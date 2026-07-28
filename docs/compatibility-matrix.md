@@ -69,7 +69,16 @@ The manager classifies the resolved closure, not the search query alone:
 - an executable package without a graphical desktop entry remains Terminal/CLI managed;
 - libraries, services, data, and dependencies remain managed closure members and never appear in the app drawer;
 - packages for another CPU ABI are hidden or rejected; Archphene does not silently emulate them;
-- `any` is accepted only for data-only packages after extraction confirms there is no mismatched native ELF.
+- `any` is accepted only for data-only packages after the signed-archive review confirms there is no native ELF.
+
+Before Linux package mutation, every present signed archive in the freshly
+resolved closure is streamed through the bounded package review. It checks
+runtime ELF ABI and actual Android page-size alignment, architecture-any native
+content, valid relocatable-library versus loadable ELF type, and command
+formats. Blockers identify the exact closure package. A passing result is only
+**Bridge eligible**: package-specific runtime and launcher workflows still
+determine Validated, Partial, or Blocked status. When the signed closure is not
+cached, the manager says **Not analyzed** rather than guessing.
 
 One package failure must produce a package-scoped diagnostic and must not cancel unrelated resolve/download jobs. Wrapper signing and Android PackageInstaller confirmation remain serialized; bounded preparation work may run concurrently.
 

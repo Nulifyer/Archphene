@@ -111,10 +111,10 @@ archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
-archphene_open_manager_section Packages "archphene-prepare-packages-$serial"
 if [[ "$clean_data" == true ]]; then
   archphene_skip_storage_onboarding "archphene-prepare-onboarding-$serial"
 fi
+archphene_open_manager_section Packages "archphene-prepare-packages-$serial"
 archphene_wait_ui 'Package catalog (ready|not downloaded)' \
   "archphene-prepare-catalog-$serial" 15
 if ! archphene_regex_contains "$ARCHPHENE_UI" 'Package catalog ready'; then
@@ -131,7 +131,7 @@ archphene_wait_ui 'text="btop"' "archphene-prepare-entered-$serial" 10
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:DETAILS|Details)"' 'package details'
 archphene_wait_ui \
   'text="[^"]*/btop [^"]+.*Dependency closure: [1-9][0-9]* packages' \
-  "archphene-prepare-resolution-$serial" 20
+  "archphene-prepare-resolution-$serial" 180
 closure_count="$(python3 -c '
 import re, sys
 match = re.search(r"Dependency closure: ([1-9][0-9]*) packages", sys.stdin.read())
@@ -141,7 +141,8 @@ print(match.group(1))
 ' <<<"$ARCHPHENE_UI")"
 
 archphene_tap_ui_pattern \
-  "$ARCHPHENE_UI" 'text="(?:INSTALL|Install|VERIFY|Verify)"' 'install or verify package'
+  "$ARCHPHENE_UI" 'text="(?:INSTALL|Install|VERIFY|Verify|RETRY|Retry)"' \
+  'install, verify, or retry package'
 wait_for_btop_install "archphene-prepare-complete-$serial" "Installed|Verified"
 archphene_wait_log \
   "(?:Installed|Verified) btop: $closure_count signed packages" 15 >/dev/null

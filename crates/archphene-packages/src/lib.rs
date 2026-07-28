@@ -9,15 +9,19 @@ use std::fmt;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use archphene_process::{CommandEnvironment, GuiAppearance, ProcessError, publish_gui_appearance};
 use sha2::{Digest, Sha256};
+use tar::{Archive, EntryType};
+use xz2::read::XzDecoder;
 
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
 pub const MAX_MANIFEST_ENTRIES: usize = 128;
@@ -86,6 +90,10 @@ const LOCAL_DESCRIPTION_LIMIT: u64 = 64 * 1024;
 const LOCAL_FILES_LIMIT: u64 = 8 * 1024 * 1024;
 const LOCAL_FILES_TOTAL_LIMIT: u64 = 128 * 1024 * 1024;
 const LOCAL_FILE_PATH_LIMIT: usize = 4 * 1024;
+const PACKAGE_COMPATIBILITY_MAX_ENTRIES: u64 = 262_144;
+const PACKAGE_COMPATIBILITY_MAX_EXPANDED_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const PACKAGE_COMPATIBILITY_MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const PACKAGE_COMPATIBILITY_HEADER_BYTES: usize = 16 * 1024;
 const PACKAGE_CAPABILITY_GRAPHICAL: u8 = 1 << 0;
 const PACKAGE_CAPABILITY_COMMAND_LINE: u8 = 1 << 1;
 const PACKAGE_CAPABILITY_LIBRARY: u8 = 1 << 2;
@@ -259,6 +267,8 @@ pub enum PackageRuntimeError {
     Desktop(desktop::DesktopEntryError),
     InvalidQuery,
     InvalidResolution,
+    CompatibilityReviewRequired,
+    CompatibilityReview(String, Box<PackageRuntimeError>),
     MissingTarget,
     NotInstalled,
     InvalidPayload,
@@ -292,6 +302,15 @@ impl fmt::Display for PackageRuntimeError {
             Self::Desktop(error) => error.fmt(formatter),
             Self::InvalidQuery => formatter.write_str("invalid package search query"),
             Self::InvalidResolution => formatter.write_str("invalid package dependency resolution"),
+            Self::CompatibilityReviewRequired => {
+                formatter.write_str("verified package compatibility review is missing or stale")
+            }
+            Self::CompatibilityReview(package, error) => {
+                write!(
+                    formatter,
+                    "package compatibility review failed for {package}: {error}"
+                )
+            }
             Self::MissingTarget => {
                 formatter.write_str("resolved packages omit the requested target")
             }
@@ -351,6 +370,7 @@ pub struct PackageRuntime {
     gdk_pixbuf_module_file: Option<PathBuf>,
     gtk_settings_module: Option<PathBuf>,
     qt_plugin_root: Option<PathBuf>,
+    compatibility_review: Arc<Mutex<Option<PackageCompatibilityReview>>>,
 }
 
 #[derive(Debug)]
@@ -380,6 +400,39 @@ pub struct VerifiedAurArchive<'a> {
 
 pub struct InstalledPackageCatalog {
     packages: Vec<InstalledPackage>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackageCompatibilityStatus {
+    NotAnalyzed,
+    BridgeEligible,
+    ManagedOnly,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackageCompatibilityDiagnostic {
+    None,
+    NotCached,
+    ForeignElf,
+    NativeInAnyPackage,
+    MalformedElf,
+    IncompatiblePageSize,
+    UnsupportedCommand,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PackageArchiveAnalysis {
+    capabilities: u8,
+    elf_count: u32,
+    command_count: u32,
+    diagnostic: Option<PackageCompatibilityDiagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PackageCompatibilityReview {
+    package: String,
+    resolution_sha256: [u8; 32],
 }
 
 struct InstalledPackage {
@@ -828,6 +881,7 @@ impl PackageRuntime {
             gdk_pixbuf_module_file,
             gtk_settings_module,
             qt_plugin_root,
+            compatibility_review: Arc::new(Mutex::new(None)),
         };
         if runtime.read_pending_mutation()?.is_none() {
             runtime.clear_orphaned_removal_repair()?;
@@ -1092,6 +1146,122 @@ impl PackageRuntime {
         }
     }
 
+    pub fn cached_package_compatibility(
+        &self,
+        package: &str,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        self.clear_package_compatibility_review()?;
+        let resolution = self.resolve(package)?;
+        let package_count = resolution.as_str()?.lines().count();
+        if package_count == 0 || package_count > 512 {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            if !self.cached_package_artifacts_present(&payload)? {
+                return package_compatibility_output(
+                    PackageCompatibilityStatus::NotAnalyzed,
+                    0,
+                    package_count,
+                    0,
+                    0,
+                    PackageCompatibilityDiagnostic::NotCached,
+                    None,
+                );
+            }
+        }
+
+        let mut target_found = false;
+        let mut target_capabilities = 0_u8;
+        let mut target_commands = 0_u32;
+        let mut closure_elfs = 0_u32;
+        let mut diagnostic = None;
+        let mut diagnostic_package = None;
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            let target = payload.name == package;
+            let analysis = (|| {
+                self.verify_package(
+                    payload.filename,
+                    payload.name,
+                    payload.version,
+                    payload.size,
+                )?;
+                let archive = self
+                    .arch_root
+                    .join(PACKAGE_CACHE_DIRECTORY)
+                    .join(payload.filename);
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+                    .open(&archive)?;
+                let metadata = file.metadata()?;
+                if !metadata.is_file() || metadata.len() != payload.size {
+                    return Err(PackageRuntimeError::InvalidPayload);
+                }
+                inspect_package_archive(
+                    &mut file,
+                    payload.filename,
+                    self.architecture,
+                    rustix::param::page_size(),
+                    target,
+                )
+            })()
+            .map_err(|error| {
+                PackageRuntimeError::CompatibilityReview(payload.name.to_owned(), Box::new(error))
+            })?;
+            closure_elfs = closure_elfs
+                .checked_add(analysis.elf_count)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            if diagnostic.is_none() {
+                diagnostic = analysis.diagnostic;
+                if diagnostic.is_some() {
+                    diagnostic_package = Some(payload.name);
+                }
+            }
+            if target {
+                if target_found {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                target_found = true;
+                target_capabilities = analysis.capabilities;
+                target_commands = analysis.command_count;
+            }
+        }
+        if !target_found {
+            return Err(PackageRuntimeError::MissingTarget);
+        }
+        let status = if diagnostic.is_some() {
+            PackageCompatibilityStatus::Unsupported
+        } else if target_capabilities
+            & (PACKAGE_CAPABILITY_GRAPHICAL | PACKAGE_CAPABILITY_COMMAND_LINE)
+            != 0
+        {
+            PackageCompatibilityStatus::BridgeEligible
+        } else {
+            PackageCompatibilityStatus::ManagedOnly
+        };
+        let output = package_compatibility_output(
+            status,
+            target_capabilities,
+            package_count,
+            closure_elfs,
+            target_commands,
+            diagnostic.unwrap_or(PackageCompatibilityDiagnostic::None),
+            diagnostic_package,
+        )?;
+        if matches!(
+            status,
+            PackageCompatibilityStatus::BridgeEligible | PackageCompatibilityStatus::ManagedOnly
+        ) {
+            self.publish_package_compatibility_review(package, &resolution)?;
+        }
+        Ok(output)
+    }
+
     pub fn resolve_targets(
         &self,
         packages: &[&str],
@@ -1168,6 +1338,80 @@ impl PackageRuntime {
         )?;
         let raw = std::str::from_utf8(&raw).map_err(|_| PackageRuntimeError::InvalidResolution)?;
         parse_resolution_output(raw, packages, self.architecture)
+    }
+
+    fn cached_package_artifacts_present(
+        &self,
+        payload: &ResolvedPayload<'_>,
+    ) -> Result<bool, PackageRuntimeError> {
+        let package = self
+            .arch_root
+            .join(PACKAGE_CACHE_DIRECTORY)
+            .join(payload.filename);
+        let signature = self
+            .arch_root
+            .join(PACKAGE_CACHE_DIRECTORY)
+            .join(format!("{}.sig", payload.filename));
+        for (path, package_payload) in [(&package, true), (&signature, false)] {
+            let metadata = match fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(PackageRuntimeError::Io(error)),
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() == 0
+                || package_payload && metadata.len() != payload.size
+                || !package_payload && metadata.len() > PACKAGE_SIGNATURE_LIMIT
+            {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+        }
+        Ok(true)
+    }
+
+    fn clear_package_compatibility_review(&self) -> Result<(), PackageRuntimeError> {
+        self.compatibility_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?
+            .take();
+        Ok(())
+    }
+
+    fn publish_package_compatibility_review(
+        &self,
+        package: &str,
+        resolution: &PackageResolution,
+    ) -> Result<(), PackageRuntimeError> {
+        let review = PackageCompatibilityReview {
+            package: package.to_owned(),
+            resolution_sha256: Sha256::digest(resolution.as_bytes()).into(),
+        };
+        self.compatibility_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?
+            .replace(review);
+        Ok(())
+    }
+
+    fn consume_package_compatibility_review(
+        &self,
+        package: &str,
+        resolution: &PackageResolution,
+    ) -> Result<(), PackageRuntimeError> {
+        let expected = PackageCompatibilityReview {
+            package: package.to_owned(),
+            resolution_sha256: Sha256::digest(resolution.as_bytes()).into(),
+        };
+        let review = self
+            .compatibility_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?
+            .take();
+        if review.as_ref() != Some(&expected) {
+            return Err(PackageRuntimeError::CompatibilityReviewRequired);
+        }
+        Ok(())
     }
 
     fn prepare_fresh_resolution_database(&self) -> Result<PathBuf, PackageRuntimeError> {
@@ -1608,6 +1852,7 @@ impl PackageRuntime {
 
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
+        self.consume_package_compatibility_review(package, &resolution)?;
         if package == BASE_PACKAGE {
             self.install_resolution(
                 &resolution,
@@ -1646,6 +1891,7 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::NotInstalled);
         }
         let resolution = self.resolve(package)?;
+        self.consume_package_compatibility_review(package, &resolution)?;
         // An update must retain the local database's existing install reasons.
         // install_resolution starts every archive as a dependency, keeps base
         // explicit, then promotes only packages already recorded as explicit.
@@ -4693,11 +4939,7 @@ fn process_package_capability_line(
     if line.starts_with(b"usr/share/applications/") && line.ends_with(b".desktop") {
         *capabilities |= PACKAGE_CAPABILITY_GRAPHICAL;
     }
-    if line.starts_with(b"usr/bin/")
-        || line.starts_with(b"usr/sbin/")
-        || line.starts_with(b"bin/")
-        || line.starts_with(b"sbin/")
-    {
+    if direct_command_path(line) {
         *capabilities |= PACKAGE_CAPABILITY_COMMAND_LINE;
     }
     if line.starts_with(b"usr/include/")
@@ -4724,12 +4966,411 @@ fn is_library_metadata_path(path: &[u8]) -> bool {
         || (path.starts_with(b"usr/lib/pkgconfig/") && name.ends_with(b".pc"))
 }
 
+fn is_static_library_path(path: &[u8]) -> bool {
+    path.starts_with(b"usr/lib/") && path.ends_with(b".a")
+}
+
 fn hex_nibble(value: u8) -> u8 {
     debug_assert!(value <= 0x0f);
     match value {
         0..=9 => b'0' + value,
         _ => b'a' + (value - 10),
     }
+}
+
+fn package_compatibility_output(
+    status: PackageCompatibilityStatus,
+    capabilities: u8,
+    package_count: usize,
+    elf_count: u32,
+    command_count: u32,
+    diagnostic: PackageCompatibilityDiagnostic,
+    diagnostic_package: Option<&str>,
+) -> Result<ToolOutput, PackageRuntimeError> {
+    let status = match status {
+        PackageCompatibilityStatus::NotAnalyzed => "not-analyzed",
+        PackageCompatibilityStatus::BridgeEligible => "bridge-eligible",
+        PackageCompatibilityStatus::ManagedOnly => "managed-only",
+        PackageCompatibilityStatus::Unsupported => "unsupported",
+    };
+    let diagnostic = match diagnostic {
+        PackageCompatibilityDiagnostic::None => "none",
+        PackageCompatibilityDiagnostic::NotCached => "not-cached",
+        PackageCompatibilityDiagnostic::ForeignElf => "foreign-elf",
+        PackageCompatibilityDiagnostic::NativeInAnyPackage => "native-in-any-package",
+        PackageCompatibilityDiagnostic::MalformedElf => "malformed-elf",
+        PackageCompatibilityDiagnostic::IncompatiblePageSize => "incompatible-page-size",
+        PackageCompatibilityDiagnostic::UnsupportedCommand => "unsupported-command",
+    };
+    let mut output = empty_tool_output();
+    let diagnostic_package = diagnostic_package.unwrap_or("-");
+    if diagnostic_package != "-" && !safe_logical_name(diagnostic_package) {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    writeln!(
+        output,
+        "{status}\t{}\t{package_count}\t{elf_count}\t{command_count}\t{diagnostic}\t{diagnostic_package}",
+        char::from(hex_nibble(capabilities)),
+    )
+    .map_err(|_| PackageRuntimeError::OutputLimit)?;
+    Ok(output)
+}
+
+fn inspect_package_archive(
+    archive: &mut File,
+    filename: &str,
+    architecture: RepositoryArchitecture,
+    page_size: usize,
+    classify_target: bool,
+) -> Result<PackageArchiveAnalysis, PackageRuntimeError> {
+    archive.seek(SeekFrom::Start(0))?;
+    let (_, _, _, package_architecture) =
+        parse_package_cache_filename(filename).ok_or(PackageRuntimeError::InvalidPayload)?;
+    let architecture_any = package_architecture == "any";
+    if !architecture_any && package_architecture != architecture.package_architecture() {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    if filename.ends_with(".pkg.tar.zst") {
+        let decoder = zstd::stream::read::Decoder::new(archive)?;
+        inspect_package_tar(
+            decoder,
+            architecture,
+            architecture_any,
+            page_size,
+            classify_target,
+        )
+    } else if filename.ends_with(".pkg.tar.xz") {
+        inspect_package_tar(
+            XzDecoder::new(archive),
+            architecture,
+            architecture_any,
+            page_size,
+            classify_target,
+        )
+    } else {
+        Err(PackageRuntimeError::InvalidPayload)
+    }
+}
+
+fn inspect_package_tar(
+    reader: impl Read,
+    architecture: RepositoryArchitecture,
+    architecture_any: bool,
+    page_size: usize,
+    classify_target: bool,
+) -> Result<PackageArchiveAnalysis, PackageRuntimeError> {
+    if !page_size.is_power_of_two() || !(4096..=64 * 1024).contains(&page_size) {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let mut archive = Archive::new(reader);
+    let mut analysis = PackageArchiveAnalysis::default();
+    let mut entry_count = 0_u64;
+    let mut expanded_bytes = 0_u64;
+    let mut header = [0_u8; PACKAGE_COMPATIBILITY_HEADER_BYTES];
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let entry_type = entry.header().entry_type();
+        validate_compatibility_archive_path(&path, entry_type.is_dir())?;
+        let logical_path = normalized_archive_path(path.as_os_str().as_bytes())
+            .map(|path| path.strip_suffix(b"/").unwrap_or(path))
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        validate_compatibility_archive_entry_type(entry_type)?;
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            let target = entry
+                .link_name()?
+                .ok_or(PackageRuntimeError::InvalidPayload)?;
+            validate_compatibility_archive_link(&target, entry_type.is_hard_link())?;
+        }
+        entry_count = entry_count
+            .checked_add(1)
+            .ok_or(PackageRuntimeError::OutputLimit)?;
+        if entry_count > PACKAGE_COMPATIBILITY_MAX_ENTRIES {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let is_file = entry_type.is_file();
+        if is_file {
+            let bytes = entry.header().size()?;
+            if bytes > PACKAGE_COMPATIBILITY_MAX_ENTRY_BYTES {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+            expanded_bytes = expanded_bytes
+                .checked_add(bytes)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            if expanded_bytes > PACKAGE_COMPATIBILITY_MAX_EXPANDED_BYTES {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+        }
+
+        let command_path = direct_command_path(logical_path);
+        let library_metadata_path = is_library_metadata_path(logical_path);
+        let static_library_path = is_static_library_path(logical_path);
+        if classify_target && !entry_type.is_dir() {
+            analysis.capabilities |= archive_path_capabilities(logical_path);
+            if command_path {
+                analysis.command_count = analysis
+                    .command_count
+                    .checked_add(1)
+                    .ok_or(PackageRuntimeError::OutputLimit)?;
+            }
+        }
+        if !is_file {
+            continue;
+        }
+        let header_bytes = usize::try_from(
+            entry
+                .header()
+                .size()?
+                .min(PACKAGE_COMPATIBILITY_HEADER_BYTES as u64),
+        )
+        .map_err(|_| PackageRuntimeError::OutputLimit)?;
+        entry.read_exact(&mut header[..header_bytes])?;
+        let mode = entry.header().mode()?;
+        let executable = mode & 0o111 != 0;
+        let elf = header[..header_bytes].starts_with(b"\x7fELF");
+        if elf {
+            analysis.elf_count = analysis
+                .elf_count
+                .checked_add(1)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            let runtime_elf = executable || library_metadata_path;
+            let relocatable_library = static_library_path && !executable;
+            let invalid = validate_elf_compatibility(
+                &header[..header_bytes],
+                architecture,
+                architecture_any,
+                page_size,
+                runtime_elf,
+                relocatable_library,
+            );
+            analysis.diagnostic = analysis.diagnostic.or(invalid);
+        } else if command_path && executable && !supported_package_shebang(&header[..header_bytes])
+        {
+            analysis.diagnostic = analysis
+                .diagnostic
+                .or(Some(PackageCompatibilityDiagnostic::UnsupportedCommand));
+        }
+    }
+    if entry_count == 0 {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(analysis)
+}
+
+fn validate_compatibility_archive_path(
+    path: &Path,
+    directory: bool,
+) -> Result<(), PackageRuntimeError> {
+    let bytes = path.as_os_str().as_bytes();
+    let logical = normalized_archive_path(bytes)
+        .map(|path| {
+            if directory {
+                path.strip_suffix(b"/").unwrap_or(path)
+            } else {
+                path
+            }
+        })
+        .filter(|path| !path.is_empty())
+        .ok_or(PackageRuntimeError::InvalidPayload)?;
+    if !directory && logical.ends_with(b"/") {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    if logical.len() > LOCAL_FILE_PATH_LIMIT
+        || logical.starts_with(b"/")
+        || logical.contains(&0)
+        || logical
+            .split(|byte| *byte == b'/')
+            .any(|part| part.is_empty() || part == b"." || part == b"..")
+        || bytes.is_empty()
+        || bytes.len() > LOCAL_FILE_PATH_LIMIT
+    {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(())
+}
+
+fn validate_compatibility_archive_link(
+    path: &Path,
+    hard_link: bool,
+) -> Result<(), PackageRuntimeError> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.len() > LOCAL_FILE_PATH_LIMIT || bytes.contains(&0) {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    if hard_link
+        && (bytes.starts_with(b"/")
+            || bytes
+                .split(|byte| *byte == b'/')
+                .any(|part| part.is_empty() || part == b"." || part == b".."))
+    {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(())
+}
+
+fn validate_compatibility_archive_entry_type(
+    entry_type: EntryType,
+) -> Result<(), PackageRuntimeError> {
+    if entry_type.is_file()
+        || entry_type.is_dir()
+        || entry_type.is_symlink()
+        || entry_type.is_hard_link()
+    {
+        Ok(())
+    } else {
+        Err(PackageRuntimeError::InvalidPayload)
+    }
+}
+
+fn normalized_archive_path(mut path: &[u8]) -> Option<&[u8]> {
+    while let Some(stripped) = path.strip_prefix(b"./") {
+        path = stripped;
+    }
+    (!path.is_empty()).then_some(path)
+}
+
+fn archive_path_capabilities(path: &[u8]) -> u8 {
+    let mut capabilities = 0_u8;
+    if path.starts_with(b"usr/share/applications/") && path.ends_with(b".desktop") {
+        capabilities |= PACKAGE_CAPABILITY_GRAPHICAL;
+    }
+    if direct_command_path(path) {
+        capabilities |= PACKAGE_CAPABILITY_COMMAND_LINE;
+    }
+    if path.starts_with(b"usr/include/")
+        || (path.starts_with(b"usr/lib/") && is_library_metadata_path(path))
+        || (path.starts_with(b"usr/share/pkgconfig/") && path.ends_with(b".pc"))
+    {
+        capabilities |= PACKAGE_CAPABILITY_LIBRARY;
+    }
+    if path.starts_with(b"usr/lib/systemd/")
+        || path.starts_with(b"usr/lib/udev/")
+        || path.starts_with(b"usr/lib/sysusers.d/")
+        || path.starts_with(b"usr/lib/tmpfiles.d/")
+    {
+        capabilities |= PACKAGE_CAPABILITY_SYSTEM;
+    }
+    capabilities
+}
+
+fn direct_command_path(path: &[u8]) -> bool {
+    [b"usr/bin/".as_slice(), b"usr/sbin/", b"bin/", b"sbin/"]
+        .into_iter()
+        .find_map(|prefix| path.strip_prefix(prefix))
+        .is_some_and(|name| !name.is_empty() && !name.contains(&b'/'))
+}
+
+fn validate_elf_compatibility(
+    header: &[u8],
+    architecture: RepositoryArchitecture,
+    architecture_any: bool,
+    page_size: usize,
+    runtime_elf: bool,
+    relocatable_library: bool,
+) -> Option<PackageCompatibilityDiagnostic> {
+    if header.len() < 20
+        || header.get(4) != Some(&2)
+        || header.get(5) != Some(&1)
+        || header.get(6) != Some(&1)
+    {
+        return runtime_elf.then_some(PackageCompatibilityDiagnostic::MalformedElf);
+    }
+    if architecture_any {
+        return Some(PackageCompatibilityDiagnostic::NativeInAnyPackage);
+    }
+    if header.len() < 64 {
+        return runtime_elf.then_some(PackageCompatibilityDiagnostic::MalformedElf);
+    }
+    let elf_type = u16::from_le_bytes([header[16], header[17]]);
+    let elf_version = u32::from_le_bytes([header[20], header[21], header[22], header[23]]);
+    let header_bytes = u16::from_le_bytes([header[52], header[53]]);
+    let valid_type = matches!(elf_type, 2 | 3) || relocatable_library && matches!(elf_type, 1);
+    if runtime_elf && (!valid_type || elf_version != 1 || header_bytes < 64) {
+        return Some(PackageCompatibilityDiagnostic::MalformedElf);
+    }
+    let machine = u16::from_le_bytes([header[18], header[19]]);
+    let expected = match architecture {
+        RepositoryArchitecture::X86_64 => 62,
+        RepositoryArchitecture::Aarch64 => 183,
+    };
+    if runtime_elf && machine != expected {
+        return Some(PackageCompatibilityDiagnostic::ForeignElf);
+    }
+    if runtime_elf
+        && !relocatable_library
+        && page_size > 4096
+        && !elf_supports_page_size(header, page_size)
+    {
+        return Some(PackageCompatibilityDiagnostic::IncompatiblePageSize);
+    }
+    None
+}
+
+fn elf_supports_page_size(header: &[u8], page_size: usize) -> bool {
+    if header.len() < 64 {
+        return false;
+    }
+    let program_offset = u64::from_le_bytes(header[32..40].try_into().unwrap_or([0; 8]));
+    let program_entry_bytes = u16::from_le_bytes([header[54], header[55]]) as usize;
+    let program_count = u16::from_le_bytes([header[56], header[57]]) as usize;
+    let Ok(program_offset) = usize::try_from(program_offset) else {
+        return false;
+    };
+    let Some(program_bytes) = program_entry_bytes.checked_mul(program_count) else {
+        return false;
+    };
+    let Some(program_end) = program_offset.checked_add(program_bytes) else {
+        return false;
+    };
+    if program_entry_bytes < 56
+        || program_count == 0
+        || program_end > header.len()
+        || page_size == 0
+    {
+        return false;
+    }
+    let page_size = page_size as u64;
+    let mut load_segments = 0_u16;
+    for index in 0..program_count {
+        let offset = program_offset + index * program_entry_bytes;
+        let entry = &header[offset..offset + program_entry_bytes];
+        if u32::from_le_bytes(entry[..4].try_into().unwrap_or([0; 4])) != 1 {
+            continue;
+        }
+        load_segments = load_segments.saturating_add(1);
+        let file_offset = u64::from_le_bytes(entry[8..16].try_into().unwrap_or([0; 8]));
+        let virtual_address = u64::from_le_bytes(entry[16..24].try_into().unwrap_or([0; 8]));
+        let alignment = u64::from_le_bytes(entry[48..56].try_into().unwrap_or([0; 8]));
+        if alignment < page_size || file_offset % page_size != virtual_address % page_size {
+            return false;
+        }
+    }
+    load_segments > 0
+}
+
+fn supported_package_shebang(header: &[u8]) -> bool {
+    if !header.starts_with(b"#!") {
+        return false;
+    }
+    let end = header
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(header.len());
+    let Ok(line) = std::str::from_utf8(&header[2..end]) else {
+        return false;
+    };
+    let interpreter = line.trim().split_ascii_whitespace().next().unwrap_or("");
+    let Some(name) = interpreter
+        .strip_prefix("/usr/bin/")
+        .or_else(|| interpreter.strip_prefix("/bin/"))
+    else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.contains('/')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
 }
 
 fn scan_desktop_owners(
@@ -5647,9 +6288,54 @@ fn validate_package_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn package_tar(entries: &[(&str, u32, &[u8])]) -> Vec<u8> {
+        let mut output = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut output);
+            builder.mode(tar::HeaderMode::Deterministic);
+            for (path, mode, content) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(*mode);
+                header.set_entry_type(EntryType::Regular);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, Cursor::new(*content))
+                    .expect("package archive entry");
+            }
+            builder.finish().expect("package archive");
+        }
+        output
+    }
+
+    fn elf_header(machine: u16) -> [u8; 64] {
+        let mut header = [0_u8; 64];
+        header[..4].copy_from_slice(b"\x7fELF");
+        header[4] = 2;
+        header[5] = 1;
+        header[6] = 1;
+        header[16..18].copy_from_slice(&3_u16.to_le_bytes());
+        header[18..20].copy_from_slice(&machine.to_le_bytes());
+        header[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        header[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        header
+    }
+
+    fn elf_with_load_segment(machine: u16, alignment: u64) -> Vec<u8> {
+        let mut elf = vec![0_u8; 64 + 56];
+        elf[..64].copy_from_slice(&elf_header(machine));
+        elf[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&1_u32.to_le_bytes());
+        elf[64 + 48..64 + 56].copy_from_slice(&alignment.to_le_bytes());
+        elf
+    }
 
     struct TestTree {
         root: PathBuf,
@@ -6575,6 +7261,271 @@ unknown-metadata\t1.0-1\t1\t0\t0\n",
     }
 
     #[test]
+    fn verified_archive_analysis_derives_target_class_and_matching_elf_abi() {
+        let command = elf_header(62);
+        let library = elf_header(62);
+        let archive = package_tar(&[
+            (
+                "usr/share/applications/tool.desktop",
+                0o644,
+                b"[Desktop Entry]\nType=Application\nName=Tool\nExec=tool\n",
+            ),
+            ("usr/bin/tool", 0o755, &command),
+            ("usr/lib/libtool.so.1", 0o644, &library),
+            (
+                "usr/lib/systemd/user/tool.service",
+                0o644,
+                b"[Service]\nExecStart=tool\n",
+            ),
+        ]);
+        let analysis = inspect_package_tar(
+            Cursor::new(archive),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("package compatibility");
+        assert_eq!(
+            analysis,
+            PackageArchiveAnalysis {
+                capabilities: PACKAGE_CAPABILITY_GRAPHICAL
+                    | PACKAGE_CAPABILITY_COMMAND_LINE
+                    | PACKAGE_CAPABILITY_LIBRARY
+                    | PACKAGE_CAPABILITY_SYSTEM,
+                elf_count: 2,
+                command_count: 1,
+                diagnostic: None,
+            },
+        );
+    }
+
+    #[test]
+    fn verified_archive_analysis_reports_only_explicit_runtime_blockers() {
+        let foreign = elf_header(183);
+        let cross_compiler_data = elf_header(183);
+        let archive = package_tar(&[
+            ("usr/bin/foreign", 0o755, &foreign),
+            (
+                "usr/share/cross/sysroot/foreign",
+                0o644,
+                &cross_compiler_data,
+            ),
+        ]);
+        let analysis = inspect_package_tar(
+            Cursor::new(archive),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("foreign package compatibility");
+        assert_eq!(
+            analysis.diagnostic,
+            Some(PackageCompatibilityDiagnostic::ForeignElf),
+        );
+        assert_eq!(analysis.elf_count, 2);
+
+        let data_archive = package_tar(&[(
+            "usr/share/cross/sysroot/foreign",
+            0o644,
+            &cross_compiler_data,
+        )]);
+        let data_analysis = inspect_package_tar(
+            Cursor::new(data_archive),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("cross compiler data");
+        assert_eq!(data_analysis.diagnostic, None);
+
+        let any_archive =
+            package_tar(&[("usr/share/package/bundled-elf", 0o644, &cross_compiler_data)]);
+        let any_analysis = inspect_package_tar(
+            Cursor::new(any_archive),
+            RepositoryArchitecture::X86_64,
+            true,
+            4096,
+            true,
+        )
+        .expect("architecture-any package");
+        assert_eq!(
+            any_analysis.diagnostic,
+            Some(PackageCompatibilityDiagnostic::NativeInAnyPackage),
+        );
+
+        let mut relocatable = elf_header(62);
+        relocatable[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        let static_library = package_tar(&[("usr/lib/libmcheck.a", 0o644, &relocatable)]);
+        let static_library_analysis = inspect_package_tar(
+            Cursor::new(static_library),
+            RepositoryArchitecture::X86_64,
+            false,
+            16 * 1024,
+            true,
+        )
+        .expect("relocatable static-library metadata");
+        assert_eq!(static_library_analysis.diagnostic, None);
+
+        let relocatable_command = package_tar(&[("usr/bin/invalid", 0o755, &relocatable)]);
+        let relocatable_command_analysis = inspect_package_tar(
+            Cursor::new(relocatable_command),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("relocatable command");
+        assert_eq!(
+            relocatable_command_analysis.diagnostic,
+            Some(PackageCompatibilityDiagnostic::MalformedElf),
+        );
+    }
+
+    #[test]
+    fn verified_archive_analysis_accepts_bridge_shebangs_and_rejects_unknown_commands() {
+        let supported = package_tar(&[("usr/bin/script", 0o755, b"#!/usr/bin/bash\nexit 0\n")]);
+        let supported_analysis = inspect_package_tar(
+            Cursor::new(supported),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("supported script");
+        assert_eq!(supported_analysis.diagnostic, None);
+        assert_eq!(supported_analysis.command_count, 1);
+
+        let unsupported = package_tar(&[("usr/bin/blob", 0o755, b"not an executable format")]);
+        let unsupported_analysis = inspect_package_tar(
+            Cursor::new(unsupported),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("unsupported command");
+        assert_eq!(
+            unsupported_analysis.diagnostic,
+            Some(PackageCompatibilityDiagnostic::UnsupportedCommand),
+        );
+
+        let malformed = package_tar(&[("usr/bin/elf", 0o755, b"\x7fELF\x02\x01\x01")]);
+        let malformed_analysis = inspect_package_tar(
+            Cursor::new(malformed),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("malformed ELF");
+        assert_eq!(
+            malformed_analysis.diagnostic,
+            Some(PackageCompatibilityDiagnostic::MalformedElf),
+        );
+    }
+
+    #[test]
+    fn verified_archive_analysis_rejects_ambiguous_or_escaping_paths() {
+        assert!(validate_compatibility_archive_path(Path::new("./usr/bin/tool"), false).is_ok());
+        assert!(validate_compatibility_archive_path(Path::new("usr/bin/"), true).is_ok());
+        for path in [
+            "/usr/bin/tool",
+            "../usr/bin/tool",
+            "usr/../bin/tool",
+            "usr/./bin/tool",
+            "usr//bin/tool",
+        ] {
+            assert!(matches!(
+                validate_compatibility_archive_path(Path::new(path), false),
+                Err(PackageRuntimeError::InvalidPayload)
+            ));
+        }
+        assert!(
+            validate_compatibility_archive_link(Path::new("/usr/lib/libtool.so"), false).is_ok()
+        );
+        assert!(matches!(
+            validate_compatibility_archive_link(Path::new("../usr/lib/libtool.so"), true),
+            Err(PackageRuntimeError::InvalidPayload)
+        ));
+    }
+
+    #[test]
+    fn verified_archive_analysis_enforces_the_actual_android_page_size() {
+        let four_kib = elf_with_load_segment(62, 4096);
+        let four_kib_archive = package_tar(&[("usr/bin/tool", 0o755, &four_kib)]);
+        let incompatible = inspect_package_tar(
+            Cursor::new(four_kib_archive),
+            RepositoryArchitecture::X86_64,
+            false,
+            16 * 1024,
+            true,
+        )
+        .expect("16 KiB compatibility");
+        assert_eq!(
+            incompatible.diagnostic,
+            Some(PackageCompatibilityDiagnostic::IncompatiblePageSize),
+        );
+
+        let sixteen_kib = elf_with_load_segment(62, 16 * 1024);
+        let sixteen_kib_archive = package_tar(&[("usr/bin/tool", 0o755, &sixteen_kib)]);
+        let compatible = inspect_package_tar(
+            Cursor::new(sixteen_kib_archive),
+            RepositoryArchitecture::X86_64,
+            false,
+            16 * 1024,
+            true,
+        )
+        .expect("aligned 16 KiB compatibility");
+        assert_eq!(compatible.diagnostic, None);
+    }
+
+    #[test]
+    fn verified_archive_analysis_streams_both_official_package_compressions() {
+        let tree = TestTree::new();
+        let elf = elf_with_load_segment(62, 4096);
+        let tar = package_tar(&[("usr/bin/tool", 0o755, &elf)]);
+        let zstd_bytes =
+            zstd::stream::encode_all(Cursor::new(&tar), 1).expect("zstd package fixture");
+        let zstd_path = tree.root.join("fixture-1.0-1-x86_64.pkg.tar.zst");
+        fs::write(&zstd_path, zstd_bytes).expect("zstd package");
+        let mut zstd_file = File::open(zstd_path).expect("open zstd package");
+        assert_eq!(
+            inspect_package_archive(
+                &mut zstd_file,
+                "fixture-1.0-1-x86_64.pkg.tar.zst",
+                RepositoryArchitecture::X86_64,
+                4096,
+                true,
+            )
+            .expect("inspect zstd package")
+            .command_count,
+            1,
+        );
+
+        let mut xz_encoder = xz2::write::XzEncoder::new(Vec::new(), 1);
+        xz_encoder.write_all(&tar).expect("xz package fixture");
+        let xz_bytes = xz_encoder.finish().expect("finish xz package");
+        let xz_path = tree.root.join("fixture-1.0-1-x86_64.pkg.tar.xz");
+        fs::write(&xz_path, xz_bytes).expect("xz package");
+        let mut xz_file = File::open(xz_path).expect("open xz package");
+        assert_eq!(
+            inspect_package_archive(
+                &mut xz_file,
+                "fixture-1.0-1-x86_64.pkg.tar.xz",
+                RepositoryArchitecture::X86_64,
+                4096,
+                true,
+            )
+            .expect("inspect xz package")
+            .command_count,
+            1,
+        );
+    }
+
+    #[test]
     fn package_resolution_output_is_strict_and_contains_target() {
         let input = "core\tglibc\t2.42+r33+gde5fe48316ed-1\tglibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/core/os/x86_64/glibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\t10158024\n\
 extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/extra/os/x86_64/dotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\t123456789\n";
@@ -6630,6 +7581,37 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
         );
         assert!(!database.join("local").exists());
         fs::remove_dir_all(database).expect("fresh database cleanup");
+    }
+
+    #[test]
+    fn compatibility_review_capability_is_memory_only_exact_and_single_use() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let resolution = PackageResolution {
+            bytes: b"extra\ttool\t1.0-1\ttool-1.0-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/extra/os/x86_64/tool-1.0-1-x86_64.pkg.tar.zst\t1024\n".to_vec(),
+        };
+        runtime
+            .publish_package_compatibility_review("tool", &resolution)
+            .expect("publish review");
+        runtime
+            .clone()
+            .consume_package_compatibility_review("tool", &resolution)
+            .expect("consume exact review through runtime clone");
+        assert!(matches!(
+            runtime.consume_package_compatibility_review("tool", &resolution),
+            Err(PackageRuntimeError::CompatibilityReviewRequired)
+        ));
+
+        runtime
+            .publish_package_compatibility_review("tool", &resolution)
+            .expect("republish review");
+        let changed = PackageResolution {
+            bytes: b"extra\ttool\t1.0-2\ttool-1.0-2-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/extra/os/x86_64/tool-1.0-2-x86_64.pkg.tar.zst\t1024\n".to_vec(),
+        };
+        assert!(matches!(
+            runtime.consume_package_compatibility_review("tool", &changed),
+            Err(PackageRuntimeError::CompatibilityReviewRequired)
+        ));
     }
 
     #[test]

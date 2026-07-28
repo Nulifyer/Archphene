@@ -96,14 +96,14 @@ archphene_wait_ui_exact_text \
 archphene_wait_ui_exact_text \
   "Official" "available-packages-official-$serial" 15
 archphene_wait_ui_exact_text \
-  "Not analyzed" "available-packages-unanalyzed-$serial" 15
+  "Candidate: Not analyzed" "available-packages-unanalyzed-$serial" 15
 archphene_wait_ui_exact_text \
-  "CLI" "available-packages-installed-$serial" 15
+  "Installed content: CLI" "available-packages-installed-$serial" 15
 archphene_wait_ui_exact_text \
   "Update from 10.0.0.preview.1-1" \
   "available-packages-update-$serial" 15
 archphene_wait_ui_exact_text \
-  "CLI installed · Candidate not analyzed" \
+  "CLI installed · Candidate: Not analyzed" \
   "available-packages-candidate-analysis-$serial" 15
 archphene_wait_ui_exact_text \
   "Installed 2.0-1 · Not an update" \
@@ -139,6 +139,9 @@ archphene_wait_ui \
 archphene_wait_ui_text \
   "extra/dotnet-sdk 10.0.100.sdk100-1" \
   "available-packages-reviewed-resolution-$serial" 20
+archphene_wait_ui_text \
+  "Compatibility: Not analyzed · signed archives are reviewed before mutation" \
+  "available-packages-compatibility-$serial" 20
 archphene_wait_ui \
   'text="Retry"[^>]*class="android.widget.Button"[^>]*enabled="true"' \
   "available-packages-retry-$serial" 15
@@ -172,5 +175,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene available package list passed on $serial"
-archphene_note "  Real local pacman search, version-safe update/no-downgrade states, revision-gated Retry, recreation, and theme passed"
+archphene_note "  Real local pacman search, explicit candidate compatibility state, version-safe update/no-downgrade states, revision-gated Retry, recreation, and theme passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{light,retry,dark}.png"

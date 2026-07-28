@@ -34,6 +34,21 @@ class PackageRecoveryPolicyTest {
     }
 
     @Test
+    fun unsupported_closure_failure_is_actionable_and_precedes_trust_heuristics() {
+        assertEquals(
+            "Unsupported on this device: the verified closure contains a runtime ELF for " +
+                "another CPU ABI. No Linux packages were changed.",
+            PackageFailureDiagnostics.install(
+                UnsupportedPackageCompatibilityException(
+                    "the verified closure contains a runtime ELF for another CPU ABI",
+                ),
+                mutationStarted = false,
+                installedStateRefreshed = true,
+            ),
+        )
+    }
+
+    @Test
     fun cache_recovery_reclaims_only_packages_outside_the_current_closure() {
         assertEquals(
             listOf("old-tool", "unrelated"),

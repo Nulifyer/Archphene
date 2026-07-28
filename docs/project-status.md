@@ -190,6 +190,32 @@ Archphene will not downgrade it automatically. Both exact ABIs pass four-result
 states, row selection, retained query and results across theme recreation,
 durable Failed overlay, scoped fatal logs, and visually inspected full-device
 light/dark screenshots without network access.
+Candidate compatibility is a separate state from file class. Search and Details
+say Not analyzed while any signed archive is absent. Once the complete freshly
+resolved closure is cached, Rust reverifies every archive and signature, then
+streams both Zstandard and XZ package tars with fixed header storage and bounded
+paths, links, entry count, expanded bytes, and per-entry size. Before pacman can
+mutate the shared root, the review rejects runtime ELF for another CPU ABI,
+native ELF hidden in an `any` package, malformed runtime ELF, executables that
+the bridge cannot launch, and ELF load segments incompatible with the Android
+device's actual page size. Valid relocatable ELF static-library metadata remains
+ABI checked without being mistaken for a loadable executable; this distinction
+was required by glibc's real `libmcheck.a`. Blockers name the exact closure
+package. Passing this review is shown as Bridge eligible, not as a validated
+application claim; data/library/service-only targets remain Managed only. A
+successful review publishes only a single-use, process-memory capability bound
+to the target name and exact resolution SHA-256. Install or Update must consume
+that exact capability before pacman mutation, and the transaction still
+reverifies every archive, so a catalog race, process restart, or writable
+on-disk forgery cannot substitute an unreviewed closure.
+The normal `btop` manager gate now passes review, install, deliberate cache
+tamper/recovery, remove, verified-cache reinstall, Terminal execution, and
+process restart over real signed 139-package x86_64 and 138-package AArch64
+closures. Full-device light/dark captures were inspected. The first uncached
+Samsung run took 4m22s end to end, making reuse of unchanged review results a
+measured product requirement.
+Content-addressed analysis-result caching, granular cancellation, and the
+post-install launcher/toolkit/broker capability result remain pending.
 The local Binder path makes the Queued boundary deterministic in code: after
 the journal commit, the Service posts worker start to the next main-Looper turn
 and the Activity synchronously consumes the new job revision before its Install

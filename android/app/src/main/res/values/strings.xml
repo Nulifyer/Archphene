@@ -154,7 +154,9 @@
     <string name="package_search_installed">Installed</string>
     <string name="package_search_update_from">Update from %1$s</string>
     <string name="package_search_not_update">Installed %1$s · Not an update</string>
-    <string name="package_search_installed_candidate_analysis">%1$s installed · Candidate not analyzed</string>
+    <string name="package_search_installed_candidate_analysis">%1$s installed · Candidate: Not analyzed</string>
+    <string name="package_candidate_compatibility_unanalyzed">Candidate: Not analyzed</string>
+    <string name="package_installed_content">Installed content: %1$s</string>
     <string name="package_capabilities_unanalyzed">Not analyzed</string>
     <string name="package_capabilities_data">Data</string>
     <string name="package_capabilities_graphical">Graphical</string>

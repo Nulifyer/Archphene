@@ -1,6 +1,6 @@
 # Archphene TODO
 
-Updated: 2026-07-27
+Updated: 2026-07-28
 
 This file is the remaining prioritized work, not a history of completed tests. Validated behavior belongs in `docs/project-status.md`, `docs/compatibility-matrix.md`, and `research/experiments/`.
 
@@ -437,6 +437,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Derive GUI, CLI, library, and compatibility classes from verified package file/capability metadata; integrate AUR results and a version-order-safe update state without guessing from names or descriptions.
     - [x] Derive bounded Graphical, CLI, Library, System, and Data classes from installed pacman file-ownership records, keep missing/unverified candidate metadata explicitly Not analyzed, and use pacman/libalpm ordering to distinguish updates from locally newer versions. The manager refuses an automatic downgrade. Multi-page installed and four-state local-search fixtures pass exact-ABI light/dark full-device visual gates on the emulator and Samsung.
     - [ ] Derive package-specific bridge compatibility/unsupported diagnostics from the verified candidate closure and launcher capability review rather than treating a file class as a support claim.
+      - [x] Stream every signed cached archive in the freshly re-resolved closure before package mutation; bound paths, links, entry count, expanded bytes, and per-entry bytes; derive the exact target class; and reject runtime ELF ABI, architecture-any native content, malformed ELF, actual Android page-size alignment, and unsupported command-format blockers. Search/details remain explicitly Not analyzed until those signed bytes exist, Bridge eligible explicitly means not validated, and blockers name the exact closure package. A successful review creates a single-use in-memory capability bound to the exact resolution digest; install/update must consume it before pacman mutation and still reverifies every archive. Rust hostile/ABI/page/compression/capability tests plus real signed `btop` install/tamper/remove/reinstall/Terminal gates pass on the emulator and Samsung across 139/138-package closures and 1,628/1,624 native ELF files.
+      - [ ] Cache the content-addressed closure review, make large scans granular and cancellable, and combine its result with the generated launcher's verified executable, toolkit/protocol, broker-capability, and wrapper-publication review.
     - [ ] Integrate reviewed AUR results into the same source, class, installed-version, update, and compatibility presentation.
 - [ ] Add clear disk-use estimates and controls for package archives, shared runtime data, build caches, and user files.
 

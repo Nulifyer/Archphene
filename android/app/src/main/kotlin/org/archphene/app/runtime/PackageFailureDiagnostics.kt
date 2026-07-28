@@ -19,6 +19,10 @@ internal class InsufficientPackageStorageException(
     }
 }
 
+internal class UnsupportedPackageCompatibilityException(
+    detail: String,
+) : IllegalStateException(detail)
+
 internal object PackageFailureDiagnostics {
     fun install(
         error: Exception,
@@ -66,6 +70,8 @@ internal object PackageFailureDiagnostics {
                 .replace('\n', ' ')
         val normalized = detail.lowercase()
         return when {
+            error is UnsupportedPackageCompatibilityException ->
+                "Unsupported on this device: $detail. No Linux packages were changed."
             error is InsufficientPackageStorageException ->
                 "Not enough Linux storage: " +
                     "${formatStorageBytes(error.requiredBytes)} is required and " +

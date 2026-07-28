@@ -2862,11 +2862,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextIfChanged(
                     views.analysis,
                     when (snapshot.installStates[position]) {
-                        "available" -> getString(R.string.package_capabilities_unanalyzed)
+                        "available" ->
+                            getString(R.string.package_candidate_compatibility_unanalyzed)
                         "installed" ->
-                            packageCapabilitiesLabel(
-                                snapshot.installedCapabilities[position],
-                                snapshot.installedCapabilitiesAnalyzed[position],
+                            getString(
+                                R.string.package_installed_content,
+                                packageCapabilitiesLabel(
+                                    snapshot.installedCapabilities[position],
+                                    snapshot.installedCapabilitiesAnalyzed[position],
+                                ),
                             )
                         else ->
                             getString(

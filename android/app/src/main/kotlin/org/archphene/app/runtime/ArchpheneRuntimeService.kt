@@ -1140,6 +1140,9 @@ class ArchpheneRuntimeService : Service() {
     private val packageResolutionRequestBuffer = ByteBuffer.allocateDirect(128)
     private val packageResolutionOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_RESOLUTION_OUTPUT_SIZE)
+    private val packageCompatibilityRequestBuffer = ByteBuffer.allocateDirect(128)
+    private val packageCompatibilityOutputBuffer =
+        ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val aurBuildClosureOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE)
     private val aurPackageBuffer = ByteBuffer.allocateDirect(128)
@@ -6907,6 +6910,12 @@ class ArchpheneRuntimeService : Service() {
                             installedVersion == resolvedTarget.version -> "installed"
                             else -> availablePackageVersionState(activeHandle, normalized)
                         }
+                    val compatibility = analyzeCachedPackage(activeHandle, normalized)
+                    if (compatibility.packageCount != packages.size) {
+                        throw IllegalStateException(
+                            "Repository state changed during compatibility review",
+                        )
+                    }
                     lastResolvedPackage = normalized
                     lastResolvedRepository = resolvedTarget.repository
                     lastResolvedInstalledVersion = installedVersion
@@ -6969,6 +6978,8 @@ class ArchpheneRuntimeService : Service() {
                                         "Archphene will not downgrade it automatically.\n",
                                 )
                             }
+                            append(packageCompatibilitySummary(compatibility))
+                            append('\n')
                             append("Dependency closure: ")
                             append(packages.size)
                             append(if (packages.size == 1) " package · " else " packages · ")
@@ -9369,6 +9380,94 @@ class ArchpheneRuntimeService : Service() {
         return packages
     }
 
+    private fun analyzeCachedPackage(
+        activeHandle: Long,
+        packageName: String,
+    ): PackageCompatibility {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        val bytes =
+            synchronized(packageCompatibilityOutputBuffer) {
+                packageCompatibilityRequestBuffer.clear()
+                packageCompatibilityRequestBuffer.put(packageBytes)
+                packageCompatibilityOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeAnalyzeCachedPackage(
+                        activeHandle,
+                        packageCompatibilityRequestBuffer,
+                        packageBytes.size,
+                        packageCompatibilityOutputBuffer,
+                    )
+                if (outputLength <= 0) {
+                    throw IllegalStateException(
+                        readNativeMessage(packageCompatibilityOutputBuffer, outputLength),
+                    )
+                }
+                ByteArray(outputLength).also { output ->
+                    packageCompatibilityOutputBuffer.position(0)
+                    packageCompatibilityOutputBuffer.get(output)
+                }
+            }
+        return decodePackageCompatibility(bytes)
+    }
+
+    private fun packageCompatibilitySummary(compatibility: PackageCompatibility): String =
+        when (compatibility.status) {
+            "not-analyzed" ->
+                "Compatibility: Not analyzed · signed archives are reviewed before mutation"
+            "bridge-eligible" ->
+                "Compatibility: Bridge eligible, not validated · " +
+                    packageCapabilitySummary(compatibility.capabilities) +
+                    " · ${compatibility.elfCount} native ELF"
+            "managed-only" ->
+                "Compatibility: Managed only · no launcher or Terminal command"
+            "unsupported" ->
+                "Compatibility: Unsupported · " +
+                    packageCompatibilityUnsupportedDetail(compatibility)
+            else -> throw IllegalStateException("Invalid package compatibility")
+        }
+
+    private fun packageCompatibilityUnsupportedDetail(
+        compatibility: PackageCompatibility,
+    ): String {
+        val detail =
+            when (compatibility.diagnostic) {
+            "foreign-elf" -> "the verified closure contains a runtime ELF for another CPU ABI"
+            "native-in-any-package" ->
+                "a data-only architecture package contains native ELF content"
+            "malformed-elf" -> "the verified closure contains a malformed runtime ELF"
+            "incompatible-page-size" ->
+                "a runtime ELF is not aligned for this Android page size"
+            "unsupported-command" ->
+                "an installed command is neither ELF nor a supported shebang script"
+            else -> throw IllegalStateException("Invalid unsupported-package diagnostic")
+        }
+        return "$detail (package ${checkNotNull(compatibility.diagnosticPackage)})"
+    }
+
+    private fun packageCapabilitySummary(capabilities: Int): String {
+        require(capabilities in 0..15)
+        if (capabilities == 0) {
+            return "Data"
+        }
+        return buildString(36) {
+            if (capabilities and 1 != 0) {
+                append("Graphical")
+            }
+            if (capabilities and 2 != 0) {
+                if (isNotEmpty()) append(" · ")
+                append("CLI")
+            }
+            if (capabilities and 4 != 0) {
+                if (isNotEmpty()) append(" · ")
+                append("Library")
+            }
+            if (capabilities and 8 != 0) {
+                if (isNotEmpty()) append(" · ")
+                append("System")
+            }
+        }
+    }
+
     private fun decodeResolvedPayloads(
         bytes: ByteArray,
         maximumPackages: Int,
@@ -10065,6 +10164,30 @@ class ArchpheneRuntimeService : Service() {
                             )
                             verifyPackagePayload(activeHandle, payload, scratch)
                         }
+                        throwIfPackageCancelled()
+                        record(
+                            NativeRuntime.JOB_VERIFYING,
+                            3,
+                            96,
+                            "Reviewing verified closure for this device",
+                        )
+                        val compatibility = analyzeCachedPackage(activeHandle, normalized)
+                        if (compatibility.packageCount != packages.size) {
+                            throw IllegalStateException(
+                                "Repository state changed during compatibility review",
+                            )
+                        }
+                        when (compatibility.status) {
+                            "not-analyzed" ->
+                                throw IllegalStateException(
+                                    "Repository state changed before compatibility review",
+                                )
+                            "unsupported" ->
+                                throw UnsupportedPackageCompatibilityException(
+                                    packageCompatibilityUnsupportedDetail(compatibility),
+                                )
+                        }
+                        throwIfPackageCancelled()
                         val installedBytes =
                             packageInstallationBytes(activeHandle, normalized)
                         val availableBytes = StatFs(filesDir.absolutePath).availableBytes

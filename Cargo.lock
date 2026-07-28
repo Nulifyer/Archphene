@@ -70,10 +70,13 @@ version = "0.1.0"
 dependencies = [
  "archphene-process",
  "flate2",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tar",
+ "xz2",
+ "zstd",
 ]
 
 [[package]]
