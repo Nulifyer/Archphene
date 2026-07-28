@@ -14,12 +14,14 @@ import android.net.Uri
 import android.os.Build
 import android.os.Binder
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.os.RemoteException
 import android.os.SystemClock
 import android.provider.DocumentsContract
@@ -47,6 +49,7 @@ import android.widget.TextView
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
 class LauncherActivity :
@@ -98,6 +101,8 @@ class LauncherActivity :
     private var pendingLinuxClipboardText: String? = null
     private var pendingDocumentRequestId = 0
     private var pendingDocumentOperation = 0
+    private val activeDirectoryWatchdog =
+        AtomicReference<DirectoryProviderWatchdog?>()
     private val clipboardManager by lazy {
         getSystemService(ClipboardManager::class.java)
     }
@@ -520,6 +525,7 @@ class LauncherActivity :
         handler.removeCallbacksAndMessages(null)
         stopClipboardListening()
         cancelPendingDocumentRequest()
+        activeDirectoryWatchdog.getAndSet(null)?.close()
         detachSurface()
         closeSession()
         remote = null
@@ -2002,22 +2008,43 @@ class LauncherActivity :
         treeUri: Uri,
         output: DataOutputStream,
     ) {
-        output.write(DIRECTORY_STREAM_MAGIC)
-        val visited = HashSet<String>()
-        val counters = longArrayOf(0L, 0L)
-        val buffer = ByteArray(DIRECTORY_BUFFER_BYTES)
-        writeDirectoryChildren(
-            treeUri,
-            DocumentsContract.getTreeDocumentId(treeUri),
-            "",
-            0,
-            visited,
-            counters,
-            buffer,
-            output,
-        )
-        output.writeByte(DIRECTORY_RECORD_END)
-        output.flush()
+        val watchdog =
+            DirectoryProviderWatchdog(
+                handler,
+                DIRECTORY_PROVIDER_DEADLINE_MILLIS,
+                DIRECTORY_PROVIDER_FATAL_GRACE_MILLIS,
+            ) { operation ->
+                Log.e(
+                    TAG,
+                    "Android directory provider remained blocked while attempting to $operation",
+                )
+                Process.killProcess(Process.myPid())
+            }
+        check(activeDirectoryWatchdog.compareAndSet(null, watchdog)) {
+            "Another Android directory stream is active"
+        }
+        try {
+            output.write(DIRECTORY_STREAM_MAGIC)
+            val visited = HashSet<String>()
+            val counters = longArrayOf(0L, 0L)
+            val buffer = ByteArray(DIRECTORY_BUFFER_BYTES)
+            writeDirectoryChildren(
+                treeUri,
+                DocumentsContract.getTreeDocumentId(treeUri),
+                "",
+                0,
+                visited,
+                counters,
+                buffer,
+                output,
+                watchdog,
+            )
+            output.writeByte(DIRECTORY_RECORD_END)
+            output.flush()
+        } finally {
+            activeDirectoryWatchdog.compareAndSet(watchdog, null)
+            watchdog.close()
+        }
     }
 
     private fun writeDirectoryChildren(
@@ -2029,55 +2056,41 @@ class LauncherActivity :
         counters: LongArray,
         buffer: ByteArray,
         output: DataOutputStream,
+        watchdog: DirectoryProviderWatchdog,
     ) {
         check(depth <= MAX_DIRECTORY_DEPTH) { "Android directory is too deep" }
         check(visited.add(parentDocumentId)) { "Android directory contains a cycle" }
         val children =
             DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+        val childRecords =
+            watchdog.cancellable("list Android folder") { signal ->
+                queryDirectoryChildren(children, signal, prefix, depth, counters)
+            }
         val directories = ArrayList<DirectoryChild>()
-        contentResolver.query(
-            children,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-            ),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            while (cursor.moveToNext()) {
-                check(depth < MAX_DIRECTORY_DEPTH) {
-                    "Android directory is too deep"
-                }
-                counters[0]++
-                check(counters[0] <= MAX_DIRECTORY_ENTRIES) {
-                    "Android directory has too many entries"
-                }
-                val documentId =
-                    cursor.getString(0)?.takeIf(String::isNotEmpty)
-                        ?: error("Android provider returned no document ID")
-                val name =
-                    cursor.getString(1)?.takeIf(::safePortalFolderName)
-                        ?: error("Android provider returned an unsafe name")
-                val relativePath = if (prefix.isEmpty()) name else "$prefix/$name"
-                val pathBytes = relativePath.toByteArray(Charsets.UTF_8)
-                check(pathBytes.size in 1..MAX_DIRECTORY_PATH_BYTES) {
-                    "Android directory path is too long"
-                }
-                val mimeType = cursor.getString(2).orEmpty()
-                if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
-                    writeDirectoryPath(output, DIRECTORY_RECORD_DIRECTORY, pathBytes)
-                    directories += DirectoryChild(documentId, relativePath)
-                } else {
-                    writeDirectoryPath(output, DIRECTORY_RECORD_FILE, pathBytes)
-                    val documentUri =
-                        DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
-                    contentResolver.openFileDescriptor(documentUri, "r")?.use { descriptor ->
+        for (child in childRecords) {
+            if (child.directory) {
+                writeDirectoryPath(
+                    output,
+                    DIRECTORY_RECORD_DIRECTORY,
+                    child.relativePathBytes,
+                )
+                directories += child
+            } else {
+                writeDirectoryPath(output, DIRECTORY_RECORD_FILE, child.relativePathBytes)
+                val documentUri =
+                    DocumentsContract.buildDocumentUriUsingTree(treeUri, child.documentId)
+                watchdog
+                    .cancellable("open Android file") { signal ->
+                        contentResolver.openFileDescriptor(documentUri, "r", signal)
+                            ?: error("Android provider returned no file descriptor")
+                    }.use { descriptor ->
                         ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
                             var fileBytes = 0L
                             while (true) {
-                                val count = input.read(buffer)
+                                val count =
+                                    watchdog.read("read Android file", descriptor) {
+                                        input.read(buffer)
+                                    }
                                 if (count < 0) break
                                 if (count == 0) continue
                                 fileBytes = Math.addExact(fileBytes, count.toLong())
@@ -2093,11 +2106,10 @@ class LauncherActivity :
                                 output.write(buffer, 0, count)
                             }
                         }
-                    } ?: error("Android provider returned no file descriptor")
-                    output.writeByte(DIRECTORY_RECORD_FILE_END)
-                }
+                    }
+                output.writeByte(DIRECTORY_RECORD_FILE_END)
             }
-        } ?: error("Android provider did not return directory children")
+        }
         for (directory in directories) {
             writeDirectoryChildren(
                 treeUri,
@@ -2108,8 +2120,63 @@ class LauncherActivity :
                 counters,
                 buffer,
                 output,
+                watchdog,
             )
         }
+    }
+
+    private fun queryDirectoryChildren(
+        children: Uri,
+        signal: CancellationSignal,
+        prefix: String,
+        depth: Int,
+        counters: LongArray,
+    ): List<DirectoryChild> {
+        val records = ArrayList<DirectoryChild>()
+        contentResolver
+            .query(
+                children,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                ),
+                null,
+                null,
+                null,
+                signal,
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    signal.throwIfCanceled()
+                    check(depth < MAX_DIRECTORY_DEPTH) {
+                        "Android directory is too deep"
+                    }
+                    counters[0]++
+                    check(counters[0] <= MAX_DIRECTORY_ENTRIES) {
+                        "Android directory has too many entries"
+                    }
+                    val documentId =
+                        cursor.getString(0)?.takeIf(String::isNotEmpty)
+                            ?: error("Android provider returned no document ID")
+                    val name =
+                        cursor.getString(1)?.takeIf(::safePortalFolderName)
+                            ?: error("Android provider returned an unsafe name")
+                    val relativePath = if (prefix.isEmpty()) name else "$prefix/$name"
+                    val pathBytes = relativePath.toByteArray(Charsets.UTF_8)
+                    check(pathBytes.size in 1..MAX_DIRECTORY_PATH_BYTES) {
+                        "Android directory path is too long"
+                    }
+                    records +=
+                        DirectoryChild(
+                            documentId,
+                            relativePath,
+                            pathBytes,
+                            cursor.getString(2).orEmpty() ==
+                                DocumentsContract.Document.MIME_TYPE_DIR,
+                        )
+                }
+            } ?: error("Android provider did not return directory children")
+        return records
     }
 
     private fun writeDirectoryPath(
@@ -2135,6 +2202,8 @@ class LauncherActivity :
     private data class DirectoryChild(
         val documentId: String,
         val relativePath: String,
+        val relativePathBytes: ByteArray,
+        val directory: Boolean,
     )
 
     private fun sendOpenDocumentBatch(
@@ -2378,6 +2447,8 @@ class LauncherActivity :
         private const val MAX_DIRECTORY_FILE_BYTES = 2L * 1024 * 1024 * 1024
         private const val MAX_DIRECTORY_TOTAL_BYTES = 16L * 1024 * 1024 * 1024
         private const val DIRECTORY_BUFFER_BYTES = 64 * 1024
+        private const val DIRECTORY_PROVIDER_DEADLINE_MILLIS = 30_000L
+        private const val DIRECTORY_PROVIDER_FATAL_GRACE_MILLIS = 2_000L
         private const val DIRECTORY_RECORD_END = 0
         private const val DIRECTORY_RECORD_DIRECTORY = 1
         private const val DIRECTORY_RECORD_FILE = 2

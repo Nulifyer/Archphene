@@ -1640,6 +1640,18 @@ contract was exercised from the portal probe inside an unmodified generated
 Mousepad launcher; a stock GTK folder-selecting application and Qt 6, GTK 4,
 and Electron caller validation remain.
 
+Folder streaming also has a sliding 30-second boundary around provider queries,
+descriptor opens, and reads. It first cancels the SAF operation or closes the
+active descriptor. If a provider ignores both for another two seconds, only
+the generated launcher process is terminated; the manager-owned pipe observes
+EOF and Rust discards descriptor-relative staging. A debuggable Archphene
+DocumentsProvider deliberately ignores cancellation for 60 seconds. Its modern
+Android 16 query path and Samsung Android 15 legacy query path both trigger at
+the expected deadline, leave the manager alive and no partial project, and
+permit the subsequent normal folder/collision/cancellation gate to pass.
+Full-device frames show the responsive picker before the stall and the
+dialog-free Android surface after the launcher is stopped.
+
 The same private frontend implements XDG Settings portal v2 for the standard
 appearance color scheme, accent, contrast, and reduced-motion keys, including
 the intentionally nested legacy `Read` result. It honors D-Bus no-reply calls,

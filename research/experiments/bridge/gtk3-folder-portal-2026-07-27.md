@@ -44,6 +44,22 @@ empty file, and a `.git` directory. SHA-256 values matched the host fixtures.
 A second selection published `ArchphenePortalTree (2)`, and cancelling a third
 selection created no new project and left the launcher alive.
 
+The companion timeout gate is:
+
+```bash
+./scripts/test-folder-portal-provider-timeout.sh \
+  --serial SERIAL \
+  --package org.archphene.linux.p510d0cdd00e00000605a7743b9909630
+```
+
+It selects the current manager's own DocumentsProvider, then asks that
+debuggable provider to ignore cancellation for 60 seconds. A sliding
+30-second query/open/read watchdog cancels or closes the active operation and,
+after a two-second grace period, stops only the blocked launcher. Both devices
+retained the manager process and published no partial project. A normal portal
+run passed immediately afterward. Android 16 exercised the provider's modern
+query hook, while Samsung Android 15 exercised its legacy hook.
+
 Full-device evidence is retained under:
 
 - `tooling/build/folder-portal/emulator-5554/`
@@ -58,5 +74,5 @@ complete Android status and navigation areas visible.
   a folder-selection workflow.
 - Validate Qt 6/KDE, GTK 4/libadwaita, and Electron callers.
 - Add MIME/name filters where the Android picker contract can preserve them.
-- Test slow, failing, and stalled document providers plus genuinely large
-  provider-backed trees.
+- Test explicitly failing providers, providers that make slow forward
+  progress, and genuinely large provider-backed trees.

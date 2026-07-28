@@ -1,11 +1,16 @@
 package org.archphene.app.storage
 
+import android.content.pm.ApplicationInfo
 import android.database.Cursor
 import android.database.MatrixCursor
+import android.os.Binder
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
+import android.util.Log
 import android.webkit.MimeTypeMap
 import java.io.File
 import java.io.FileNotFoundException
@@ -69,6 +74,14 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         projection: Array<out String>?,
         sortOrder: String?,
     ): Cursor {
+        holdDebugLauncherQuery()
+        return queryChildDocumentsInternal(parentDocumentId, projection)
+    }
+
+    private fun queryChildDocumentsInternal(
+        parentDocumentId: String,
+        projection: Array<out String>?,
+    ): Cursor {
         val parent = documentForId(parentDocumentId)
         if (!parent.isDirectory) {
             throw missing("Document is not a directory: $parentDocumentId")
@@ -131,6 +144,15 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             include(rows, childId, documentForId(childId))
         }
         return rows
+    }
+
+    override fun queryChildDocuments(
+        parentDocumentId: String,
+        projection: Array<out String>?,
+        queryArgs: Bundle?,
+    ): Cursor {
+        holdDebugLauncherQuery()
+        return queryChildDocumentsInternal(parentDocumentId, projection)
     }
 
     override fun openDocument(
@@ -514,6 +536,37 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
     private fun providerContext() =
         context ?: throw IllegalStateException("DocumentsProvider is not attached")
 
+    private fun holdDebugLauncherQuery() {
+        val context = providerContext()
+        if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return
+        }
+        val callingUid = Binder.getCallingUid()
+        val callerPackages =
+            context.packageManager.getPackagesForUid(callingUid).orEmpty()
+        val delay =
+            runCatching {
+                File(context.cacheDir, PORTAL_FOLDER_PROVIDER_DELAY_FILE)
+                    .readText()
+                    .trim()
+                    .toLong()
+            }.getOrNull()
+                ?.takeIf { milliseconds -> milliseconds in 1..MAX_TEST_PROVIDER_DELAY_MILLIS }
+                ?: return
+        Log.i(
+            TAG,
+            "Portal folder delay requested callerUid=$callingUid " +
+                "packages=${callerPackages.joinToString()}",
+        )
+        if (callerPackages.none { packageName -> packageName.startsWith(LAUNCHER_PACKAGE_PREFIX) }) {
+            return
+        }
+        val deadline = SystemClock.elapsedRealtime() + delay
+        while (SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(20)
+        }
+    }
+
     private fun mimeType(name: String): String {
         val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
         return MimeTypeMap
@@ -558,6 +611,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
 
     private companion object {
         private const val ROOT_ID = "archphene-home"
+        private const val TAG = "ArchpheneDocuments"
         private const val HOME_ID = "home"
         private const val SHELL_STARTUP_ID = "shell-startup"
         private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/bashrc"
@@ -568,6 +622,10 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         private const val MAX_DOCUMENT_DEPTH = 32
         private const val MAX_VISIBLE_CHILDREN = 4096
         private const val MAX_NATIVE_REQUEST_BYTES = 4 * 1024
+        private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
+        private const val PORTAL_FOLDER_PROVIDER_DELAY_FILE =
+            "portal-folder-provider-delay-ms"
+        private const val MAX_TEST_PROVIDER_DELAY_MILLIS = 60_000L
         private val SHELL_STARTUP_FILES =
             mapOf(
                 BASHRC_DOCUMENT_ID to
