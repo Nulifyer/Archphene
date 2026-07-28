@@ -432,6 +432,27 @@ pub struct PackageResolution {
     bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryTargetPartition {
+    official_targets: Vec<String>,
+    unresolved_targets: Vec<String>,
+    resolution: Option<PackageResolution>,
+}
+
+impl RepositoryTargetPartition {
+    pub fn official_targets(&self) -> &[String] {
+        &self.official_targets
+    }
+
+    pub fn unresolved_targets(&self) -> &[String] {
+        &self.unresolved_targets
+    }
+
+    pub fn resolution(&self) -> Option<&PackageResolution> {
+        self.resolution.as_ref()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VerifiedPackageClosure {
     bytes: Vec<u8>,
@@ -1562,26 +1583,29 @@ impl PackageRuntime {
         }
     }
 
+    pub fn partition_targets_for_fresh_root(
+        &self,
+        packages: &[&str],
+    ) -> Result<RepositoryTargetPartition, PackageRuntimeError> {
+        validate_resolution_targets(packages, self.catalogs_ready())?;
+        let database_path = self.prepare_fresh_resolution_database()?;
+        let result = partition_repository_targets(packages, |targets| {
+            self.resolve_targets_with_database(targets, &database_path)
+        });
+        let cleanup = fs::remove_dir_all(&database_path);
+        match (result, cleanup) {
+            (Ok(partition), Ok(())) => Ok(partition),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(PackageRuntimeError::Io(error)),
+        }
+    }
+
     fn resolve_targets_with_database(
         &self,
         packages: &[&str],
         database_path: &Path,
     ) -> Result<PackageResolution, PackageRuntimeError> {
-        if packages.is_empty()
-            || packages.len() > 256
-            || packages.iter().any(|package| !safe_logical_name(package))
-            || packages
-                .iter()
-                .enumerate()
-                .any(|(index, package)| packages[..index].contains(package))
-            || !self.catalogs_ready()
-        {
-            return Err(if self.catalogs_ready() {
-                PackageRuntimeError::InvalidQuery
-            } else {
-                PackageRuntimeError::InvalidCatalog
-            });
-        }
+        validate_resolution_targets(packages, self.catalogs_ready())?;
         let config = self
             .pacman_config
             .to_str()
@@ -7279,6 +7303,120 @@ fn append_search_result(
     Ok(())
 }
 
+fn validate_resolution_targets(
+    targets: &[&str],
+    catalogs_ready: bool,
+) -> Result<(), PackageRuntimeError> {
+    if !catalogs_ready {
+        return Err(PackageRuntimeError::InvalidCatalog);
+    }
+    if targets.is_empty()
+        || targets.len() > 256
+        || targets.iter().any(|target| !safe_logical_name(target))
+        || targets
+            .iter()
+            .enumerate()
+            .any(|(index, target)| targets[..index].contains(target))
+    {
+        return Err(PackageRuntimeError::InvalidQuery);
+    }
+    Ok(())
+}
+
+fn exact_missing_repository_target(error: &PackageRuntimeError, target: &str) -> bool {
+    let PackageRuntimeError::ToolFailed(1, output) = error else {
+        return false;
+    };
+    let Ok(diagnostic) = output.as_str() else {
+        return false;
+    };
+    diagnostic == format!("error: target not found: {target}\n")
+        || diagnostic == format!("error: target not found: {target}")
+}
+
+fn partition_repository_targets<F>(
+    targets: &[&str],
+    mut resolve: F,
+) -> Result<RepositoryTargetPartition, PackageRuntimeError>
+where
+    F: FnMut(&[&str]) -> Result<PackageResolution, PackageRuntimeError>,
+{
+    if targets.is_empty()
+        || targets.len() > 256
+        || targets.iter().any(|target| !safe_logical_name(target))
+        || targets
+            .iter()
+            .enumerate()
+            .any(|(index, target)| targets[..index].contains(target))
+    {
+        return Err(PackageRuntimeError::InvalidQuery);
+    }
+
+    match resolve(targets) {
+        Ok(resolution) => {
+            return Ok(RepositoryTargetPartition {
+                official_targets: targets.iter().map(|target| (*target).to_owned()).collect(),
+                unresolved_targets: Vec::new(),
+                resolution: Some(resolution),
+            });
+        }
+        Err(error) if targets.len() == 1 => {
+            if exact_missing_repository_target(&error, targets[0]) {
+                return Ok(RepositoryTargetPartition {
+                    official_targets: Vec::new(),
+                    unresolved_targets: vec![targets[0].to_owned()],
+                    resolution: None,
+                });
+            }
+            return Err(error);
+        }
+        Err(_) => {}
+    }
+
+    let mut official = vec![false; targets.len()];
+    let mut stack = vec![(0_usize, targets.len())];
+    while let Some((start, end)) = stack.pop() {
+        let subset = &targets[start..end];
+        match resolve(subset) {
+            Ok(_) => official[start..end].fill(true),
+            Err(error) if subset.len() == 1 => {
+                if !exact_missing_repository_target(&error, subset[0]) {
+                    return Err(error);
+                }
+            }
+            Err(_) => {
+                let middle = start + subset.len() / 2;
+                stack.push((middle, end));
+                stack.push((start, middle));
+            }
+        }
+    }
+
+    let official_targets: Vec<String> = targets
+        .iter()
+        .zip(&official)
+        .filter(|(_, is_official)| **is_official)
+        .map(|(target, _)| (*target).to_owned())
+        .collect();
+    let unresolved_targets: Vec<String> = targets
+        .iter()
+        .zip(&official)
+        .filter(|(_, is_official)| !**is_official)
+        .map(|(target, _)| (*target).to_owned())
+        .collect();
+    let resolution = if official_targets.is_empty() {
+        None
+    } else {
+        let borrowed: Vec<&str> = official_targets.iter().map(String::as_str).collect();
+        Some(resolve(&borrowed)?)
+    };
+    Ok(RepositoryTargetPartition {
+        official_targets,
+        unresolved_targets,
+        resolution,
+    })
+}
+
 fn parse_resolution_output(
     input: &str,
     targets: &[&str],
@@ -7829,6 +7967,24 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn test_resolution(label: &str) -> PackageResolution {
+        PackageResolution {
+            bytes: label.as_bytes().to_vec(),
+        }
+    }
+
+    fn missing_repository_target(target: &str) -> PackageRuntimeError {
+        test_tool_failure(1, format!("error: target not found: {target}\n").as_bytes())
+    }
+
+    fn test_tool_failure(code: i32, diagnostic: &[u8]) -> PackageRuntimeError {
+        let mut output = empty_tool_output();
+        output
+            .push(diagnostic)
+            .expect("package tool failure diagnostic");
+        PackageRuntimeError::ToolFailed(code, Box::new(output))
+    }
 
     fn package_tar(entries: &[(&str, u32, &[u8])]) -> Vec<u8> {
         let mut output = Vec::new();
@@ -9377,6 +9533,100 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
                 RepositoryArchitecture::Aarch64,
             ),
             Err(PackageRuntimeError::InvalidResolution)
+        ));
+    }
+
+    #[test]
+    fn repository_partition_uses_one_resolution_when_every_target_is_official() {
+        let mut calls = 0;
+        let partition = partition_repository_targets(&["base-devel", "glibc"], |targets| {
+            calls += 1;
+            assert_eq!(targets, ["base-devel", "glibc"]);
+            Ok(test_resolution("complete"))
+        })
+        .expect("official partition");
+        assert_eq!(calls, 1);
+        assert_eq!(partition.official_targets(), ["base-devel", "glibc"]);
+        assert!(partition.unresolved_targets().is_empty());
+        assert_eq!(
+            partition.resolution().expect("official resolution"),
+            &test_resolution("complete")
+        );
+    }
+
+    #[test]
+    fn repository_partition_bisects_only_exact_missing_targets() {
+        let official = ["base-devel", "glibc"];
+        let partition = partition_repository_targets(
+            &["base-devel", "aur-runtime", "glibc", "aur-build-tool"],
+            |targets| {
+                if let Some(missing) = targets.iter().find(|target| !official.contains(target)) {
+                    Err(missing_repository_target(missing))
+                } else {
+                    Ok(test_resolution(&targets.join(",")))
+                }
+            },
+        )
+        .expect("mixed repository partition");
+        assert_eq!(partition.official_targets(), ["base-devel", "glibc"]);
+        assert_eq!(
+            partition.unresolved_targets(),
+            ["aur-runtime", "aur-build-tool"]
+        );
+        assert_eq!(
+            partition
+                .resolution()
+                .expect("combined official resolution"),
+            &test_resolution("base-devel,glibc")
+        );
+    }
+
+    #[test]
+    fn repository_partition_does_not_reclassify_other_pacman_failures() {
+        assert!(matches!(
+            partition_repository_targets(&["aur-runtime"], |_| {
+                Err(test_tool_failure(
+                    1,
+                    b"error: target not found: aur-runtime\nwarning: changed catalog\n",
+                ))
+            }),
+            Err(PackageRuntimeError::ToolFailed(1, _))
+        ));
+
+        assert!(matches!(
+            partition_repository_targets(&["aur-runtime"], |_| {
+                Err(test_tool_failure(
+                    2,
+                    b"error: target not found: aur-runtime\n",
+                ))
+            }),
+            Err(PackageRuntimeError::ToolFailed(2, _))
+        ));
+    }
+
+    #[test]
+    fn repository_partition_rechecks_the_combined_official_set() {
+        let mut calls = 0;
+        let result =
+            partition_repository_targets(&["official-a", "aur-tool", "official-b"], |targets| {
+                calls += 1;
+                if targets.contains(&"aur-tool") {
+                    return Err(missing_repository_target("aur-tool"));
+                }
+                if targets.len() == 2 && targets.contains(&"official-a") {
+                    let mut output = empty_tool_output();
+                    output
+                        .push(b"error: unresolvable package conflicts detected\n")
+                        .expect("conflict");
+                    return Err(PackageRuntimeError::ToolFailed(1, Box::new(output)));
+                }
+                Ok(test_resolution("subset"))
+            });
+        assert!(calls > 1);
+        assert!(matches!(
+            result,
+            Err(PackageRuntimeError::ToolFailed(1, output))
+                if output.as_bytes() == b"error: unresolvable package conflicts detected\n"
         ));
     }
 
