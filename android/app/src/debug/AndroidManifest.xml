@@ -4,6 +4,9 @@
     <application
         android:name=".ArchpheneDebugApplication"
         tools:replace="android:name">
+        <activity
+            android:name=".TerminalAccessibilityFixtureActivity"
+            android:exported="true" />
         <receiver
             android:name=".ClipboardTestReceiver"
             android:exported="true" />

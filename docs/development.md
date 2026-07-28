@@ -80,6 +80,21 @@ It compares full-device frames and writes JSON plus Terminal and Foot PNGs under
 `tooling/build/active-performance/<serial>/`. Counters are dormant outside an
 explicit debug reset and the receiver is absent from release builds.
 
+Run the production terminal View against the vendor screen reader already
+installed on a device:
+
+```bash
+./scripts/test-terminal-screen-reader.sh --serial emulator-5554
+./scripts/test-terminal-screen-reader.sh --serial <adb-serial>
+```
+
+The test installs nothing. It uses a debug-only exact damage-protocol Activity,
+temporarily enables the installed TalkBack service, requires genuine
+accessibility focus and character/word/line traversal support, drives
+next-item navigation, retains full-device focus-border screenshots, and
+restores the previous accessibility and notification state. It fails closed
+when the vendor screen reader still requires user-owned first-run setup.
+
 Run the repeated-window sustained gate with the same exact-ABI inputs:
 
 ```bash

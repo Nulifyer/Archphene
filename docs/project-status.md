@@ -1213,8 +1213,8 @@ preallocated, three-frame-throttled edge autoscroll. Accessibility exposes the
 selected state and Copy action. Exact x86_64 emulator and AArch64 Samsung gates
 prove long-press selection, off-screen/back stability, rendered-handle
 discovery and drag, edge autoscroll into old history, exact clipboard
-paste-back, scoped fatal logs, and inspected full-device frames. Remaining
-xterm controls and a real screen-reader workflow are still required.
+paste-back, scoped fatal logs, and inspected full-device frames. The remaining
+terminal device work is consolidated below.
 
 The current terminal core now honors xterm background-color erase across
 character, line, display, edit, and scroll-created cells while resetting
@@ -1227,6 +1227,22 @@ x86_64/AArch64 builds. The signed-manager device fixture now includes a real
 `tput el` background-color-erase marker, but the final current-APK device gate
 is pending restoration of a package-installed shell after the intentional
 clean-data navigation regression cleared both test roots.
+
+The terminal now advertises and handles Android character, word, and line
+movement granularities, emits exact traversal events, and extends bounded
+terminal selection when the accessibility action requests it. Two retained
+locale iterators keep TalkBack gestures off the frame path and avoid rebuilding
+Unicode boundary machinery for every gesture; unit coverage includes combining
+graphemes, terminal punctuation, lines, edges, and unsupported requests. A
+debug-only exact damage-protocol Activity presents the production terminal View
+without weakening or adding hooks to the release APK. The maintained device
+script installs nothing, restores accessibility and notification state,
+verifies the installed Google TalkBack service is bound, requires real
+accessibility focus plus the character/word/line mask, drives next-item
+navigation, and retains full-device focus-border pixels. That workflow passes
+on the API 36 emulator. The Samsung lane fails closed because its preinstalled
+TalkBack still opens the vendor first-run tutorial; Archphene does not dismiss
+or accept that user-owned setup.
 
 Auditing the terminal against the locally installed `xterm-256color` terminfo
 also exposed two terminfo-used controls that had been silently ignored. DEC
@@ -1354,9 +1370,9 @@ clean-data devices currently lack a package-installed shell.
 
 The material `xterm-256color` contract audit is complete. Title/title-stack,
 hyperlink, printer, and window operations remain deliberate no-ops where they
-cannot affect visible terminal correctness or a safe Android interaction. A
-real screen-reader workflow and the consolidated shell-dependent device proofs
-remain open.
+cannot affect visible terminal correctness or a safe Android interaction. The
+real screen-reader workflow is now maintained; the consolidated
+shell-dependent device proofs remain open.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a

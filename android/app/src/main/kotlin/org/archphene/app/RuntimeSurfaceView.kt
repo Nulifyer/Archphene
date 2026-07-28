@@ -187,6 +187,11 @@ internal class RuntimeSurfaceView(
     private var accessibilityEventPosted = false
     private var accessibilityTextChanged = false
     private var accessibilityScrolled = false
+    private val accessibilityNavigator =
+        TerminalAccessibilityNavigator(resources.configuration.locales[0])
+    private var accessibilityTraversalRevision = Long.MIN_VALUE
+    private var accessibilityTraversalAnchor = NO_ACCESSIBILITY_OFFSET
+    private var accessibilityTraversalCursor = NO_ACCESSIBILITY_OFFSET
     private val accessibilityEventRunnable =
         Runnable {
             accessibilityEventPosted = false
@@ -604,20 +609,22 @@ internal class RuntimeSurfaceView(
         info.isSelected = hasSelection()
         if (rows != 0 && columns != 0) {
             val snapshot = accessibilitySnapshot()
-            info.text =
-                if (composingText.isEmpty()) {
-                    snapshot
-                } else {
-                    "$snapshot\n${context.getString(
-                        R.string.terminal_composing_text,
-                        composingText,
-                    )}"
-                }
-            terminalAccessibilitySelection(snapshot.length)?.let { selection ->
+            val text = accessibilityText(snapshot)
+            info.text = text
+            accessibilitySelection(snapshot.length, text.length)?.let { selection ->
                 info.setTextSelection(selection.first, selection.last)
             }
-            if (snapshot.isNotEmpty()) {
+            if (text.isNotEmpty()) {
                 info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION)
+                info.movementGranularities = ACCESSIBILITY_MOVEMENT_GRANULARITIES
+                info.addAction(
+                    AccessibilityNodeInfo.AccessibilityAction
+                        .ACTION_NEXT_AT_MOVEMENT_GRANULARITY,
+                )
+                info.addAction(
+                    AccessibilityNodeInfo.AccessibilityAction
+                        .ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY,
+                )
             }
         }
         if (hasSelection()) {
@@ -650,6 +657,10 @@ internal class RuntimeSurfaceView(
                 setViewportOffset(viewportOffset - rows.coerceAtLeast(1))
             AccessibilityNodeInfo.ACTION_SET_SELECTION ->
                 setAccessibilitySelection(arguments)
+            AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY ->
+                moveAccessibility(arguments, action, forward = true)
+            AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY ->
+                moveAccessibility(arguments, action, forward = false)
             else -> super.performAccessibilityAction(action, arguments)
         }
 
@@ -847,6 +858,9 @@ internal class RuntimeSurfaceView(
             terminalRevision == Long.MIN_VALUE ||
                 nextTerminalRevision != terminalRevision ||
                 dirtyStart < dirtyEnd
+        if (contentChanged || nextViewportOffset != viewportOffset) {
+            resetAccessibilityTraversal()
+        }
         val nextHistoryOriginEpoch = damageBuffer.getLong(40)
         if (terminalRevision != Long.MIN_VALUE && nextTerminalRevision < terminalRevision) {
             return false
@@ -2405,6 +2419,7 @@ internal class RuntimeSurfaceView(
                 return false
             }
             composingText = text.toString()
+            resetAccessibilityTraversal()
             invalidate()
             return super.setComposingText(text, newCursorPosition)
         }
@@ -2412,6 +2427,7 @@ internal class RuntimeSurfaceView(
         override fun finishComposingText(): Boolean {
             val pending = composingText
             composingText = ""
+            resetAccessibilityTraversal()
             invalidate()
             val accepted = super.finishComposingText()
             editable?.clear()
@@ -2426,6 +2442,7 @@ internal class RuntimeSurfaceView(
                 return false
             }
             composingText = ""
+            resetAccessibilityTraversal()
             invalidate()
             val accepted = super.commitText(text, newCursorPosition)
             editable?.clear()
@@ -2538,6 +2555,7 @@ internal class RuntimeSurfaceView(
         selectionDragging = false
         needsFullSnapshot = true
         composingText = ""
+        resetAccessibilityTraversal()
         glyphCodepoints = IntArray(0)
         glyphLengths = ByteArray(0)
         glyphWidths = ByteArray(0)
@@ -2591,6 +2609,33 @@ internal class RuntimeSurfaceView(
             }
         }
         return builder.toString()
+    }
+
+    private fun accessibilityText(snapshot: String): String =
+        if (composingText.isEmpty()) {
+            snapshot
+        } else {
+            "$snapshot\n${context.getString(
+                R.string.terminal_composing_text,
+                composingText,
+            )}"
+        }
+
+    private fun accessibilitySelection(
+        snapshotLength: Int,
+        textLength: Int,
+    ): IntRange? {
+        if (
+            accessibilityTraversalRevision == terminalRevision &&
+            accessibilityTraversalAnchor in 0..textLength &&
+            accessibilityTraversalCursor in 0..textLength
+        ) {
+            return IntRange(
+                minOf(accessibilityTraversalAnchor, accessibilityTraversalCursor),
+                maxOf(accessibilityTraversalAnchor, accessibilityTraversalCursor),
+            )
+        }
+        return terminalAccessibilitySelection(snapshotLength)
     }
 
     private fun accessibilityLastRow(): Int {
@@ -2748,16 +2793,30 @@ internal class RuntimeSurfaceView(
                 -1,
             )
         val snapshotLength = accessibilitySnapshot().length
+        return setAccessibilitySelection(start, end, snapshotLength)
+    }
+
+    private fun setAccessibilitySelection(
+        start: Int,
+        end: Int,
+        snapshotLength: Int,
+    ): Boolean {
         if (start < 0 || end < start || end > snapshotLength) {
             return false
         }
         if (start == end) {
+            accessibilityTraversalRevision = terminalRevision
+            accessibilityTraversalAnchor = start
+            accessibilityTraversalCursor = end
             clearSelection()
-            sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED)
+            sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED)
             return true
         }
         val startCell = accessibilityCellForOffset(start) ?: return false
         val endCell = accessibilityCellForOffset(end - 1) ?: return false
+        accessibilityTraversalRevision = terminalRevision
+        accessibilityTraversalAnchor = start
+        accessibilityTraversalCursor = end
         selectionStart = minOf(startCell, endCell)
         selectionEnd = maxOf(startCell, endCell)
         selectionInitialStart = selectionStart
@@ -2766,8 +2825,89 @@ internal class RuntimeSurfaceView(
         selectionDragEndpoint = SELECTION_DRAG_NONE
         selectionDragging = false
         recordSelectionRows()
-        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED)
+        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED)
         return true
+    }
+
+    private fun moveAccessibility(
+        arguments: Bundle?,
+        action: Int,
+        forward: Boolean,
+    ): Boolean {
+        val granularity =
+            arguments?.getInt(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT,
+                0,
+            ) ?: return false
+        val extendSelection =
+            arguments.getBoolean(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN,
+                false,
+            )
+        val snapshot = accessibilitySnapshot()
+        val text = accessibilityText(snapshot)
+        val currentSelection = accessibilitySelection(snapshot.length, text.length)
+        val currentCursor =
+            if (
+                accessibilityTraversalRevision == terminalRevision &&
+                accessibilityTraversalCursor in 0..text.length
+            ) {
+                accessibilityTraversalCursor
+            } else {
+                currentSelection?.last ?: 0
+            }
+        if (!accessibilityNavigator.move(text, currentCursor, granularity, forward)) {
+            return false
+        }
+        val nextCursor =
+            if (forward) {
+                accessibilityNavigator.end
+            } else {
+                accessibilityNavigator.start
+            }
+        val nextAnchor =
+            if (
+                extendSelection &&
+                accessibilityTraversalRevision == terminalRevision &&
+                accessibilityTraversalAnchor in 0..text.length
+            ) {
+                accessibilityTraversalAnchor
+            } else if (extendSelection) {
+                currentCursor
+            } else {
+                nextCursor
+            }
+        if (!extendSelection) {
+            clearSelection()
+        }
+        accessibilityTraversalRevision = terminalRevision
+        accessibilityTraversalAnchor = nextAnchor
+        accessibilityTraversalCursor = nextCursor
+        if (extendSelection) {
+            val selectionStart = minOf(nextAnchor, nextCursor)
+            val selectionEnd = maxOf(nextAnchor, nextCursor)
+            if (selectionEnd <= snapshot.length) {
+                setAccessibilitySelection(selectionStart, selectionEnd, snapshot.length)
+                accessibilityTraversalAnchor = nextAnchor
+                accessibilityTraversalCursor = nextCursor
+            }
+        }
+        sendTerminalAccessibilityEvent(
+            AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY,
+        ) { event ->
+            event.action = action
+            event.movementGranularity = granularity
+            event.fromIndex = accessibilityNavigator.start
+            event.toIndex = accessibilityNavigator.end
+            event.text.add(text)
+        }
+        return true
+    }
+
+    private fun resetAccessibilityTraversal() {
+        accessibilityTraversalRevision = Long.MIN_VALUE
+        accessibilityTraversalAnchor = NO_ACCESSIBILITY_OFFSET
+        accessibilityTraversalCursor = NO_ACCESSIBILITY_OFFSET
     }
 
     private fun isBlankGlyph(cell: Int): Boolean =
@@ -2787,6 +2927,7 @@ internal class RuntimeSurfaceView(
             return true
         }
         viewportOffset = nextOffset
+        resetAccessibilityTraversal()
         needsFullSnapshot = true
         scheduleTerminalAccessibilityEvent(scrolled = true)
         invalidate()
@@ -2824,6 +2965,7 @@ internal class RuntimeSurfaceView(
     private fun returnToLiveView() {
         if (viewportOffset != 0) {
             viewportOffset = 0
+            resetAccessibilityTraversal()
             needsFullSnapshot = true
         }
     }
@@ -2874,6 +3016,7 @@ internal class RuntimeSurfaceView(
         private const val TEXT_SIZE_RESET = 1
         private const val TEXT_SIZE_LARGER = 2
         private const val NO_SELECTION = -1L
+        private const val NO_ACCESSIBILITY_OFFSET = -1
         private const val NO_MOUSE_POINTER = -1
         private const val NO_MOUSE_POSITION = -1
         private const val SELECTION_DRAG_NONE = 0
@@ -2907,6 +3050,10 @@ internal class RuntimeSurfaceView(
         private const val MIN_COLUMNS = 2
         private const val MAX_COLUMNS = 400
         private const val ACCESSIBILITY_CHARACTER_LIMIT = 8 * 1024
+        private const val ACCESSIBILITY_MOVEMENT_GRANULARITIES =
+            AccessibilityNodeInfo.MOVEMENT_GRANULARITY_CHARACTER or
+                AccessibilityNodeInfo.MOVEMENT_GRANULARITY_WORD or
+                AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE
         private const val ACCESSIBILITY_EVENT_DELAY_MILLIS = 100L
         private const val BLINK_INTERVAL_MILLIS = 500L
         private const val TERMINAL_INPUT_LIMIT = 8 * 1024
