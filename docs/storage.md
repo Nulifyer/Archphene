@@ -268,8 +268,12 @@ progress frames pass on both maintained ABIs.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees the
 private POSIX mirror and changes cross the boundary only during explicit Sync.
-Drag-and-drop import and richer `/mnt/android` mapping status are still
-planned.
+Capability-scoped wrapper drag-and-drop imports granted Android URI lists
+through the conflict-safe document session and exports only visible-home files
+with exact temporary read grants. `/mnt/android` remains a fail-closed set of
+managed private-home aliases rather than a misleading live SAF mount; connected
+tree direction, action progress, conflicts, history, retry, and grant state are
+shown in the Files UI.
 
 ## Virtual Linux Layout
 

@@ -573,8 +573,13 @@ partial success honestly. The Activity consumes each incoming batch once.
 Exact ACTION_VIEW, ACTION_SEND, and deduplicated ACTION_SEND_MULTIPLE byte
 content, collision, restart-status, system-picker cancellation, cleanup,
 scoped-log, and visually inspected full-device gates pass on the x86_64
-emulator and physical AArch64 Samsung. Directory-tree entry, drag-and-drop,
-progress/cancel, and provider timeouts remain open.
+emulator and physical AArch64 Samsung. The same current APKs also pass live
+byte progress, chunk cancellation, cooperative and ignored provider-open
+timeouts, stalled and paced descriptor reads, process recovery, and exact
+retry. Directory trees enter through the manager and Linux portal
+`ACTION_OPEN_DOCUMENT_TREE` paths, while wrapper drag-and-drop uses the
+capability-scoped conflict-safe document broker. Fresh dual-ABI drag/drop gates
+and the complete mirror/synchronization/recovery matrix pass on both targets.
 
 The Files page can now open one visible Linux file or share one through 32
 visible Linux files through Android's standard flows. Both actions open
