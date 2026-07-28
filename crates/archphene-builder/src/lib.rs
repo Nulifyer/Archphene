@@ -47,7 +47,6 @@ const BUILDER_RUNTIME_ALIAS_NAME: &str = "builder-runtime-v1";
 const BUILDER_RUNTIME_HEADER: &str = "# org.archphene.builder-runtime.v1";
 const BUILDER_RUNTIME_PATH_BRIDGE: &str = "libarchphene_path_bridge.so";
 const BUILDER_NINJA_WRAPPER_NAME: &str = "ninja";
-const BUILDER_NINJA_WRAPPER: &[u8] = b"#!/usr/bin/sh\nexec /usr/bin/ninja -j2 \"$@\"\n";
 const PACMAN_LOCAL_DATABASE_VERSION: &[u8] = b"9\n";
 const MAX_BUILDER_RUNTIME_MANIFEST_BYTES: usize = 32 * 1024;
 const MAX_BUILDER_RUNTIME_ENTRIES: usize = 32;
@@ -779,7 +778,7 @@ pub fn install_staged_aur_dependencies(
     {
         return Err(BuilderError::InvalidArgument);
     }
-    let runtime = BuilderRuntime::prepare(files_directory, native_directory, runtime_manifest)?;
+    let runtime = BuilderRuntime::prepare(files_directory, native_directory, runtime_manifest, 2)?;
     let files = openat(
         CWD,
         files_directory,
@@ -1355,7 +1354,11 @@ impl BuilderRuntime {
         files_directory: &Path,
         native_directory: &Path,
         manifest: &[u8],
+        build_jobs: u8,
     ) -> Result<Self, BuilderError> {
+        if !(1..=8).contains(&build_jobs) {
+            return Err(BuilderError::InvalidArgument);
+        }
         let entries = parse_builder_runtime_manifest(manifest)?;
         let files = openat(
             CWD,
@@ -1384,7 +1387,7 @@ impl BuilderRuntime {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
-        publish_builder_ninja_wrapper(&root_descriptor)?;
+        publish_builder_ninja_wrapper(&root_descriptor, build_jobs)?;
         let run = open_directory(&root_descriptor, "run")?;
         let mut visited = 0;
         remove_entry_if_present(&run, BUILDER_RUNTIME_ALIAS_NAME, 0, &mut visited)?;
@@ -1435,7 +1438,8 @@ impl BuilderRuntime {
             &alias_path.join(BUILDER_RUNTIME_PATH_BRIDGE),
             &alias_path,
             None,
-        )?;
+        )?
+        .with_build_jobs(build_jobs)?;
         run_official_install_scriptlets(
             &environment,
             &root_descriptor,
@@ -1475,7 +1479,12 @@ impl BuilderRuntime {
     }
 }
 
-fn publish_builder_ninja_wrapper(root: &OwnedFd) -> Result<(), BuilderError> {
+fn publish_builder_ninja_wrapper(root: &OwnedFd, build_jobs: u8) -> Result<(), BuilderError> {
+    if !(1..=8).contains(&build_jobs) {
+        return Err(BuilderError::InvalidArgument);
+    }
+    let wrapper =
+        format!("#!/usr/bin/sh\nexec /usr/bin/ninja -j{build_jobs} \"$@\"\n").into_bytes();
     let usr = open_directory(root, "usr")?;
     let local = open_or_create_directory(&usr, "local")?;
     let bin = open_or_create_directory(&local, "bin")?;
@@ -1483,14 +1492,11 @@ fn publish_builder_ninja_wrapper(root: &OwnedFd) -> Result<(), BuilderError> {
         Ok(metadata)
             if FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
                 && metadata.st_mode & 0o777 == 0o700
-                && metadata.st_size == BUILDER_NINJA_WRAPPER.len() as i64 =>
+                && metadata.st_size == wrapper.len() as i64 =>
         {
-            let existing = read_bounded_regular_file(
-                &bin,
-                BUILDER_NINJA_WRAPPER_NAME,
-                BUILDER_NINJA_WRAPPER.len(),
-            )?;
-            if existing == BUILDER_NINJA_WRAPPER {
+            let existing =
+                read_bounded_regular_file(&bin, BUILDER_NINJA_WRAPPER_NAME, wrapper.len())?;
+            if existing == wrapper {
                 return Ok(());
             }
             return Err(BuilderError::InvalidRuntime);
@@ -1499,7 +1505,7 @@ fn publish_builder_ninja_wrapper(root: &OwnedFd) -> Result<(), BuilderError> {
         Err(Errno::NOENT) => {}
         Err(error) => return Err(error.into()),
     }
-    write_atomic(&bin, BUILDER_NINJA_WRAPPER_NAME, BUILDER_NINJA_WRAPPER)?;
+    write_atomic(&bin, BUILDER_NINJA_WRAPPER_NAME, &wrapper)?;
     chmodat(
         &bin,
         BUILDER_NINJA_WRAPPER_NAME,
@@ -1521,9 +1527,15 @@ impl AurBuildSession {
         expected_input_manifest_sha256: [u8; 32],
         expected_closure_sha256: [u8; 32],
         expected_dependency_manifest_sha256: Option<[u8; 32]>,
+        build_jobs: u8,
     ) -> Result<Self, BuilderError> {
         terminate_stale_builder_processes()?;
-        let runtime = BuilderRuntime::prepare(files_directory, native_directory, runtime_manifest)?;
+        let runtime = BuilderRuntime::prepare(
+            files_directory,
+            native_directory,
+            runtime_manifest,
+            build_jobs,
+        )?;
         if runtime.closure_sha256() != expected_closure_sha256 {
             return Err(BuilderError::InvalidInput);
         }
@@ -5012,9 +5024,12 @@ mod android {
         native_directory: JString,
         manifest_buffer: JByteBuffer,
         manifest_length: jint,
+        build_jobs: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
-        let Ok(manifest_length) = usize::try_from(manifest_length) else {
+        let (Ok(manifest_length), Ok(build_jobs)) =
+            (usize::try_from(manifest_length), u8::try_from(build_jobs))
+        else {
             return ERROR_INVALID_ARGUMENT;
         };
         let (Ok(files_directory), Ok(native_directory)) = (
@@ -5050,6 +5065,7 @@ mod android {
                 Path::new(&files_directory),
                 Path::new(&native_directory),
                 manifest,
+                build_jobs,
             )?;
             runtime.probe_makepkg()
         })();
@@ -5139,8 +5155,12 @@ mod android {
         input_manifest_sha256: JString,
         closure_sha256: JString,
         dependency_manifest_sha256: JString,
+        build_jobs: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
+        let Ok(build_jobs) = u8::try_from(build_jobs) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
         let Ok(runtime_manifest_length) = usize::try_from(runtime_manifest_length) else {
             return ERROR_INVALID_ARGUMENT;
         };
@@ -5215,6 +5235,7 @@ mod android {
             input_manifest_sha256,
             closure_sha256,
             dependency_manifest_sha256,
+            build_jobs,
         ) {
             Ok(value) => {
                 *slot = Some(value);
@@ -5786,7 +5807,7 @@ summary\t1\t{}\n",
     fn prepares_a_verified_builder_execution_runtime() {
         let directory = test_directory();
         let (native, manifest, closure) = runtime_fixture(&directory);
-        let runtime = BuilderRuntime::prepare(&directory, &native, &manifest)
+        let runtime = BuilderRuntime::prepare(&directory, &native, &manifest, 2)
             .expect("verified Builder runtime");
         assert_eq!(runtime.closure_sha256(), closure);
         assert_eq!(runtime.root_report().package_count, 1);
@@ -5809,7 +5830,7 @@ summary\t1\t{}\n",
             .join(BUILDER_NINJA_WRAPPER_NAME);
         assert_eq!(
             fs::read(&ninja).expect("Ninja wrapper"),
-            BUILDER_NINJA_WRAPPER,
+            b"#!/usr/bin/sh\nexec /usr/bin/ninja -j2 \"$@\"\n",
         );
         assert_eq!(
             fs::metadata(&ninja)
@@ -5829,12 +5850,12 @@ summary\t1\t{}\n",
                 .expect("official scriptlet marker")
                 .contains(&format!("closure={}", hex_sha256(&closure))),
         );
-        BuilderRuntime::prepare(&directory, &native, &manifest)
+        BuilderRuntime::prepare(&directory, &native, &manifest, 2)
             .expect("idempotent verified Builder runtime");
         fs::write(&ninja, b"#!/usr/bin/sh\nexit 0\n").expect("tamper Ninja wrapper");
         fs::set_permissions(&ninja, fs::Permissions::from_mode(0o700))
             .expect("tampered wrapper mode");
-        assert!(BuilderRuntime::prepare(&directory, &native, &manifest).is_err());
+        assert!(BuilderRuntime::prepare(&directory, &native, &manifest, 2).is_err());
         fs::remove_dir_all(directory).expect("cleanup");
     }
 
@@ -5851,7 +5872,7 @@ summary\t1\t{}\n",
             .nth(2)
             .expect("loader package");
         fs::write(native.join(packaged), b"tampered").expect("tamper runtime");
-        assert!(BuilderRuntime::prepare(&directory, &native, &manifest).is_err());
+        assert!(BuilderRuntime::prepare(&directory, &native, &manifest, 2).is_err());
         fs::remove_dir_all(directory).expect("cleanup");
     }
 

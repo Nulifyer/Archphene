@@ -1893,8 +1893,18 @@ real same-version `pamac-aur 11.7.5-1` transaction. The compact action now
 advances through **AUR**, **Prepare**, **Sources**, **Build**, and **Built**
 instead of repeating **Verify**; full-device evidence covers dependency
 review, exact base/package verification counters, restored **Built** /
-**Update**, and completed installation. Safe prepared-root reuse between
-untrusted recipes and adaptive build concurrency remain open.
+**Update**, and completed installation.
+
+Builder concurrency is no longer a fixed two-worker policy. One bounded pure
+decision uses available processors, free memory, Android's low-memory signal,
+and current thermal severity to select one through four workers once per
+reviewed isolated root. The selected value is retained in the Builder report,
+bounded again across Binder/JNI, and applied consistently to Make, Cargo,
+CMake, and a verified Ninja wrapper. The physical Samsung selected
+**Auto · 4**, exposed that value in the full-device build evidence, published
+an exact `ninja -j4` wrapper, started current `libpamac-aur` through the new
+protocol, and cancelled/reaped the build normally. Safe prepared-root reuse
+between untrusted recipes remains open.
 
 Current AArch64 Code now reaches and retains its Ozone/Wayland workbench without
 a package patch. The generic bridge passes Chromium's kernel `/proc`
@@ -2445,8 +2455,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild. The GTK settings bridge now has a clean checksum-pinned AArch64 GLib link sysroot.
 - Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.
 - Reuse unchanged content-addressed recursive-AUR closures and prepared roots
-  between untrusted recipes where the isolation model permits it, and make the
-  conservative build concurrency limit adaptive/configurable.
+  between untrusted recipes where the isolation model permits it.
 
 ## Package-manager efficiency rules
 

@@ -55,7 +55,7 @@ class AurBuilderService : Service() {
                                 extractProvisionBatch(data, reply)
                             TRANSACTION_FINISH_PROVISION -> finishProvision(reply)
                             TRANSACTION_ABORT_PROVISION -> abortProvision(reply)
-                            TRANSACTION_PROBE_RUNTIME -> probeRuntime(reply)
+                            TRANSACTION_PROBE_RUNTIME -> probeRuntime(data, reply)
                             TRANSACTION_PREPARE_RECIPE -> prepareRecipe(data, reply)
                             TRANSACTION_BEGIN_AUR_DEPENDENCIES ->
                                 beginAurDependencies(data, reply)
@@ -371,7 +371,12 @@ class AurBuilderService : Service() {
     }
 
     @Synchronized
-    private fun probeRuntime(reply: Parcel) {
+    private fun probeRuntime(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val buildJobs = data.readInt()
+        require(buildJobs in 1..8)
         val manifest = readRuntimeManifest()
         val manifestBuffer = ByteBuffer.allocateDirect(manifest.size).put(manifest)
         val output =
@@ -384,6 +389,7 @@ class AurBuilderService : Service() {
                 applicationInfo.nativeLibraryDir,
                 manifestBuffer,
                 manifest.size,
+                buildJobs,
                 output,
             )
         check(result in 1..NativeBuilder.RUNTIME_OUTPUT_BYTES) {
@@ -622,9 +628,11 @@ class AurBuilderService : Service() {
         val inputManifestSha256 = data.readString().orEmpty()
         val closureSha256 = data.readString().orEmpty()
         val dependencyManifestSha256 = data.readString().orEmpty()
+        val buildJobs = data.readInt()
         require(
             inputManifestSha256.matches(SHA256) &&
                 closureSha256.matches(SHA256) &&
+                buildJobs in 1..8 &&
                 (
                     dependencyManifestSha256.isEmpty() ||
                         dependencyManifestSha256.matches(SHA256)
@@ -644,6 +652,7 @@ class AurBuilderService : Service() {
                 inputManifestSha256,
                 closureSha256,
                 dependencyManifestSha256,
+                buildJobs,
                 nativeOutputBuffer,
             )
         check(result == 0) {

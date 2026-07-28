@@ -1,5 +1,6 @@
 package org.archphene.app.runtime
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -27,6 +28,7 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.Parcel
 import android.os.Process
+import android.os.PowerManager
 import android.os.StatFs
 import android.os.SystemClock
 import android.provider.DocumentsContract
@@ -1317,6 +1319,7 @@ class ArchpheneRuntimeService : Service() {
         val closureManifestSha256: String,
         val buildRootEntries: Long,
         val buildRootBytes: Long,
+        val parallelJobs: Int,
         val runtimeVersion: String,
         val recipeEntries: Long,
         val recipeBytes: Long,
@@ -8012,6 +8015,7 @@ class ArchpheneRuntimeService : Service() {
                                 "${builder.closureManifestSha256} " +
                                 "root=${builder.buildRootEntries}/" +
                                 "${builder.buildRootBytes} " +
+                                "jobs=${builder.parallelJobs} " +
                                 "tool=${builder.runtimeVersion.replace('\n', ' ')} " +
                                 "recipe=${builder.recipeEntries}/" +
                                 "${builder.recipeBytes}+${builder.recipeSourceBytes}",
@@ -8226,18 +8230,22 @@ class ArchpheneRuntimeService : Service() {
                      */
                     retainedAurBuilderReport = null
                     clearRetainedAurBuiltPackages()
-                    searchStatus =
-                        if (
-                            error is InterruptedException ||
+                    val cancelled =
+                        error is InterruptedException ||
                             aurBuildCancellationRequested
-                        ) {
+                    searchStatus =
+                        if (cancelled) {
                             "AUR build cancelled · verify again to prepare a fresh builder"
                         } else {
                             "AUR build failed: " +
                                 (error.message ?: error.javaClass.simpleName) +
                                 " · verify again to retry"
                         }
-                    Log.e(TAG, "AUR build failed", error)
+                    if (cancelled) {
+                        Log.i(TAG, "AUR build cancelled and isolated state invalidated")
+                    } else {
+                        Log.e(TAG, "AUR build failed", error)
+                    }
                 } finally {
                     aurBuildCancelable = false
                     aurBuildActive = false
@@ -8416,6 +8424,7 @@ class ArchpheneRuntimeService : Service() {
         requireRuntimeWorker("AUR builder execution")
         check(builder.inputManifestSha256.matches(SHA256_HEX))
         check(builder.closureManifestSha256.matches(SHA256_HEX))
+        check(builder.parallelJobs in 1..AurBuildConcurrency.MAXIMUM_JOBS)
         check(builder.preparedPackageBase == review.packageBase)
         check(
             builder.dependencyPackageCount == 0 &&
@@ -8489,6 +8498,7 @@ class ArchpheneRuntimeService : Service() {
                     request.writeString(builder.inputManifestSha256)
                     request.writeString(builder.closureManifestSha256)
                     request.writeString(builder.dependencyManifestSha256)
+                    request.writeInt(builder.parallelJobs)
                 },
             ) {}
             buildStarted = true
@@ -9138,6 +9148,7 @@ class ArchpheneRuntimeService : Service() {
         }
         val builderUid = builderApplication.uid
         check(builderUid != Process.myUid())
+        val buildJobs = recommendedAurBuildJobs()
 
         val sentinel = File(filesDir, "aur-builder-manager-sentinel")
         val outputFile = File(cacheDir, "aur-builder-probe-output")
@@ -9325,7 +9336,7 @@ class ArchpheneRuntimeService : Service() {
                         )
                     }
                 searchStatus = "Validating the isolated Builder runtime"
-                val runtimeVersion = probeAurBuilderRuntime(endpoint)
+                val runtimeVersion = probeAurBuilderRuntime(endpoint, buildJobs)
                 searchStatus = "Preparing the exact reviewed build recipe"
                 val recipe =
                     prepareAurBuilderRecipe(
@@ -9347,6 +9358,7 @@ class ArchpheneRuntimeService : Service() {
                     closure.manifestSha256,
                     buildRoot.entryCount,
                     buildRoot.expandedBytes,
+                    buildJobs,
                     runtimeVersion,
                     recipe.entryCount,
                     recipe.recipeBytes,
@@ -9880,11 +9892,27 @@ class ArchpheneRuntimeService : Service() {
         return report
     }
 
-    private fun probeAurBuilderRuntime(endpoint: IBinder): String =
+    private fun recommendedAurBuildJobs(): Int {
+        val memory =
+            ActivityManager.MemoryInfo().also { info ->
+                getSystemService(ActivityManager::class.java).getMemoryInfo(info)
+            }
+        return AurBuildConcurrency.recommendedJobs(
+            Runtime.getRuntime().availableProcessors(),
+            memory.availMem,
+            memory.lowMemory,
+            getSystemService(PowerManager::class.java).currentThermalStatus,
+        )
+    }
+
+    private fun probeAurBuilderRuntime(
+        endpoint: IBinder,
+        buildJobs: Int,
+    ): String =
         transactAurBuilder(
             endpoint,
             AUR_BUILDER_TRANSACTION_PROBE_RUNTIME,
-            {},
+            { request -> request.writeInt(buildJobs) },
         ) { reply ->
             val version = reply.readString().orEmpty().trim()
             check(
@@ -10682,6 +10710,9 @@ class ArchpheneRuntimeService : Service() {
                         .append(" verified entries\n")
                     append("Builder toolchain: ")
                         .append(builder.runtimeVersion)
+                        .append('\n')
+                    append("Build workers: Auto · ")
+                        .append(builder.parallelJobs)
                         .append('\n')
                 }
                 if (built == null) {
@@ -13967,6 +13998,7 @@ class ArchpheneRuntimeService : Service() {
                 closureManifestSha256 = "5".repeat(64),
                 buildRootEntries = 128L,
                 buildRootBytes = 33_554_432L,
+                parallelJobs = 2,
                 runtimeVersion = "makepkg 7.0",
                 recipeEntries = 3L,
                 recipeBytes = 1_024L,

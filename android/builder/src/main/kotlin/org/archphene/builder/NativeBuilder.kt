@@ -120,6 +120,7 @@ internal object NativeBuilder {
         nativeDirectory: String,
         manifestBuffer: ByteBuffer,
         manifestLength: Int,
+        buildJobs: Int,
         outputBuffer: ByteBuffer,
     ): Int
 
@@ -142,6 +143,7 @@ internal object NativeBuilder {
         inputManifestSha256: String,
         closureSha256: String,
         dependencyManifestSha256: String,
+        buildJobs: Int,
         outputBuffer: ByteBuffer,
     ): Int
 

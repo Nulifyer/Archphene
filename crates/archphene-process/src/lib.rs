@@ -221,6 +221,8 @@ pub struct CommandEnvironment {
     qt_plugin_root: Option<PathBuf>,
     appearance: GuiAppearance,
     portal_bus_address: Option<OsString>,
+    build_jobs: OsString,
+    makeflags: OsString,
 }
 
 impl CommandEnvironment {
@@ -290,7 +292,18 @@ impl CommandEnvironment {
             qt_plugin_root: None,
             appearance: GuiAppearance::default(),
             portal_bus_address: None,
+            build_jobs: OsString::from("2"),
+            makeflags: OsString::from("-j2"),
         })
+    }
+
+    pub fn with_build_jobs(mut self, jobs: u8) -> Result<Self, ProcessError> {
+        if !(1..=8).contains(&jobs) {
+            return Err(ProcessError::InvalidEnvironment);
+        }
+        self.build_jobs = OsString::from(jobs.to_string());
+        self.makeflags = OsString::from(format!("-j{jobs}"));
+        Ok(self)
     }
 
     pub fn with_gui_support(
@@ -595,9 +608,9 @@ impl CommandEnvironment {
             // Bound common build frontends for phone/tablet memory pressure.
             // The isolated Builder also publishes a verified Ninja wrapper
             // because Ninja has no direct environment job-count override.
-            .env("MAKEFLAGS", "-j2")
-            .env("CARGO_BUILD_JOBS", "2")
-            .env("CMAKE_BUILD_PARALLEL_LEVEL", "2")
+            .env("MAKEFLAGS", &self.makeflags)
+            .env("CARGO_BUILD_JOBS", &self.build_jobs)
+            .env("CMAKE_BUILD_PARALLEL_LEVEL", &self.build_jobs)
             .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
             .env("ARCHPHENE_RUNTIME_LOADER", &self.loader)
             .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
@@ -2922,6 +2935,24 @@ mod tests {
         assert_eq!(gui_value("GDK_BACKEND"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("QT_QPA_PLATFORM"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("SDL_VIDEODRIVER"), Some(OsStr::new("wayland")));
+        let adaptive = environment
+            .clone()
+            .with_build_jobs(4)
+            .expect("bounded build jobs")
+            .build_command(&launch, &[], "dumb");
+        let adaptive_value = |name: &str| {
+            adaptive
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(adaptive_value("MAKEFLAGS"), Some(OsStr::new("-j4")));
+        assert_eq!(adaptive_value("CARGO_BUILD_JOBS"), Some(OsStr::new("4")));
+        assert_eq!(
+            adaptive_value("CMAKE_BUILD_PARALLEL_LEVEL"),
+            Some(OsStr::new("4")),
+        );
+        assert!(environment.clone().with_build_jobs(0).is_err());
+        assert!(environment.clone().with_build_jobs(9).is_err());
         assert!(validate_wayland_display("../escape").is_err());
         assert!(validate_wayland_display("/absolute").is_err());
     }
