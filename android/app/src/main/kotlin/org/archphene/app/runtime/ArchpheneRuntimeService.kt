@@ -1036,6 +1036,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var searchActive = false
     @Volatile private var searchStatus = "Search the official Arch repositories"
     @Volatile private var retainedAurReview: AurReviewData? = null
+    @Volatile private var retainedAurDependencyReviews: Array<AurReviewData> = emptyArray()
     @Volatile private var retainedAurVerifiedBytes = 0L
     @Volatile private var retainedAurSourceEvidence: Array<AurSourceEvidence> = emptyArray()
     @Volatile private var retainedAurBuilderReport: AurBuilderReport? = null
@@ -1378,6 +1379,11 @@ class ArchpheneRuntimeService : Service() {
         val packageCount: Int
             get() = packages.size
     }
+
+    private data class AurBuildTargetPartition(
+        val environment: AurBuildEnvironment,
+        val unresolvedTargets: List<String>,
+    )
 
     private data class VerifiedBuildPackage(
         val repository: String,
@@ -6851,6 +6857,7 @@ class ArchpheneRuntimeService : Service() {
         searchActive = true
         availablePackageQuery = normalized
         retainedAurReview = null
+        retainedAurDependencyReviews = emptyArray()
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
@@ -7271,6 +7278,7 @@ class ArchpheneRuntimeService : Service() {
             publishAvailablePackageStatus("Reviewing AUR package $normalized")
         }
         retainedAurReview = null
+        retainedAurDependencyReviews = emptyArray()
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
@@ -7354,6 +7362,7 @@ class ArchpheneRuntimeService : Service() {
                             rpcLength,
                             aurSnapshotBuffer,
                             snapshotLength,
+                            false,
                             aurReviewBuffer,
                         )
                     if (reviewLength <= 0) {
@@ -7394,6 +7403,7 @@ class ArchpheneRuntimeService : Service() {
         expectedEndpoint: String,
         destination: ByteBuffer,
         maximumBytes: Int,
+        expectedQuery: String? = null,
     ): Int {
         val endpoint = URL(expectedEndpoint)
         if (
@@ -7403,7 +7413,7 @@ class ArchpheneRuntimeService : Service() {
             endpoint.userInfo != null ||
             endpoint.port != -1 ||
             endpoint.ref != null ||
-            endpoint.query != null
+            endpoint.query != expectedQuery
         ) {
             throw SecurityException("Invalid AUR endpoint")
         }
@@ -7453,6 +7463,198 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun resolveReviewedAurDependencies(
+        activeHandle: Long,
+    ): AurBuildTargetPartition {
+        val dependencyReviews = ArrayList(retainedAurDependencyReviews.asList())
+        repeat(31) {
+            throwIfAurBuildCancelled()
+            val partition = resolveAurBuildEnvironment(activeHandle)
+            if (partition.unresolvedTargets.isEmpty()) {
+                retainedAurDependencyReviews = dependencyReviews.toTypedArray()
+                return partition
+            }
+            searchStatus =
+                "Resolving ${partition.unresolvedTargets.size} reviewed AUR dependency " +
+                    "provider(s)"
+            val providers =
+                partition.unresolvedTargets
+                    .map { dependency ->
+                        resolveAurDependencyProvider(activeHandle, dependency)
+                    }
+                    .distinct()
+                    .filter { provider ->
+                        dependencyReviews.none { review -> review.packageName == provider }
+                    }
+            if (providers.isEmpty() || dependencyReviews.size + providers.size > 31) {
+                throw SecurityException(
+                    "The reviewed AUR dependency graph did not make bounded progress",
+                )
+            }
+            providers.forEach { provider ->
+                throwIfAurBuildCancelled()
+                searchStatus = "Reviewing AUR dependency ${dependencyReviews.size + 1}: $provider"
+                val dependencyReview =
+                    downloadAndReviewAurDependency(activeHandle, provider)
+                dependencyReviews += dependencyReview
+                retainedAurDependencyReviews = dependencyReviews.toTypedArray()
+            }
+        }
+        throw SecurityException("The reviewed AUR dependency graph exceeds 32 package bases")
+    }
+
+    private fun resolveAurDependencyProvider(
+        activeHandle: Long,
+        dependency: String,
+    ): String {
+        require(dependency.matches(AUR_PACKAGE_NAME))
+        val dependencyBytes = dependency.toByteArray(StandardCharsets.US_ASCII)
+        aurPackageBuffer.clear()
+        aurPackageBuffer.put(dependencyBytes)
+        val exactLength =
+            downloadAurObject(
+                "https://aur.archlinux.org/rpc/v5/info/$dependency",
+                aurRpcBuffer,
+                NativeRuntime.AUR_RPC_SIZE,
+            )
+        aurEndpointBuffer.clear()
+        val exactPathLength =
+            NativeRuntime.nativeResolveAurSnapshotPath(
+                activeHandle,
+                aurPackageBuffer,
+                dependencyBytes.size,
+                aurRpcBuffer,
+                exactLength,
+                aurEndpointBuffer,
+            )
+        if (exactPathLength > 0) {
+            return dependency
+        }
+
+        val query = "by=provides"
+        val providerLength =
+            downloadAurObject(
+                "https://aur.archlinux.org/rpc/v5/search/$dependency?$query",
+                aurRpcBuffer,
+                NativeRuntime.AUR_RPC_SIZE,
+                query,
+            )
+        aurEndpointBuffer.clear()
+        val outputLength =
+            NativeRuntime.nativeAurProviderCandidates(
+                activeHandle,
+                aurPackageBuffer,
+                dependencyBytes.size,
+                aurRpcBuffer,
+                providerLength,
+                aurEndpointBuffer,
+            )
+        if (outputLength < 0) {
+            throw SecurityException(
+                "AUR provider search for $dependency failed: " +
+                    readNativeMessage(aurEndpointBuffer, outputLength),
+            )
+        }
+        val candidateBytes = ByteArray(outputLength)
+        aurEndpointBuffer.position(0)
+        aurEndpointBuffer.get(candidateBytes)
+        val candidates =
+            String(candidateBytes, StandardCharsets.US_ASCII)
+                .lineSequence()
+                .filter(String::isNotBlank)
+                .toList()
+        require(
+            candidates.size <= 32 &&
+                candidates.distinct().size == candidates.size &&
+                candidates.all { candidate -> candidate.matches(AUR_PACKAGE_NAME) },
+        )
+        return when (candidates.size) {
+            0 -> throw IllegalStateException("No AUR provider exists for $dependency")
+            1 -> candidates.single()
+            else ->
+                throw IllegalStateException(
+                    "Choose an AUR provider for $dependency: ${candidates.joinToString(", ")}",
+                )
+        }
+    }
+
+    private fun downloadAndReviewAurDependency(
+        activeHandle: Long,
+        packageName: String,
+    ): AurReviewData {
+        require(packageName.matches(AUR_PACKAGE_NAME))
+        val packageBytes = packageName.toByteArray(StandardCharsets.US_ASCII)
+        aurPackageBuffer.clear()
+        aurPackageBuffer.put(packageBytes)
+        val rpcLength =
+            downloadAurObject(
+                "https://aur.archlinux.org/rpc/v5/info/$packageName",
+                aurRpcBuffer,
+                NativeRuntime.AUR_RPC_SIZE,
+            )
+        aurEndpointBuffer.clear()
+        val pathLength =
+            NativeRuntime.nativeResolveAurSnapshotPath(
+                activeHandle,
+                aurPackageBuffer,
+                packageBytes.size,
+                aurRpcBuffer,
+                rpcLength,
+                aurEndpointBuffer,
+            )
+        if (pathLength <= 0) {
+            throw SecurityException(
+                "AUR dependency identity failed: " +
+                    readNativeMessage(aurEndpointBuffer, pathLength),
+            )
+        }
+        val pathBytes = ByteArray(pathLength)
+        aurEndpointBuffer.position(0)
+        aurEndpointBuffer.get(pathBytes)
+        val snapshotPath = String(pathBytes, StandardCharsets.US_ASCII)
+        require(snapshotPath == "/cgit/aur.git/snapshot/$packageName.tar.gz")
+        val snapshotLength =
+            downloadAurObject(
+                "https://aur.archlinux.org$snapshotPath",
+                aurSnapshotBuffer,
+                NativeRuntime.AUR_SNAPSHOT_SIZE,
+            )
+        val architecture =
+            when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                "x86_64" -> NativeRuntime.REPOSITORY_X86_64
+                "arm64-v8a" -> NativeRuntime.REPOSITORY_AARCH64
+                else -> throw IllegalStateException("Unsupported Android ABI")
+            }
+        aurReviewBuffer.clear()
+        val reviewLength =
+            NativeRuntime.nativeReviewAur(
+                activeHandle,
+                architecture,
+                aurPackageBuffer,
+                packageBytes.size,
+                aurRpcBuffer,
+                rpcLength,
+                aurSnapshotBuffer,
+                snapshotLength,
+                true,
+                aurReviewBuffer,
+            )
+        if (reviewLength <= 0) {
+            throw SecurityException(
+                "AUR dependency review failed: " +
+                    readNativeMessage(aurReviewBuffer, reviewLength),
+            )
+        }
+        val review = parseAurReview(aurReviewBuffer, reviewLength)
+        require(review.packageName == packageName)
+        Log.i(
+            TAG,
+            "Reviewed AUR dependency ${review.packageName} ${review.version} " +
+                "commit=${review.snapshotCommit}",
+        )
+        return review
+    }
+
     @Synchronized
     private fun requestAurSourceVerification(packageName: String): Boolean {
         val normalized = packageName.trim()
@@ -7500,6 +7702,24 @@ class ArchpheneRuntimeService : Service() {
                 try {
                     throwIfAurBuildCancelled()
                     deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
+                    val buildTargets = resolveReviewedAurDependencies(activeHandle)
+                    if (retainedAurDependencyReviews.isNotEmpty()) {
+                        publishAurReviewPresentation(
+                            review,
+                            buildEnvironment = buildTargets.environment,
+                        )
+                        searchStatus =
+                            "Reviewed ${retainedAurDependencyReviews.size} AUR dependency " +
+                                "package base(s) · inspect the combined evidence"
+                        Log.i(
+                            TAG,
+                            "Reviewed bounded AUR dependency graph for ${review.packageName}: " +
+                                retainedAurDependencyReviews.joinToString(", ") {
+                                    dependency -> dependency.packageName
+                                },
+                        )
+                        return@Thread
+                    }
                     var totalVerified = 0L
                     val evidence = ArrayList<AurSourceEvidence>(remoteSources.size)
                     remoteSources.forEachIndexed { remoteIndex, (sourceIndex, source) ->
@@ -7615,7 +7835,7 @@ class ArchpheneRuntimeService : Service() {
                     val buildEnvironment =
                         downloadAndVerifyAurBuildEnvironment(
                             activeHandle,
-                            resolveAurBuildEnvironment(activeHandle),
+                            buildTargets.environment,
                         )
                     val builder =
                         probeAurBuilderCompanion(
@@ -9004,7 +9224,7 @@ class ArchpheneRuntimeService : Service() {
             report
         }
 
-    private fun resolveAurBuildEnvironment(activeHandle: Long): AurBuildEnvironment {
+    private fun resolveAurBuildEnvironment(activeHandle: Long): AurBuildTargetPartition {
         val partitionBytes =
             synchronized(packageResolutionOutputBuffer) {
                 packageResolutionOutputBuffer.clear()
@@ -9053,19 +9273,16 @@ class ArchpheneRuntimeService : Service() {
             unresolved += target
         }
         require(!reader.hasRemaining())
-        if (unresolved.isNotEmpty()) {
-            throw IllegalStateException(
-                "Additional reviewed AUR package providers are required for: " +
-                    unresolved.joinToString(", "),
-            )
-        }
         val packages = decodeResolvedPayloads(bytes, 512)
         require(packages.any { payload -> payload.name == "base-devel" })
         val totalBytes =
             packages.fold(0L) { total, payload ->
                 Math.addExact(total, payload.size)
             }
-        return AurBuildEnvironment(packages, bytes, totalBytes)
+        return AurBuildTargetPartition(
+            AurBuildEnvironment(packages, bytes, totalBytes),
+            unresolved,
+        )
     }
 
     private fun downloadAndVerifyAurBuildEnvironment(
@@ -9510,6 +9727,7 @@ class ArchpheneRuntimeService : Service() {
         logs: String,
         revision: Int,
     ): AurReviewSnapshot {
+        val dependencyReviews = retainedAurDependencyReviews
         val summary =
             buildString(768) {
                 append(review.packageName).append(' ').append(review.version).append('\n')
@@ -9521,6 +9739,10 @@ class ArchpheneRuntimeService : Service() {
                     append(" · flagged out of date")
                 }
                 append(" · review evidence before continuing")
+                if (dependencyReviews.isNotEmpty()) {
+                    append("\nReviewed AUR dependency bases: ")
+                        .append(dependencyReviews.size)
+                }
             }
         val sources =
             buildString(4096) {
@@ -9549,6 +9771,26 @@ class ArchpheneRuntimeService : Service() {
                         append("  Warning: insecure transport\n")
                     }
                 }
+                dependencyReviews.forEach { dependency ->
+                    append("\nAUR dependency ")
+                        .append(dependency.packageName)
+                        .append(' ')
+                        .append(dependency.version)
+                        .append('\n')
+                    dependency.sources.forEach { source ->
+                        append("• ").append(source.expression).append('\n')
+                        append("  File: ").append(source.filename).append('\n')
+                        append("  Origin: ")
+                            .append(
+                                when {
+                                    source.local -> "included in AUR snapshot"
+                                    source.remoteUrl != null -> source.remoteUrl
+                                    else -> "unsupported source transport"
+                                },
+                            )
+                            .append('\n')
+                    }
+                }
             }.trimEnd()
         val trust =
             buildString(2048) {
@@ -9571,6 +9813,17 @@ class ArchpheneRuntimeService : Service() {
                 append("Insecure source transports: ")
                     .append(if (review.insecureSources) "yes" else "none")
                     .append('\n')
+                dependencyReviews.forEach { dependency ->
+                    append("Reviewed dependency: ")
+                        .append(dependency.packageName)
+                        .append(' ')
+                        .append(dependency.version)
+                        .append(" · base ")
+                        .append(dependency.packageBase)
+                        .append(" · maintainer ")
+                        .append(dependency.maintainer.ifEmpty { "Orphaned" })
+                        .append('\n')
+                }
                 append("Android permissions: none requested at this review stage.")
             }
         val buildEnvironmentText =
@@ -9615,6 +9868,11 @@ class ArchpheneRuntimeService : Service() {
                     }
                     append('\n')
                 }
+                if (dependencyReviews.isNotEmpty()) {
+                    append("Reviewed AUR dependency bases: ")
+                        .append(dependencyReviews.size)
+                        .append("; each requires its own isolated build before the root package.\n")
+                }
                 if (builder == null) {
                     append("Build sandbox: signed companion not ready.\n")
                 } else {
@@ -9654,6 +9912,18 @@ class ArchpheneRuntimeService : Service() {
             buildString(4096) {
                 append("AUR commit: ").append(review.snapshotCommit).append('\n')
                 append("Snapshot SHA-256: ").append(review.snapshotSha256).append('\n')
+                dependencyReviews.forEach { dependency ->
+                    append("Dependency ")
+                        .append(dependency.packageName)
+                        .append(" commit: ")
+                        .append(dependency.snapshotCommit)
+                        .append('\n')
+                    append("Dependency ")
+                        .append(dependency.packageName)
+                        .append(" snapshot SHA-256: ")
+                        .append(dependency.snapshotSha256)
+                        .append('\n')
+                }
                 review.sources.forEach { source ->
                     append(source.filename)
                         .append(' ')
@@ -9704,6 +9974,26 @@ class ArchpheneRuntimeService : Service() {
                 }
                 append("\nPKGBUILD\n")
                 append(review.pkgbuild)
+                dependencyReviews.forEach { dependency ->
+                    append("\n\nAUR DEPENDENCY ")
+                        .append(dependency.packageName)
+                        .append(' ')
+                        .append(dependency.version)
+                        .append('\n')
+                    appendAurValues("Runtime dependencies", dependency.dependencies)
+                    appendAurValues("Build dependencies", dependency.makeDependencies)
+                    appendAurValues("Check dependencies", dependency.checkDependencies)
+                    dependency.installScripts.forEach { script ->
+                        append("\nInstall script for ")
+                            .append(script.packageName)
+                            .append(": ")
+                            .append(script.path)
+                            .append('\n')
+                        append(script.contents).append('\n')
+                    }
+                    append("\nPKGBUILD\n")
+                    append(dependency.pkgbuild)
+                }
             }.trim()
         return AurReviewSnapshot(
             review.packageName,
@@ -12024,6 +12314,7 @@ class ArchpheneRuntimeService : Service() {
                     deleteRetainedAurBuiltPackageFiles(outputFiles)
                     clearManagerAurOutputFiles()
                     retainedAurReview = null
+                    retainedAurDependencyReviews = emptyArray()
                     retainedAurVerifiedBytes = 0L
                     retainedAurSourceEvidence = emptyArray()
                     retainedAurBuilderReport = null
@@ -12673,6 +12964,7 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         retainedAurReview = null
+        retainedAurDependencyReviews = emptyArray()
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null

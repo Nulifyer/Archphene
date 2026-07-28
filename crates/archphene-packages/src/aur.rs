@@ -498,6 +498,48 @@ pub fn aur_snapshot_path(
     Ok(canonical_snapshot_path(rpc.package_base))
 }
 
+pub fn aur_provider_candidates(
+    rpc_bytes: &[u8],
+    dependency: &str,
+) -> Result<Vec<String>, AurReviewError> {
+    validate_package_name(dependency)?;
+    let text = checked_text(rpc_bytes, MAX_AUR_RPC_BYTES, "RPC response")?;
+    validate_text(text, MAX_AUR_RPC_BYTES)?;
+    let envelope: RpcEnvelope<'_> =
+        serde_json::from_slice(rpc_bytes).map_err(|_| AurReviewError::InvalidRpc)?;
+    if envelope.version != 5
+        || envelope.response_type != "search"
+        || envelope.resultcount != envelope.results.len()
+        || envelope.results.len() > MAX_AUR_GRAPH_BASES
+    {
+        return Err(if envelope.results.len() > MAX_AUR_GRAPH_BASES {
+            AurReviewError::Limit("provider candidates")
+        } else {
+            AurReviewError::InvalidRpc
+        });
+    }
+    let mut candidates = Vec::with_capacity(envelope.results.len());
+    for package in envelope.results {
+        validate_rpc_package(&package)?;
+        let expected_snapshot = format!("/cgit/aur.git/snapshot/{}.tar.gz", package.name);
+        if package.snapshot_path != expected_snapshot
+            || !(package.name == dependency
+                || package
+                    .provides
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|provided| dependency_name(provided) == Ok(dependency)))
+        {
+            return Err(AurReviewError::RpcMismatch);
+        }
+        candidates.push(package.name.to_owned());
+    }
+    candidates.sort();
+    candidates.dedup();
+    Ok(candidates)
+}
+
 pub fn review_aur_snapshot(
     rpc_bytes: &[u8],
     snapshot_bytes: &[u8],
@@ -564,6 +606,8 @@ struct RpcPackage<'a> {
     last_modified: u64,
     #[serde(rename = "OutOfDate")]
     out_of_date: Option<u64>,
+    #[serde(rename = "Provides", default, borrow)]
+    provides: Option<Vec<&'a str>>,
 }
 
 #[derive(Default)]
@@ -1260,13 +1304,7 @@ fn parse_rpc<'a>(
         return Err(AurReviewError::InvalidRpc);
     }
     let package = envelope.results.pop().ok_or(AurReviewError::InvalidRpc)?;
-    validate_package_name(package.name)?;
-    validate_package_name(package.package_base)?;
-    validate_bounded_value(package.version, MAX_VERSION_BYTES)?;
-    validate_optional_value(package.description, MAX_DESCRIPTION_BYTES)?;
-    validate_optional_value(package.maintainer, MAX_MAINTAINER_BYTES)?;
-    validate_optional_value(package.project_url, MAX_FIELD_BYTES)?;
-    validate_bounded_value(package.snapshot_path, MAX_FIELD_BYTES)?;
+    validate_rpc_package(&package)?;
     // AUR's RPC URLPath follows the queried split-package name, while the
     // canonical package-base endpoint expands with a package-base directory.
     // Validate the server-provided identity here, then have the caller fetch
@@ -1276,6 +1314,27 @@ fn parse_rpc<'a>(
         return Err(AurReviewError::RpcMismatch);
     }
     Ok(package)
+}
+
+fn validate_rpc_package(package: &RpcPackage<'_>) -> Result<(), AurReviewError> {
+    validate_package_name(package.name)?;
+    validate_package_name(package.package_base)?;
+    validate_bounded_value(package.version, MAX_VERSION_BYTES)?;
+    validate_optional_value(package.description, MAX_DESCRIPTION_BYTES)?;
+    validate_optional_value(package.maintainer, MAX_MAINTAINER_BYTES)?;
+    validate_optional_value(package.project_url, MAX_FIELD_BYTES)?;
+    validate_bounded_value(package.snapshot_path, MAX_FIELD_BYTES)?;
+    if package
+        .provides
+        .as_deref()
+        .is_some_and(|provided| provided.len() > MAX_AUR_DEPENDENCIES)
+    {
+        return Err(AurReviewError::Limit("provides"));
+    }
+    for provided in package.provides.as_deref().unwrap_or_default() {
+        dependency_name(provided)?;
+    }
+    Ok(())
 }
 
 fn canonical_snapshot_path(package_base: &str) -> String {
@@ -1991,6 +2050,35 @@ mod tests {
       "version": 5
     }"#;
 
+    const PROVIDER_RPC: &[u8] = br#"{
+      "resultcount": 2,
+      "results": [{
+        "Description": "Virtual provider",
+        "LastModified": 1784746314,
+        "Maintainer": "builder",
+        "Name": "z-provider-bin",
+        "OutOfDate": null,
+        "PackageBase": "z-provider-bin",
+        "Provides": ["virtual-sdk=2.0"],
+        "URL": "https://example.com/",
+        "URLPath": "/cgit/aur.git/snapshot/z-provider-bin.tar.gz",
+        "Version": "2.0-1"
+      }, {
+        "Description": "Exact provider",
+        "LastModified": 1784746314,
+        "Maintainer": "builder",
+        "Name": "virtual-sdk",
+        "OutOfDate": null,
+        "PackageBase": "virtual-sdk",
+        "Provides": null,
+        "URL": "https://example.com/",
+        "URLPath": "/cgit/aur.git/snapshot/virtual-sdk.tar.gz",
+        "Version": "1.0-1"
+      }],
+      "type": "search",
+      "version": 5
+    }"#;
+
     const SRCINFO: &[u8] = br#"pkgbase = visual-studio-code-bin
 	pkgdesc = Visual Studio Code
 	pkgver = 1.130.0
@@ -2200,6 +2288,28 @@ package_dotnet-sdk-bin() {
         review.check_dependencies.clear();
         review.install_scripts.clear();
         review
+    }
+
+    #[test]
+    fn provider_search_is_exact_bounded_and_preserves_ambiguity() {
+        assert_eq!(
+            aur_provider_candidates(PROVIDER_RPC, "virtual-sdk").expect("provider candidates"),
+            ["virtual-sdk", "z-provider-bin"]
+        );
+        let mismatched = String::from_utf8(PROVIDER_RPC.to_vec())
+            .expect("provider RPC")
+            .replace(
+                "\"Provides\": [\"virtual-sdk=2.0\"]",
+                "\"Provides\": [\"different-sdk=2.0\"]",
+            );
+        assert!(matches!(
+            aur_provider_candidates(mismatched.as_bytes(), "virtual-sdk"),
+            Err(AurReviewError::RpcMismatch)
+        ));
+        assert!(matches!(
+            aur_provider_candidates(PROVIDER_RPC, "../virtual-sdk"),
+            Err(AurReviewError::InvalidSrcInfo)
+        ));
     }
 
     #[test]

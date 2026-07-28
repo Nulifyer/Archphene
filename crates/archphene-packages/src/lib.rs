@@ -1590,7 +1590,7 @@ impl PackageRuntime {
         validate_resolution_targets(packages, self.catalogs_ready())?;
         let database_path = self.prepare_fresh_resolution_database()?;
         let result = partition_repository_targets(packages, |targets| {
-            self.resolve_targets_with_database(targets, &database_path)
+            self.resolve_targets_with_database_allowing_providers(targets, &database_path)
         });
         let cleanup = fs::remove_dir_all(&database_path);
         match (result, cleanup) {
@@ -1604,6 +1604,23 @@ impl PackageRuntime {
         &self,
         packages: &[&str],
         database_path: &Path,
+    ) -> Result<PackageResolution, PackageRuntimeError> {
+        self.resolve_targets_with_database_mode(packages, database_path, true)
+    }
+
+    fn resolve_targets_with_database_allowing_providers(
+        &self,
+        packages: &[&str],
+        database_path: &Path,
+    ) -> Result<PackageResolution, PackageRuntimeError> {
+        self.resolve_targets_with_database_mode(packages, database_path, false)
+    }
+
+    fn resolve_targets_with_database_mode(
+        &self,
+        packages: &[&str],
+        database_path: &Path,
+        require_named_targets: bool,
     ) -> Result<PackageResolution, PackageRuntimeError> {
         validate_resolution_targets(packages, self.catalogs_ready())?;
         let config = self
@@ -1639,7 +1656,7 @@ impl PackageRuntime {
             true,
         )?;
         let raw = std::str::from_utf8(&raw).map_err(|_| PackageRuntimeError::InvalidResolution)?;
-        parse_resolution_output(raw, packages, self.architecture)
+        parse_resolution_output_mode(raw, packages, self.architecture, require_named_targets)
     }
 
     fn cached_package_artifacts_present(
@@ -7422,6 +7439,15 @@ fn parse_resolution_output(
     targets: &[&str],
     architecture: RepositoryArchitecture,
 ) -> Result<PackageResolution, PackageRuntimeError> {
+    parse_resolution_output_mode(input, targets, architecture, true)
+}
+
+fn parse_resolution_output_mode(
+    input: &str,
+    targets: &[&str],
+    architecture: RepositoryArchitecture,
+    require_named_targets: bool,
+) -> Result<PackageResolution, PackageRuntimeError> {
     let mut output = PackageResolution {
         bytes: Vec::with_capacity(input.len().min(MAX_PACKAGE_RESOLUTION_BYTES)),
     };
@@ -7492,7 +7518,7 @@ fn parse_resolution_output(
             resolution_push(&mut output, if index == 5 { b"\n" } else { b"\t" })?;
         }
     }
-    if count == 0 || contains_targets.iter().any(|contains| !contains) {
+    if count == 0 || require_named_targets && contains_targets.iter().any(|contains| !contains) {
         return Err(PackageRuntimeError::MissingTarget);
     }
     Ok(output)
@@ -9534,6 +9560,28 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
             ),
             Err(PackageRuntimeError::InvalidResolution)
         ));
+    }
+
+    #[test]
+    fn repository_partition_resolution_accepts_only_pacman_validated_virtual_providers() {
+        let provider = "extra\tprovider-impl\t1.0-1\tprovider-impl-1.0-1-x86_64.pkg.tar.zst\t\
+https://geo.mirror.pkgbuild.com/extra/os/x86_64/provider-impl-1.0-1-x86_64.pkg.tar.zst\t1024\n";
+        assert!(matches!(
+            parse_resolution_output(provider, &["virtual-api"], RepositoryArchitecture::X86_64,),
+            Err(PackageRuntimeError::MissingTarget)
+        ));
+        assert_eq!(
+            parse_resolution_output_mode(
+                provider,
+                &["virtual-api"],
+                RepositoryArchitecture::X86_64,
+                false,
+            )
+            .expect("pacman-validated virtual provider")
+            .as_str()
+            .expect("UTF-8"),
+            provider,
+        );
     }
 
     #[test]

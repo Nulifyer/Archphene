@@ -18,7 +18,10 @@ use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackageCacheCatalog, PackagePayloadDownload,
     PackageResolution, PackageRuntime, PackageRuntimeError, PackageTool, Repository,
     RepositoryArchitecture, RepositoryTargetPartition, ToolOutput, VerifiedPackageClosure,
-    aur::{AurReview, AurSourceDownload, MAX_AUR_SOURCE_BYTES},
+    aur::{
+        AurBuildGraphError, AurReview, AurSourceDownload, MAX_AUR_GRAPH_BASES,
+        MAX_AUR_SOURCE_BYTES, plan_reviewed_aur_graph,
+    },
     desktop::{DesktopCatalog, ExecArgument},
 };
 use archphene_process::{
@@ -57,6 +60,7 @@ pub struct RuntimeHost {
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
     aur_review: Option<AurReview>,
+    aur_dependency_reviews: Vec<AurReview>,
     aur_build_resolution: Option<PackageResolution>,
     aur_build_closure: Option<VerifiedPackageClosure>,
     aur_source_download: Option<AurSourceDownload>,
@@ -273,6 +277,7 @@ impl RuntimeHost {
             catalog_download: None,
             package_download: None,
             aur_review: None,
+            aur_dependency_reviews: Vec::new(),
             aur_build_resolution: None,
             aur_build_closure: None,
             aur_source_download: None,
@@ -1568,7 +1573,33 @@ impl RuntimeHost {
         self.aur_source_download = None;
         self.aur_build_resolution = None;
         self.aur_build_closure = None;
+        self.aur_dependency_reviews.clear();
         self.aur_review = Some(review);
+    }
+
+    pub fn retain_aur_dependency_review(
+        &mut self,
+        review: AurReview,
+    ) -> Result<(), PackageRuntimeError> {
+        let root = self
+            .aur_review
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        if self.aur_dependency_reviews.len() >= MAX_AUR_GRAPH_BASES - 1
+            || review.package_base == root.package_base
+            || review.package_name == root.package_name
+            || self.aur_dependency_reviews.iter().any(|current| {
+                current.package_base == review.package_base
+                    || current.package_name == review.package_name
+            })
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        self.aur_source_download = None;
+        self.aur_build_resolution = None;
+        self.aur_build_closure = None;
+        self.aur_dependency_reviews.push(review);
+        Ok(())
     }
 
     pub fn begin_aur_source_download(
@@ -1674,22 +1705,47 @@ impl RuntimeHost {
     pub fn partition_aur_build_environment(
         &mut self,
     ) -> Result<RepositoryTargetPartition, PackageRuntimeError> {
-        let review = self
+        let root = self
             .aur_review
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPayload)?;
-        let targets = aur_build_environment_targets(std::slice::from_ref(review))?;
+        let mut reviews = Vec::with_capacity(1 + self.aur_dependency_reviews.len());
+        reviews.push(root.clone());
+        reviews.extend(self.aur_dependency_reviews.iter().cloned());
+        let targets = aur_build_environment_targets(&reviews)?;
         let borrowed: Vec<&str> = targets.iter().map(String::as_str).collect();
-        let partition = self
+        let package_runtime = self
             .package_runtime
             .as_ref()
-            .ok_or(PackageRuntimeError::InvalidPath)?
-            .partition_targets_for_fresh_root(&borrowed)?;
-        self.aur_build_resolution = if partition.unresolved_targets().is_empty() {
-            partition.resolution().cloned()
-        } else {
-            None
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let initial = package_runtime.partition_targets_for_fresh_root(&borrowed)?;
+        let official: BTreeSet<String> = initial.official_targets().iter().cloned().collect();
+        let graph = match plan_reviewed_aur_graph(&reviews, &root.package_name, &official) {
+            Ok(graph) => graph,
+            Err(AurBuildGraphError::MissingProvider(_))
+                if !initial.unresolved_targets().is_empty() =>
+            {
+                self.aur_build_resolution = None;
+                self.aur_build_closure = None;
+                return Ok(initial);
+            }
+            Err(_) => return Err(PackageRuntimeError::InvalidPayload),
         };
+        let aur_dependencies: BTreeSet<&str> = graph
+            .edges
+            .iter()
+            .map(|edge| edge.dependency.as_str())
+            .collect();
+        let final_targets: Vec<&str> = targets
+            .iter()
+            .map(String::as_str)
+            .filter(|target| !aur_dependencies.contains(target))
+            .collect();
+        let partition = package_runtime.partition_targets_for_fresh_root(&final_targets)?;
+        if !partition.unresolved_targets().is_empty() {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        self.aur_build_resolution = partition.resolution().cloned();
         self.aur_build_closure = None;
         Ok(partition)
     }
@@ -2071,12 +2127,13 @@ fn aur_build_environment_targets(
     if reviews.is_empty() || reviews.len() > 32 {
         return Err(PackageRuntimeError::InvalidPayload);
     }
-    let required_packages: BTreeSet<&str> = reviews
-        .iter()
-        .flat_map(|review| review.required_packages.iter().map(String::as_str))
-        .collect();
     let mut targets = BTreeSet::from(["base-devel".to_owned()]);
     for review in reviews {
+        let required_packages: BTreeSet<&str> = review
+            .required_packages
+            .iter()
+            .map(String::as_str)
+            .collect();
         for dependency in review
             .dependencies
             .iter()
@@ -2166,7 +2223,7 @@ mod tests {
     }
 
     #[test]
-    fn aur_build_targets_span_reviews_and_exclude_split_outputs() {
+    fn aur_build_targets_span_reviews_and_only_exclude_same_base_split_outputs() {
         let root = test_aur_review(
             "editor-bin",
             "editor-bin",
@@ -2184,7 +2241,7 @@ mod tests {
                 .expect("aggregate build targets")
                 .into_iter()
                 .collect::<Vec<_>>(),
-            ["base-devel", "cmake", "glibc"]
+            ["aur-helper", "base-devel", "cmake", "glibc"]
         );
     }
 

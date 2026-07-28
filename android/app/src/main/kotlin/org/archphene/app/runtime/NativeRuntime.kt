@@ -353,12 +353,21 @@ internal object NativeRuntime {
         rpcLength: Int,
         snapshotBuffer: ByteBuffer,
         snapshotLength: Int,
+        dependencyReview: Boolean,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeResolveAurSnapshotPath(
         handle: Long,
         packageBuffer: ByteBuffer,
         packageLength: Int,
+        rpcBuffer: ByteBuffer,
+        rpcLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeAurProviderCandidates(
+        handle: Long,
+        dependencyBuffer: ByteBuffer,
+        dependencyLength: Int,
         rpcBuffer: ByteBuffer,
         rpcLength: Int,
         outputBuffer: ByteBuffer,

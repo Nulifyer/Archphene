@@ -104,7 +104,8 @@ mod android {
         VerifiedPackageClosure,
         aur::{
             AurReview, MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES,
-            MAX_AUR_SOURCE_BYTES, ReviewedInstallScript, aur_snapshot_path, review_aur_snapshot,
+            MAX_AUR_SOURCE_BYTES, ReviewedInstallScript, aur_provider_candidates,
+            aur_snapshot_path, review_aur_snapshot,
         },
     };
     use archphene_process::{
@@ -3170,6 +3171,7 @@ mod android {
         rpc_length: jint,
         snapshot_buffer: JByteBuffer,
         snapshot_length: jint,
+        dependency_review: jboolean,
         output_buffer: JByteBuffer,
     ) -> jint {
         let (Ok(handle), Ok(package_length), Ok(rpc_length), Ok(snapshot_length)) = (
@@ -3185,6 +3187,9 @@ mod android {
             2 => RepositoryArchitecture::Aarch64,
             _ => return ERROR_INVALID_ARGUMENT,
         };
+        if !matches!(dependency_review, JNI_FALSE | JNI_TRUE) {
+            return ERROR_INVALID_ARGUMENT;
+        }
         let (Ok(package_capacity), Ok(rpc_capacity), Ok(snapshot_capacity), Ok(output_capacity)) = (
             environment.get_direct_buffer_capacity(&package_buffer),
             environment.get_direct_buffer_capacity(&rpc_buffer),
@@ -3295,7 +3300,13 @@ mod android {
         let Some(runtime) = registry.runtime_mut(handle) else {
             return ERROR_INVALID_HANDLE;
         };
-        runtime.retain_aur_review(review);
+        if dependency_review == JNI_TRUE {
+            if let Err(error) = runtime.retain_aur_dependency_review(review) {
+                return copy_package_error(&error, destination);
+            }
+        } else {
+            runtime.retain_aur_review(review);
+        }
         i32::try_from(length).unwrap_or(ERROR_INTERNAL)
     }
 
@@ -3620,6 +3631,107 @@ mod android {
                 i32::try_from(path.len()).unwrap_or(ERROR_INTERNAL)
             }
             Ok(_) => ERROR_INTERNAL,
+            Err(error) => copy_package_error(&error, destination),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAurProviderCandidates(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        dependency_buffer: JByteBuffer,
+        dependency_length: jint,
+        rpc_buffer: JByteBuffer,
+        rpc_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(dependency_length), Ok(rpc_length)) = (
+            u64::try_from(handle),
+            usize::try_from(dependency_length),
+            usize::try_from(rpc_length),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(dependency_capacity), Ok(rpc_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&dependency_buffer),
+            environment.get_direct_buffer_capacity(&rpc_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if dependency_length == 0
+            || dependency_length > dependency_capacity
+            || dependency_length > 128
+            || rpc_length == 0
+            || rpc_length > rpc_capacity
+            || rpc_length > MAX_AUR_RPC_BYTES
+            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(dependency_address), Ok(rpc_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&dependency_buffer),
+            environment.get_direct_buffer_address(&rpc_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if dependency_address.is_null()
+            || rpc_address.is_null()
+            || output_address.is_null()
+            || ranges_overlap(
+                output_address as usize,
+                output_capacity,
+                dependency_address as usize,
+                dependency_length,
+            )
+            || ranges_overlap(
+                output_address as usize,
+                output_capacity,
+                rpc_address as usize,
+                rpc_length,
+            )
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            if runtime.package_runtime().is_none() {
+                return ERROR_INVALID_STATE;
+            }
+        }
+        let dependency_bytes =
+            unsafe { slice::from_raw_parts(dependency_address.cast_const(), dependency_length) };
+        let Ok(dependency) = str::from_utf8(dependency_bytes) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let rpc = unsafe { slice::from_raw_parts(rpc_address.cast_const(), rpc_length) };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        match aur_provider_candidates(rpc, dependency) {
+            Ok(candidates) => {
+                let required = candidates.iter().try_fold(0_usize, |total, candidate| {
+                    total.checked_add(candidate.len())?.checked_add(1)
+                });
+                let Some(required) = required.filter(|length| *length <= destination.len()) else {
+                    return ERROR_INTERNAL;
+                };
+                let mut cursor = 0;
+                for candidate in candidates {
+                    destination[cursor..cursor + candidate.len()]
+                        .copy_from_slice(candidate.as_bytes());
+                    cursor += candidate.len();
+                    destination[cursor] = b'\n';
+                    cursor += 1;
+                }
+                debug_assert_eq!(cursor, required);
+                i32::try_from(required).unwrap_or(ERROR_INTERNAL)
+            }
             Err(error) => copy_package_error(&error, destination),
         }
     }
