@@ -5,6 +5,7 @@
 #include "archphene_secret_service.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -12,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -34,9 +36,18 @@
 #define MAX_MIME_SPEC 2048
 #define MAX_MIME_TYPE 127
 #define MAX_MIME_TYPES 16
+#define APPEARANCE_STATE_BYTES 11
 
 static volatile sig_atomic_t running = 1;
 static uint32_t next_id = 1;
+
+struct appearance_state {
+    uint32_t color_scheme;
+    unsigned char accent[3];
+    dbus_bool_t accent_available;
+};
+
+static struct appearance_state appearance = {0, {0, 0, 0}, FALSE};
 
 static const char portal_xml[] =
         "<node>"
@@ -553,33 +564,86 @@ static dbus_bool_t append_named_uint(
             && dbus_message_iter_close_container(dict, &entry);
 }
 
+static dbus_bool_t decode_hex_pair(
+        const unsigned char *value, unsigned char *decoded) {
+    unsigned int component = 0;
+    for (size_t digit = 0; digit < 2; digit++) {
+        unsigned char character = value[digit];
+        unsigned int nibble;
+        if (character >= '0' && character <= '9') nibble = character - '0';
+        else if (character >= 'a' && character <= 'f') nibble = character - 'a' + 10;
+        else if (character >= 'A' && character <= 'F') nibble = character - 'A' + 10;
+        else return FALSE;
+        component = component * 16 + nibble;
+    }
+    *decoded = (unsigned char)component;
+    return TRUE;
+}
+
+static void load_environment_appearance(void) {
+    const char *scheme = getenv("ARCHPHENE_COLOR_SCHEME");
+    if (scheme != NULL && strcmp(scheme, "dark") == 0) appearance.color_scheme = 1;
+    else if (scheme != NULL && strcmp(scheme, "light") == 0) appearance.color_scheme = 2;
+    else appearance.color_scheme = 0;
+    const char *value = getenv("ARCHPHENE_ACCENT_RGB");
+    appearance.accent_available = value != NULL && strlen(value) == 6;
+    for (size_t index = 0; index < 3; index++) {
+        if (appearance.accent_available
+                && !decode_hex_pair((const unsigned char *)value + index * 2,
+                    &appearance.accent[index])) {
+            appearance.accent_available = FALSE;
+        }
+    }
+}
+
+static dbus_bool_t read_appearance_state(struct appearance_state *state) {
+    const char *path = getenv("ARCHPHENE_APPEARANCE_STATE");
+    if (path == NULL || path[0] != '/' || strlen(path) > 4096) return FALSE;
+    int descriptor = open(
+            path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (descriptor < 0) return FALSE;
+    struct stat metadata;
+    if (fstat(descriptor, &metadata) != 0
+            || !S_ISREG(metadata.st_mode)
+            || metadata.st_size != APPEARANCE_STATE_BYTES) {
+        close(descriptor);
+        return FALSE;
+    }
+    unsigned char bytes[APPEARANCE_STATE_BYTES + 1];
+    size_t received = 0;
+    while (received < sizeof(bytes)) {
+        ssize_t count = read(descriptor, bytes + received, sizeof(bytes) - received);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        received += (size_t)count;
+    }
+    close(descriptor);
+    if (received != APPEARANCE_STATE_BYTES
+            || bytes[0] != '1' || bytes[1] != '\n'
+            || (bytes[2] != '1' && bytes[2] != '2')
+            || bytes[3] != '\n' || bytes[10] != '\n') return FALSE;
+    struct appearance_state parsed = {
+        .color_scheme = bytes[2] == '1' ? 1U : 2U,
+        .accent = {0, 0, 0},
+        .accent_available = TRUE,
+    };
+    for (size_t index = 0; index < 3; index++) {
+        if (!decode_hex_pair(bytes + 4 + index * 2, &parsed.accent[index]))
+            return FALSE;
+    }
+    *state = parsed;
+    return TRUE;
+}
+
 static uint32_t appearance_color_scheme(void) {
-    const char *value = getenv("ARCHPHENE_COLOR_SCHEME");
-    if (value != NULL && strcmp(value, "dark") == 0) return 1;
-    if (value != NULL && strcmp(value, "light") == 0) return 2;
-    return 0;
+    return appearance.color_scheme;
 }
 
 static dbus_bool_t appearance_accent(double *red, double *green, double *blue) {
-    const char *value = getenv("ARCHPHENE_ACCENT_RGB");
-    if (value == NULL || strlen(value) != 6) return FALSE;
-    unsigned int components[3] = {0};
-    for (size_t index = 0; index < 3; index++) {
-        unsigned int component = 0;
-        for (size_t digit = 0; digit < 2; digit++) {
-            unsigned char character = (unsigned char)value[index * 2 + digit];
-            unsigned int decoded;
-            if (character >= '0' && character <= '9') decoded = character - '0';
-            else if (character >= 'a' && character <= 'f') decoded = character - 'a' + 10;
-            else if (character >= 'A' && character <= 'F') decoded = character - 'A' + 10;
-            else return FALSE;
-            component = component * 16 + decoded;
-        }
-        components[index] = component;
-    }
-    *red = components[0] / 255.0;
-    *green = components[1] / 255.0;
-    *blue = components[2] / 255.0;
+    if (!appearance.accent_available) return FALSE;
+    *red = appearance.accent[0] / 255.0;
+    *green = appearance.accent[1] / 255.0;
+    *blue = appearance.accent[2] / 255.0;
     return TRUE;
 }
 
@@ -588,6 +652,47 @@ static dbus_bool_t appearance_accent_available(void) {
     double green;
     double blue;
     return appearance_accent(&red, &green, &blue);
+}
+
+static dbus_bool_t append_appearance_value(
+        DBusMessageIter *parent, const char *key);
+
+static dbus_bool_t send_setting_changed(
+        DBusConnection *connection, const char *key) {
+    const char *name = "org.freedesktop.appearance";
+    DBusMessage *signal = dbus_message_new_signal(
+            PORTAL_PATH, PORTAL_SETTINGS, "SettingChanged");
+    DBusMessageIter arguments;
+    if (signal == NULL) return FALSE;
+    dbus_message_iter_init_append(signal, &arguments);
+    if (!dbus_message_iter_append_basic(
+                &arguments, DBUS_TYPE_STRING, &name)
+            || !dbus_message_iter_append_basic(
+                &arguments, DBUS_TYPE_STRING, &key)
+            || !append_appearance_value(&arguments, key)) {
+        dbus_message_unref(signal);
+        return FALSE;
+    }
+    return send_message(connection, signal);
+}
+
+static void poll_appearance_state(DBusConnection *connection) {
+    struct appearance_state updated;
+    if (!read_appearance_state(&updated)) return;
+    dbus_bool_t scheme_changed =
+            updated.color_scheme != appearance.color_scheme;
+    dbus_bool_t accent_changed =
+            updated.accent_available != appearance.accent_available
+            || memcmp(updated.accent, appearance.accent,
+                sizeof(updated.accent)) != 0;
+    if (!scheme_changed && !accent_changed) return;
+    appearance = updated;
+    if (scheme_changed
+            && !send_setting_changed(connection, "color-scheme"))
+        fprintf(stderr, "Archphene portal could not emit color-scheme change\n");
+    if (accent_changed
+            && !send_setting_changed(connection, "accent-color"))
+        fprintf(stderr, "Archphene portal could not emit accent-color change\n");
 }
 
 static dbus_bool_t known_appearance_key(const char *key) {
@@ -1380,6 +1485,9 @@ int main(void) {
     }
     signal(SIGINT, stop_running);
     signal(SIGTERM, stop_running);
+    load_environment_appearance();
+    struct appearance_state initial;
+    if (read_appearance_state(&initial)) appearance = initial;
     DBusError error = DBUS_ERROR_INIT;
     DBusConnection *connection = dbus_bus_get_private(DBUS_BUS_SESSION, &error);
     if (connection == NULL) {
@@ -1422,6 +1530,7 @@ int main(void) {
     fprintf(stderr, "Archphene portal ready\n");
     while (running && dbus_connection_get_is_connected(connection)) {
         dbus_connection_read_write(connection, 250);
+        poll_appearance_state(connection);
         DBusMessage *message;
         while ((message = dbus_connection_pop_message(connection)) != NULL) {
             if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_METHOD_CALL)

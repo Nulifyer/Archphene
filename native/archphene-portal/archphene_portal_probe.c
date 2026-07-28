@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
@@ -833,14 +834,7 @@ static DBusMessage *read_setting(
     return call(connection, request, method);
 }
 
-static void settings_contract(DBusConnection *connection) {
-    uint32_t version = portal_version(connection,
-            "org.freedesktop.portal.Settings", "portal Settings version");
-    if (version < 2) {
-        fprintf(stderr, "FAIL portal Settings version: %u\n", version);
-        exit(1);
-    }
-
+static uint32_t read_color_scheme(DBusConnection *connection) {
     DBusMessage *reply = read_setting(connection, "ReadOne", "color-scheme");
     DBusMessageIter value;
     DBusMessageIter variant;
@@ -863,8 +857,21 @@ static void settings_contract(DBusConnection *connection) {
         fprintf(stderr, "FAIL Settings color-scheme=%u\n", scheme);
         exit(1);
     }
+    return scheme;
+}
 
-    reply = read_setting(connection, "ReadOne", "accent-color");
+static void settings_contract(DBusConnection *connection) {
+    uint32_t version = portal_version(connection,
+            "org.freedesktop.portal.Settings", "portal Settings version");
+    if (version < 2) {
+        fprintf(stderr, "FAIL portal Settings version: %u\n", version);
+        exit(1);
+    }
+    uint32_t scheme = read_color_scheme(connection);
+
+    DBusMessage *reply = read_setting(connection, "ReadOne", "accent-color");
+    DBusMessageIter value;
+    DBusMessageIter variant;
     if (!dbus_message_iter_init(reply, &value)
             || dbus_message_iter_get_arg_type(&value) != DBUS_TYPE_VARIANT) {
         dbus_message_unref(reply);
@@ -947,9 +954,86 @@ static void settings_contract(DBusConnection *connection) {
             version, scheme);
 }
 
+static void settings_watch(DBusConnection *connection) {
+    DBusError error = DBUS_ERROR_INIT;
+    dbus_bus_add_match(connection,
+            "type='signal',path='/org/freedesktop/portal/desktop',"
+            "interface='org.freedesktop.portal.Settings',"
+            "member='SettingChanged'", &error);
+    if (dbus_error_is_set(&error)) fail_error("SettingsChanged match", &error);
+    dbus_connection_flush(connection);
+    uint32_t initial = read_color_scheme(connection);
+    printf("READY SettingsChanged initial=%u\n", initial);
+    fflush(stdout);
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        perror("FAIL SettingsChanged clock");
+        exit(1);
+    }
+    time_t deadline = now.tv_sec + 12;
+    while (clock_gettime(CLOCK_MONOTONIC, &now) == 0
+            && now.tv_sec <= deadline) {
+        dbus_connection_read_write(connection, 250);
+        DBusMessage *message;
+        while ((message = dbus_connection_pop_message(connection)) != NULL) {
+            if (!dbus_message_is_signal(
+                        message, "org.freedesktop.portal.Settings",
+                        "SettingChanged")) {
+                dbus_message_unref(message);
+                continue;
+            }
+            DBusMessageIter arguments;
+            const char *name = NULL;
+            const char *key = NULL;
+            uint32_t scheme = 0;
+            dbus_bool_t valid = dbus_message_iter_init(message, &arguments)
+                    && dbus_message_iter_get_arg_type(&arguments)
+                        == DBUS_TYPE_STRING;
+            if (valid) {
+                dbus_message_iter_get_basic(&arguments, &name);
+                valid = dbus_message_iter_next(&arguments)
+                        && dbus_message_iter_get_arg_type(&arguments)
+                            == DBUS_TYPE_STRING;
+            }
+            if (valid) {
+                dbus_message_iter_get_basic(&arguments, &key);
+                valid = dbus_message_iter_next(&arguments)
+                        && dbus_message_iter_get_arg_type(&arguments)
+                            == DBUS_TYPE_VARIANT;
+            }
+            DBusMessageIter variant;
+            if (valid) {
+                dbus_message_iter_recurse(&arguments, &variant);
+                valid = dbus_message_iter_get_arg_type(&variant)
+                        == DBUS_TYPE_UINT32;
+            }
+            if (valid) dbus_message_iter_get_basic(&variant, &scheme);
+            dbus_bool_t target = valid && name != NULL && key != NULL
+                    && strcmp(name, "org.freedesktop.appearance") == 0
+                    && strcmp(key, "color-scheme") == 0;
+            dbus_message_unref(message);
+            if (!target) continue;
+            uint32_t current = read_color_scheme(connection);
+            if ((scheme != 1 && scheme != 2)
+                    || scheme == initial || current != scheme) {
+                fprintf(stderr,
+                        "FAIL SettingsChanged initial=%u signal=%u read=%u\n",
+                        initial, scheme, current);
+                exit(1);
+            }
+            printf("PASS SettingsChanged initial=%u changed=%u read=%u\n",
+                    initial, scheme, current);
+            return;
+        }
+    }
+    fprintf(stderr, "FAIL SettingsChanged timed out initial=%u\n", initial);
+    exit(1);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s contract|settings|open-directory|open-filtered|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
+        fprintf(stderr, "usage: %s contract|settings|settings-watch|open-directory|open-filtered|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
                 argv[0]);
         return 2;
     }
@@ -970,6 +1054,8 @@ int main(int argc, char **argv) {
         prepare_print(connection);
     } else if (strcmp(argv[1], "settings") == 0 && argc == 2) {
         settings_contract(connection);
+    } else if (strcmp(argv[1], "settings-watch") == 0 && argc == 2) {
+        settings_watch(connection);
     } else if (strcmp(argv[1], "open-directory") == 0 && argc == 2) {
         open_directory(connection);
     } else if (strcmp(argv[1], "open-filtered") == 0 && argc == 2) {

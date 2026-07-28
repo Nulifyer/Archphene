@@ -61,8 +61,8 @@ internal class LauncherPortalBridge(
     private val sessionId: Int,
     private val appName: String,
     private val archRoot: File,
-    private val dark: Boolean,
-    private val accent: Int,
+    initialDark: Boolean,
+    initialAccent: Int,
     private val requestSave: (String, String, String) -> LauncherPortalSaveResult,
     private val requestOpen: (String, String, Boolean) -> LauncherPortalOpenResult,
     private val requestDirectory: (String) -> LauncherPortalDirectoryResult,
@@ -96,6 +96,8 @@ internal class LauncherPortalBridge(
         File(savesBaseDirectory, "$sessionId-$instanceToken")
     private val importsDirectory =
         File(archRoot, "home/archphene/Documents/Android")
+    private val appearanceState = File(runtimeDirectory, APPEARANCE_STATE)
+    private val appearanceStateTemporary = File(runtimeDirectory, APPEARANCE_STATE_TEMPORARY)
     private val activeSaves = ArrayList<ActiveSave>(MAX_ACTIVE_SAVES)
     @Volatile private var saveSnapshot = emptyArray<ActiveSave>()
     @Volatile private var running = false
@@ -106,6 +108,8 @@ internal class LauncherPortalBridge(
     private var portal: java.lang.Process? = null
     private var busSocket: File? = null
     private var nextSaveId = 1
+    private var publishedDark = initialDark
+    private var publishedAccent = initialAccent and 0x00ff_ffff
 
     lateinit var busAddress: String
         private set
@@ -114,6 +118,7 @@ internal class LauncherPortalBridge(
     fun start() {
         check(!running) { "Portal bridge is already running" }
         requireDirectory(runtimeDirectory)
+        writeAppearanceState(publishedDark, publishedAccent)
         prepareSavesDirectory()
         prepareImportsDirectory()
         val socketName =
@@ -189,9 +194,12 @@ internal class LauncherPortalBridge(
                     environment()["ARCHPHENE_ANDROID_BROKER"] = brokerAddress
                     environment()["ARCHPHENE_RUNTIME_DIR"] = runtimeDirectory.absolutePath
                     environment()["ARCHPHENE_APP_NAME"] = appName
-                    environment()["ARCHPHENE_COLOR_SCHEME"] = if (dark) "dark" else "light"
+                    environment()["ARCHPHENE_APPEARANCE_STATE"] =
+                        appearanceState.absolutePath
+                    environment()["ARCHPHENE_COLOR_SCHEME"] =
+                        if (publishedDark) "dark" else "light"
                     environment()["ARCHPHENE_ACCENT_RGB"] =
-                        String.format(Locale.ROOT, "%06x", accent and 0x00ff_ffff)
+                        String.format(Locale.ROOT, "%06x", publishedAccent)
                     environment()["ARCHPHENE_ENABLE_SECRETS"] = "0"
                     environment()["ARCHPHENE_ENABLE_CAMERA"] = "0"
                     environment()["ARCHPHENE_ENABLE_ACCESSIBILITY"] = "0"
@@ -200,6 +208,66 @@ internal class LauncherPortalBridge(
         SystemClock.sleep(PORTAL_READY_DELAY_MILLIS)
         check(portal?.isAlive == true) { "Private portal frontend exited during startup" }
         Log.i(TAG, "Private desktop portal ready session=$sessionId")
+    }
+
+    @Synchronized
+    fun updateAppearance(
+        dark: Boolean,
+        accent: Int,
+    ) {
+        if (!running) return
+        val boundedAccent = accent and 0x00ff_ffff
+        if (dark == publishedDark && boundedAccent == publishedAccent) return
+        runCatching {
+            writeAppearanceState(dark, boundedAccent)
+        }.onSuccess {
+            publishedDark = dark
+            publishedAccent = boundedAccent
+            Log.i(
+                TAG,
+                "Published portal appearance session=$sessionId " +
+                    "dark=$dark accent=${boundedAccent.toString(16).padStart(6, '0')}",
+            )
+        }.onFailure { error ->
+            Log.e(TAG, "Could not publish portal appearance session=$sessionId", error)
+        }
+    }
+
+    private fun writeAppearanceState(
+        dark: Boolean,
+        accent: Int,
+    ) {
+        check(
+            appearanceState.parentFile == runtimeDirectory &&
+                appearanceStateTemporary.parentFile == runtimeDirectory &&
+                !Files.isSymbolicLink(runtimeDirectory.toPath()) &&
+                !Files.isSymbolicLink(appearanceState.toPath()) &&
+                !Files.isSymbolicLink(appearanceStateTemporary.toPath()),
+        ) {
+            "Unsafe portal appearance state"
+        }
+        if (appearanceStateTemporary.exists()) {
+            check(appearanceStateTemporary.delete()) {
+                "Could not remove stale portal appearance state"
+            }
+        }
+        val bytes = ByteArray(APPEARANCE_STATE_BYTES)
+        bytes[0] = '1'.code.toByte()
+        bytes[1] = '\n'.code.toByte()
+        bytes[2] = if (dark) '1'.code.toByte() else '2'.code.toByte()
+        bytes[3] = '\n'.code.toByte()
+        var shift = 20
+        for (index in 4..9) {
+            bytes[index] = HEX[(accent ushr shift) and 0x0f].code.toByte()
+            shift -= 4
+        }
+        bytes[10] = '\n'.code.toByte()
+        FileOutputStream(appearanceStateTemporary, false).use { output ->
+            output.write(bytes)
+            output.fd.sync()
+        }
+        Os.chmod(appearanceStateTemporary.absolutePath, 0x180)
+        Os.rename(appearanceStateTemporary.absolutePath, appearanceState.absolutePath)
     }
 
     private fun acceptLoop(localServer: LocalServerSocket) {
@@ -774,6 +842,9 @@ internal class LauncherPortalBridge(
         private const val TAG = "ArchphenePortal"
         private const val DAEMON = "libarchphene_dbus_daemon.so"
         private const val PORTAL = "libarchphene_portal_service.so"
+        private const val APPEARANCE_STATE = "appearance-v1"
+        private const val APPEARANCE_STATE_TEMPORARY = "appearance-v1.tmp"
+        private const val APPEARANCE_STATE_BYTES = 11
         private const val START_TIMEOUT_MILLIS = 5_000L
         private const val PORTAL_READY_DELAY_MILLIS = 100L
         private const val PROCESS_STOP_TIMEOUT_SECONDS = 2L
@@ -794,6 +865,7 @@ internal class LauncherPortalBridge(
         private const val EMPTY_SAVE_GRACE_MILLIS = 5_000L
         private const val MAX_RECOVERED_SAVE_DIRECTORIES = 128
         private const val MAX_RUNTIME_ENTRIES = 4
+        private const val HEX = "0123456789abcdef"
         private val STALE_SAVE_DIRECTORY_NAME =
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")
         private val STALE_RUNTIME_DIRECTORY_NAME =

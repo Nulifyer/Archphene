@@ -1,6 +1,7 @@
 package org.archphene.app.launcher
 
 import android.app.Service
+import android.app.WallpaperManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -152,8 +153,13 @@ class LauncherSessionService : Service() {
     private lateinit var surfaceHandler: Handler
     private lateinit var clipboardThread: HandlerThread
     private lateinit var clipboardHandler: Handler
+    private var wallpaperManager: WallpaperManager? = null
     @Volatile private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
     private var runtimeBound = false
+    private val wallpaperColorsChanged =
+        WallpaperManager.OnColorsChangedListener { _, _ ->
+            publishPortalAppearance()
+        }
 
     private val runtimeConnection =
         object : ServiceConnection {
@@ -186,6 +192,10 @@ class LauncherSessionService : Service() {
         surfaceHandler = Handler(surfaceThread.looper)
         clipboardThread = HandlerThread("ArchpheneLauncherClipboard").apply { start() }
         clipboardHandler = Handler(clipboardThread.looper)
+        wallpaperManager =
+            getSystemService(WallpaperManager::class.java)?.also { manager ->
+                manager.addOnColorsChangedListener(wallpaperColorsChanged, surfaceHandler)
+            }
         runtimeBound =
             bindService(
                 Intent(this, ArchpheneRuntimeService::class.java),
@@ -207,8 +217,15 @@ class LauncherSessionService : Service() {
             null
         }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        surfaceHandler.post { publishPortalAppearance() }
+    }
+
     override fun onDestroy() {
         LauncherSessionDebugBridge.detach(this)
+        wallpaperManager?.removeOnColorsChangedListener(wallpaperColorsChanged)
+        wallpaperManager = null
         clearSessions()
         runtimeBinder = null
         if (runtimeBound) {
@@ -852,6 +869,10 @@ class LauncherSessionService : Service() {
                     session.active && sessions[sessionId] === session && session.surface === surface
                 }
             if (current) {
+                session.portalBridge?.let { bridge ->
+                    val appearance = resolvedAppearance(session)
+                    bridge.updateAppearance(appearance.dark, appearance.accent)
+                }
                 session.compositor?.detach()
                 previous?.release()
                 attachCompositor(session, surface, width, height, densityDpi)
@@ -1541,8 +1562,8 @@ class LauncherSessionService : Service() {
                         sessionId = session.id,
                         appName = session.authorization.label,
                         archRoot = File(filesDir, "arch-root"),
-                        dark = appearance.dark,
-                        accent = appearance.accent,
+                        initialDark = appearance.dark,
+                        initialAccent = appearance.accent,
                         requestSave = { title, suggestedName, mimeType ->
                             requestPortalDocumentSave(
                                 session,
@@ -1889,6 +1910,15 @@ class LauncherSessionService : Service() {
             material[1],
             material[2],
         )
+    }
+
+    @Synchronized
+    private fun publishPortalAppearance() {
+        for (session in sessions.values) {
+            val bridge = session.portalBridge ?: continue
+            val appearance = resolvedAppearance(session)
+            bridge.updateAppearance(appearance.dark, appearance.accent)
+        }
     }
 
     private inner class CompositorPump(

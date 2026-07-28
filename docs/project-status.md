@@ -1696,8 +1696,16 @@ The same private frontend implements XDG Settings portal v2 for the standard
 appearance color scheme, accent, contrast, and reduced-motion keys, including
 the intentionally nested legacy `Read` result. It honors D-Bus no-reply calls,
 removing GTK's rejected startup error. The contract probe passes on both exact
-ABIs. Values are currently a per-launch snapshot; live `SettingChanged`
-signals remain pending.
+ABIs. Color scheme and Material You accent now remain live through a private
+11-byte versioned state record. The manager writes it with fsync and atomic
+rename from the launcher worker, while the portal accepts only a no-follow
+regular file with the exact size and grammar. Android configuration/display
+changes and wallpaper-color callbacks publish only actual value changes and
+the portal emits the corresponding `SettingChanged` signals. A real
+light-to-dark-to-light transition preserves the launcher and Linux process and
+matches fresh `ReadOne` results on Android 16 x86_64 and Samsung Android 15
+AArch64. The device gate preserves the prior night-mode setting, rejects fatal
+logs, and captures full-device frames after the transition settles.
 
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure
