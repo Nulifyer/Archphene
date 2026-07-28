@@ -1749,6 +1749,20 @@ origin, renders an honest disabled Installed action, and enables conservative
 Remove instead of failing official-repository resolution. Cancelled
 PackageInstaller confirmations now persist as a distinct terminal launcher
 state instead of being reconciled back to publication after manager restart.
+
+The AUR pre-install decision surface is now explicitly gated as a complete
+contract rather than by one token per section. Six mutually compact,
+expandable, selectable sections expose source origins and licenses; maintainer,
+community/shared-environment trust, and Android permission status; verified
+source, closure, and isolated-root disk use; snapshot/source/closure/Builder
+and final-package digests; runtime/build/check dependencies, visible recipe
+functions, install script, and exact PKGBUILD; and bounded build logs. After
+independent output verification the action row shows disabled **Built** and an
+enabled **Install**, while Build environment shows exact archive and installed
+sizes before mutation. The no-network ready-to-install fixture passes on the
+exact x86_64 emulator and AArch64 Samsung with visually inspected full-device
+light/dark frames and unchanged 152/151-package databases.
+
 The manager shows explicit Retry/Dismiss choices, persists dismissal, and only
 Retry submits another Android session. Exact-ABI emulator and Samsung gates
 remove one generated wrapper, cancel the Android confirmation, force-stop and

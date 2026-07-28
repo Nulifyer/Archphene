@@ -120,7 +120,7 @@ archphene_adb_run shell am start -W \
   -n "$activity" -a "$show_action" --es package "$fixture" >/dev/null
 
 archphene_wait_ui_exact_text \
-  "Verified fixture evidence · ready to build" \
+  "Verified fixture evidence · ready to install" \
   "aur-review-presentation-status-$serial" 20
 archphene_wait_ui_text \
   "Community AUR package" "aur-review-presentation-summary-$serial" 15
@@ -131,6 +131,12 @@ for section in Sources Trust "Build environment" Digests Recipe "Build logs"; do
     "text=\"$section\"[^>]*class=\"android\\.widget\\.Button\"[^>]*content-desc=\"$section, collapsed\\. Tap to expand\"" ||
     archphene_die "$section is not a collapsed accessible AUR section"
 done
+archphene_regex_contains \
+  "$ui" 'text="Built"[^>]*class="android\.widget\.Button"[^>]*enabled="false"' ||
+  archphene_die "AUR presentation allowed a second build after verification"
+archphene_regex_contains \
+  "$ui" 'text="Install"[^>]*class="android\.widget\.Button"[^>]*enabled="true"' ||
+  archphene_die "verified AUR presentation did not expose the reviewed Install action"
 [[ "$ui" != *"post_install()"* ]] ||
   archphene_die "collapsed AUR review exposed the raw install recipe"
 archphene_adb_run exec-out screencap -p \
@@ -177,13 +183,21 @@ open_section() {
     "$section"
 }
 
-open_section Sources 'Origin: https://example\.invalid/source' sources
+open_section Sources \
+  'Licenses.*• MIT.*File: archphene-aur-ux-fixture-1\.2\.3\.tar\.gz.*Origin: https://example\.invalid/source' \
+  sources
 open_section Trust \
-  'Community PKGBUILD; not an official signed Arch package\.' trust
+  'Community PKGBUILD; not an official signed Arch package\..*joins the shared Archphene Linux environment.*Maintainer: Archphene test maintainer.*Unverified sources: none.*Insecure source transports: none.*Android permissions: none requested at this review stage\.' \
+  trust
 open_section "Build environment" \
-  'Build sandbox: signed companion UID 12345' build
-open_section Digests 'Snapshot SHA-256: 3{64}' digests
-open_section Recipe 'post_install\(\)' recipe
+  'Verified source downloads: 2 MiB.*Verified official build environment: 1 packages · 16 MiB archives · 1 cached · 0 downloaded.*Build sandbox: signed companion UID 12345; no network permission or direct manager-data access\..*Reviewed inputs: 2 MiB.*Signed build packages: 4 · 16 MiB archives.*Isolated build root: 32 MiB across 128 verified entries.*Verified package: archphene-aur-ux-fixture-1\.2\.3-1-any\.pkg\.tar\.zst · 8 MiB archive · 64 MiB installed' \
+  build
+open_section Digests \
+  'AUR commit: 1{40}.*Snapshot SHA-256: 3{64}.*archphene-aur-ux-fixture-1\.2\.3\.tar\.gz SHA-256: 2{64}.*Build closure SHA-256: 5{64}.*Builder input SHA-256: 4{64}.*Builder closure SHA-256: 5{64}.*Built package SHA-256: 6{64}' \
+  digests
+open_section Recipe \
+  'Runtime dependencies.*• glibc.*• zlib.*Build dependencies.*• rust.*• cargo.*Check dependencies.*• bats.*Valid PGP keys.*0123456789ABCDEF0123456789ABCDEF01234567.*Visible build functions.*prepare\(\).*build\(\).*check\(\).*package\(\).*Install script: archphene-aur-ux-fixture\.install.*post_install\(\).*PKGBUILD.*pkgname=archphene-aur-ux-fixture' \
+  recipe
 open_section "Build logs" \
   'Finished making: archphene-aur-ux-fixture 1\.2\.3-1' logs false
 

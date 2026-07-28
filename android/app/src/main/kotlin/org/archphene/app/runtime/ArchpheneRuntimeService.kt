@@ -12200,6 +12200,19 @@ class ArchpheneRuntimeService : Service() {
                 downloadedPackages = 0,
                 verified = true,
             )
+        val built =
+            AurBuiltPackage(
+                packageName = packageName,
+                filename = "$packageName-1.2.3-1-any.pkg.tar.zst",
+                archiveBytes = 8_388_608L,
+                installedBytes = 67_108_864L,
+                buildPackageCount = 4,
+                sha256 = "6".repeat(64),
+                file = File(cacheDir, ".aur-debug-presentation-fixture.pkg"),
+                logs =
+                    "==> Making package: $packageName 1.2.3-1\n" +
+                        "==> Finished making: $packageName 1.2.3-1",
+            )
         val candidateState = reviewedAurCandidateState(readyHandle, review)
         if (availablePackageQuery != packageName) {
             availablePackageQuery = packageName
@@ -12210,6 +12223,16 @@ class ArchpheneRuntimeService : Service() {
         retainedAurSourceEvidence = evidence
         retainedAurBuilderReport = builder
         deleteRetainedAurBuiltPackageFilesAsync(detachRetainedAurBuiltPackageFiles())
+        retainedAurBuiltPackages = arrayOf(built)
+        retainedAurBuiltPackage = built
+        lastResolvedPackage = review.packageName
+        lastResolvedRepository = "aur"
+        lastResolvedInstalledVersion = candidateState.installedVersion
+        lastResolvedAvailableVersion = review.version
+        primaryActionLabel =
+            if (candidateState.installedVersion.isEmpty()) "Install" else "Update"
+        primaryActionPermitted = true
+        removeAvailable = candidateState.installedVersion.isNotEmpty()
         publishReviewedAurPackage(review, candidateState)
         publishAurReviewPresentation(
             review,
@@ -12217,12 +12240,10 @@ class ArchpheneRuntimeService : Service() {
             evidence,
             builder,
             buildEnvironment,
+            built,
         )
-        publishAurBuildLogs(
-            "==> Making package: $packageName 1.2.3-1\n" +
-                "==> Finished making: $packageName 1.2.3-1",
-        )
-        searchStatus = "Verified fixture evidence · ready to build"
+        publishAurBuildLogs(built.logs)
+        searchStatus = "Verified fixture evidence · ready to install"
         return true
     }
 
@@ -12241,6 +12262,13 @@ class ArchpheneRuntimeService : Service() {
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
         deleteRetainedAurBuiltPackageFilesAsync(detachRetainedAurBuiltPackageFiles())
+        lastResolvedPackage = ""
+        lastResolvedRepository = ""
+        lastResolvedInstalledVersion = ""
+        lastResolvedAvailableVersion = ""
+        primaryActionLabel = "Install"
+        primaryActionPermitted = true
+        removeAvailable = false
         clearAurReviewPresentation()
         searchStatus = "Search the official Arch repositories"
         return true
