@@ -21,7 +21,7 @@
     <string name="files_heading">Android and Linux files</string>
     <string name="files_description">Documents, Downloads, Media, Pictures, and Shared in Archphene Home appear in Linux under /mnt/android. Connect an Android folder to create a private ~/Projects mirror, then use Sync to exchange changes; it is not a live mount.</string>
     <string name="terminal_heading">Shared Linux terminal</string>
-    <string name="terminal_description">Use a shared shell or run an installed Linux command directly.</string>
+    <string name="terminal_description">Start a shared Linux shell for terminal tools and development work.</string>
     <string name="appearance_heading">Linux app appearance</string>
     <string name="appearance_description">Tune unmodified Linux apps for a phone, tablet, or connected display. Each setting starts in Auto.</string>
     <string name="linux_geometry_scale">App scale</string>
@@ -142,8 +142,6 @@
     <string name="terminal_text_larger">Text larger</string>
     <string name="terminal_text_size_automatic">Text size: Auto (%1$d sp)</string>
     <string name="terminal_text_size_explicit">Text size: %1$d sp (reset to Auto)</string>
-    <string name="linux_command_hint">Command, e.g. btop</string>
-    <string name="run_command">Run</string>
     <string name="start_shell">Start shell</string>
     <string name="installed_shell">Shell</string>
     <string name="no_supported_shell">No supported shell</string>

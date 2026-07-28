@@ -27,9 +27,14 @@ if [[ -z "$apk" ]]; then
 fi
 output_dir="$ARCHPHENE_ROOT/tooling/build/terminal-queries"
 mkdir -p "$output_dir"
+restore_notification=false
 
 cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  if [[ "$restore_notification" == true ]]; then
+    archphene_adb_run shell pm revoke "$package" \
+      android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -39,6 +44,13 @@ if [[ "$skip_install" == false ]]; then
 fi
 archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/bash ||
   archphene_die "terminal-query regression requires installed bash"
+package_dump="$(archphene_adb_run shell dumpsys package "$package")"
+if ! archphene_regex_contains "$package_dump" \
+    'android\.permission\.POST_NOTIFICATIONS: granted=true'; then
+  archphene_adb_run shell pm grant "$package" \
+    android.permission.POST_NOTIFICATIONS
+  restore_notification=true
+fi
 
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
@@ -68,5 +80,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "terminal-query regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene terminal-query regression passed on $serial"
-archphene_note "  Primary DA, status DSR, and exact cursor CPR round trips passed"
+archphene_note "  Primary/secondary DA, DSR/CPR, character size, and mode query round trips passed"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

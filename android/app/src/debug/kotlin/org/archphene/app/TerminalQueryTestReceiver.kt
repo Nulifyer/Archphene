@@ -76,8 +76,20 @@ internal class TerminalQueryTestReceiver : BroadcastReceiver() {
             "read -rsn7 -p \$'\\e[c' da; " +
                 "read -rsn4 -p \$'\\e[5n' dsr; " +
                 "read -rsn6 -p \$'\\e[3;5H\\e[6n' cpr; " +
+                "read -rsn9 -p \$'\\e[>c' da2; " +
+                "IFS=' ' read -r tty_rows tty_columns < <(stty size); " +
+                "IFS= read -rsd t -p \$'\\e[18t' size; size+=t; " +
+                "printf -v expected_size '\\e[8;%s;%st' \"\$tty_rows\" \"\$tty_columns\"; " +
+                "printf \$'\\e[?2004l'; " +
+                "read -rsn11 -p \$'\\e[?2004\$p' paste_off; " +
+                "printf \$'\\e[?2004h'; " +
+                "read -rsn11 -p \$'\\e[?2004\$p' paste_on; " +
+                "printf \$'\\e[?2004l'; " +
                 "if [[ \$da == \$'\\e[?1;2c' && \$dsr == \$'\\e[0n' " +
-                "&& \$cpr == \$'\\e[3;5R' ]]; then " +
+                "&& \$cpr == \$'\\e[3;5R' && \$da2 == \$'\\e[>0;1;0c' " +
+                "&& \$size == \"\$expected_size\" " +
+                "&& \$paste_off == \$'\\e[?2004;2\$y' " +
+                "&& \$paste_on == \$'\\e[?2004;1\$y' ]]; then " +
                 "printf \$'\\e[2J\\e[Hterminal-query-pass\\n'; else " +
                 "printf \$'\\e[2J\\e[Hterminal-query-fail\\n'; fi"
     }

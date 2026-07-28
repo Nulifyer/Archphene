@@ -132,6 +132,16 @@ impl Scrollback {
         }
     }
 
+    fn clear(&mut self) {
+        self.bytes.fill(0);
+        self.lines.fill(StoredLine::default());
+        self.first_line = 0;
+        self.line_count = 0;
+        self.write_offset = 0;
+        self.bytes_used = 0;
+        self.origin_epoch = self.origin_epoch.saturating_add(1);
+    }
+
     fn append_line(&mut self, cells: &[Cell], soft_wrapped: bool, columns: u16) {
         let stored_cells = if soft_wrapped {
             cells
@@ -492,7 +502,8 @@ pub struct Terminal {
     csi_count: usize,
     csi_value: u16,
     csi_has_value: bool,
-    csi_private: bool,
+    csi_prefix: u8,
+    csi_intermediate: u8,
     csi_unsupported: bool,
     string_bytes: usize,
     utf8_codepoint: u32,
@@ -559,7 +570,8 @@ impl Terminal {
             csi_count: 0,
             csi_value: 0,
             csi_has_value: false,
-            csi_private: false,
+            csi_prefix: 0,
+            csi_intermediate: 0,
             csi_unsupported: false,
             string_bytes: 0,
             utf8_codepoint: 0,
@@ -1245,7 +1257,7 @@ impl Terminal {
 
     fn feed_csi(&mut self, byte: u8) {
         match byte {
-            b'0'..=b'9' => {
+            b'0'..=b'9' if self.csi_intermediate == 0 => {
                 self.csi_value = self
                     .csi_value
                     .saturating_mul(10)
@@ -1253,9 +1265,19 @@ impl Terminal {
                     .min(9999);
                 self.csi_has_value = true;
             }
-            b';' => self.push_csi_parameter(),
-            b'?' if self.csi_count == 0 && !self.csi_has_value => self.csi_private = true,
-            0x20..=0x2f | b':' | b'<' | b'=' | b'>' | b'?' => {
+            b';' if self.csi_intermediate == 0 => self.push_csi_parameter(),
+            b'?' | b'>' | b'='
+                if self.csi_count == 0
+                    && !self.csi_has_value
+                    && self.csi_prefix == 0
+                    && self.csi_intermediate == 0 =>
+            {
+                self.csi_prefix = byte;
+            }
+            0x20..=0x2f if self.csi_intermediate == 0 => {
+                self.csi_intermediate = byte;
+            }
+            0x20..=0x2f | b'0'..=b'9' | b';' | b':' | b'<' | b'=' | b'>' | b'?' => {
                 self.csi_unsupported = true;
             }
             0x40..=0x7e => {
@@ -1272,7 +1294,8 @@ impl Terminal {
         self.csi_count = 0;
         self.csi_value = 0;
         self.csi_has_value = false;
-        self.csi_private = false;
+        self.csi_prefix = 0;
+        self.csi_intermediate = 0;
         self.csi_unsupported = false;
     }
 
@@ -1284,6 +1307,8 @@ impl Terminal {
                 0
             };
             self.csi_count += 1;
+        } else {
+            self.csi_unsupported = true;
         }
         self.csi_value = 0;
         self.csi_has_value = false;
@@ -1301,8 +1326,28 @@ impl Terminal {
         if self.csi_unsupported {
             return;
         }
-        if self.csi_private {
+        if self.csi_prefix == b'?' {
             self.execute_private_csi(final_byte);
+            return;
+        }
+        if self.csi_prefix == b'>' {
+            if self.csi_intermediate == 0
+                && final_byte == b'c'
+                && self.csi_count == 1
+                && self.csi_parameters[0] == 0
+            {
+                self.queue_reply(b"\x1b[>0;1;0c");
+            }
+            return;
+        }
+        if self.csi_prefix != 0 {
+            return;
+        }
+        if self.csi_intermediate == b'$' && final_byte == b'p' {
+            self.report_mode(false);
+            return;
+        }
+        if self.csi_intermediate != 0 {
             return;
         }
         self.wrap_pending = false;
@@ -1375,6 +1420,7 @@ impl Terminal {
             b'g' => self.clear_tab_stops(self.csi_parameters[0]),
             b'm' => self.select_graphics(),
             b'n' => self.report_device_status(),
+            b't' => self.report_window_operation(),
             b'c' if self.csi_count == 1 && self.csi_parameters[0] == 0 => {
                 self.queue_reply(b"\x1b[?1;2c");
             }
@@ -1405,6 +1451,13 @@ impl Terminal {
     }
 
     fn execute_private_csi(&mut self, final_byte: u8) {
+        if self.csi_intermediate == b'$' && final_byte == b'p' {
+            self.report_mode(true);
+            return;
+        }
+        if self.csi_intermediate != 0 {
+            return;
+        }
         if final_byte == b'n' {
             if self.csi_count == 1 && self.csi_parameters[0] == 6 {
                 self.report_cursor_position(true);
@@ -1477,6 +1530,64 @@ impl Terminal {
             6 => self.report_cursor_position(false),
             _ => {}
         }
+    }
+
+    fn report_window_operation(&mut self) {
+        if self.csi_count != 1 || !matches!(self.csi_parameters[0], 18 | 19) {
+            return;
+        }
+        let mut response = [0_u8; 24];
+        let mut length = 0;
+        response[length..length + 4].copy_from_slice(b"\x1b[8;");
+        length += 4;
+        length += write_decimal(&mut response[length..], self.rows);
+        response[length] = b';';
+        length += 1;
+        length += write_decimal(&mut response[length..], self.columns);
+        response[length] = b't';
+        length += 1;
+        self.queue_reply(&response[..length]);
+    }
+
+    fn report_mode(&mut self, private: bool) {
+        if self.csi_count != 1 {
+            return;
+        }
+        let mode = self.csi_parameters[0];
+        let status = if private {
+            match mode {
+                1 => mode_status(self.application_cursor),
+                6 => mode_status(self.origin_mode),
+                7 => mode_status(self.auto_wrap),
+                25 => mode_status(self.cursor_visible),
+                47 | 1047 | 1049 => mode_status(self.alternate_active),
+                66 => mode_status(self.application_keypad),
+                67 => mode_status(self.backarrow_key),
+                2004 => mode_status(self.bracketed_paste),
+                _ => 0,
+            }
+        } else {
+            match mode {
+                4 => mode_status(self.insert_mode),
+                20 => mode_status(self.new_line_mode),
+                _ => 0,
+            }
+        };
+        let mut response = [0_u8; 24];
+        let mut length = 0;
+        response[length..length + 2].copy_from_slice(b"\x1b[");
+        length += 2;
+        if private {
+            response[length] = b'?';
+            length += 1;
+        }
+        length += write_decimal(&mut response[length..], mode);
+        response[length] = b';';
+        length += 1;
+        length += write_decimal(&mut response[length..], status);
+        response[length..length + 2].copy_from_slice(b"$y");
+        length += 2;
+        self.queue_reply(&response[..length]);
     }
 
     fn report_cursor_position(&mut self, private: bool) {
@@ -1915,9 +2026,13 @@ impl Terminal {
                 self.row_soft_wrapped[..=usize::from(self.cursor_row)].fill(false);
                 self.mark_dirty_range(0, self.cursor_row + 1);
             }
-            2 | 3 => {
+            2 => {
                 self.cells.fill(Cell::blank());
                 self.row_soft_wrapped.fill(false);
+                self.mark_dirty_range(0, self.rows);
+            }
+            3 => {
+                self.scrollback.clear();
                 self.mark_dirty_range(0, self.rows);
             }
             _ => {}
@@ -2209,6 +2324,10 @@ fn write_decimal(output: &mut [u8], value: u16) -> usize {
         output[index] = reversed[length - index - 1];
     }
     length
+}
+
+const fn mode_status(enabled: bool) -> u16 {
+    if enabled { 1 } else { 2 }
 }
 
 fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
@@ -2956,6 +3075,23 @@ mod tests {
     }
 
     #[test]
+    fn xterm_erase_saved_lines_preserves_the_visible_screen() {
+        let mut terminal = Terminal::new(2, 5).unwrap();
+        terminal.feed(b"one\r\ntwo\r\nthree");
+        assert_eq!(terminal.history_rows(), 1);
+        assert_eq!(text(&terminal, 0), "two  ");
+        assert_eq!(text(&terminal, 1), "three");
+        let old_epoch = terminal.history_origin_epoch();
+
+        terminal.feed(b"\x1b[3J");
+
+        assert_eq!(terminal.history_rows(), 0);
+        assert!(terminal.history_origin_epoch() > old_epoch);
+        assert_eq!(text(&terminal, 0), "two  ");
+        assert_eq!(text(&terminal, 1), "three");
+    }
+
+    #[test]
     fn device_queries_publish_bounded_ordered_replies() {
         let mut terminal = Terminal::new(24, 80).unwrap();
         terminal.feed(b"\x1b[c\x1b[5n\x1b[4;9H\x1b[6n\x1bZ");
@@ -2970,9 +3106,28 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_device_query_forms_do_not_impersonate_primary_da() {
+    fn xterm_device_size_and_mode_queries_are_bounded_and_exact() {
         let mut terminal = Terminal::new(24, 80).unwrap();
-        terminal.feed(b"\x1b[>c\x1b[=c\x1b[0;1c\x1b[0$c");
+        terminal.feed(
+            b"\x1b[>c\x1b[18t\
+              \x1b[?2004$p\x1b[?2004h\x1b[?2004$p\
+              \x1b[4$p\x1b[4h\x1b[4$p\x1b[9999$p",
+        );
+        assert_eq!(
+            terminal.pending_reply(),
+            b"\x1b[>0;1;0c\x1b[8;24;80t\
+              \x1b[?2004;2$y\x1b[?2004;1$y\
+              \x1b[4;2$y\x1b[4;1$y\x1b[9999;0$y"
+        );
+    }
+
+    #[test]
+    fn malformed_device_query_forms_do_not_impersonate_a_terminal() {
+        let mut terminal = Terminal::new(24, 80).unwrap();
+        terminal.feed(
+            b"\x1b[>1c\x1b[=c\x1b[0;1c\x1b[0$c\x1b[18;19t\x1b[$4p\
+              \x1b[4;4;4;4;4;4;4;4;4;4;4;4;4;4;4;4;4$p",
+        );
         assert!(terminal.pending_reply().is_empty());
     }
 

@@ -1973,6 +1973,17 @@ paths and supports Retry across manager restart. The complete matrix and
 visually inspected full-device progress frames pass on the exact x86_64
 emulator and physical AArch64 Samsung.
 
+The manager Terminal now accepts strict bounded CSI prefix/intermediate
+grammar, clears saved scrollback for xterm `CSI 3 J` without erasing the live
+screen, and answers Secondary DA, character-size, and ANSI/DEC mode queries
+through its existing fixed reply ring. Malformed and overlong forms fail
+closed, and the warmed parser remains allocation-free. Exact-ABI probes run
+the queries through a real Bash PTY on the emulator and Samsung. Their
+full-device captures also verify the production session layout: the obsolete
+command-entry and Run/Send row is gone, the shell selector disappears while a
+session is active, and only a compact status/Stop row remains below the
+full-height terminal.
+
 ## Validated
 
 | Area | Evidence |

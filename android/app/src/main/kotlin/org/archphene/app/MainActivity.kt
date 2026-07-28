@@ -91,6 +91,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var settingsPanel: LinuxAppearanceSettingsView
     private lateinit var terminalEmptyPanel: LinearLayout
     private lateinit var terminalControls: LinearLayout
+    private lateinit var terminalShellSelectorRow: LinearLayout
     private lateinit var runtimePanel: FrameLayout
     private lateinit var packagesNavigationButton: Button
     private lateinit var filesNavigationButton: Button
@@ -100,7 +101,6 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var removeButton: Button
     private lateinit var aurReviewButton: Button
     private lateinit var cancelButton: Button
-    private lateinit var commandButton: Button
     private lateinit var ptyButton: Button
     private lateinit var importButton: Button
     private lateinit var openButton: Button
@@ -189,7 +189,6 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 removeButton.isEnabled = false
                 cancelButton.isEnabled = false
                 cancelButton.visibility = View.GONE
-                commandButton.isEnabled = false
                 ptyButton.isEnabled = false
                 importButton.isEnabled = false
                 openButton.isEnabled = false
@@ -1145,7 +1144,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                     }
             }
-        val shellRow =
+        terminalShellSelectorRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -1172,71 +1171,17 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
             }
-        val commandInput =
-            EditText(this).apply {
-                setHint(R.string.linux_command_hint)
-                setSingleLine(true)
-                imeOptions = EditorInfo.IME_ACTION_GO
-            }
-        commandButton =
-            Button(this).apply {
-                setText(R.string.run_command)
-                isEnabled = false
-                setOnClickListener {
-                    hideKeyboard(commandInput)
-                    if (runtimeBinder?.submitLinuxInput(commandInput.text.toString()) == true) {
-                        commandInput.text.clear()
-                    }
-                }
-            }
         ptyButton =
             Button(this).apply {
                 setText(R.string.start_shell)
                 isEnabled = false
                 setOnClickListener {
-                    hideKeyboard(commandInput)
+                    hideKeyboard(runtimeSurface)
                     if (runtimeBinder?.sharedShellRunning == false) {
                         requestSessionNotificationPermission()
                     }
                     runtimeBinder?.toggleSharedShell()
                 }
-            }
-        commandInput.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_GO) {
-                hideKeyboard(commandInput)
-                if (runtimeBinder?.submitLinuxInput(commandInput.text.toString()) == true) {
-                    commandInput.text.clear()
-                }
-                true
-            } else {
-                false
-            }
-        }
-        val commandRow =
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(
-                    commandInput,
-                    LinearLayout.LayoutParams(
-                        0,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        1f,
-                    ),
-                )
-                addView(
-                    commandButton,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    ),
-                )
-                addView(
-                    ptyButton,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    ),
-                )
             }
         commandStatusView =
             TextView(this).apply {
@@ -1248,6 +1193,26 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setBackgroundColor(getColor(R.color.archphene_surface))
                 maxLines = 2
                 setTextIsSelectable(true)
+            }
+        val sessionActionRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setBackgroundColor(getColor(R.color.archphene_surface))
+                addView(
+                    commandStatusView,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+                addView(
+                    ptyButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
             }
         packagePanel =
             LinearLayout(this).apply {
@@ -1548,21 +1513,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(
-                    shellRow,
+                    terminalShellSelectorRow,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         dp(48),
                     ),
                 )
                 addView(
-                    commandRow,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(52),
-                    ),
-                )
-                addView(
-                    commandStatusView,
+                    sessionActionRow,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         dp(52),
@@ -1671,7 +1629,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     terminalControls,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(152),
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
                     ),
                 )
                 if (!wideManagerLayout) {
@@ -2995,7 +2953,6 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             packageCacheButton.isEnabled = false
             cancelButton.isEnabled = false
             cancelButton.visibility = View.GONE
-            commandButton.isEnabled = false
             ptyButton.isEnabled = false
             importButton.isEnabled = false
             shareButton.isEnabled = false
@@ -3025,8 +2982,6 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             cancelButton,
             if (packageActionAvailable) View.VISIBLE else View.GONE,
         )
-        setTextIfChanged(commandButton, binder.linuxInputActionLabel)
-        commandButton.isEnabled = binder.linuxCommandAvailable
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable
         importButton.isEnabled =
@@ -3259,6 +3214,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setVisibilityIfChanged(
             terminalControls,
             if (terminalSelected) View.VISIBLE else View.GONE,
+        )
+        setVisibilityIfChanged(
+            terminalShellSelectorRow,
+            if (shellRunning) View.GONE else View.VISIBLE,
         )
         val terminalVisibility =
             if (terminalSelected && shellRunning) View.VISIBLE else View.GONE
