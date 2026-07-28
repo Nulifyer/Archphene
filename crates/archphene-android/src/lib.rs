@@ -96,8 +96,9 @@ mod android {
     use archphene_launcher::{LauncherReviewDecision, MAX_LAUNCHER_DESCRIPTORS};
     use archphene_packages::{
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
-        MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageResolution, PackageRuntimeError, Repository,
-        RepositoryArchitecture, ToolOutput, VerifiedAurArchive, VerifiedPackageClosure,
+        MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageCompatibilityCancellation, PackageResolution,
+        PackageRuntimeError, Repository, RepositoryArchitecture, ToolOutput, VerifiedAurArchive,
+        VerifiedPackageClosure,
         aur::{
             MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, MAX_AUR_SOURCE_BYTES,
             aur_snapshot_path, review_aur_snapshot,
@@ -145,15 +146,20 @@ mod android {
     static PROJECT_SYNC_CANCELLATIONS: OnceLock<
         Mutex<[Option<(u64, MirrorCancellation)>; MAX_RUNTIME_HANDLES]>,
     > = OnceLock::new();
+    static PACKAGE_COMPATIBILITY_CANCELLATIONS: OnceLock<
+        Mutex<[Option<(u64, PackageCompatibilityCancellation)>; MAX_RUNTIME_HANDLES]>,
+    > = OnceLock::new();
     static DOCUMENT_EXPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
     static DOCUMENT_EXPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
     static DOCUMENT_EXPORT_BYTES: AtomicU64 = AtomicU64::new(0);
     static DOCUMENT_IMPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
     static DOCUMENT_IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
     static DOCUMENT_IMPORT_BYTES: AtomicU64 = AtomicU64::new(0);
+    static PACKAGE_COMPATIBILITY_TEST_HOLD_MILLIS: AtomicU64 = AtomicU64::new(0);
 
     struct DocumentExportGuard;
     struct DocumentImportGuard;
+    struct PackageCompatibilityCancellationGuard(u64);
 
     impl Drop for DocumentExportGuard {
         fn drop(&mut self) {
@@ -167,6 +173,12 @@ mod android {
         }
     }
 
+    impl Drop for PackageCompatibilityCancellationGuard {
+        fn drop(&mut self) {
+            remove_package_compatibility_cancellation(self.0);
+        }
+    }
+
     fn registry() -> &'static Mutex<RuntimeRegistry> {
         REGISTRY.get_or_init(|| Mutex::new(RuntimeRegistry::new()))
     }
@@ -174,6 +186,92 @@ mod android {
     fn project_sync_cancellations()
     -> &'static Mutex<[Option<(u64, MirrorCancellation)>; MAX_RUNTIME_HANDLES]> {
         PROJECT_SYNC_CANCELLATIONS.get_or_init(|| Mutex::new(std::array::from_fn(|_| None)))
+    }
+
+    fn package_compatibility_cancellations()
+    -> &'static Mutex<[Option<(u64, PackageCompatibilityCancellation)>; MAX_RUNTIME_HANDLES]> {
+        PACKAGE_COMPATIBILITY_CANCELLATIONS
+            .get_or_init(|| Mutex::new(std::array::from_fn(|_| None)))
+    }
+
+    fn set_package_compatibility_cancellation(
+        handle: u64,
+        cancellation: PackageCompatibilityCancellation,
+    ) -> Result<(), ()> {
+        let (index, _) = super::decode_handle(handle).ok_or(())?;
+        let mut slots = package_compatibility_cancellations()
+            .lock()
+            .map_err(|_| ())?;
+        let slot = slots.get_mut(index).ok_or(())?;
+        if slot.is_some() {
+            return Err(());
+        }
+        *slot = Some((handle, cancellation));
+        Ok(())
+    }
+
+    fn package_compatibility_cancellation(handle: u64) -> Option<PackageCompatibilityCancellation> {
+        let (index, _) = super::decode_handle(handle)?;
+        let slots = package_compatibility_cancellations().lock().ok()?;
+        slots
+            .get(index)
+            .and_then(Option::as_ref)
+            .filter(|(active, _)| *active == handle)
+            .map(|(_, cancellation)| cancellation.clone())
+    }
+
+    fn remove_package_compatibility_cancellation(handle: u64) -> bool {
+        let Some((index, _)) = super::decode_handle(handle) else {
+            return false;
+        };
+        let Ok(mut slots) = package_compatibility_cancellations().lock() else {
+            return false;
+        };
+        let Some(slot) = slots.get_mut(index) else {
+            return false;
+        };
+        if slot.as_ref().is_some_and(|(active, _)| *active == handle) {
+            *slot = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel_package_compatibility_without_runtime_lock(handle: u64) -> bool {
+        let Some((index, _)) = super::decode_handle(handle) else {
+            return false;
+        };
+        let Ok(slots) = package_compatibility_cancellations().lock() else {
+            return false;
+        };
+        slots
+            .get(index)
+            .and_then(Option::as_ref)
+            .filter(|(active, _)| *active == handle)
+            .is_some_and(|(_, cancellation)| {
+                cancellation.cancel();
+                true
+            })
+    }
+
+    fn hold_debug_package_compatibility_review(
+        cancellation: &PackageCompatibilityCancellation,
+    ) -> Result<(), PackageRuntimeError> {
+        let mut remaining = PACKAGE_COMPATIBILITY_TEST_HOLD_MILLIS.swap(0, Ordering::AcqRel);
+        while remaining != 0 {
+            if cancellation.is_cancelled() {
+                return Err(PackageRuntimeError::Cancelled);
+            }
+            let slice = remaining.min(10);
+            std::thread::sleep(Duration::from_millis(slice));
+            remaining -= slice;
+        }
+        if cancellation.is_cancelled() {
+            Err(PackageRuntimeError::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 
     fn set_project_sync_cancellation(
@@ -1681,6 +1779,8 @@ mod android {
         };
         let destroyed = registry.destroy(handle);
         remove_project_sync_cancellation(handle);
+        cancel_package_compatibility_without_runtime_lock(handle);
+        remove_package_compatibility_cancellation(handle);
         if destroyed { JNI_TRUE } else { JNI_FALSE }
     }
 
@@ -5137,6 +5237,10 @@ mod android {
         let Ok(package) = str::from_utf8(request_bytes) else {
             return ERROR_INVALID_ARGUMENT;
         };
+        let Some(cancellation) = package_compatibility_cancellation(handle) else {
+            return ERROR_INVALID_STATE;
+        };
+        let _cancellation_guard = PackageCompatibilityCancellationGuard(handle);
         let package_runtime = {
             let Ok(mut registry) = registry().lock() else {
                 return ERROR_INTERNAL;
@@ -5149,9 +5253,71 @@ mod android {
             };
             package_runtime.clone()
         };
-        let result = package_runtime.cached_package_compatibility(package);
+        let result = hold_debug_package_compatibility_review(&cancellation).and_then(|()| {
+            package_runtime.cached_package_compatibility_cancellable(package, &cancellation)
+        });
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_tool_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativePreparePackageCompatibilityReview(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        let Ok(handle) = u64::try_from(handle) else {
+            return JNI_FALSE;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return JNI_FALSE;
+        };
+        if registry.runtime_mut(handle).is_none() {
+            return JNI_FALSE;
+        }
+        let prepared =
+            set_package_compatibility_cancellation(handle, PackageCompatibilityCancellation::new())
+                .is_ok();
+        drop(registry);
+        if prepared { JNI_TRUE } else { JNI_FALSE }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeArmPackageCompatibilityReviewTestHold(
+        _environment: JNIEnv,
+        _class: JClass,
+        hold_millis: jlong,
+    ) -> jboolean {
+        let Ok(hold_millis) = u64::try_from(hold_millis) else {
+            return JNI_FALSE;
+        };
+        if !(750..=30_000).contains(&hold_millis) {
+            return JNI_FALSE;
+        }
+        if PACKAGE_COMPATIBILITY_TEST_HOLD_MILLIS
+            .compare_exchange(0, hold_millis, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCancelPackageCompatibilityReview(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        let Ok(handle) = u64::try_from(handle) else {
+            return JNI_FALSE;
+        };
+        if cancel_package_compatibility_without_runtime_lock(handle) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
     }
 
     #[unsafe(no_mangle)]

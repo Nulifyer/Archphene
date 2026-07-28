@@ -401,7 +401,12 @@ class ArchpheneRuntimeService : Service() {
             get() = removeActionLabel
 
         val packageCancellationAvailable: Boolean
-            get() = packageOperationActive && packageOperationCancelable
+            get() =
+                packageResolutionThread != null ||
+                    packageOperationActive && packageOperationCancelable
+
+        val packageCompatibilityReviewActive: Boolean
+            get() = packageResolutionThread != null
 
         val packageRecoveryAvailable: Boolean
             get() =
@@ -622,6 +627,26 @@ class ArchpheneRuntimeService : Service() {
             packageName: String,
             holdMillis: Long,
         ): Boolean = requestDebugInterruptedRemovalFixture(packageName, holdMillis)
+
+        fun armDebugPackageCompatibilityReviewHold(holdMillis: Long): Boolean =
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+                holdMillis in
+                MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS &&
+                NativeRuntime.nativeArmPackageCompatibilityReviewTestHold(holdMillis)
+
+        fun armDebugPackageWorkerHold(holdMillis: Long): Boolean {
+            if (
+                applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+                holdMillis !in
+                MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS
+            ) {
+                return false
+            }
+            return getSharedPreferences(PACKAGE_JOB_TEST_PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putLong(PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS, holdMillis)
+                .commit()
+        }
 
         fun publishDebugAurReviewFixture(packageName: String): Boolean =
             requestDebugAurReviewFixture(packageName)
@@ -965,6 +990,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var bootstrapActive = false
     private var catalogThread: Thread? = null
     private var packageThread: Thread? = null
+    @Volatile private var packageResolutionThread: Thread? = null
     private var commandThread: Thread? = null
     private var shellThread: Thread? = null
     private var storageThread: Thread? = null
@@ -1861,6 +1887,7 @@ class ArchpheneRuntimeService : Service() {
                 bootstrapThread,
                 catalogThread,
                 packageThread,
+                packageResolutionThread,
                 commandThread,
                 shellThread,
                 storageThread,
@@ -1872,6 +1899,7 @@ class ArchpheneRuntimeService : Service() {
         launcherPublisherActive.set(false)
         catalogThread = null
         packageThread = null
+        packageResolutionThread = null
         commandThread = null
         shellThread = null
         storageThread = null
@@ -1909,6 +1937,9 @@ class ArchpheneRuntimeService : Service() {
         if (activeHandle != 0L && activePty != 0L) {
             NativeRuntime.nativeWakePty(activeHandle, activePty)
             PerformanceMetrics.recordTerminalJni()
+        }
+        if (activeHandle != 0L) {
+            NativeRuntime.nativeCancelPackageCompatibilityReview(activeHandle)
         }
         if (activeHandle != 0L && cancelFolderMirror) {
             if (cancelFolderSync) {
@@ -6870,6 +6901,7 @@ class ArchpheneRuntimeService : Service() {
             searchStatus = "Enter one exact official package name"
             return false
         }
+        packageCancellationRequested = false
         searchActive = true
         lastResolvedPackage = ""
         lastResolvedRepository = ""
@@ -6880,11 +6912,13 @@ class ArchpheneRuntimeService : Service() {
         removeActionLabel = "Remove"
         removeAvailable = false
         searchStatus = "Resolving $normalized and its dependencies"
-        Thread(
+        val worker = Thread(
             {
                 requireRuntimeWorker("Package resolution")
                 try {
+                    throwIfPackageCancelled()
                     val packages = resolvePayloads(activeHandle, normalized)
+                    throwIfPackageCancelled()
                     var totalBytes = 0L
                     var target: ResolvedPayload? = null
                     val packageNames = StringBuilder()
@@ -6910,7 +6944,11 @@ class ArchpheneRuntimeService : Service() {
                             installedVersion == resolvedTarget.version -> "installed"
                             else -> availablePackageVersionState(activeHandle, normalized)
                         }
+                    throwIfPackageCancelled()
+                    searchStatus = "Reviewing cached signed packages for this device"
+                    Log.i(TAG, "Package compatibility review started for $normalized")
                     val compatibility = analyzeCachedPackage(activeHandle, normalized)
+                    throwIfPackageCancelled()
                     if (compatibility.packageCount != packages.size) {
                         throw IllegalStateException(
                             "Repository state changed during compatibility review",
@@ -6993,54 +7031,66 @@ class ArchpheneRuntimeService : Service() {
                         "Resolved $normalized: ${packages.size} packages, $totalBytes bytes",
                     )
                 } catch (error: Exception) {
-                    val installedVersion =
-                        runCatching {
-                            installedPackageVersion(activeHandle, normalized)
-                        }.getOrDefault("")
-                    val installedOrigin =
-                        if (installedVersion.isEmpty()) {
-                            ""
-                        } else {
-                            runCatching {
-                                installedPackageOrigin(activeHandle, normalized)
-                            }.getOrDefault("")
-                        }
-                    if (installedOrigin == "aur") {
-                        lastResolvedPackage = normalized
-                        lastResolvedRepository = "aur"
-                        lastResolvedInstalledVersion = installedVersion
-                        lastResolvedAvailableVersion = installedVersion
-                        primaryActionLabel = "Installed"
-                        removeAvailable = true
-                        val removalRetry =
-                            normalized == jobPackage &&
-                                (
-                                    jobState == NativeRuntime.JOB_FAILED ||
-                                        jobState == NativeRuntime.JOB_CANCELLED
-                                ) &&
-                                jobOperation == NativeRuntime.JOB_OPERATION_REMOVE
-                        removeActionLabel = if (removalRetry) "Retry" else "Remove"
-                        if (removalRetry) {
-                            recoveryReviewedJobRevision = jobRevision
-                        }
-                        searchStatus =
-                            "aur/$normalized $installedVersion\n" +
-                                "Installed from a locally verified AUR build\n" +
-                                "Review AUR to check the current available version"
-                        Log.i(TAG, "Resolved installed AUR package $normalized $installedVersion")
+                    if (error is InterruptedException || packageCancellationRequested) {
+                        searchStatus = "Package compatibility review cancelled"
+                        Log.i(TAG, "Cancelled package compatibility review for $normalized")
                     } else {
-                        searchStatus =
-                            "Package resolution failed: " +
-                                (error.message ?: error.javaClass.simpleName)
-                        Log.e(TAG, "Package resolution failed", error)
+                        val installedVersion =
+                            runCatching {
+                                installedPackageVersion(activeHandle, normalized)
+                            }.getOrDefault("")
+                        val installedOrigin =
+                            if (installedVersion.isEmpty()) {
+                                ""
+                            } else {
+                                runCatching {
+                                    installedPackageOrigin(activeHandle, normalized)
+                                }.getOrDefault("")
+                            }
+                        if (installedOrigin == "aur") {
+                            lastResolvedPackage = normalized
+                            lastResolvedRepository = "aur"
+                            lastResolvedInstalledVersion = installedVersion
+                            lastResolvedAvailableVersion = installedVersion
+                            primaryActionLabel = "Installed"
+                            removeAvailable = true
+                            val removalRetry =
+                                normalized == jobPackage &&
+                                    (
+                                        jobState == NativeRuntime.JOB_FAILED ||
+                                            jobState == NativeRuntime.JOB_CANCELLED
+                                    ) &&
+                                    jobOperation == NativeRuntime.JOB_OPERATION_REMOVE
+                            removeActionLabel = if (removalRetry) "Retry" else "Remove"
+                            if (removalRetry) {
+                                recoveryReviewedJobRevision = jobRevision
+                            }
+                            searchStatus =
+                                "aur/$normalized $installedVersion\n" +
+                                    "Installed from a locally verified AUR build\n" +
+                                    "Review AUR to check the current available version"
+                            Log.i(
+                                TAG,
+                                "Resolved installed AUR package $normalized $installedVersion",
+                            )
+                        } else {
+                            searchStatus =
+                                "Package resolution failed: " +
+                                    (error.message ?: error.javaClass.simpleName)
+                            Log.e(TAG, "Package resolution failed", error)
+                        }
                     }
                 } finally {
+                    packageCancellationRequested = false
+                    packageResolutionThread = null
                     searchActive = false
                     stopWhenUnobservedAndIdle()
                 }
             },
             "ArchpheneResolve",
-        ).start()
+        )
+        packageResolutionThread = worker
+        worker.start()
         return true
     }
 
@@ -9390,6 +9440,17 @@ class ArchpheneRuntimeService : Service() {
                 packageCompatibilityRequestBuffer.clear()
                 packageCompatibilityRequestBuffer.put(packageBytes)
                 packageCompatibilityOutputBuffer.clear()
+                if (!NativeRuntime.nativePreparePackageCompatibilityReview(activeHandle)) {
+                    throw IllegalStateException(
+                        "Another package compatibility review is active",
+                    )
+                }
+                if (
+                    packageCancellationRequested ||
+                    Thread.currentThread().isInterrupted
+                ) {
+                    NativeRuntime.nativeCancelPackageCompatibilityReview(activeHandle)
+                }
                 val outputLength =
                     NativeRuntime.nativeAnalyzeCachedPackage(
                         activeHandle,
@@ -11818,13 +11879,26 @@ class ArchpheneRuntimeService : Service() {
 
     @Synchronized
     private fun requestPackageCancellation(): Boolean {
-        if (!packageOperationActive || !packageOperationCancelable) {
+        val resolutionWorker = packageResolutionThread
+        val cancellingResolution = resolutionWorker != null
+        if (
+            !cancellingResolution &&
+            (!packageOperationActive || !packageOperationCancelable)
+        ) {
             return false
         }
         packageCancellationRequested = true
         packageOperationCancelable = false
-        jobStatus = "Cancellation requested\nFinishing the current safe step"
-        jobMessage = "Finishing the current safe step"
+        if (cancellingResolution) {
+            searchStatus = "Cancelling package compatibility review"
+        } else {
+            jobStatus = "Cancellation requested\nFinishing the current safe step"
+            jobMessage = "Finishing the current safe step"
+        }
+        val activeHandle = readyHandle
+        if (activeHandle != 0L) {
+            NativeRuntime.nativeCancelPackageCompatibilityReview(activeHandle)
+        }
         activePackageConnection?.let { connection ->
             Thread(
                 {
@@ -11835,6 +11909,7 @@ class ArchpheneRuntimeService : Service() {
             ).start()
         }
         packageThread?.interrupt()
+        resolutionWorker?.interrupt()
         return true
     }
 

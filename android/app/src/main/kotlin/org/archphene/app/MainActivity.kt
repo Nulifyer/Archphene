@@ -3178,6 +3178,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     private fun updatePackageActivity() {
         val binder = runtimeBinder
+        val compatibilityReview = binder?.packageCompatibilityReviewActive == true
         val packageName = binder?.packageJobName.orEmpty()
         val terminal =
             when (binder?.packageJobState) {
@@ -3190,12 +3191,17 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val selectedPackage = packageSearchInput.text.toString().trim()
         val visible =
             binder != null &&
-                packageName.isNotEmpty() &&
                 (
-                    !terminal ||
+                    compatibilityReview ||
                         (
-                            binder.packageTerminalActivityVisible &&
-                                selectedPackage == packageName
+                            packageName.isNotEmpty() &&
+                                (
+                                    !terminal ||
+                                        (
+                                            binder.packageTerminalActivityVisible &&
+                                                selectedPackage == packageName
+                                        )
+                                )
                         )
                 )
         if (packageJobContainer.visibility != if (visible) View.VISIBLE else View.GONE) {
@@ -3204,6 +3210,24 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         if (!visible) {
             setTextIfChanged(packageJobTitleView, getString(R.string.package_activity_heading))
             setTextIfChanged(packageJobActivityView, "")
+            if (packageJobProgressTrack.visibility != View.INVISIBLE) {
+                packageJobProgressTrack.visibility = View.INVISIBLE
+            }
+            if (packageJobRenderedProgress != 0) {
+                setPackageJobProgress(0)
+            }
+            return
+        }
+        if (compatibilityReview) {
+            setTextIfChanged(
+                packageJobTitleView,
+                selectedPackage.ifEmpty { getString(R.string.package_activity_heading) },
+            )
+            setTextIfChanged(packageJobActivityView, "Compatibility review")
+            setTextIfChanged(jobStatusView, binder.packageSearchStatus)
+            resetHorizontalScroll(packageJobTitleView)
+            resetHorizontalScroll(packageJobActivityView)
+            resetHorizontalScroll(jobStatusView)
             if (packageJobProgressTrack.visibility != View.INVISIBLE) {
                 packageJobProgressTrack.visibility = View.INVISIBLE
             }

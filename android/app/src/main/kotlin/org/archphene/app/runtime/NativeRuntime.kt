@@ -576,6 +576,9 @@ internal object NativeRuntime {
         requestLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativePreparePackageCompatibilityReview(handle: Long): Boolean
+    external fun nativeCancelPackageCompatibilityReview(handle: Long): Boolean
+    external fun nativeArmPackageCompatibilityReviewTestHold(holdMillis: Long): Boolean
     external fun nativeSubmitEvents(handle: Long, buffer: ByteBuffer, byteCount: Int): Int
     external fun nativeDrainInput(handle: Long, maximum: Int): Int
     external fun nativeWriteSnapshot(handle: Long, buffer: ByteBuffer): Int

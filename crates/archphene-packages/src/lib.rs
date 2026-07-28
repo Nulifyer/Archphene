@@ -14,6 +14,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -271,6 +272,7 @@ pub enum PackageRuntimeError {
     Desktop(desktop::DesktopEntryError),
     InvalidQuery,
     InvalidResolution,
+    Cancelled,
     CompatibilityReviewRequired,
     CompatibilityReview(String, Box<PackageRuntimeError>),
     MissingTarget,
@@ -306,6 +308,7 @@ impl fmt::Display for PackageRuntimeError {
             Self::Desktop(error) => error.fmt(formatter),
             Self::InvalidQuery => formatter.write_str("invalid package search query"),
             Self::InvalidResolution => formatter.write_str("invalid package dependency resolution"),
+            Self::Cancelled => formatter.write_str("package compatibility review was cancelled"),
             Self::CompatibilityReviewRequired => {
                 formatter.write_str("verified package compatibility review is missing or stale")
             }
@@ -354,6 +357,31 @@ impl From<ProcessError> for PackageRuntimeError {
 impl From<desktop::DesktopEntryError> for PackageRuntimeError {
     fn from(error: desktop::DesktopEntryError) -> Self {
         Self::Desktop(error)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageCompatibilityCancellation(Arc<AtomicBool>);
+
+impl PackageCompatibilityCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn check(&self) -> Result<(), PackageRuntimeError> {
+        if self.is_cancelled() {
+            Err(PackageRuntimeError::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1160,20 +1188,35 @@ impl PackageRuntime {
         &self,
         package: &str,
     ) -> Result<ToolOutput, PackageRuntimeError> {
+        self.cached_package_compatibility_cancellable(
+            package,
+            &PackageCompatibilityCancellation::new(),
+        )
+    }
+
+    pub fn cached_package_compatibility_cancellable(
+        &self,
+        package: &str,
+        cancellation: &PackageCompatibilityCancellation,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
         if !safe_logical_name(package) {
             return Err(PackageRuntimeError::InvalidQuery);
         }
+        cancellation.check()?;
         let _analysis = self
             .compatibility_analysis
             .lock()
             .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+        cancellation.check()?;
         self.clear_package_compatibility_review()?;
         let resolution = self.resolve(package)?;
+        cancellation.check()?;
         let package_count = resolution.as_str()?.lines().count();
         if package_count == 0 || package_count > 512 {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         for line in resolution.as_str()?.lines() {
+            cancellation.check()?;
             let payload = parse_resolved_payload(line)?;
             if !self.cached_package_artifacts_present(&payload)? {
                 return package_compatibility_output(
@@ -1188,8 +1231,11 @@ impl PackageRuntime {
             }
         }
         let page_size = rustix::param::page_size();
-        let content_digest = self.package_compatibility_content_digest(&resolution, page_size)?;
+        let content_digest =
+            self.package_compatibility_content_digest(&resolution, page_size, cancellation)?;
+        cancellation.check()?;
         if let Some(output) = self.load_package_compatibility_cache(&content_digest)? {
+            cancellation.check()?;
             if cached_compatibility_allows_mutation(&output)? {
                 self.publish_package_compatibility_review(package, &resolution)?;
             }
@@ -1203,15 +1249,18 @@ impl PackageRuntime {
         let mut diagnostic = None;
         let mut diagnostic_package = None;
         for line in resolution.as_str()?.lines() {
+            cancellation.check()?;
             let payload = parse_resolved_payload(line)?;
             let target = payload.name == package;
             let analysis = (|| {
+                cancellation.check()?;
                 self.verify_package(
                     payload.filename,
                     payload.name,
                     payload.version,
                     payload.size,
                 )?;
+                cancellation.check()?;
                 let archive = self
                     .arch_root
                     .join(PACKAGE_CACHE_DIRECTORY)
@@ -1224,12 +1273,13 @@ impl PackageRuntime {
                 if !metadata.is_file() || metadata.len() != payload.size {
                     return Err(PackageRuntimeError::InvalidPayload);
                 }
-                inspect_package_archive(
+                inspect_package_archive_cancellable(
                     &mut file,
                     payload.filename,
                     self.architecture,
                     page_size,
                     target,
+                    cancellation,
                 )
             })()
             .map_err(|error| {
@@ -1275,7 +1325,9 @@ impl PackageRuntime {
             diagnostic.unwrap_or(PackageCompatibilityDiagnostic::None),
             diagnostic_package,
         )?;
+        cancellation.check()?;
         self.publish_package_compatibility_cache(&content_digest, &output)?;
+        cancellation.check()?;
         if matches!(
             status,
             PackageCompatibilityStatus::BridgeEligible | PackageCompatibilityStatus::ManagedOnly
@@ -1289,6 +1341,7 @@ impl PackageRuntime {
         &self,
         resolution: &PackageResolution,
         page_size: usize,
+        cancellation: &PackageCompatibilityCancellation,
     ) -> Result<[u8; 32], PackageRuntimeError> {
         if !page_size.is_power_of_two() || !(4096..=64 * 1024).contains(&page_size) {
             return Err(PackageRuntimeError::InvalidPayload);
@@ -1303,6 +1356,7 @@ impl PackageRuntime {
         hasher.update((resolution.as_bytes().len() as u64).to_le_bytes());
         hasher.update(resolution.as_bytes());
         for line in resolution.as_str()?.lines() {
+            cancellation.check()?;
             let payload = parse_resolved_payload(line)?;
             let package = self
                 .arch_root
@@ -1314,6 +1368,7 @@ impl PackageRuntime {
                 PACKAGE_ARCHIVE_LIMIT,
                 b'P',
                 &mut hasher,
+                cancellation,
             )?;
             let signature = self
                 .arch_root
@@ -1325,8 +1380,10 @@ impl PackageRuntime {
                 PACKAGE_SIGNATURE_LIMIT,
                 b'S',
                 &mut hasher,
+                cancellation,
             )?;
         }
+        cancellation.check()?;
         Ok(hasher.finalize().into())
     }
 
@@ -5068,34 +5125,37 @@ fn process_package_capability_line(
     if !*in_files || line.is_empty() {
         return Ok(());
     }
-    if line.starts_with(b"/")
-        || line.contains(&0)
-        || line
+    let directory = line.ends_with(b"/");
+    let path = line.strip_suffix(b"/").unwrap_or(line);
+    if path.is_empty()
+        || path.starts_with(b"/")
+        || path.contains(&0)
+        || path
             .split(|byte| *byte == b'/')
             .any(|part| part.is_empty() || part == b"." || part == b"..")
     {
         return Err(PackageRuntimeError::InvalidResolution);
     }
-    if line.ends_with(b"/") {
+    if directory {
         return Ok(());
     }
 
-    if line.starts_with(b"usr/share/applications/") && line.ends_with(b".desktop") {
+    if path.starts_with(b"usr/share/applications/") && path.ends_with(b".desktop") {
         *capabilities |= PACKAGE_CAPABILITY_GRAPHICAL;
     }
-    if direct_command_path(line) {
+    if direct_command_path(path) {
         *capabilities |= PACKAGE_CAPABILITY_COMMAND_LINE;
     }
-    if line.starts_with(b"usr/include/")
-        || (line.starts_with(b"usr/lib/") && is_library_metadata_path(line))
-        || (line.starts_with(b"usr/share/pkgconfig/") && line.ends_with(b".pc"))
+    if path.starts_with(b"usr/include/")
+        || (path.starts_with(b"usr/lib/") && is_library_metadata_path(path))
+        || (path.starts_with(b"usr/share/pkgconfig/") && path.ends_with(b".pc"))
     {
         *capabilities |= PACKAGE_CAPABILITY_LIBRARY;
     }
-    if line.starts_with(b"usr/lib/systemd/")
-        || line.starts_with(b"usr/lib/udev/")
-        || line.starts_with(b"usr/lib/sysusers.d/")
-        || line.starts_with(b"usr/lib/tmpfiles.d/")
+    if path.starts_with(b"usr/lib/systemd/")
+        || path.starts_with(b"usr/lib/udev/")
+        || path.starts_with(b"usr/lib/sysusers.d/")
+        || path.starts_with(b"usr/lib/tmpfiles.d/")
     {
         *capabilities |= PACKAGE_CAPABILITY_SYSTEM;
     }
@@ -5302,7 +5362,9 @@ fn hash_package_compatibility_file(
     maximum_size: u64,
     role: u8,
     digest: &mut Sha256,
+    cancellation: &PackageCompatibilityCancellation,
 ) -> Result<(), PackageRuntimeError> {
+    cancellation.check()?;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
@@ -5325,6 +5387,7 @@ fn hash_package_compatibility_file(
     let mut buffer = [0_u8; 64 * 1024];
     let mut total = 0_u64;
     loop {
+        cancellation.check()?;
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
@@ -5335,6 +5398,7 @@ fn hash_package_compatibility_file(
             .ok_or(PackageRuntimeError::SizeMismatch)?;
         digest.update(&buffer[..count]);
     }
+    cancellation.check()?;
     if total != metadata.len() {
         return Err(PackageRuntimeError::SizeMismatch);
     }
@@ -5390,6 +5454,7 @@ fn is_lower_hex_sha256(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+#[cfg(test)]
 fn inspect_package_archive(
     archive: &mut File,
     filename: &str,
@@ -5397,6 +5462,25 @@ fn inspect_package_archive(
     page_size: usize,
     classify_target: bool,
 ) -> Result<PackageArchiveAnalysis, PackageRuntimeError> {
+    inspect_package_archive_cancellable(
+        archive,
+        filename,
+        architecture,
+        page_size,
+        classify_target,
+        &PackageCompatibilityCancellation::new(),
+    )
+}
+
+fn inspect_package_archive_cancellable(
+    archive: &mut File,
+    filename: &str,
+    architecture: RepositoryArchitecture,
+    page_size: usize,
+    classify_target: bool,
+    cancellation: &PackageCompatibilityCancellation,
+) -> Result<PackageArchiveAnalysis, PackageRuntimeError> {
+    cancellation.check()?;
     archive.seek(SeekFrom::Start(0))?;
     let (_, _, _, package_architecture) =
         parse_package_cache_filename(filename).ok_or(PackageRuntimeError::InvalidPayload)?;
@@ -5404,28 +5488,36 @@ fn inspect_package_archive(
     if !architecture_any && package_architecture != architecture.package_architecture() {
         return Err(PackageRuntimeError::InvalidPayload);
     }
-    if filename.ends_with(".pkg.tar.zst") {
+    let result = if filename.ends_with(".pkg.tar.zst") {
         let decoder = zstd::stream::read::Decoder::new(archive)?;
-        inspect_package_tar(
-            decoder,
+        inspect_package_tar_cancellable(
+            CancellableReader::new(decoder, cancellation),
             architecture,
             architecture_any,
             page_size,
             classify_target,
+            cancellation,
         )
     } else if filename.ends_with(".pkg.tar.xz") {
-        inspect_package_tar(
-            XzDecoder::new(archive),
+        inspect_package_tar_cancellable(
+            CancellableReader::new(XzDecoder::new(archive), cancellation),
             architecture,
             architecture_any,
             page_size,
             classify_target,
+            cancellation,
         )
     } else {
         Err(PackageRuntimeError::InvalidPayload)
+    };
+    if cancellation.is_cancelled() {
+        Err(PackageRuntimeError::Cancelled)
+    } else {
+        result
     }
 }
 
+#[cfg(test)]
 fn inspect_package_tar(
     reader: impl Read,
     architecture: RepositoryArchitecture,
@@ -5433,6 +5525,48 @@ fn inspect_package_tar(
     page_size: usize,
     classify_target: bool,
 ) -> Result<PackageArchiveAnalysis, PackageRuntimeError> {
+    inspect_package_tar_cancellable(
+        reader,
+        architecture,
+        architecture_any,
+        page_size,
+        classify_target,
+        &PackageCompatibilityCancellation::new(),
+    )
+}
+
+struct CancellableReader<'a, R> {
+    inner: R,
+    cancellation: &'a PackageCompatibilityCancellation,
+}
+
+impl<'a, R> CancellableReader<'a, R> {
+    fn new(inner: R, cancellation: &'a PackageCompatibilityCancellation) -> Self {
+        Self {
+            inner,
+            cancellation,
+        }
+    }
+}
+
+impl<R: Read> Read for CancellableReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.cancellation.check().map_err(io::Error::other)?;
+        let count = self.inner.read(buffer)?;
+        self.cancellation.check().map_err(io::Error::other)?;
+        Ok(count)
+    }
+}
+
+fn inspect_package_tar_cancellable(
+    reader: impl Read,
+    architecture: RepositoryArchitecture,
+    architecture_any: bool,
+    page_size: usize,
+    classify_target: bool,
+    cancellation: &PackageCompatibilityCancellation,
+) -> Result<PackageArchiveAnalysis, PackageRuntimeError> {
+    cancellation.check()?;
     if !page_size.is_power_of_two() || !(4096..=64 * 1024).contains(&page_size) {
         return Err(PackageRuntimeError::InvalidPayload);
     }
@@ -5442,6 +5576,7 @@ fn inspect_package_tar(
     let mut expanded_bytes = 0_u64;
     let mut header = [0_u8; PACKAGE_COMPATIBILITY_HEADER_BYTES];
     for entry in archive.entries()? {
+        cancellation.check()?;
         let mut entry = entry?;
         let path = entry.path()?;
         let entry_type = entry.header().entry_type();
@@ -5499,6 +5634,7 @@ fn inspect_package_tar(
         )
         .map_err(|_| PackageRuntimeError::OutputLimit)?;
         entry.read_exact(&mut header[..header_bytes])?;
+        cancellation.check()?;
         let mode = entry.header().mode()?;
         let executable = mode & 0o111 != 0;
         let elf = header[..header_bytes].starts_with(b"\x7fELF");
@@ -5528,6 +5664,7 @@ fn inspect_package_tar(
     if entry_count == 0 {
         return Err(PackageRuntimeError::InvalidPayload);
     }
+    cancellation.check()?;
     Ok(analysis)
 }
 
@@ -6687,6 +6824,23 @@ mod tests {
         output
     }
 
+    struct CancelOnFirstRead<R> {
+        inner: R,
+        cancellation: PackageCompatibilityCancellation,
+        first: bool,
+    }
+
+    impl<R: Read> Read for CancelOnFirstRead<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.inner.read(buffer)?;
+            if self.first {
+                self.first = false;
+                self.cancellation.cancel();
+            }
+            Ok(count)
+        }
+    }
+
     fn elf_header(machine: u16) -> [u8; 64] {
         let mut header = [0_u8; 64];
         header[..4].copy_from_slice(b"\x7fELF");
@@ -7576,7 +7730,8 @@ fixture-064\t1.0.64-1\t1\t0\t0\nfixture-065\t1.0.65-1\t0\t0\t0\n",
         tree.local_package(
             "desktop-tool-1.0-1",
             "desktop-tool",
-            b"%FILES%\nusr/bin/desktop-tool\nusr/share/applications/desktop-tool.desktop\n\n",
+            b"%FILES%\nusr/\nusr/bin/\nusr/bin/desktop-tool\nusr/share/\n\
+usr/share/applications/\nusr/share/applications/desktop-tool.desktop\n\n",
         );
         tree.local_package(
             "development-kit-1.0-1",
@@ -7672,6 +7827,26 @@ unknown-metadata\t1.0-1\t1\t0\t0\n",
                 diagnostic: None,
             },
         );
+    }
+
+    #[test]
+    fn verified_archive_analysis_checks_cancellation_during_stream_reads() {
+        let archive = package_tar(&[("usr/bin/tool", 0o755, b"#!/bin/sh\n")]);
+        let cancellation = PackageCompatibilityCancellation::new();
+        let reader = CancelOnFirstRead {
+            inner: Cursor::new(archive),
+            cancellation: cancellation.clone(),
+            first: true,
+        };
+        let result = inspect_package_tar_cancellable(
+            CancellableReader::new(reader, &cancellation),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+            &cancellation,
+        );
+        assert!(matches!(result, Err(PackageRuntimeError::Cancelled)));
     }
 
     #[test]
@@ -7986,18 +8161,30 @@ https://geo.mirror.pkgbuild.com/core/os/x86_64/{filename}\t7\n"
             .into_bytes(),
         };
         let original = runtime
-            .package_compatibility_content_digest(&resolution, 4096)
+            .package_compatibility_content_digest(
+                &resolution,
+                4096,
+                &PackageCompatibilityCancellation::new(),
+            )
             .expect("original digest");
         assert_eq!(
             original,
             runtime
-                .package_compatibility_content_digest(&resolution, 4096)
+                .package_compatibility_content_digest(
+                    &resolution,
+                    4096,
+                    &PackageCompatibilityCancellation::new(),
+                )
                 .expect("stable digest"),
         );
         assert_ne!(
             original,
             runtime
-                .package_compatibility_content_digest(&resolution, 16 * 1024)
+                .package_compatibility_content_digest(
+                    &resolution,
+                    16 * 1024,
+                    &PackageCompatibilityCancellation::new(),
+                )
                 .expect("page-size digest"),
         );
         let mut changed_trust = runtime.clone();
@@ -8007,14 +8194,22 @@ https://geo.mirror.pkgbuild.com/core/os/x86_64/{filename}\t7\n"
         assert_ne!(
             original,
             changed_trust
-                .package_compatibility_content_digest(&resolution, 4096)
+                .package_compatibility_content_digest(
+                    &resolution,
+                    4096,
+                    &PackageCompatibilityCancellation::new(),
+                )
                 .expect("verification-source digest"),
         );
         fs::write(&signature_path, b"Signature").expect("changed signature");
         assert_ne!(
             original,
             runtime
-                .package_compatibility_content_digest(&resolution, 4096)
+                .package_compatibility_content_digest(
+                    &resolution,
+                    4096,
+                    &PackageCompatibilityCancellation::new(),
+                )
                 .expect("signature digest"),
         );
         fs::write(&signature_path, b"signature").expect("restore signature");
@@ -8022,7 +8217,11 @@ https://geo.mirror.pkgbuild.com/core/os/x86_64/{filename}\t7\n"
         assert_ne!(
             original,
             runtime
-                .package_compatibility_content_digest(&resolution, 4096)
+                .package_compatibility_content_digest(
+                    &resolution,
+                    4096,
+                    &PackageCompatibilityCancellation::new(),
+                )
                 .expect("package digest"),
         );
     }

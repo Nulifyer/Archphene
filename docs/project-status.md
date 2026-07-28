@@ -162,7 +162,13 @@ Android list rows for name, exact version, verified capability class, and
 explicit/dependency reason. Rust derives Graphical, CLI, Library, and System
 bits only from each installed package's bounded pacman `files` record; missing
 metadata remains visibly Not analyzed instead of being guessed from names or
-descriptions.
+descriptions. The final dual-device inventory gate also caught a parser
+regression in ordinary pacman `files` records: directory entries legitimately
+end in `/`. Rust now removes exactly that trailing delimiter before validating
+the bounded relative path, ignores the directory itself for capability
+classification, and still rejects empty segments, traversal, absolute paths,
+and embedded NULs. The current exact builds enumerate 139 x86_64 and 138
+AArch64 packages without hiding the Installed view behind a refresh error.
 Installed and Search results are distinct retained modes, selecting an
 installed row routes to exact package details, and a changed installed count
 returns to the installed view. A debug-only 67-package local-database fixture
@@ -222,9 +228,23 @@ checksummed mode-0600 result, discards corrupt derived records, invalidates any
 changed payload/signature/trust input, and caps the cache at 1,024 entries. A
 cache hit recreates only the same single-use in-memory
 capability; pacman mutation still reverifies the closure. Cache-hit
-install/tamper/remove/reinstall gates pass on both exact ABIs. Granular
-first-pass cancellation and the post-install launcher/toolkit/broker capability
-result remain pending.
+install/tamper/remove/reinstall gates pass on both exact ABIs.
+
+The uncached review is now cooperatively cancellable without JNI callbacks or
+per-entry managed allocations. One shared Rust token is checked at every
+64 KiB content-hash chunk, decompressor read, archive-entry boundary, package
+verification boundary, and result-publication boundary. Details renders the
+active compatibility phase in the existing activity card and exposes Cancel;
+install/update uses the same token, and Service shutdown cancels it before
+joining workers. A prepare/cancel handshake removes the race between the
+managed cancellation request and entry into the blocking native review. Cold
+139-package x86_64 and 138-package AArch64 gates cancel before mutation,
+preserve the package database and archive/signature bytes, leave no partials or
+commit intent, and pass scoped fatal logs plus inspected full-device light/dark
+screenshots. The normal Samsung signed-package lifecycle still passes
+verify, deliberate cache tamper/redownload, removal, cache reinstall, Terminal
+execution, and process restart afterward. The post-install
+launcher/toolkit/broker capability result remains pending.
 The local Binder path makes the Queued boundary deterministic in code: after
 the journal commit, the Service posts worker start to the next main-Looper turn
 and the Activity synchronously consumes the new job revision before its Install

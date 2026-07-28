@@ -14,7 +14,13 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
-        if (intent.action != ACTION_START && intent.action != ACTION_START_INTERRUPTED_REMOVAL) {
+        if (
+            intent.action != ACTION_START &&
+            intent.action != ACTION_START_INTERRUPTED_REMOVAL &&
+            intent.action != ACTION_ARM_COMPATIBILITY_REVIEW &&
+            intent.action != ACTION_CANCEL_COMPATIBILITY_REVIEW &&
+            intent.action != ACTION_ARM_PACKAGE_WORKER
+        ) {
             return
         }
         val token = intent.getStringExtra(EXTRA_TOKEN)
@@ -40,16 +46,25 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
                 ) {
                     val binder = service as? ArchpheneRuntimeService.LocalBinder
                     val started =
-                        if (intent.action == ACTION_START_INTERRUPTED_REMOVAL) {
-                            binder?.startDebugInterruptedRemovalFixture(
-                                packageName,
-                                holdMillis.toLong(),
-                            ) == true
-                        } else {
-                            binder?.startDebugPackagePhaseFixture(
-                                packageName,
-                                holdMillis.toLong(),
-                            ) == true
+                        when (intent.action) {
+                            ACTION_START_INTERRUPTED_REMOVAL ->
+                                binder?.startDebugInterruptedRemovalFixture(
+                                    packageName,
+                                    holdMillis.toLong(),
+                                ) == true
+                            ACTION_ARM_COMPATIBILITY_REVIEW ->
+                                binder?.armDebugPackageCompatibilityReviewHold(
+                                    holdMillis.toLong(),
+                                ) == true
+                            ACTION_CANCEL_COMPATIBILITY_REVIEW ->
+                                binder?.cancelPackageOperation() == true
+                            ACTION_ARM_PACKAGE_WORKER ->
+                                binder?.armDebugPackageWorkerHold(holdMillis.toLong()) == true
+                            else ->
+                                binder?.startDebugPackagePhaseFixture(
+                                    packageName,
+                                    holdMillis.toLong(),
+                                ) == true
                         }
                     Log.i(TAG, "Started package phases=$started token=$token")
                     applicationContext.unbindService(this)
@@ -81,6 +96,12 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
         private const val ACTION_START = "org.archphene.app.debug.action.START_PACKAGE_PHASES"
         private const val ACTION_START_INTERRUPTED_REMOVAL =
             "org.archphene.app.debug.action.START_INTERRUPTED_PACKAGE_REMOVAL"
+        private const val ACTION_ARM_COMPATIBILITY_REVIEW =
+            "org.archphene.app.debug.action.ARM_PACKAGE_COMPATIBILITY_REVIEW"
+        private const val ACTION_CANCEL_COMPATIBILITY_REVIEW =
+            "org.archphene.app.debug.action.CANCEL_PACKAGE_COMPATIBILITY_REVIEW"
+        private const val ACTION_ARM_PACKAGE_WORKER =
+            "org.archphene.app.debug.action.ARM_PACKAGE_WORKER"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_HOLD_MILLIS = "hold-ms"
