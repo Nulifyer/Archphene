@@ -1,5 +1,6 @@
 package org.archphene.app
 
+import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -141,6 +142,8 @@ internal class RuntimeSurfaceView(
     private val rowGlyphScratch = CharArray(MAX_COLUMNS * MAX_GRAPHEME_UTF16_UNITS)
     private var styledForegroundColors = IntArray(0)
     private var backgroundColors = IntArray(0)
+    private var blinkingRows = BooleanArray(0)
+    private var blinkingRowCount = 0
     private var rowNodes = emptyArray<RenderNode>()
     private var rows = 0
     private var columns = 0
@@ -149,7 +152,8 @@ internal class RuntimeSurfaceView(
     private var cursorVisible = false
     private var terminalFlags = 0
     private var cursorBlinkPhaseVisible = true
-    private var cursorBlinkPosted = false
+    private var textBlinkPhaseVisible = true
+    private var blinkAnimationPosted = false
     private var mousePointerId = NO_MOUSE_POINTER
     private var mouseLocalSelectionOverride = false
     private var mousePressedButton = MOUSE_BUTTON_PRIMARY
@@ -247,18 +251,35 @@ internal class RuntimeSurfaceView(
             resources.displayMetrics,
         )
     private val selectionAutoScrollRunnable = Runnable { runSelectionAutoScroll() }
-    private val cursorBlinkRunnable =
+    private val blinkAnimationRunnable =
         object : Runnable {
             override fun run() {
-                cursorBlinkPosted = false
-                if (!shouldBlinkCursor()) {
-                    stopCursorBlink(revealCursor = true)
+                blinkAnimationPosted = false
+                val blinkCursor = shouldBlinkCursor()
+                val blinkText = shouldBlinkText()
+                if (!blinkCursor && !blinkText) {
+                    stopBlinkAnimation(revealContent = true)
                     return
                 }
-                cursorBlinkPhaseVisible = !cursorBlinkPhaseVisible
-                recordRow(cursorRow)
+                if (blinkCursor) {
+                    cursorBlinkPhaseVisible = !cursorBlinkPhaseVisible
+                }
+                if (blinkText) {
+                    textBlinkPhaseVisible = !textBlinkPhaseVisible
+                }
+                for (row in blinkingRows.indices) {
+                    if (blinkingRows[row]) {
+                        recordRow(row)
+                    }
+                }
+                if (
+                    blinkCursor &&
+                    (cursorRow !in blinkingRows.indices || !blinkingRows[cursorRow])
+                ) {
+                    recordRow(cursorRow)
+                }
                 invalidate()
-                scheduleCursorBlink()
+                scheduleBlinkAnimation()
             }
         }
 
@@ -328,15 +349,15 @@ internal class RuntimeSurfaceView(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        updateCursorBlinkScheduling()
+        restartBlinkAnimation()
     }
 
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
         if (hasWindowFocus) {
-            restartCursorBlink()
+            restartBlinkAnimation()
         } else {
-            stopCursorBlink(revealCursor = true)
+            stopBlinkAnimation(revealContent = true)
         }
         reportTerminalFocusChange()
     }
@@ -344,9 +365,9 @@ internal class RuntimeSurfaceView(
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(visibility)
         if (visibility == VISIBLE) {
-            restartCursorBlink()
+            restartBlinkAnimation()
         } else {
-            stopCursorBlink(revealCursor = true)
+            stopBlinkAnimation(revealContent = true)
         }
         reportTerminalFocusChange()
     }
@@ -564,7 +585,7 @@ internal class RuntimeSurfaceView(
 
     override fun onDetachedFromWindow() {
         stopSelectionAutoScroll()
-        stopCursorBlink(revealCursor = false)
+        stopBlinkAnimation(revealContent = false)
         removeCallbacks(accessibilityEventRunnable)
         accessibilityEventPosted = false
         accessibilityTextChanged = false
@@ -876,6 +897,8 @@ internal class RuntimeSurfaceView(
             }
             styledForegroundColors = IntArray(rows * columns) { DEFAULT_FOREGROUND }
             backgroundColors = IntArray(rows * columns) { DEFAULT_BACKGROUND }
+            blinkingRows = BooleanArray(rows)
+            blinkingRowCount = 0
             rowNodes = Array(rows) { row -> RenderNode("terminal-row-$row") }
             positionRowNodes()
         }
@@ -890,6 +913,7 @@ internal class RuntimeSurfaceView(
         var offset = DAMAGE_HEADER_SIZE
         for (row in dirtyStart until dirtyEnd) {
             val rowStart = row * columns
+            var rowBlinks = false
             for (column in 0 until columns) {
                 val cell = rowStart + column
                 val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
@@ -912,21 +936,31 @@ internal class RuntimeSurfaceView(
                         }
                 }
                 glyphLengths[cell] = graphemeLength.toByte()
-                glyphWidths[cell] =
+                val glyphWidth =
                     (damageBuffer.get(offset + 73).toInt() and 0xff)
                         .coerceIn(0, 2)
-                        .toByte()
+                val attributes = damageBuffer.get(offset + 72).toInt() and 0xff
                 styledForegroundColors[cell] =
                     damageBuffer.getInt(offset + 64) or
-                        ((damageBuffer.get(offset + 72).toInt() and 0x7f) shl ATTRIBUTE_SHIFT)
+                        ((attributes and ATTRIBUTE_STYLE_MASK) shl ATTRIBUTE_SHIFT)
                 backgroundColors[cell] = damageBuffer.getInt(offset + 68)
+                if (attributes and ATTRIBUTE_BLINK != 0) {
+                    glyphWidths[cell] = (glyphWidth or GLYPH_BLINK_FLAG).toByte()
+                    rowBlinks = true
+                } else {
+                    glyphWidths[cell] = glyphWidth.toByte()
+                }
                 offset += DAMAGE_CELL_SIZE
+            }
+            if (blinkingRows[row] != rowBlinks) {
+                blinkingRows[row] = rowBlinks
+                blinkingRowCount += if (rowBlinks) 1 else -1
             }
         }
         val cursorContentChanged =
             cursorRow in dirtyStart until dirtyEnd
         if (cursorPresentationChanged || cursorContentChanged) {
-            cancelCursorBlink()
+            cancelBlinkAnimation()
             cursorBlinkPhaseVisible = true
         }
         if (dirtyStart < dirtyEnd) {
@@ -961,7 +995,7 @@ internal class RuntimeSurfaceView(
                 terminalFlags and FOCUS_REPORTING_FLAG != 0
             terminalFocused = terminalHasInputFocus()
         }
-        updateCursorBlinkScheduling()
+        updateBlinkAnimationScheduling()
         if (contentChanged) {
             scheduleTerminalAccessibilityEvent(textChanged = true)
         }
@@ -981,15 +1015,18 @@ internal class RuntimeSurfaceView(
         while (runStart < columns) {
             val styledForeground = styledForegroundColors[start + runStart]
             val backgroundColor = backgroundColors[start + runStart]
+            val blinking = cellBlinks(start + runStart)
             val attributes = styledForeground ushr ATTRIBUTE_SHIFT
             var runEnd = runStart + 1
             while (
                 runEnd < columns &&
                 styledForegroundColors[start + runEnd] == styledForeground &&
-                backgroundColors[start + runEnd] == backgroundColor
+                backgroundColors[start + runEnd] == backgroundColor &&
+                cellBlinks(start + runEnd) == blinking
             ) {
                 runEnd++
             }
+            val blinkHidden = blinking && !textBlinkPhaseVisible
             val foregroundColor = styledForeground and COLOR_VALUE_MASK
             val inverse =
                 (attributes and ATTRIBUTE_INVERSE != 0) xor
@@ -1027,22 +1064,25 @@ internal class RuntimeSurfaceView(
             textPaint.isFakeBoldText = attributes and ATTRIBUTE_BOLD != 0
             textPaint.textSkewX =
                 if (attributes and ATTRIBUTE_ITALIC != 0) ITALIC_TEXT_SKEW else 0f
-            textPaint.isStrikeThruText = attributes and ATTRIBUTE_STRIKE != 0
-            for (column in runStart until runEnd) {
-                if (isBlankGlyph(start + column)) {
-                    continue
+            textPaint.isStrikeThruText =
+                !blinkHidden && attributes and ATTRIBUTE_STRIKE != 0
+            if (!blinkHidden) {
+                for (column in runStart until runEnd) {
+                    if (isBlankGlyph(start + column)) {
+                        continue
+                    }
+                    val glyphCount = packGlyphRun(start + column, start + column + 1)
+                    canvas.drawText(
+                        rowGlyphScratch,
+                        0,
+                        glyphCount,
+                        CONTENT_PADDING + column * cellWidth,
+                        baseline,
+                        textPaint,
+                    )
                 }
-                val glyphCount = packGlyphRun(start + column, start + column + 1)
-                canvas.drawText(
-                    rowGlyphScratch,
-                    0,
-                    glyphCount,
-                    CONTENT_PADDING + column * cellWidth,
-                    baseline,
-                    textPaint,
-                )
             }
-            if (attributes and ATTRIBUTE_UNDERLINE != 0) {
+            if (!blinkHidden && attributes and ATTRIBUTE_UNDERLINE != 0) {
                 backgroundPaint.color = foreground
                 canvas.drawRect(
                     CONTENT_PADDING + runStart * cellWidth,
@@ -1118,47 +1158,69 @@ internal class RuntimeSurfaceView(
         rowNodes[row].endRecording()
     }
 
-    private fun shouldBlinkCursor(): Boolean =
+    private fun canAnimateBlink(): Boolean =
+        ValueAnimator.areAnimatorsEnabled() &&
         isAttachedToWindow &&
             hasWindowFocus() &&
             windowVisibility == VISIBLE &&
-            isShown &&
+            isShown
+
+    private fun shouldBlinkCursor(): Boolean =
+        canAnimateBlink() &&
             cursorVisible &&
             terminalFlags and CURSOR_BLINK_FLAG != 0
 
-    private fun scheduleCursorBlink() {
-        if (!cursorBlinkPosted && shouldBlinkCursor()) {
-            cursorBlinkPosted = true
-            postDelayed(cursorBlinkRunnable, CURSOR_BLINK_INTERVAL_MILLIS)
+    private fun shouldBlinkText(): Boolean =
+        canAnimateBlink() && blinkingRowCount > 0
+
+    private fun scheduleBlinkAnimation() {
+        if (!blinkAnimationPosted && (shouldBlinkCursor() || shouldBlinkText())) {
+            blinkAnimationPosted = true
+            postDelayed(blinkAnimationRunnable, BLINK_INTERVAL_MILLIS)
         }
     }
 
-    private fun cancelCursorBlink() {
-        if (cursorBlinkPosted) {
-            removeCallbacks(cursorBlinkRunnable)
-            cursorBlinkPosted = false
+    private fun cancelBlinkAnimation() {
+        if (blinkAnimationPosted) {
+            removeCallbacks(blinkAnimationRunnable)
+            blinkAnimationPosted = false
         }
     }
 
-    private fun stopCursorBlink(revealCursor: Boolean) {
-        cancelCursorBlink()
-        if (revealCursor && !cursorBlinkPhaseVisible) {
+    private fun stopBlinkAnimation(revealContent: Boolean) {
+        cancelBlinkAnimation()
+        var needsRedraw = false
+        var cursorRowRecorded = false
+        if (revealContent && !cursorBlinkPhaseVisible) {
             cursorBlinkPhaseVisible = true
             recordRow(cursorRow)
+            needsRedraw = true
+            cursorRowRecorded = true
+        }
+        if (revealContent && !textBlinkPhaseVisible) {
+            textBlinkPhaseVisible = true
+            for (row in blinkingRows.indices) {
+                if (blinkingRows[row] && (row != cursorRow || !cursorRowRecorded)) {
+                    recordRow(row)
+                }
+            }
+            needsRedraw = true
+        }
+        if (needsRedraw) {
             invalidate()
         }
     }
 
-    private fun restartCursorBlink() {
-        stopCursorBlink(revealCursor = true)
-        scheduleCursorBlink()
+    private fun restartBlinkAnimation() {
+        stopBlinkAnimation(revealContent = true)
+        scheduleBlinkAnimation()
     }
 
-    private fun updateCursorBlinkScheduling() {
-        if (shouldBlinkCursor()) {
-            scheduleCursorBlink()
+    private fun updateBlinkAnimationScheduling() {
+        if (shouldBlinkCursor() || shouldBlinkText()) {
+            scheduleBlinkAnimation()
         } else {
-            stopCursorBlink(revealCursor = true)
+            stopBlinkAnimation(revealContent = true)
         }
     }
 
@@ -1465,7 +1527,7 @@ internal class RuntimeSurfaceView(
     ): Int {
         var output = 0
         for (cell in start until end) {
-            if (glyphWidths[cell].toInt() == 0) {
+            if (terminalCellWidth(cell) == 0) {
                 continue
             }
             val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
@@ -1707,7 +1769,7 @@ internal class RuntimeSurfaceView(
         val column = (cell % columns).toInt()
         val visibleCell = visibleRow.toInt() * columns + column
         val cellSpan =
-            if (!start && glyphWidths[visibleCell].toInt() == 2) {
+            if (!start && terminalCellWidth(visibleCell) == 2) {
                 2
             } else {
                 1
@@ -1741,7 +1803,7 @@ internal class RuntimeSurfaceView(
         val column = (cell % columns).toInt()
         val visibleCell = visibleRow.toInt() * columns + column
         val cellSpan =
-            if (!start && glyphWidths[visibleCell].toInt() == 2) {
+            if (!start && terminalCellWidth(visibleCell) == 2) {
                 2
             } else {
                 1
@@ -1832,7 +1894,7 @@ internal class RuntimeSurfaceView(
                 .toInt()
                 .coerceIn(0, columns - 1)
         val rowStart = row * columns
-        if (glyphWidths[rowStart + column].toInt() == 0 && column > 0) {
+        if (terminalCellWidth(rowStart + column) == 0 && column > 0) {
             column--
         }
         return rowStart + column
@@ -2478,8 +2540,9 @@ internal class RuntimeSurfaceView(
         ((width - CONTENT_PADDING * 2) / cellWidth).toInt().coerceIn(MIN_COLUMNS, MAX_COLUMNS)
 
     private fun clearTerminal() {
-        stopCursorBlink(revealCursor = false)
+        stopBlinkAnimation(revealContent = false)
         cursorBlinkPhaseVisible = true
+        textBlinkPhaseVisible = true
         resetMouseGesture()
         terminalFocusStateKnown = false
         terminalFocused = false
@@ -2509,6 +2572,8 @@ internal class RuntimeSurfaceView(
         glyphWidths = ByteArray(0)
         styledForegroundColors = IntArray(0)
         backgroundColors = IntArray(0)
+        blinkingRows = BooleanArray(0)
+        blinkingRowCount = 0
         rowNodes = emptyArray()
         contentDescription = context.getString(R.string.linux_session_display)
         invalidate()
@@ -2531,7 +2596,7 @@ internal class RuntimeSurfaceView(
                 end--
             }
             for (cell in start until start + end) {
-                if (glyphWidths[cell].toInt() == 0) {
+                if (terminalCellWidth(cell) == 0) {
                     continue
                 }
                 val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
@@ -2628,7 +2693,7 @@ internal class RuntimeSurfaceView(
                 val requestedEnd = targetColumn.coerceIn(0, end)
                 for (column in 0 until requestedEnd) {
                     val cell = start + column
-                    if (glyphWidths[cell].toInt() != 0) {
+                    if (terminalCellWidth(cell) != 0) {
                         offset += glyphUtf16Length(cell)
                     }
                 }
@@ -2636,7 +2701,7 @@ internal class RuntimeSurfaceView(
             }
             for (column in 0 until end) {
                 val cell = start + column
-                if (glyphWidths[cell].toInt() != 0) {
+                if (terminalCellWidth(cell) != 0) {
                     offset += glyphUtf16Length(cell)
                 }
             }
@@ -2668,7 +2733,7 @@ internal class RuntimeSurfaceView(
             }
             for (column in 0 until end) {
                 val cell = start + column
-                if (glyphWidths[cell].toInt() == 0) {
+                if (terminalCellWidth(cell) == 0) {
                     continue
                 }
                 val documentCell =
@@ -2735,9 +2800,15 @@ internal class RuntimeSurfaceView(
     }
 
     private fun isBlankGlyph(cell: Int): Boolean =
-        glyphWidths[cell].toInt() == 1 &&
+        terminalCellWidth(cell) == 1 &&
             glyphLengths[cell].toInt() == 1 &&
             glyphCodepoints[cell * MAX_GRAPHEME_CODEPOINTS] == ' '.code
+
+    private fun terminalCellWidth(cell: Int): Int =
+        glyphWidths[cell].toInt() and GLYPH_WIDTH_MASK
+
+    private fun cellBlinks(cell: Int): Boolean =
+        glyphWidths[cell].toInt() and GLYPH_BLINK_FLAG != 0
 
     private fun setViewportOffset(requestedOffset: Int): Boolean {
         val nextOffset = requestedOffset.coerceIn(0, historyRows)
@@ -2853,7 +2924,7 @@ internal class RuntimeSurfaceView(
         private const val FAINT_TOTAL_WEIGHT =
             FAINT_FOREGROUND_WEIGHT + FAINT_BACKGROUND_WEIGHT
         private const val DAMAGE_MAGIC = 0x4d525441
-        private const val DAMAGE_VERSION = 5
+        private const val DAMAGE_VERSION = 6
         private const val DAMAGE_HEADER_SIZE = 48
         private const val DAMAGE_CELL_SIZE = 76
         private const val MAX_GRAPHEME_CODEPOINTS = 16
@@ -2866,7 +2937,7 @@ internal class RuntimeSurfaceView(
         private const val MAX_COLUMNS = 400
         private const val ACCESSIBILITY_CHARACTER_LIMIT = 8 * 1024
         private const val ACCESSIBILITY_EVENT_DELAY_MILLIS = 100L
-        private const val CURSOR_BLINK_INTERVAL_MILLIS = 500L
+        private const val BLINK_INTERVAL_MILLIS = 500L
         private const val TERMINAL_INPUT_LIMIT = 8 * 1024
         private const val MAX_COMPOSING_CHARACTERS = 2 * 1024
         private const val MAX_CLIPBOARD_CHARACTERS = 2 * 1024
@@ -2915,6 +2986,10 @@ internal class RuntimeSurfaceView(
         private const val ATTRIBUTE_ITALIC = 1 shl 4
         private const val ATTRIBUTE_STRIKE = 1 shl 5
         private const val ATTRIBUTE_HIDDEN = 1 shl 6
+        private const val ATTRIBUTE_BLINK = 1 shl 7
+        private const val ATTRIBUTE_STYLE_MASK = 0x7f
+        private const val GLYPH_WIDTH_MASK = 0x7f
+        private const val GLYPH_BLINK_FLAG = 0x80
         private const val TERMINAL_BACKGROUND = 0xff1f2326.toInt()
         private const val CURSOR_COLOR = 0xff7dd3fc.toInt()
         private const val CURSOR_BLOCK_COLOR = 0x997dd3fc.toInt()

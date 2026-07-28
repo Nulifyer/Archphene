@@ -26,7 +26,7 @@ fn warmed_parser_grid_and_damage_path_does_not_allocate() {
     let mut terminal = Terminal::new(24, 80).expect("terminal");
     let mut damage = vec![0; MAX_DAMAGE_BYTES];
     let output = b"\x1b[?1;66;67;2004h\x1b=\x1b[20h\x1b[?1049h\rprogress \
-        \x1b[32;1mcomplete\x1b[38;5;196;48;2;0;95;175m!\x1b[0m \
+        \x1b[32;1;5mcomplete\x1b[25m\x1b[38;5;196;48;2;0;95;175m!\x1b[0m \
         \x1b(0lqk\x1b(B\xe2\x98\x83\x1b[K\
         \x1b[4h\x1b[2@xx\x1b[4l\x1b[2P\x1b[3X\x1b[2L\x1b[2M\
         \x1b[2S\x1b[2T\x1b[2b\x1b[3d\x1b[7`\x1b[2E\x1b[2F\

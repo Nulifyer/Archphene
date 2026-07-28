@@ -8,7 +8,7 @@ pub const MAX_ROWS: u16 = 200;
 pub const MIN_COLUMNS: u16 = 2;
 pub const MAX_COLUMNS: u16 = 400;
 pub const MAX_GRAPHEME_CODEPOINTS: usize = 16;
-pub const DAMAGE_PROTOCOL_VERSION: u32 = 5;
+pub const DAMAGE_PROTOCOL_VERSION: u32 = 6;
 pub const DAMAGE_HEADER_SIZE: usize = 48;
 pub const DAMAGE_CELL_SIZE: usize = 76;
 pub const MAX_DAMAGE_BYTES: usize =
@@ -61,7 +61,7 @@ const ATTRIBUTE_FAINT: u8 = 1 << 3;
 const ATTRIBUTE_ITALIC: u8 = 1 << 4;
 const ATTRIBUTE_STRIKE: u8 = 1 << 5;
 const ATTRIBUTE_HIDDEN: u8 = 1 << 6;
-const ATTRIBUTE_GRAPHEME_TRUNCATED: u8 = 1 << 7;
+const ATTRIBUTE_BLINK: u8 = 1 << 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cell {
@@ -72,6 +72,7 @@ pub struct Cell {
     pub attributes: u8,
     pub grapheme_len: u8,
     pub width: u8,
+    grapheme_truncated: bool,
 }
 
 impl Cell {
@@ -84,6 +85,7 @@ impl Cell {
             attributes: 0,
             grapheme_len: 1,
             width: 1,
+            grapheme_truncated: false,
         }
     }
 
@@ -96,6 +98,7 @@ impl Cell {
             attributes,
             grapheme_len: 0,
             width: 0,
+            grapheme_truncated: false,
         }
     }
 
@@ -224,7 +227,7 @@ impl Scrollback {
             self.write_byte(cell.grapheme_len);
             self.write_byte(cell.width);
             self.write_byte(cell.attributes);
-            self.write_byte(0);
+            self.write_byte(u8::from(cell.grapheme_truncated));
             self.write_u32(cell.foreground);
             self.write_u32(cell.background);
             for index in 0..usize::from(cell.grapheme_len) {
@@ -350,6 +353,7 @@ impl Scrollback {
                 attributes: self.read_byte(source + 2),
                 grapheme_len: grapheme_len.min(MAX_GRAPHEME_CODEPOINTS as u8),
                 width: self.read_byte(source + 1).min(2),
+                grapheme_truncated: self.read_byte(source + 3) != 0,
             };
             for codepoint_index in 0..usize::from(cell.grapheme_len) {
                 cell.set_codepoint(
@@ -406,6 +410,7 @@ impl Scrollback {
                     attributes,
                     grapheme_len: grapheme_len.min(MAX_GRAPHEME_CODEPOINTS as u8),
                     width: width as u8,
+                    grapheme_truncated: self.read_byte(source + 3) != 0,
                 };
                 for codepoint_index in 0..usize::from(cell.grapheme_len) {
                     cell.set_codepoint(
@@ -2207,6 +2212,7 @@ impl Terminal {
             attributes: self.attributes,
             grapheme_len: 1,
             width,
+            grapheme_truncated: false,
         };
         if width == 2 {
             self.cells[index + 1] =
@@ -2233,7 +2239,7 @@ impl Terminal {
         if cell.grapheme_len == 0 {
             return false;
         }
-        if cell.attributes & ATTRIBUTE_GRAPHEME_TRUNCATED != 0 && codepoint_width(codepoint) == 0 {
+        if cell.grapheme_truncated && codepoint_width(codepoint) == 0 {
             return true;
         }
         let length = usize::from(cell.grapheme_len);
@@ -2247,7 +2253,7 @@ impl Terminal {
         }
         if length >= MAX_GRAPHEME_CODEPOINTS {
             cell.set_codepoint(MAX_GRAPHEME_CODEPOINTS - 1, 0xfffd);
-            cell.attributes |= ATTRIBUTE_GRAPHEME_TRUNCATED;
+            cell.grapheme_truncated = true;
             self.cells[index] = cell;
             self.last_printed = Some(cell);
             self.mark_dirty(row);
@@ -2681,12 +2687,14 @@ impl Terminal {
                 2 => self.attributes |= ATTRIBUTE_FAINT,
                 3 => self.attributes |= ATTRIBUTE_ITALIC,
                 4 | 21 => self.attributes |= ATTRIBUTE_UNDERLINE,
+                5 | 6 => self.attributes |= ATTRIBUTE_BLINK,
                 7 => self.attributes |= ATTRIBUTE_INVERSE,
                 8 => self.attributes |= ATTRIBUTE_HIDDEN,
                 9 => self.attributes |= ATTRIBUTE_STRIKE,
                 22 => self.attributes &= !(ATTRIBUTE_BOLD | ATTRIBUTE_FAINT),
                 23 => self.attributes &= !ATTRIBUTE_ITALIC,
                 24 => self.attributes &= !ATTRIBUTE_UNDERLINE,
+                25 => self.attributes &= !ATTRIBUTE_BLINK,
                 27 => self.attributes &= !ATTRIBUTE_INVERSE,
                 28 => self.attributes &= !ATTRIBUTE_HIDDEN,
                 29 => self.attributes &= !ATTRIBUTE_STRIKE,
@@ -3333,7 +3341,7 @@ mod tests {
             cell.codepoint(MAX_GRAPHEME_CODEPOINTS - 1),
             u32::from('\u{fffd}')
         );
-        assert_ne!(cell.attributes & ATTRIBUTE_GRAPHEME_TRUNCATED, 0);
+        assert!(cell.grapheme_truncated);
         assert_eq!(terminal.cell(0, 1).unwrap().codepoint, u32::from('Z'));
         assert_eq!(terminal.cursor(), (0, 2));
     }
@@ -3519,6 +3527,7 @@ mod tests {
             attributes: 0,
             grapheme_len: 1,
             width: 2,
+            grapheme_truncated: false,
         };
         let continuation = Cell::continuation(DEFAULT_FOREGROUND, DEFAULT_BACKGROUND, 0);
         let row = [wide, continuation, wide, continuation];
@@ -3732,18 +3741,27 @@ mod tests {
     #[test]
     fn sgr_styles_set_and_reset_independently() {
         let mut terminal = Terminal::new(2, 8).unwrap();
-        terminal.feed(b"\x1b[1;2;3;4;7;8;9mA\x1b[22;23;24;27;28;29mB");
+        terminal.feed(b"\x1b[1;2;3;4;5;7;8;9mA\x1b[22;23;24;25;27;28;29mB");
         assert_eq!(
             terminal.cell(0, 0).unwrap().attributes,
             ATTRIBUTE_BOLD
                 | ATTRIBUTE_FAINT
                 | ATTRIBUTE_ITALIC
                 | ATTRIBUTE_UNDERLINE
+                | ATTRIBUTE_BLINK
                 | ATTRIBUTE_INVERSE
                 | ATTRIBUTE_HIDDEN
                 | ATTRIBUTE_STRIKE
         );
         assert_eq!(terminal.cell(0, 1).unwrap().attributes, 0);
+
+        let mut damage = [0_u8; 2048];
+        terminal.write_damage(&mut damage).unwrap();
+        assert_ne!(damage[DAMAGE_HEADER_SIZE + 72] & ATTRIBUTE_BLINK, 0);
+        assert_eq!(
+            damage[DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 72] & ATTRIBUTE_BLINK,
+            0
+        );
     }
 
     #[test]
@@ -4272,6 +4290,7 @@ mod tests {
 
     #[test]
     fn damage_wire_format_is_versioned_bounded_and_consumed_atomically() {
+        assert_eq!(std::mem::size_of::<Cell>(), 76);
         let mut terminal = Terminal::new(2, 3).unwrap();
         terminal.take_dirty_rows();
         terminal.feed(b"A");

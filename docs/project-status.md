@@ -1201,7 +1201,7 @@ visibly reunite a marker that began in portrait history and ended on the live
 screen on both the emulator and Samsung.
 
 Selection now uses bounded coordinates in the combined scrollback/live
-document instead of transient viewport-cell indexes. Damage protocol v5
+document instead of transient viewport-cell indexes. Damage protocol v6
 publishes a scrollback-origin epoch; appending output preserves historical
 ranges, while actual ring eviction, resize, or selected live-screen mutation
 invalidates them rather than copying unrelated cells. Rust serializes at most
@@ -1300,6 +1300,20 @@ Rust unit/allocation and clippy gates, Android unit/lint, both exact builds and
 installs, scoped cold-launch logs, and inspected full-device light/dark manager
 frames pass. Real PTY atomicity and timeout visuals remain pending until a
 package-installed shell is restored on the clean-data devices.
+
+SGR 5/6 text blink and SGR 25 reset now survive the fixed terminal grid,
+compact scrollback, and damage protocol v6. The Rust `Cell` remains 76 bytes:
+the previous internal truncation marker moved into existing struct padding and
+the already-reserved scrollback byte, leaving the high wire attribute bit for
+blink. Android packs blink into the unused high bit of its existing glyph-width
+byte and tracks one Boolean per row, then re-records only rows that actually
+contain blinking content on the existing 500 ms
+callback. Text stays visible while the surface is hidden or unfocused and when
+Android's animator setting disables motion. There is no per-frame allocation;
+the full Rust workspace tests, warmed allocation gate, warnings-denied Clippy,
+Android unit/lint, exact x86_64/AArch64 builds and installs, cold launches,
+scoped logs, and inspected full-device light/dark manager frames pass. Real PTY
+blink visuals remain pending until a package-installed shell is restored.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a
