@@ -1,5 +1,6 @@
 package org.archphene.app.storage
 
+import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.database.Cursor
 import android.database.MatrixCursor
@@ -74,6 +75,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         projection: Array<out String>?,
         sortOrder: String?,
     ): Cursor {
+        failDebugLauncherOperation(DEBUG_PROVIDER_QUERY)
         holdDebugLauncherQuery()
         return queryChildDocumentsInternal(parentDocumentId, projection)
     }
@@ -151,6 +153,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         projection: Array<out String>?,
         queryArgs: Bundle?,
     ): Cursor {
+        failDebugLauncherOperation(DEBUG_PROVIDER_QUERY)
         holdDebugLauncherQuery()
         return queryChildDocumentsInternal(parentDocumentId, projection)
     }
@@ -160,6 +163,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         mode: String,
         signal: CancellationSignal?,
     ): ParcelFileDescriptor {
+        failDebugLauncherOperation(DEBUG_PROVIDER_OPEN)
         signal?.throwIfCanceled()
         val document = documentForId(documentId)
         if (!document.isRegularFile) {
@@ -541,9 +545,6 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
             return
         }
-        val callingUid = Binder.getCallingUid()
-        val callerPackages =
-            context.packageManager.getPackagesForUid(callingUid).orEmpty()
         val delay =
             runCatching {
                 File(context.cacheDir, PORTAL_FOLDER_PROVIDER_DELAY_FILE)
@@ -553,18 +554,40 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             }.getOrNull()
                 ?.takeIf { milliseconds -> milliseconds in 1..MAX_TEST_PROVIDER_DELAY_MILLIS }
                 ?: return
-        Log.i(
-            TAG,
-            "Portal folder delay requested callerUid=$callingUid " +
-                "packages=${callerPackages.joinToString()}",
-        )
-        if (callerPackages.none { packageName -> packageName.startsWith(LAUNCHER_PACKAGE_PREFIX) }) {
-            return
-        }
+        val caller = debugLauncherCaller(context) ?: return
+        Log.i(TAG, "Portal folder query delay requested caller=$caller")
         val deadline = SystemClock.elapsedRealtime() + delay
         while (SystemClock.elapsedRealtime() < deadline) {
             SystemClock.sleep(20)
         }
+    }
+
+    private fun failDebugLauncherOperation(operation: String) {
+        val context = providerContext()
+        if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return
+        }
+        val configuredOperation =
+            runCatching {
+                File(context.cacheDir, PORTAL_FOLDER_PROVIDER_FAILURE_FILE)
+                    .readText()
+                    .trim()
+            }.getOrNull()
+                ?: return
+        if (configuredOperation != operation) {
+            return
+        }
+        val caller = debugLauncherCaller(context) ?: return
+        Log.i(TAG, "Portal folder failure requested operation=$operation caller=$caller")
+        throw missing("Debug provider failure while attempting to $operation")
+    }
+
+    private fun debugLauncherCaller(context: Context): String? {
+        val callingUid = Binder.getCallingUid()
+        return context.packageManager
+            .getPackagesForUid(callingUid)
+            .orEmpty()
+            .firstOrNull { packageName -> packageName.startsWith(LAUNCHER_PACKAGE_PREFIX) }
     }
 
     private fun mimeType(name: String): String {
@@ -625,6 +648,10 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val PORTAL_FOLDER_PROVIDER_DELAY_FILE =
             "portal-folder-provider-delay-ms"
+        private const val PORTAL_FOLDER_PROVIDER_FAILURE_FILE =
+            "portal-folder-provider-failure"
+        private const val DEBUG_PROVIDER_QUERY = "query"
+        private const val DEBUG_PROVIDER_OPEN = "open"
         private const val MAX_TEST_PROVIDER_DELAY_MILLIS = 60_000L
         private val SHELL_STARTUP_FILES =
             mapOf(

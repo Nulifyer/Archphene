@@ -1652,6 +1652,15 @@ permit the subsequent normal folder/collision/cancellation gate to pass.
 Full-device frames show the responsive picker before the stall and the
 dialog-free Android surface after the launcher is stopped.
 
+The same provider boundary injects deterministic list and descriptor-open
+failures through the real DocumentsProvider/Binder route. On both exact ABIs,
+each failure leaves the launcher and manager alive, publishes no partial
+project, and returns a failed portal response. The generated launcher also
+shows a native, readable “Couldn’t import that folder” message instead of
+silently dropping back into the Linux app. A normal retry then imports the
+exact fixture, with picker, feedback, and completed full-device frames
+inspected on both devices.
+
 The same private frontend implements XDG Settings portal v2 for the standard
 appearance color scheme, accent, contrast, and reduced-motion keys, including
 the intentionally nested legacy `Read` result. It honors D-Bus no-reply calls,

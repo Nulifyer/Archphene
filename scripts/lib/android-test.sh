@@ -177,3 +177,41 @@ for node in root.iter("node"):
     archphene_tap_text "$ARCHPHENE_UI" "Download"
   fi
 }
+
+archphene_open_documents_archphene_home_root() {
+  local ui="$1"
+  local name="${2:-documents-archphene-home-root}"
+  local root_x root_y
+  archphene_regex_contains \
+    "$ui" 'content-desc="Show roots"' ||
+    archphene_die "DocumentsUI does not expose its roots drawer"
+  archphene_tap_ui_pattern \
+    "$ui" 'content-desc="Show roots"' "DocumentsUI roots"
+  archphene_wait_ui_exact_text \
+    "Linux home files" "$name-drawer" 20
+  read -r root_x root_y < <(
+    python3 -c '
+import re, sys
+import xml.etree.ElementTree as ET
+root = ET.fromstring(sys.stdin.read())
+candidates = []
+for parent in root.iter("node"):
+    descendants = list(parent.iter("node"))
+    if (
+        any(node.attrib.get("text") == "Archphene Home" for node in descendants)
+        and any(node.attrib.get("text") == "Linux home files" for node in descendants)
+    ):
+        candidates.append((len(descendants), descendants))
+if not candidates:
+    raise SystemExit("manager Archphene Home root is unavailable")
+descendants = min(candidates, key=lambda candidate: candidate[0])[1]
+title = next(
+    node for node in descendants
+    if node.attrib.get("text") == "Archphene Home"
+)
+values = list(map(int, re.findall(r"\d+", title.attrib["bounds"])))
+print((values[0] + values[2]) // 2, (values[1] + values[3]) // 2)
+' <<<"$ARCHPHENE_UI"
+  )
+  archphene_adb_run shell input tap "$root_x" "$root_y"
+}

@@ -46,6 +46,7 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -1966,6 +1967,7 @@ class LauncherActivity :
                         if (error !is IOException || error.message != "Broken pipe") {
                             Log.w(TAG, "Android directory stream failed", error)
                         }
+                        reportDirectoryStreamFailure()
                     }
                 },
                 "ArchpheneDirectoryStream",
@@ -2044,6 +2046,19 @@ class LauncherActivity :
         } finally {
             activeDirectoryWatchdog.compareAndSet(watchdog, null)
             watchdog.close()
+        }
+    }
+
+    private fun reportDirectoryStreamFailure() {
+        handler.post {
+            if (!isFinishing && !isDestroyed) {
+                Toast.makeText(
+                    this,
+                    R.string.directory_import_failed,
+                    Toast.LENGTH_LONG,
+                ).show()
+                Log.i(TAG, "Reported Android directory stream failure")
+            }
         }
     }
 
