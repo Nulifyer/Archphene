@@ -557,20 +557,24 @@ restart, while the normal Connect/Change action remains available. Semantic
 UI, picker-cancellation, no-repeat restart, scoped-log, and visually inspected
 full-device gates pass on the exact-ABI emulator and Samsung.
 
-Single Android documents can now enter the shared environment from the system
-picker, Open With, or Share. Android passes one read-only content descriptor;
-Rust duplicates and streams it into a private staging file without transferring
-file bytes through JNI or Kotlin, enforces a 16 GiB limit, syncs it, then
-publishes it into `~/Downloads` with a non-replacing descriptor-relative
-rename. Existing names become bounded ` (2)` variants, interrupted staging is
-recovered on the next attempt, and invalid/spoofing display names receive a
-safe fallback. The Service owns coarse durable status and the Activity consumes
-each incoming intent once.
+Up to 32 Android documents can now enter the shared environment from the
+multi-select system picker, Open With, Share, or `ACTION_SEND_MULTIPLE`.
+Android passes one read-only content descriptor at a time; the Service
+deduplicates the bounded batch in selection order and reuses fixed direct
+request/output buffers. Rust duplicates and streams each descriptor into a
+private staging file without transferring file bytes through JNI or Kotlin,
+enforces a 16 GiB per-file limit, syncs it, then publishes it into
+`~/Downloads` with a non-replacing descriptor-relative rename. Existing names
+become bounded ` (2)` variants, interrupted staging is recovered on the next
+attempt, and invalid/spoofing display names receive a safe fallback. A failed
+provider item does not discard later selections; durable status reports
+partial success honestly. The Activity consumes each incoming batch once.
 
-Exact ACTION_VIEW and ACTION_SEND byte-content, collision, restart-status,
-system-picker, cleanup, scoped-log, and full-device visual gates pass on the
-x86_64 emulator and physical AArch64 Samsung. Multi-document and folder import,
-drag-and-drop, progress/cancel, provider timeouts, and export remain open.
+Exact ACTION_VIEW, ACTION_SEND, and deduplicated ACTION_SEND_MULTIPLE byte
+content, collision, restart-status, system-picker cancellation, cleanup,
+scoped-log, and visually inspected full-device gates pass on the x86_64
+emulator and physical AArch64 Samsung. Directory-tree entry, drag-and-drop,
+progress/cancel, and provider timeouts remain open.
 
 The Files page can now open one visible Linux file or share one through 32
 visible Linux files through Android's standard flows. Both actions open

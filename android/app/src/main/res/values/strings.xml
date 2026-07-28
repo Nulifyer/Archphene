@@ -75,7 +75,7 @@
     <string name="documents_root_summary">Linux home files</string>
     <string name="documents_home_name">Home</string>
     <string name="shell_startup_files">Shell startup files</string>
-    <string name="import_file">Import file</string>
+    <string name="import_file">Import</string>
     <string name="open_file">Open</string>
     <string name="open_linux_file_chooser">Open Linux file with</string>
     <string name="open_linux_file_only">Choose a file from Archphene Home</string>
@@ -100,8 +100,8 @@
     <string name="document_import_prompt">Android files can be copied into ~/Downloads</string>
     <string name="document_import_unavailable">File import unavailable while Linux starts</string>
     <string name="document_import_queued">Waiting for the shared Linux home…</string>
-    <string name="document_import_already_queued">One file import is already waiting</string>
-    <string name="document_import_content_only">Choose a file supplied by Android Files</string>
+    <string name="document_import_already_queued">One document import is already waiting</string>
+    <string name="document_import_content_only">Choose documents supplied by Android Files</string>
     <string name="folder_grant_disconnected">No Android folder connected</string>
     <string name="folder_grant_unavailable">Android folder access unavailable</string>
     <string name="folder_grant_invalid">Choose a folder that allows persistent read access</string>

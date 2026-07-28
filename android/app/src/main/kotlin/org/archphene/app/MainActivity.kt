@@ -141,7 +141,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var packageCacheRequestedRevision = Int.MIN_VALUE
     private var launcherPermissionDeferred = false
     private var launcherReviewDeferredRevision = Int.MIN_VALUE
-    private var pendingImportUri: Uri? = null
+    private var pendingImportUris: List<Uri>? = null
     private var pendingExportSourceUri: Uri? = null
     private var pendingExportTargetUri: Uri? = null
     private var pendingExportGrantFlags = 0
@@ -1731,12 +1731,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         )
         configureDebugDocumentHandoff(intent)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
-        val restoredImport =
+        val restoredImports =
             savedInstanceState
-                ?.getString(PENDING_IMPORT_URI_STATE)
-                ?.let(Uri::parse)
-        if (restoredImport != null) {
-            queueDocumentImport(restoredImport)
+                ?.getStringArrayList(PENDING_IMPORT_URIS_STATE)
+                ?.map(Uri::parse)
+                ?: savedInstanceState
+                    ?.getString(PENDING_IMPORT_URI_STATE)
+                    ?.let { listOf(Uri.parse(it)) }
+        if (!restoredImports.isNullOrEmpty()) {
+            queueDocumentImports(restoredImports)
         } else {
             queueIncomingImport(intent)
         }
@@ -1937,8 +1940,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         outState.putBoolean(PACKAGE_DETAILS_MODE_STATE, showingPackageDetails)
         outState.putString(PACKAGE_QUERY_STATE, packageSearchInput.text.toString())
         outState.putString(PACKAGE_SEARCH_QUERY_STATE, lastSubmittedSearchQuery)
-        pendingImportUri?.let { uri ->
-            outState.putString(PENDING_IMPORT_URI_STATE, uri.toString())
+        pendingImportUris?.let { uris ->
+            outState.putStringArrayList(
+                PENDING_IMPORT_URIS_STATE,
+                ArrayList(uris.map(Uri::toString)),
+            )
         }
         pendingExportSourceUri?.let { uri ->
             outState.putString(PENDING_EXPORT_SOURCE_URI_STATE, uri.toString())
@@ -1977,7 +1983,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             return
         }
         when (requestCode) {
-            IMPORT_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentImport)
+            IMPORT_DOCUMENT_REQUEST -> data?.let { queueDocumentImports(importUris(it, false)) }
             OPEN_DOCUMENT_REQUEST -> data?.data?.let(::viewLinuxDocument)
             EXPORT_SOURCE_DOCUMENT_REQUEST -> data?.data?.let(::createAndroidExportDocument)
             EXPORT_TARGET_DOCUMENT_REQUEST ->
@@ -2989,7 +2995,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         commandButton.isEnabled = binder.linuxCommandAvailable
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable
-        importButton.isEnabled = binder.documentTransferAvailable && pendingImportUri == null
+        importButton.isEnabled = binder.documentTransferAvailable && pendingImportUris == null
         openButton.isEnabled = binder.documentTransferAvailable
         exportButton.isEnabled =
             binder.documentExportCancellationAvailable ||
@@ -3293,6 +3299,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "*/*"
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         @Suppress("DEPRECATION")
@@ -3676,52 +3683,95 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     private fun queueIncomingImport(source: Intent) {
-        val uri =
-            when (source.action) {
-                Intent.ACTION_VIEW -> source.data
-                Intent.ACTION_SEND ->
+        if (
+            source.action == Intent.ACTION_VIEW ||
+            source.action == Intent.ACTION_SEND ||
+            source.action == Intent.ACTION_SEND_MULTIPLE
+        ) {
+            val uris = importUris(source, source.action != Intent.ACTION_VIEW)
+            source.action = null
+            source.data = null
+            source.clipData = null
+            source.removeExtra(Intent.EXTRA_STREAM)
+            if (uris.isNotEmpty()) {
+                queueDocumentImports(uris)
+            }
+        }
+    }
+
+    private fun importUris(
+        source: Intent,
+        includeStreams: Boolean,
+    ): List<Uri> {
+        val result = ArrayList<Uri>()
+        source.data?.let(result::add)
+        source.clipData?.let { clip ->
+            if (clip.itemCount > DocumentImportPolicy.MAX_DOCUMENTS) {
+                setTextIfChanged(
+                    storageStatusView,
+                    "Choose at most ${DocumentImportPolicy.MAX_DOCUMENTS} Android documents",
+                )
+                return emptyList()
+            }
+            repeat(clip.itemCount) { index ->
+                clip.getItemAt(index).uri?.let(result::add)
+            }
+        }
+        if (includeStreams) {
+            if (source.action == Intent.ACTION_SEND_MULTIPLE) {
+                val streams =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        source.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        source.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                    }
+                streams?.let(result::addAll)
+            } else {
+                val stream =
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         source.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
                     } else {
                         @Suppress("DEPRECATION")
                         source.getParcelableExtra(Intent.EXTRA_STREAM)
                     }
-                else -> null
+                stream?.let(result::add)
             }
-        if (uri != null) {
-            source.action = null
-            source.data = null
-            source.removeExtra(Intent.EXTRA_STREAM)
-            queueDocumentImport(uri)
         }
+        return result
     }
 
-    private fun queueDocumentImport(uri: Uri) {
+    private fun queueDocumentImports(uris: List<Uri>) {
         selectManagerSection(MANAGER_SECTION_FILES)
-        if (uri.scheme != "content") {
-            setTextIfChanged(
-                storageStatusView,
-                getString(R.string.document_import_content_only),
-            )
-            return
-        }
-        if (pendingImportUri != null) {
+        val normalized =
+            try {
+                DocumentImportPolicy
+                    .normalizeContentUris(uris.map(Uri::toString))
+                    .map(Uri::parse)
+            } catch (error: IllegalArgumentException) {
+                setTextIfChanged(
+                    storageStatusView,
+                    error.message ?: getString(R.string.document_import_content_only),
+                )
+                return
+            }
+        if (pendingImportUris != null) {
             setTextIfChanged(
                 storageStatusView,
                 getString(R.string.document_import_already_queued),
             )
             return
         }
-        pendingImportUri = uri
+        pendingImportUris = normalized
         setTextIfChanged(storageStatusView, getString(R.string.document_import_queued))
         dispatchPendingImport()
     }
 
     private fun dispatchPendingImport() {
-        val uri = pendingImportUri ?: return
+        val uris = pendingImportUris ?: return
         val binder = runtimeBinder ?: return
-        if (binder.importAndroidDocument(uri)) {
-            pendingImportUri = null
+        if (binder.importAndroidDocuments(uris)) {
+            pendingImportUris = null
         }
     }
 
@@ -3847,6 +3897,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val EXPORT_SOURCE_DOCUMENT_REQUEST = 0x4157
         private const val EXPORT_TARGET_DOCUMENT_REQUEST = 0x4158
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
+        private const val PENDING_IMPORT_URIS_STATE = "pending_import_uris"
         private const val PENDING_EXPORT_SOURCE_URI_STATE = "pending_export_source_uri"
         private const val PENDING_EXPORT_TARGET_URI_STATE = "pending_export_target_uri"
         private const val PENDING_EXPORT_GRANT_FLAGS_STATE = "pending_export_grant_flags"

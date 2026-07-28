@@ -86,14 +86,18 @@ Create/read/write/rename/delete, collision preservation, the two reviewed
 startup-file opens, hidden/traversal/symlink rejection, cleanup, and real
 DocumentsUI browsing pass on the x86_64 emulator and physical AArch64 Samsung.
 
-One Android document can also be imported from the system picker, Open With,
-or Share into `/home/archphene/Downloads`. Kotlin retains Android URI and
-lifecycle ownership but passes only a read-only descriptor and bounded
-metadata. Rust duplicates the descriptor, streams at most 16 GiB into a
+Up to 32 Android documents can also be imported from the multi-select system
+picker, Open With, Share, or `ACTION_SEND_MULTIPLE` into
+`/home/archphene/Downloads`. Kotlin retains Android URI and lifecycle ownership
+but passes only one read-only descriptor and bounded metadata at a time. The
+batch is deduplicated in selection order and reuses fixed direct request/output
+buffers. Rust duplicates each descriptor, streams at most 16 GiB into a
 private staging file, syncs it, and atomically publishes a non-replacing
 destination. Duplicate names receive numbered variants and interrupted
-staging is discarded explicitly on the next attempt. The exact content,
-collision, restart-status, and system-picker gates pass on both targets.
+staging is discarded explicitly on the next attempt. One failed provider
+document does not discard later selections; durable status reports the exact
+successful and failed counts. Exact content, collision, duplicate-stream,
+restart-status, and system-picker gates pass on both targets.
 
 Linux desktop applications use a separate XDG FileChooser contract. Open
 creates a durable non-replacing snapshot under
@@ -300,7 +304,7 @@ storage is the private shared Arch root, a synchronized Android grant, or a
 brokered Android content URI.
 
 The familiar home directories are conventional private directories.
-Single-document imports land in `~/Downloads`; `/mnt/android/downloads` is an
+Document imports land in `~/Downloads`; `/mnt/android/downloads` is an
 alias to that same directory, not Android's public Downloads collection. A
 connected Android folder is synchronized with its private
 `~/Projects/<folder>` mirror and is never represented as a mountable content

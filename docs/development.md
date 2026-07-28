@@ -390,6 +390,9 @@ Run the outbound Android document gates with each matching exact-ABI manager
 APK:
 
 ```bash
+./scripts/test-archphene-document-import.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk
 ./scripts/test-archphene-document-open.sh \
   --serial emulator-5554 \
   --apk tooling/build/apk/app-debug-x86_64.apk

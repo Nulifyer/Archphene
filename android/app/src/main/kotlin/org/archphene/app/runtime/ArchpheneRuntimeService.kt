@@ -617,7 +617,7 @@ class ArchpheneRuntimeService : Service() {
             stopWhenUnobservedRequested = true
         }
 
-        fun importAndroidDocument(uri: Uri): Boolean = requestDocumentImport(uri)
+        fun importAndroidDocuments(uris: List<Uri>): Boolean = requestDocumentImports(uris)
 
         fun importPortalFolder(
             displayName: String,
@@ -2122,6 +2122,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_SYNC_TEST_HOLD_MILLIS = 30_000L
         private const val MAX_STORAGE_URI_BYTES = 4 * 1024
         private const val MAX_STORAGE_REQUEST_BYTES = 4 * 1024
+        private const val MAX_DOCUMENT_IMPORTS = 32
         private const val MAX_STORAGE_NAME_BYTES = 255
         private const val MAX_FOLDER_LABEL_BYTES = 128
         private const val MAX_STORAGE_TRANSFER_BYTES = 16L * 1024 * 1024 * 1024
@@ -3989,18 +3990,29 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
-    private fun requestDocumentImport(uri: Uri): Boolean {
-        val encodedUri = uri.toString().toByteArray(StandardCharsets.UTF_8)
+    private fun requestDocumentImports(uris: List<Uri>): Boolean {
+        val normalized = LinkedHashMap<String, Uri>(uris.size)
+        if (uris.isEmpty() || uris.size > MAX_DOCUMENT_IMPORTS) {
+            storageStatus = "Choose between 1 and $MAX_DOCUMENT_IMPORTS Android documents"
+            return false
+        }
+        for (uri in uris) {
+            val encodedUri = uri.toString().toByteArray(StandardCharsets.UTF_8)
+            if (
+                uri.scheme != "content" ||
+                encodedUri.isEmpty() ||
+                encodedUri.size > MAX_STORAGE_URI_BYTES
+            ) {
+                storageStatus = "Choose documents supplied by Android Files"
+                return false
+            }
+            normalized.putIfAbsent(uri.toString(), uri)
+        }
         if (
             readyHandle == 0L ||
             storageDocumentActive ||
-            uri.scheme != "content" ||
-            encodedUri.isEmpty() ||
-            encodedUri.size > MAX_STORAGE_URI_BYTES
+            normalized.isEmpty()
         ) {
-            if (uri.scheme != "content" || encodedUri.size > MAX_STORAGE_URI_BYTES) {
-                storageStatus = "Choose a document supplied by Android Files"
-            }
             return false
         }
         if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
@@ -4013,66 +4025,118 @@ class ArchpheneRuntimeService : Service() {
                 {
                     requireRuntimeWorker("Android document import")
                     try {
-                        val displayName = safeImportDisplayName(uri)
-                        persistStorageStatus(
-                            STORAGE_RUNNING,
-                            "Importing $displayName into ~/Downloads…",
-                        )
                         val root =
                             File(filesDir, "arch-root/home/archphene").absolutePath
-                        val fields = listOf(root, "home/Downloads", displayName)
-                        val requestBytes =
-                            fields.joinToString("\t").toByteArray(StandardCharsets.UTF_8)
-                        if (
-                            requestBytes.isEmpty() ||
-                            requestBytes.size > MAX_STORAGE_REQUEST_BYTES
-                        ) {
-                            throw IllegalStateException("Document import request is too large")
-                        }
-                        val request = ByteBuffer.allocateDirect(requestBytes.size)
-                        request.put(requestBytes)
+                        val request = ByteBuffer.allocateDirect(MAX_STORAGE_REQUEST_BYTES)
                         val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
-                        val descriptor =
-                            contentResolver.openFileDescriptor(uri, "r", null)
-                                ?: throw IllegalStateException(
-                                    "Android provider returned no file descriptor",
+                        var importedCount = 0
+                        var importedBytesTotal = 0L
+                        var failedCount = 0
+                        var lastFailure = ""
+                        var lastImportedName = ""
+                        normalized.values.forEachIndexed { index, uri ->
+                            try {
+                                val displayName = safeImportDisplayName(uri)
+                                persistStorageStatus(
+                                    STORAGE_RUNNING,
+                                    "Importing ${index + 1} of ${normalized.size}: " +
+                                        "$displayName into ~/Downloads…",
                                 )
-                        val result =
-                            descriptor.use {
-                                NativeRuntime.nativeImportHomeDocument(
-                                    request,
-                                    requestBytes.size,
-                                    it.fd,
-                                    output,
+                                val requestBytes =
+                                    "$root\thome/Downloads\t$displayName"
+                                        .toByteArray(StandardCharsets.UTF_8)
+                                if (
+                                    requestBytes.isEmpty() ||
+                                    requestBytes.size > MAX_STORAGE_REQUEST_BYTES
+                                ) {
+                                    throw IllegalStateException(
+                                        "Document import request is too large",
+                                    )
+                                }
+                                request.clear()
+                                request.put(requestBytes)
+                                output.clear()
+                                val descriptor =
+                                    contentResolver.openFileDescriptor(uri, "r", null)
+                                        ?: throw IllegalStateException(
+                                            "Android provider returned no file descriptor",
+                                        )
+                                val result =
+                                    descriptor.use {
+                                        NativeRuntime.nativeImportHomeDocument(
+                                            request,
+                                            requestBytes.size,
+                                            it.fd,
+                                            output,
+                                        )
+                                    }
+                                val response = readCString(output)
+                                if (
+                                    result <= 0 ||
+                                    result !=
+                                    response.toByteArray(StandardCharsets.UTF_8).size
+                                ) {
+                                    throw IllegalStateException(
+                                        response.ifEmpty { "Native storage error $result" },
+                                    )
+                                }
+                                val responseFields = response.split('\t')
+                                if (responseFields.size != 2) {
+                                    throw IllegalStateException(
+                                        "Invalid native import response",
+                                    )
+                                }
+                                val importedName = responseFields[0]
+                                val importedBytes =
+                                    responseFields[1].toLongOrNull()
+                                        ?: throw IllegalStateException(
+                                            "Invalid imported byte count",
+                                        )
+                                if (
+                                    !safeVisibleName(importedName) ||
+                                    importedBytes !in 0..MAX_STORAGE_TRANSFER_BYTES
+                                ) {
+                                    throw IllegalStateException(
+                                        "Unsafe native import response",
+                                    )
+                                }
+                                importedCount++
+                                importedBytesTotal += importedBytes
+                                lastImportedName = importedName
+                                Log.i(
+                                    TAG,
+                                    "Android document imported name=$importedName " +
+                                        "bytes=$importedBytes item=${index + 1}/${normalized.size}",
+                                )
+                            } catch (error: Exception) {
+                                failedCount++
+                                lastFailure = error.message ?: error.javaClass.simpleName
+                                Log.e(
+                                    TAG,
+                                    "Android document import failed " +
+                                        "item=${index + 1}/${normalized.size}",
+                                    error,
                                 )
                             }
-                        val response = readCString(output)
-                        if (result <= 0 || result != response.toByteArray(StandardCharsets.UTF_8).size) {
-                            throw IllegalStateException(
-                                response.ifEmpty { "Native storage error $result" },
-                            )
-                        }
-                        val responseFields = response.split('\t')
-                        if (responseFields.size != 2) {
-                            throw IllegalStateException("Invalid native import response")
-                        }
-                        val importedName = responseFields[0]
-                        val importedBytes =
-                            responseFields[1].toLongOrNull()
-                                ?: throw IllegalStateException("Invalid imported byte count")
-                        if (
-                            !safeVisibleName(importedName) ||
-                            importedBytes !in 0..MAX_STORAGE_TRANSFER_BYTES
-                        ) {
-                            throw IllegalStateException("Unsafe native import response")
                         }
                         val status =
-                            "Imported $importedName (${formatStorageBytes(importedBytes)}) " +
-                                "to ~/Downloads"
-                        persistStorageStatus(STORAGE_COMPLETE, status)
-                        Log.i(
-                            TAG,
-                            "Android document imported name=$importedName bytes=$importedBytes",
+                            if (failedCount == 0) {
+                                if (importedCount == 1) {
+                                    "Imported $lastImportedName " +
+                                        "(${formatStorageBytes(importedBytesTotal)}) " +
+                                        "to ~/Downloads"
+                                } else {
+                                    "Imported $importedCount documents " +
+                                        "(${formatStorageBytes(importedBytesTotal)}) " +
+                                        "to ~/Downloads"
+                                }
+                            } else {
+                                "Imported $importedCount of ${normalized.size} documents; " +
+                                    "$failedCount failed: $lastFailure"
+                            }
+                        persistStorageStatus(
+                            if (failedCount == 0) STORAGE_COMPLETE else STORAGE_FAILED,
+                            status,
                         )
                     } catch (error: Exception) {
                         val status =
