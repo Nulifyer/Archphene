@@ -177,6 +177,22 @@ identity and launcher Activity. A wrapper contains only:
 - label, icon, MIME intents, and declared Android capabilities;
 - no Arch package closure, Linux home, package database, or executable.
 
+This APK is the primary Android representation of a graphical Linux
+application. A normal `MAIN`/`LAUNCHER` Activity gives the application a real
+app-drawer and launcher-search entry, stable icon and package identity, its own
+task/window, Android lifecycle, intent routing, and compatibility with desktop
+launcher surfaces such as DeX. An app widget cannot replace that contract:
+widgets are optional, user-placed home-screen content and do not become
+applications in the app drawer. Archphene may later offer shortcuts or widgets
+that route to an installed wrapper, but they are convenience surfaces for the
+same descriptor and never own a Linux process or package state.
+
+The wrapper cost is deliberately bounded. Current production Mousepad and btop
+wrappers are approximately 91 KiB and 87 KiB respectively on both maintained
+ABIs. They contain Android metadata and the generic client only; every launcher
+still binds to the one manager-owned Arch root and manager-owned process
+registry.
+
 The manager assembles wrappers from a reproducible precompiled template, signs
 them with one persistent non-exportable Android Keystore identity, verifies the
 generated APK, and hands it to PackageInstaller. Android confirmation remains
