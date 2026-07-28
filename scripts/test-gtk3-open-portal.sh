@@ -124,6 +124,18 @@ imported_sha256="$(
 [[ "$imported_sha256" == "$expected_sha256" ]] ||
   archphene_die "OpenFile imported document was not byte-exact"
 
+local_edit_payload="Archphene_local_only_edit_$token"
+local_edit_base64="$(printf %s "$local_edit_payload" | base64 -w0)"
+archphene_adb_run shell run-as "$manager" sh -c \
+  "'printf %s $local_edit_base64 | base64 -d > \"$imported_path\"'"
+source_sha256="$(
+  archphene_adb_run shell sha256sum "$source_path" |
+    awk '{print $1}' |
+    tr -d '\r'
+)"
+[[ "$source_sha256" == "$expected_sha256" ]] ||
+  archphene_die "editing the imported Linux copy changed the Android source"
+
 archphene_wait_ui \
   "package=\"$package\"" \
   "gtk3-open-portal-complete-$serial_slug" 20
@@ -167,5 +179,5 @@ logs="$(
 trap - EXIT
 cleanup
 archphene_note "Stock GTK3 OpenFile passed on $serial"
-archphene_note "  Cancellation stayed live; repeated imports preserved both exact files and URI/grant data stayed outside Linux"
+archphene_note "  Cancellation stayed live; a local edit did not change the Android source; repeated import preserved an exact second copy"
 archphene_note "  Full-device screenshots: $artifact_dir/{cancel-ready,picker-ready,complete,collision-complete}.png"

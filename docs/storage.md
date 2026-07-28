@@ -87,6 +87,22 @@ destination. Duplicate names receive numbered variants and interrupted
 staging is discarded explicitly on the next attempt. The exact content,
 collision, restart-status, and system-picker gates pass on both targets.
 
+Linux desktop applications use a separate XDG FileChooser contract. Open
+creates a durable non-replacing snapshot under
+`~/Documents/Android/<display name>` and then releases the Android descriptor;
+the URI and grant never enter Linux. Ordinary Save writes only that private
+POSIX copy. It never writes back to the selected Android provider document,
+even when the provider offered write access. To cross the boundary again, the
+user chooses **Save As** and an Android destination. Save As owns one bounded
+descriptor mirror for that explicit destination and does not silently treat a
+same-looking name as permission to replace the original.
+
+This deliberately removes an ambiguous conflict state: an XDG Open snapshot
+has no background provider writeback, so later Android and Linux edits can
+diverge without either side overwriting the other. Reopening the Android
+document imports another collision-numbered snapshot. Connected project trees
+use the separate baseline/conflict-copy synchronizer described below.
+
 The Files page can also hand visible regular files from Archphene Home to
 Android without exporting another copy. **Open** resolves one document's MIME
 type and sends one `ACTION_VIEW` content URI to Android's system chooser.
@@ -295,7 +311,8 @@ URI.
 | Import an Android file | content URI from `ACTION_OPEN_DOCUMENT` | prompt per document unless persisted | Android DocumentsUI |
 | Open a Linux file in Android | Archphene content URI sent through `ACTION_VIEW` | choose the Linux file, then an Android viewer | Archphene `DocumentsProvider` and Android resolver |
 | Manager Export | source from Archphene Home; destination URI from `ACTION_CREATE_DOCUMENT` | choose the Linux source and one Android target | Archphene `DocumentsProvider` and Android DocumentsUI |
-| Linux-app `Save As` | content URI from a future desktop-portal bridge | prompt per target | Android DocumentsUI |
+| Linux-app `Open` | non-replacing private snapshot under `~/Documents/Android`; no provider writeback | prompt per selection | Android DocumentsUI |
+| Linux-app `Save As` | bounded private staging mirrored to the explicitly selected content URI | prompt per target | Android DocumentsUI |
 | Connected Android folder | one persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE` plus a private synchronized mirror | prompt once, again after removal/revocation | Android DocumentsUI |
 | Background project file read/write | `$HOME/Projects/<name>` private POSIX mirror | no repeat prompt after sync setup | Archphene sandbox; explicit Sync crosses the persisted URI grant |
 | Camera, mic, notifications, contacts | Android runtime permissions | prompt through Android permission APIs | Android PermissionController |

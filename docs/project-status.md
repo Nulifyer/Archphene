@@ -1631,8 +1631,12 @@ duplicate Android URIs and malformed result shapes, owns every descriptor
 exactly, reserves non-replacing destinations, and removes the complete batch on
 copy failure. The GTK bridge preserves every selected file through the
 toolkit's plural getters; Android URIs and grants never cross into Linux, and
-editing an imported copy does not claim to update the original provider
-document. Cancellation, repeated single-file collision behavior, exact bytes,
+editing an imported copy never updates the original provider document. Save As
+is the only outbound desktop-portal operation and always uses a newly selected
+Android destination. Reopening imports another collision-numbered snapshot.
+The single-file gate now edits the first Linux snapshot and proves the Android
+source remains byte-exact before importing the unchanged source again.
+Cancellation, repeated single-file collision behavior, exact bytes,
 application-visible dual-file results, exact nested/dot/empty folder content,
 folder collision numbering, full-device captures, scoped fatal logs, and the
 current x86_64/AArch64 wrapper ABIs pass on the emulator and Samsung. The folder
