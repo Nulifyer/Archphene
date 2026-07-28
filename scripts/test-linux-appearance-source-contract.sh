@@ -11,12 +11,13 @@ style="$ARCHPHENE_ROOT/native/archphene-qt-platform-theme/archphenestyle.cpp"
 platform_theme="$ARCHPHENE_ROOT/native/archphene-qt-platform-theme/archpheneplatformtheme.cpp"
 process_runtime="$ARCHPHENE_ROOT/crates/archphene-process/src/lib.rs"
 gtk_live="$ARCHPHENE_ROOT/native/archphene-gtk3-settings/archphene_gtk3_settings.c"
+gtk_build="$ARCHPHENE_ROOT/scripts/build-gtk3-settings-podman.sh"
 runtime_service="$ARCHPHENE_ROOT/android/app/src/main/kotlin/org/archphene/app/runtime/ArchpheneRuntimeService.kt"
 session_service="$ARCHPHENE_ROOT/android/app/src/main/kotlin/org/archphene/app/launcher/LauncherSessionService.kt"
 launcher_activity="$ARCHPHENE_ROOT/android/launcher-template/src/main/kotlin/org/archphene/launcher/LauncherActivity.kt"
 
 for file in "$bridge" "$store" "$provider" "$manager" "$style" "$platform_theme" \
-    "$process_runtime" "$gtk_live" "$runtime_service" "$session_service" \
+    "$process_runtime" "$gtk_live" "$gtk_build" "$runtime_service" "$session_service" \
     "$launcher_activity"; do
   archphene_require_file "$file"
 done
@@ -136,6 +137,19 @@ grep -Fq 'g_file_monitor_directory(' "$gtk_live" \
   || archphene_die 'GTK live settings do not use an event-driven file monitor'
 ! grep -Fq 'g_timeout_add(' "$gtk_live" \
   || archphene_die 'GTK live settings still poll and allocate continuously'
+! grep -Fq -- '--allow-shlib-undefined' "$gtk_build" \
+  || archphene_die 'GTK settings bridge must not defer its GLib symbols to an arbitrary target process'
+grep -Fq '662ee8c1c9546b10e394cac1d25205417b76580fab5d51524c5377e10024b34c' "$gtk_build" \
+  || archphene_die 'GTK settings bridge is missing its pinned AArch64 GLib sysroot digest'
+for architecture in x86_64 aarch64; do
+  settings_module="$ARCHPHENE_ROOT/prebuilt/gtk3-compat/$architecture/libarchphene_gtk3_settings.so"
+  archphene_require_file "$settings_module"
+  dynamic="$(readelf -d "$settings_module")"
+  for dependency in libgio-2.0.so.0 libgobject-2.0.so.0 libgmodule-2.0.so.0 libglib-2.0.so.0; do
+    [[ "$dynamic" == *"Shared library: [$dependency]"* ]] \
+      || archphene_die "$architecture GTK settings bridge is not linked to $dependency"
+  done
+done
 grep -Fq 'QFileSystemWatcher' "$platform_theme" \
   || archphene_die 'Qt live settings do not use an event-driven file monitor'
 ! grep -Fq 'setInterval(500)' "$platform_theme" \

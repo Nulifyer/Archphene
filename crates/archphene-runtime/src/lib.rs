@@ -97,6 +97,30 @@ pub struct LauncherRegistrySummary {
     pub needs_review: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageLauncherReviewStatus {
+    NotInstalled,
+    NoLauncher,
+    Ready,
+    Pending,
+    Attention,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackageLauncherReview {
+    pub status: PackageLauncherReviewStatus,
+    pub capabilities: u8,
+    pub capabilities_analyzed: bool,
+    pub launchers: u16,
+    pub verified_executables: u16,
+    pub current: u16,
+    pub pending: u16,
+    pub attention: u16,
+    pub failed: u16,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPublishWork {
     pub android_package: String,
@@ -876,6 +900,101 @@ impl RuntimeHost {
             }
         }
         Some(summary)
+    }
+
+    pub fn package_launcher_review(&self, package: &str) -> Option<PackageLauncherReview> {
+        let installed = self.installed_packages.as_ref()?;
+        let (capabilities, capabilities_analyzed) = match installed.capabilities(package) {
+            Some(value) => value,
+            None => {
+                return Some(PackageLauncherReview {
+                    status: PackageLauncherReviewStatus::NotInstalled,
+                    capabilities: 0,
+                    capabilities_analyzed: false,
+                    launchers: 0,
+                    verified_executables: 0,
+                    current: 0,
+                    pending: 0,
+                    attention: 0,
+                    failed: 0,
+                });
+            }
+        };
+        let catalog = self.desktop_entries.as_ref()?;
+        let registry = self.launcher_registry.as_ref();
+        let mut review = PackageLauncherReview {
+            status: if catalog.truncated {
+                PackageLauncherReviewStatus::Unavailable
+            } else {
+                PackageLauncherReviewStatus::NoLauncher
+            },
+            capabilities,
+            capabilities_analyzed,
+            launchers: 0,
+            verified_executables: 0,
+            current: 0,
+            pending: 0,
+            attention: 0,
+            failed: 0,
+        };
+        for entry in catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.source_package.as_deref() == Some(package) && !entry.terminal)
+        {
+            review.launchers = review.launchers.saturating_add(1);
+            if entry.executable_package.is_some() {
+                review.verified_executables = review.verified_executables.saturating_add(1);
+            }
+            let descriptor = registry.and_then(|registry| {
+                registry
+                    .descriptors()
+                    .iter()
+                    .find(|descriptor| descriptor.desktop_id == entry.desktop_id)
+            });
+            let Some(descriptor) = descriptor else {
+                review.status = PackageLauncherReviewStatus::Unavailable;
+                continue;
+            };
+            if descriptor.source_package != entry.source_package
+                || descriptor.executable_package != entry.executable_package
+                || !descriptor.desired_present
+            {
+                review.status = PackageLauncherReviewStatus::Unavailable;
+                continue;
+            }
+            match descriptor.status {
+                WrapperStatus::Current => review.current = review.current.saturating_add(1),
+                WrapperStatus::Failed | WrapperStatus::Cancelled => {
+                    review.failed = review.failed.saturating_add(1);
+                }
+                WrapperStatus::NeedsReview | WrapperStatus::Dismissed => {
+                    review.attention = review.attention.saturating_add(1);
+                }
+                WrapperStatus::NeedsPublish
+                | WrapperStatus::Building
+                | WrapperStatus::AwaitingInstall
+                | WrapperStatus::NeedsRemoval
+                | WrapperStatus::AwaitingRemoval => {
+                    review.pending = review.pending.saturating_add(1);
+                }
+            }
+        }
+        if review.status == PackageLauncherReviewStatus::Unavailable || review.launchers == 0 {
+            return Some(review);
+        }
+        review.status = if review.verified_executables != review.launchers {
+            PackageLauncherReviewStatus::Unavailable
+        } else if review.failed != 0 {
+            PackageLauncherReviewStatus::Failed
+        } else if review.attention != 0 {
+            PackageLauncherReviewStatus::Attention
+        } else if review.current == review.launchers {
+            PackageLauncherReviewStatus::Ready
+        } else {
+            PackageLauncherReviewStatus::Pending
+        };
+        Some(review)
     }
 
     pub fn authorize_launcher(

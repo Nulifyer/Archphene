@@ -2220,6 +2220,20 @@ surface. The inactive footer reports either the selected shell's readiness or
 the need to install a supported shell instead of advertising the removed
 action.
 
+Package details now join the verified archive result to installed desktop-entry
+source and executable ownership, the exact broker-capability contract, and the
+generated wrapper's signer/generation/template/publication state. Terminal
+desktop entries no longer produce graphical wrappers. Real Foot installs on the
+x86_64 emulator and AArch64 Samsung pass the normal three-launcher review,
+stale-signer uninstall recovery, one-time Android source permission, serialized
+system confirmations, Ready presentation, cold manager restart, and native
+Wayland launch. This gate found that the GTK settings preload relied on GLib
+symbols already existing in the target process, causing Foot Client to exit on
+`g_object_unref`. Both checked-in modules now explicitly link
+GIO/GObject/GModule/GLib; the AArch64 build uses a checksum-pinned Arch Linux ARM
+GLib sysroot. Full-device Foot frames map cleanly on both devices. Exact
+toolkit/protocol derivation remains a separate pending compatibility step.
+
 ## Validated
 
 | Area | Evidence |
@@ -2269,7 +2283,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - GrapheneOS Pixel and sustained desktop-mode validation.
 - Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending. The replacement selects installed Bash or its POSIX-shell mode; additional shell-specific startup adapters remain pending.
 - Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
-- Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild, and restore the GTK settings bridge's clean container dependency declaration.
+- Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild. The GTK settings bridge now has a clean checksum-pinned AArch64 GLib link sysroot.
 - Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.
 
 ## Package-manager efficiency rules

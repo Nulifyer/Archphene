@@ -117,9 +117,11 @@ The script rejects a Qt private-ABI mismatch, cross-compiles the ARM plugins aga
 
 The GTK settings bridge is rebuilt with
 `scripts/build-gtk3-settings-podman.sh`. Its checked-in x86_64 and AArch64
-binaries contain the GTK 3/GTK 4 implementation. GLib is now an explicit build
-dependency, but the clean AArch64 cross-build still needs a checksum-pinned GLib
-development sysroot before the dual-ABI rebuild can be claimed as self-contained.
+binaries contain the GTK 3/GTK 4 implementation. Both binaries explicitly link
+GIO, GObject, GModule, and GLib so the preload remains valid for direct-Wayland
+processes that do not already load GTK. The AArch64 cross-build downloads an
+exact Arch Linux ARM GLib package, verifies its pinned SHA-256 digest, and uses
+only its shared-library sysroot for linking.
 
 KCalc is the Qt metric reference application. A focused July 22 audit found that
 the prior checks did not assert menu target size or status-area placement. The

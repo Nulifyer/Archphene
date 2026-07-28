@@ -382,6 +382,12 @@ internal object NativeRuntime {
         offset: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativePackageLauncherReview(
+        handle: Long,
+        packageBuffer: ByteBuffer,
+        packageLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeLauncherRegistryStatus(
         handle: Long,
         outputBuffer: ByteBuffer,

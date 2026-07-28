@@ -93,7 +93,9 @@ mod android {
 
     use archphene_core::{Lifecycle, PROTOCOL_VERSION, RuntimeError, SNAPSHOT_SIZE};
     use archphene_jobs::{JobError, JobOperation, JobState};
-    use archphene_launcher::{LauncherReviewDecision, MAX_LAUNCHER_DESCRIPTORS};
+    use archphene_launcher::{
+        LAUNCHER_CAPABILITIES_V2, LauncherReviewDecision, MAX_LAUNCHER_DESCRIPTORS,
+    };
     use archphene_packages::{
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
         MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageCompatibilityCancellation, PackageResolution,
@@ -109,6 +111,7 @@ mod android {
         MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_CLIPBOARD_BYTES, MAX_TERMINAL_DAMAGE_BYTES,
         MAX_TERMINAL_SELECTION_BYTES, ProcessError,
     };
+    use archphene_runtime::PackageLauncherReviewStatus;
     use archphene_storage::{
         MirrorCancellation, OpenMode, StorageError, SyncAction, SyncEntryKind, SyncFingerprint,
         fingerprint_file_from_fd,
@@ -3345,6 +3348,87 @@ mod android {
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_tool_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativePackageLauncherReview(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        package_buffer: JByteBuffer,
+        package_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(package_length) = usize::try_from(package_length) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(package_capacity) = environment.get_direct_buffer_capacity(&package_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_length == 0
+            || package_length > 128
+            || package_length > package_capacity
+            || output_capacity < 256
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(package_address) = environment.get_direct_buffer_address(&package_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_address.is_null() || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let package_bytes = unsafe { slice::from_raw_parts(package_address, package_length) };
+        let Ok(package) = str::from_utf8(package_bytes) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let review = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(review) = runtime.package_launcher_review(package) else {
+                return ERROR_INVALID_STATE;
+            };
+            review
+        };
+        let status = match review.status {
+            PackageLauncherReviewStatus::NotInstalled => "not-installed",
+            PackageLauncherReviewStatus::NoLauncher => "no-launcher",
+            PackageLauncherReviewStatus::Ready => "ready",
+            PackageLauncherReviewStatus::Pending => "pending",
+            PackageLauncherReviewStatus::Attention => "attention",
+            PackageLauncherReviewStatus::Failed => "failed",
+            PackageLauncherReviewStatus::Unavailable => "unavailable",
+        };
+        let encoded = format!(
+            "R1\t{status}\t{:x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{LAUNCHER_CAPABILITIES_V2}\n",
+            review.capabilities,
+            u8::from(review.capabilities_analyzed),
+            review.launchers,
+            review.verified_executables,
+            review.current,
+            review.pending,
+            review.attention,
+            review.failed,
+        );
+        if encoded.len() > output_capacity {
+            return ERROR_INTERNAL;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        destination[..encoded.len()].copy_from_slice(encoded.as_bytes());
+        i32::try_from(encoded.len()).unwrap_or(i32::MAX)
     }
 
     #[unsafe(no_mangle)]

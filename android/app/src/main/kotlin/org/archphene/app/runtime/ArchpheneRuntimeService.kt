@@ -76,6 +76,7 @@ internal class DesktopEntrySnapshot(
     val terminal: BooleanArray,
     val icons: Array<String>,
     val sourcePackages: Array<String>,
+    val executablePackages: Array<String>,
     val status: String,
     val revision: Int,
 )
@@ -279,10 +280,6 @@ class ArchpheneRuntimeService : Service() {
             ) {
                 return false
             }
-            if (!packageManager.canRequestPackageInstalls()) {
-                return false
-            }
-            launcherPermissionRequired = false
             startLauncherPublisher(activeHandle)
             return true
         }
@@ -1041,6 +1038,7 @@ class ArchpheneRuntimeService : Service() {
             emptyArray(),
             emptyArray(),
             BooleanArray(0),
+            emptyArray(),
             emptyArray(),
             emptyArray(),
             "Discovering Linux apps…",
@@ -2088,6 +2086,7 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val AVAILABLE_PACKAGE_LIMIT = 100
+        private const val PACKAGE_CAPABILITY_COMMAND_LINE = 2
         private const val PACKAGE_CACHE_ENTRY_LIMIT = 4096
         private const val PACKAGE_CACHE_PAGE_SIZE = 32
         private const val MAX_PACKAGE_CACHE_SELECTION = 256
@@ -5340,6 +5339,7 @@ class ArchpheneRuntimeService : Service() {
         val terminal = BooleanArray(NativeRuntime.DESKTOP_ENTRY_LIMIT)
         val icons = ArrayList<String>()
         val sourcePackages = ArrayList<String>()
+        val executablePackages = ArrayList<String>()
         var offset = 0
         var expectedTotal = -1
         var examined = 0
@@ -5380,7 +5380,7 @@ class ArchpheneRuntimeService : Service() {
                         StandardCharsets.UTF_8,
                     ).dropLast(1).split('\n')
                 val header = lines.first().split('\t')
-                if (header.size != 6 || header[0] != "D2") {
+                if (header.size != 6 || header[0] != "D3") {
                     throw IllegalStateException("Invalid desktop-entry page header")
                 }
                 val nextOffset = header[1].toInt()
@@ -5408,8 +5408,8 @@ class ArchpheneRuntimeService : Service() {
                 rejected = pageRejected
                 truncated = pageTruncated
                 for (line in lines.drop(1)) {
-                    val fields = line.split('\t', limit = 9)
-                    if (fields.size != 9) {
+                    val fields = line.split('\t', limit = 10)
+                    if (fields.size != 10) {
                         throw IllegalStateException("Invalid desktop-entry row")
                     }
                     val desktopId = fields[0]
@@ -5426,6 +5426,7 @@ class ArchpheneRuntimeService : Service() {
                     val argumentSpec = fields[6]
                     val mimeSpec = fields[7]
                     val sourcePackage = fields[8]
+                    val executablePackage = fields[9]
                     if (
                         desktopId.isEmpty() ||
                         name.isEmpty() ||
@@ -5447,6 +5448,13 @@ class ArchpheneRuntimeService : Service() {
                                                         character == '-'
                                                 )
                                         }
+                                )
+                        ) ||
+                        (
+                            executablePackage.isNotEmpty() &&
+                                (
+                                    executablePackage.length > 128 ||
+                                        !AUR_PACKAGE_NAME.matches(executablePackage)
                                 )
                         ) ||
                         (tryExec.isNotEmpty() && !tryExec.startsWith('/')) ||
@@ -5488,6 +5496,7 @@ class ArchpheneRuntimeService : Service() {
                     executables.add(executable)
                     icons.add(icon)
                     sourcePackages.add(sourcePackage)
+                    executablePackages.add(executablePackage)
                     previousName = name
                     previousDesktopId = desktopId
                 }
@@ -5620,9 +5629,11 @@ class ArchpheneRuntimeService : Service() {
                     terminal.copyOf(desktopIds.size),
                     icons.toTypedArray(),
                     sourcePackages.toTypedArray(),
+                    executablePackages.toTypedArray(),
                     status,
                     previousRevision + 1,
                 )
+            refreshSelectedPackageLauncherReview(activeHandle)
             Log.i(
                 TAG,
                 "Desktop catalog refreshed: entries=${desktopIds.size} examined=$examined rejected=$rejected truncated=$truncated",
@@ -5639,11 +5650,29 @@ class ArchpheneRuntimeService : Service() {
                     previous.terminal,
                     previous.icons,
                     previous.sourcePackages,
+                    previous.executablePackages,
                     "Linux app discovery unavailable",
                     previous.revision + 1,
                 )
             Log.w(TAG, "Could not refresh Linux desktop entries", error)
             return false
+        }
+    }
+
+    private fun refreshSelectedPackageLauncherReview(activeHandle: Long) {
+        val packageName = lastResolvedPackage
+        if (
+            packageName.isEmpty() ||
+            !searchStatus.lineSequence().any { line -> line.startsWith("Integration:") }
+        ) {
+            return
+        }
+        runCatching {
+            packageLauncherReview(activeHandle, packageName)
+        }.onSuccess { review ->
+            searchStatus = withPackageLauncherReview(searchStatus, review)
+        }.onFailure { error ->
+            Log.w(TAG, "Could not refresh package launcher review", error)
         }
     }
 
@@ -6949,6 +6978,7 @@ class ArchpheneRuntimeService : Service() {
                     Log.i(TAG, "Package compatibility review started for $normalized")
                     val compatibility = analyzeCachedPackage(activeHandle, normalized)
                     throwIfPackageCancelled()
+                    val launcherReview = packageLauncherReview(activeHandle, normalized)
                     if (compatibility.packageCount != packages.size) {
                         throw IllegalStateException(
                             "Repository state changed during compatibility review",
@@ -7017,6 +7047,8 @@ class ArchpheneRuntimeService : Service() {
                                 )
                             }
                             append(packageCompatibilitySummary(compatibility))
+                            append('\n')
+                            append(packageLauncherReviewSummary(launcherReview))
                             append('\n')
                             append("Dependency closure: ")
                             append(packages.size)
@@ -9471,6 +9503,36 @@ class ArchpheneRuntimeService : Service() {
         return decodePackageCompatibility(bytes)
     }
 
+    private fun packageLauncherReview(
+        activeHandle: Long,
+        packageName: String,
+    ): PackageLauncherReview {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        val bytes =
+            synchronized(packageCompatibilityOutputBuffer) {
+                packageCompatibilityRequestBuffer.clear()
+                packageCompatibilityRequestBuffer.put(packageBytes)
+                packageCompatibilityOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativePackageLauncherReview(
+                        activeHandle,
+                        packageCompatibilityRequestBuffer,
+                        packageBytes.size,
+                        packageCompatibilityOutputBuffer,
+                    )
+                if (outputLength <= 0) {
+                    throw IllegalStateException(
+                        readNativeMessage(packageCompatibilityOutputBuffer, outputLength),
+                    )
+                }
+                ByteArray(outputLength).also { output ->
+                    packageCompatibilityOutputBuffer.position(0)
+                    packageCompatibilityOutputBuffer.get(output)
+                }
+            }
+        return decodePackageLauncherReview(bytes)
+    }
+
     private fun packageCompatibilitySummary(compatibility: PackageCompatibility): String =
         when (compatibility.status) {
             "not-analyzed" ->
@@ -9486,6 +9548,52 @@ class ArchpheneRuntimeService : Service() {
                     packageCompatibilityUnsupportedDetail(compatibility)
             else -> throw IllegalStateException("Invalid package compatibility")
         }
+
+    private fun packageLauncherReviewSummary(review: PackageLauncherReview): String =
+        when (review.status) {
+            "not-installed" -> "Integration: Reviewed after installation"
+            "no-launcher" ->
+                if (
+                    review.capabilitiesAnalyzed &&
+                    review.capabilities and PACKAGE_CAPABILITY_COMMAND_LINE != 0
+                ) {
+                    "Integration: Command available in the shared Archphene Terminal"
+                } else {
+                    "Integration: No Android launcher required · shared Arch environment"
+                }
+            "ready" ->
+                "Integration: Ready · ${review.current} Android " +
+                    (if (review.current == 1) "launcher" else "launchers") +
+                    " · executable ownership and broker contract verified"
+            "pending" ->
+                "Integration: ${review.pending} Android launcher " +
+                    (if (review.pending == 1) "change" else "changes") +
+                    " pending"
+            "attention" ->
+                "Integration: ${review.attention} Android " +
+                    (if (review.attention == 1) "launcher needs" else "launchers need") +
+                    " your review"
+            "failed" ->
+                "Integration: ${review.failed} Android launcher " +
+                    (if (review.failed == 1) "failure" else "failures") +
+                    " · review launcher setup"
+            "unavailable" ->
+                "Integration: Launcher review unavailable · package ownership is incomplete"
+            else -> throw IllegalStateException("Invalid package launcher review")
+        }
+
+    private fun withPackageLauncherReview(
+        details: String,
+        review: PackageLauncherReview,
+    ): String {
+        val lines = details.lineSequence().toMutableList()
+        val index = lines.indexOfFirst { line -> line.startsWith("Integration:") }
+        if (index < 0) {
+            return details
+        }
+        lines[index] = packageLauncherReviewSummary(review)
+        return lines.joinToString("\n")
+    }
 
     private fun packageCompatibilityUnsupportedDetail(
         compatibility: PackageCompatibility,

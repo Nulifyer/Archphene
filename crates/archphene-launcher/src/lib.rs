@@ -18,8 +18,9 @@ const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
 const REGISTRY_FILE: &str = "launcher-registry-v1";
 const REGISTRY_TEMP_FILE: &str = ".launcher-registry-v1.tmp";
 const REGISTRY_MAGIC: &[u8; 8] = b"ARCHLREG";
-const REGISTRY_VERSION: u32 = 3;
-const PREVIOUS_REGISTRY_VERSION: u32 = 2;
+const REGISTRY_VERSION: u32 = 4;
+const PREVIOUS_REGISTRY_VERSION: u32 = 3;
+const ICON_REGISTRY_VERSION: u32 = 2;
 const LEGACY_REGISTRY_VERSION: u32 = 1;
 const REGISTRY_HEADER_BYTES: usize = 8 + 4 + 8 + 4 + 32;
 const MAX_LAUNCHER_ICON_BYTES: u64 = 1024 * 1024;
@@ -68,6 +69,7 @@ pub struct LauncherDescriptor {
     pub android_package: String,
     pub desktop_id: String,
     pub source_package: Option<String>,
+    pub executable_package: Option<String>,
     pub name: String,
     pub executable: String,
     pub arguments: Vec<ExecArgument>,
@@ -230,7 +232,16 @@ impl LauncherRegistry {
             return Err(LauncherRegistryError::IncompleteCatalog);
         }
         let mut registry = Self::load(arch_root)?;
-        let mut desired: Vec<&DesktopEntry> = catalog.entries.iter().collect();
+        // Terminal=true asks a desktop environment to start the command inside a
+        // terminal emulator. The generated Android wrapper owns a Wayland surface,
+        // not a terminal renderer, so publishing such an entry would create an app
+        // drawer item which can never start successfully. These commands remain
+        // available through Archphene's shared Terminal.
+        let mut desired: Vec<&DesktopEntry> = catalog
+            .entries
+            .iter()
+            .filter(|entry| !entry.terminal)
+            .collect();
         desired.sort_unstable_by(|left, right| left.desktop_id.cmp(&right.desktop_id));
         if desired
             .windows(2)
@@ -1016,6 +1027,7 @@ fn descriptor_from_entry(
         android_package: android_package(&descriptor_id),
         desktop_id: entry.desktop_id.clone(),
         source_package: entry.source_package.clone(),
+        executable_package: entry.executable_package.clone(),
         name: entry.name.clone(),
         executable: entry.executable.clone(),
         arguments: entry.arguments.clone(),
@@ -1047,6 +1059,7 @@ fn descriptor_content_digest(entry: &DesktopEntry, icon_digest: Option<&[u8; 32]
     descriptor_content_digest_fields(
         &entry.desktop_id,
         entry.source_package.as_deref(),
+        entry.executable_package.as_deref(),
         &entry.name,
         &entry.executable,
         &entry.arguments,
@@ -1062,6 +1075,7 @@ fn descriptor_digest(descriptor: &LauncherDescriptor) -> [u8; 32] {
     descriptor_content_digest_fields(
         &descriptor.desktop_id,
         descriptor.source_package.as_deref(),
+        descriptor.executable_package.as_deref(),
         &descriptor.name,
         &descriptor.executable,
         &descriptor.arguments,
@@ -1077,6 +1091,7 @@ fn descriptor_digest(descriptor: &LauncherDescriptor) -> [u8; 32] {
 fn descriptor_content_digest_fields(
     desktop_id: &str,
     source_package: Option<&str>,
+    executable_package: Option<&str>,
     name: &str,
     executable: &str,
     arguments: &[ExecArgument],
@@ -1087,9 +1102,10 @@ fn descriptor_content_digest_fields(
     terminal: bool,
 ) -> [u8; 32] {
     let mut bytes = Vec::with_capacity(2048);
-    bytes.extend_from_slice(b"org.archphene.launcher-content.v2\0");
+    bytes.extend_from_slice(b"org.archphene.launcher-content.v3\0");
     push_digest_field(&mut bytes, desktop_id.as_bytes());
     push_digest_optional(&mut bytes, source_package);
+    push_digest_optional(&mut bytes, executable_package);
     push_digest_field(&mut bytes, name.as_bytes());
     push_digest_field(&mut bytes, executable.as_bytes());
     bytes.push(u8::from(terminal));
@@ -1120,6 +1136,46 @@ fn descriptor_content_digest_fields(
     }
     bytes.push(u8::try_from(mime_types.len()).unwrap_or(u8::MAX));
     for mime_type in mime_types {
+        push_digest_field(&mut bytes, mime_type.as_bytes());
+    }
+    sha256(&bytes)
+}
+
+fn previous_descriptor_digest(descriptor: &LauncherDescriptor) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(2048);
+    bytes.extend_from_slice(b"org.archphene.launcher-content.v2\0");
+    push_digest_field(&mut bytes, descriptor.desktop_id.as_bytes());
+    push_digest_optional(&mut bytes, descriptor.source_package.as_deref());
+    push_digest_field(&mut bytes, descriptor.name.as_bytes());
+    push_digest_field(&mut bytes, descriptor.executable.as_bytes());
+    bytes.push(u8::from(descriptor.terminal));
+    push_digest_optional(&mut bytes, descriptor.try_exec.as_deref());
+    push_digest_optional(&mut bytes, descriptor.icon.as_deref());
+    match descriptor.icon_digest {
+        Some(icon_digest) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&icon_digest);
+        }
+        None => bytes.push(0),
+    }
+    bytes.push(u8::try_from(descriptor.arguments.len()).unwrap_or(u8::MAX));
+    for argument in &descriptor.arguments {
+        match argument {
+            ExecArgument::Literal(value) => {
+                bytes.push(0);
+                push_digest_field(&mut bytes, value.as_bytes());
+            }
+            ExecArgument::SingleFile => bytes.push(1),
+            ExecArgument::MultipleFiles => bytes.push(2),
+            ExecArgument::SingleUrl => bytes.push(3),
+            ExecArgument::MultipleUrls => bytes.push(4),
+            ExecArgument::Icon => bytes.push(5),
+            ExecArgument::DisplayName => bytes.push(6),
+            ExecArgument::DesktopFile => bytes.push(7),
+        }
+    }
+    bytes.push(u8::try_from(descriptor.mime_types.len()).unwrap_or(u8::MAX));
+    for mime_type in &descriptor.mime_types {
         push_digest_field(&mut bytes, mime_type.as_bytes());
     }
     sha256(&bytes)
@@ -1260,17 +1316,23 @@ fn encode_registry_version(
 ) -> Result<Vec<u8>, LauncherRegistryError> {
     if !matches!(
         version,
-        LEGACY_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION | REGISTRY_VERSION
+        LEGACY_REGISTRY_VERSION
+            | ICON_REGISTRY_VERSION
+            | PREVIOUS_REGISTRY_VERSION
+            | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
     }
     let mut body = Vec::with_capacity(registry.descriptors.len().saturating_mul(1024));
     for descriptor in &registry.descriptors {
         body.extend_from_slice(&descriptor.descriptor_id);
-        let content_digest = if version == LEGACY_REGISTRY_VERSION {
-            legacy_descriptor_digest(descriptor)
-        } else {
-            descriptor.content_digest
+        let content_digest = match version {
+            LEGACY_REGISTRY_VERSION => legacy_descriptor_digest(descriptor),
+            ICON_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION => {
+                previous_descriptor_digest(descriptor)
+            }
+            REGISTRY_VERSION => descriptor.content_digest,
+            _ => return Err(LauncherRegistryError::Corrupt),
         };
         body.extend_from_slice(&content_digest);
         body.extend_from_slice(&descriptor.desired_generation.to_le_bytes());
@@ -1282,11 +1344,14 @@ fn encode_registry_version(
         push_string(&mut body, &descriptor.android_package)?;
         push_string(&mut body, &descriptor.desktop_id)?;
         push_optional_string(&mut body, descriptor.source_package.as_deref())?;
+        if version >= REGISTRY_VERSION {
+            push_optional_string(&mut body, descriptor.executable_package.as_deref())?;
+        }
         push_string(&mut body, &descriptor.name)?;
         push_string(&mut body, &descriptor.executable)?;
         push_optional_string(&mut body, descriptor.try_exec.as_deref())?;
         push_optional_string(&mut body, descriptor.icon.as_deref())?;
-        if version >= 2 {
+        if version >= ICON_REGISTRY_VERSION {
             match descriptor.icon_digest {
                 Some(digest) => {
                     body.push(1);
@@ -1354,7 +1419,10 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
     let version = cursor.u32()?;
     if !matches!(
         version,
-        LEGACY_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION | REGISTRY_VERSION
+        LEGACY_REGISTRY_VERSION
+            | ICON_REGISTRY_VERSION
+            | PREVIOUS_REGISTRY_VERSION
+            | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
     }
@@ -1382,11 +1450,16 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
         let android_package = cursor.string()?;
         let desktop_id = cursor.string()?;
         let source_package = cursor.optional_string()?;
+        let executable_package = if version >= REGISTRY_VERSION {
+            cursor.optional_string()?
+        } else {
+            None
+        };
         let name = cursor.string()?;
         let executable = cursor.string()?;
         let try_exec = cursor.optional_string()?;
         let icon = cursor.optional_string()?;
-        let icon_digest = if version >= 2 {
+        let icon_digest = if version >= ICON_REGISTRY_VERSION {
             match cursor.byte()? {
                 0 => None,
                 1 => Some(cursor.array_32()?),
@@ -1426,6 +1499,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
             android_package,
             desktop_id,
             source_package,
+            executable_package,
             name,
             executable,
             arguments,
@@ -1441,11 +1515,21 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
             status,
             content_digest,
         };
-        if version == LEGACY_REGISTRY_VERSION {
-            if descriptor.content_digest != legacy_descriptor_digest(&descriptor) {
-                return Err(LauncherRegistryError::Corrupt);
+        match version {
+            LEGACY_REGISTRY_VERSION => {
+                if descriptor.content_digest != legacy_descriptor_digest(&descriptor) {
+                    return Err(LauncherRegistryError::Corrupt);
+                }
+                descriptor.content_digest = descriptor_digest(&descriptor);
             }
-            descriptor.content_digest = descriptor_digest(&descriptor);
+            ICON_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION => {
+                if descriptor.content_digest != previous_descriptor_digest(&descriptor) {
+                    return Err(LauncherRegistryError::Corrupt);
+                }
+                descriptor.content_digest = descriptor_digest(&descriptor);
+            }
+            REGISTRY_VERSION => {}
+            _ => return Err(LauncherRegistryError::Corrupt),
         }
         descriptors.push(descriptor);
     }
@@ -1546,6 +1630,10 @@ fn valid_descriptor_strings(descriptor: &LauncherDescriptor) -> bool {
         && valid_path(&descriptor.executable)
         && descriptor
             .source_package
+            .as_deref()
+            .is_none_or(valid_package_name)
+        && descriptor
+            .executable_package
             .as_deref()
             .is_none_or(valid_package_name)
         && descriptor.try_exec.as_deref().is_none_or(valid_path)
@@ -1887,6 +1975,7 @@ mod tests {
         DesktopEntry {
             desktop_id: desktop_id.to_owned(),
             source_package: Some("kate".to_owned()),
+            executable_package: Some("kate".to_owned()),
             name: name.to_owned(),
             executable: "/usr/bin/kate".to_owned(),
             arguments: vec![
@@ -1992,6 +2081,26 @@ mod tests {
     }
 
     #[test]
+    fn terminal_desktop_entries_do_not_publish_graphical_wrappers() {
+        let root = TestRoot::new();
+        let mut terminal = entry("btop.desktop", "btop++");
+        terminal.source_package = Some("btop".to_owned());
+        terminal.executable_package = Some("btop".to_owned());
+        terminal.executable = "/usr/bin/btop".to_owned();
+        terminal.try_exec = None;
+        terminal.arguments.clear();
+        terminal.terminal = true;
+
+        let (registry, report) = LauncherRegistry::reconcile(&root.path, &catalog(vec![terminal]))
+            .expect("terminal reconcile");
+
+        assert!(registry.descriptors().is_empty());
+        assert_eq!(report.added, 0);
+        assert_eq!(report.changed, 0);
+        assert_eq!(report.removed, 0);
+    }
+
+    #[test]
     fn package_icon_bytes_are_fingerprinted_and_trigger_wrapper_updates() {
         let root = TestRoot::new();
         let icon = root
@@ -2079,7 +2188,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_registry_version_loads_before_review_state_is_written() {
+    fn previous_registry_version_rebinds_executable_ownership() {
         let root = TestRoot::new();
         let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
         let (registry, _) =
@@ -2091,9 +2200,19 @@ mod tests {
             previous,
         )
         .expect("replace with previous registry");
+        let loaded = LauncherRegistry::load(&root.path).expect("load previous registry");
         assert_eq!(
-            LauncherRegistry::load(&root.path).expect("load previous registry"),
-            registry,
+            loaded.descriptors[0].android_package,
+            registry.descriptors[0].android_package,
+        );
+        assert!(loaded.descriptors[0].executable_package.is_none());
+        let (reconciled, report) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("rebind executable owner");
+        assert_eq!(report.changed, 1);
+        assert_eq!(reconciled.descriptors[0].desired_generation, 2);
+        assert_eq!(
+            reconciled.descriptors[0].executable_package.as_deref(),
+            Some("kate"),
         );
     }
 

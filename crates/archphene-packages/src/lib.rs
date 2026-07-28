@@ -74,7 +74,7 @@ const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
 const AUR_PACKAGE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-packages";
 const PACKAGE_COMPATIBILITY_CACHE_DIRECTORY: &str = "var/cache/archphene/package-compatibility-v1";
-const PACKAGE_COMPATIBILITY_CACHE_DOMAIN: &[u8] = b"org.archphene.package-compatibility-cache.v1\0";
+const PACKAGE_COMPATIBILITY_CACHE_DOMAIN: &[u8] = b"org.archphene.package-compatibility-cache.v2\0";
 const PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT: u64 = 1024;
 const PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT: usize = 1024;
 const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
@@ -549,6 +549,16 @@ impl VerifiedPackageClosure {
 }
 
 impl InstalledPackageCatalog {
+    pub fn capabilities(&self, package: &str) -> Option<(u8, bool)> {
+        self.packages
+            .binary_search_by(|candidate| candidate.name.as_str().cmp(package))
+            .ok()
+            .map(|index| {
+                let package = &self.packages[index];
+                (package.capabilities, package.capabilities_analyzed)
+            })
+    }
+
     pub fn page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
         if offset > self.packages.len() {
             return Err(PackageRuntimeError::InvalidQuery);
@@ -643,7 +653,7 @@ impl desktop::DesktopCatalog {
 
         let mut output = empty_tool_output();
         let header = format!(
-            "D2\t{next}\t{}\t{}\t{}\t{}\n",
+            "D3\t{next}\t{}\t{}\t{}\t{}\n",
             self.entries.len(),
             self.examined,
             self.rejected,
@@ -666,7 +676,10 @@ fn desktop_record_bytes(entry: &desktop::DesktopEntry) -> Result<usize, PackageR
         .and_then(|value| value.checked_add(entry.icon.as_ref().map_or(0, String::len)))
         .and_then(|value| value.checked_add(entry.try_exec.as_ref().map_or(0, String::len)))
         .and_then(|value| value.checked_add(entry.source_package.as_ref().map_or(0, String::len)))
-        .and_then(|value| value.checked_add(10))
+        .and_then(|value| {
+            value.checked_add(entry.executable_package.as_ref().map_or(0, String::len))
+        })
+        .and_then(|value| value.checked_add(11))
         .ok_or(PackageRuntimeError::OutputLimit)?;
     for (index, argument) in entry.arguments.iter().enumerate() {
         length = length
@@ -729,6 +742,10 @@ fn push_desktop_record(
     output.push(b"\t")?;
     if let Some(source_package) = &entry.source_package {
         output.push(source_package.as_bytes())?;
+    }
+    output.push(b"\t")?;
+    if let Some(executable_package) = &entry.executable_package {
+        output.push(executable_package.as_bytes())?;
     }
     output.push(b"\n")
 }
@@ -1934,19 +1951,27 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::UnsafeEntry(local));
         }
 
-        let mut targets: Vec<(Vec<u8>, usize)> = catalog
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                (
-                    format!("usr/share/applications/{}", entry.desktop_id).into_bytes(),
-                    index,
-                )
-            })
-            .collect();
-        targets.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        let mut ambiguous = vec![false; catalog.entries.len()];
+        let mut targets = Vec::with_capacity(catalog.entries.len().saturating_mul(2));
+        for (index, entry) in catalog.entries.iter().enumerate() {
+            targets.push((
+                format!("usr/share/applications/{}", entry.desktop_id).into_bytes(),
+                index,
+                false,
+            ));
+            let executable = entry
+                .executable
+                .strip_prefix('/')
+                .ok_or(PackageRuntimeError::InvalidResolution)?;
+            targets.push((executable.as_bytes().to_vec(), index, true));
+        }
+        targets.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        let mut source_ambiguous = vec![false; catalog.entries.len()];
+        let mut executable_ambiguous = vec![false; catalog.entries.len()];
         let mut directory_entries = 0_usize;
         let mut database_entries = 0_usize;
         let mut total_bytes = 0_u64;
@@ -2032,12 +2057,15 @@ impl PackageRuntime {
                 &package,
                 &targets,
                 &mut catalog.entries,
-                &mut ambiguous,
+                &mut source_ambiguous,
+                &mut executable_ambiguous,
             ) {
                 catalog.truncated = true;
             }
         }
-        if ambiguous.iter().any(|value| *value) {
+        if source_ambiguous.iter().any(|value| *value)
+            || executable_ambiguous.iter().any(|value| *value)
+        {
             catalog.truncated = true;
         }
         Ok(())
@@ -5614,6 +5642,18 @@ fn inspect_package_tar_cancellable(
         let command_path = direct_command_path(logical_path);
         let library_metadata_path = is_library_metadata_path(logical_path);
         let static_library_path = is_static_library_path(logical_path);
+        let desktop_path = classify_target
+            && logical_path.starts_with(b"usr/share/applications/")
+            && logical_path.ends_with(b".desktop");
+        let desktop_id = if desktop_path {
+            logical_path
+                .rsplit(|byte| *byte == b'/')
+                .next()
+                .and_then(|name| str::from_utf8(name).ok())
+                .map(str::to_owned)
+        } else {
+            None
+        };
         if classify_target && !entry_type.is_dir() {
             analysis.capabilities |= archive_path_capabilities(logical_path);
             if command_path {
@@ -5635,6 +5675,39 @@ fn inspect_package_tar_cancellable(
         .map_err(|_| PackageRuntimeError::OutputLimit)?;
         entry.read_exact(&mut header[..header_bytes])?;
         cancellation.check()?;
+        if desktop_path {
+            let desktop_size = usize::try_from(entry.header().size()?)
+                .map_err(|_| PackageRuntimeError::OutputLimit)?;
+            if desktop_size <= desktop::MAX_DESKTOP_ENTRY_BYTES {
+                let mut contents = Vec::with_capacity(desktop_size);
+                contents.extend_from_slice(&header[..header_bytes]);
+                entry.read_to_end(&mut contents)?;
+                cancellation.check()?;
+                if contents.len() != desktop_size {
+                    return Err(PackageRuntimeError::SizeMismatch);
+                }
+                if let Some(entry) = desktop_id.as_deref().and_then(|desktop_id| {
+                    desktop::parse_desktop_entry(desktop_id, &contents, |program| {
+                        if program.starts_with('/') {
+                            Some(program.to_owned())
+                        } else if !program.is_empty() && !program.contains('/') {
+                            Some(format!("/usr/bin/{program}"))
+                        } else {
+                            None
+                        }
+                    })
+                    .ok()
+                    .flatten()
+                }) {
+                    analysis.capabilities |= if entry.terminal {
+                        PACKAGE_CAPABILITY_COMMAND_LINE
+                    } else {
+                        PACKAGE_CAPABILITY_GRAPHICAL
+                    };
+                }
+            }
+            continue;
+        }
         let mode = entry.header().mode()?;
         let executable = mode & 0o111 != 0;
         let elf = header[..header_bytes].starts_with(b"\x7fELF");
@@ -5742,9 +5815,6 @@ fn normalized_archive_path(mut path: &[u8]) -> Option<&[u8]> {
 
 fn archive_path_capabilities(path: &[u8]) -> u8 {
     let mut capabilities = 0_u8;
-    if path.starts_with(b"usr/share/applications/") && path.ends_with(b".desktop") {
-        capabilities |= PACKAGE_CAPABILITY_GRAPHICAL;
-    }
     if direct_command_path(path) {
         capabilities |= PACKAGE_CAPABILITY_COMMAND_LINE;
     }
@@ -5888,9 +5958,10 @@ fn scan_desktop_owners(
     mut file: File,
     expected_bytes: u64,
     package: &str,
-    targets: &[(Vec<u8>, usize)],
+    targets: &[(Vec<u8>, usize, bool)],
     entries: &mut [desktop::DesktopEntry],
-    ambiguous: &mut [bool],
+    source_ambiguous: &mut [bool],
+    executable_ambiguous: &mut [bool],
 ) -> bool {
     let mut read_bytes = 0_u64;
     let mut chunk = [0_u8; 8 * 1024];
@@ -5919,7 +5990,8 @@ fn scan_desktop_owners(
                         package,
                         targets,
                         entries,
-                        ambiguous,
+                        source_ambiguous,
+                        executable_ambiguous,
                     );
                 }
                 line.clear();
@@ -5936,7 +6008,15 @@ fn scan_desktop_owners(
         }
     }
     if !line.is_empty() && !overlong {
-        process_local_files_line(&line, &mut in_files, package, targets, entries, ambiguous);
+        process_local_files_line(
+            &line,
+            &mut in_files,
+            package,
+            targets,
+            entries,
+            source_ambiguous,
+            executable_ambiguous,
+        );
     }
     valid && read_bytes == expected_bytes
 }
@@ -5945,9 +6025,10 @@ fn process_local_files_line(
     raw_line: &[u8],
     in_files: &mut bool,
     package: &str,
-    targets: &[(Vec<u8>, usize)],
+    targets: &[(Vec<u8>, usize, bool)],
     entries: &mut [desktop::DesktopEntry],
-    ambiguous: &mut [bool],
+    source_ambiguous: &mut [bool],
+    executable_ambiguous: &mut [bool],
 ) {
     let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
     if line == b"%FILES%" {
@@ -5961,19 +6042,31 @@ fn process_local_files_line(
     if !*in_files {
         return;
     }
-    let Ok(target) = targets.binary_search_by(|candidate| candidate.0.as_slice().cmp(line)) else {
-        return;
-    };
-    let index = targets[target].1;
-    if ambiguous[index] {
-        return;
-    }
-    match entries[index].source_package.as_deref() {
-        None => entries[index].source_package = Some(package.to_owned()),
-        Some(current) if current == package => {}
-        Some(_) => {
-            entries[index].source_package = None;
-            ambiguous[index] = true;
+    let start = targets.partition_point(|candidate| candidate.0.as_slice() < line);
+    for (_, index, executable) in targets[start..]
+        .iter()
+        .take_while(|candidate| candidate.0.as_slice() == line)
+    {
+        let ambiguous = if *executable {
+            &mut executable_ambiguous[*index]
+        } else {
+            &mut source_ambiguous[*index]
+        };
+        if *ambiguous {
+            continue;
+        }
+        let owner = if *executable {
+            &mut entries[*index].executable_package
+        } else {
+            &mut entries[*index].source_package
+        };
+        match owner.as_deref() {
+            None => *owner = Some(package.to_owned()),
+            Some(current) if current == package => {}
+            Some(_) => {
+                *owner = None;
+                *ambiguous = true;
+            }
         }
     }
 }
@@ -7224,7 +7317,12 @@ library\tlibarchphene_kde_config.so\tlibarchphene_pkg_999999999999999999999999.s
         tree.local_package(
             "editor-1.0-1",
             "editor",
-            b"%FILES%\nusr/bin/editor\nusr/share/applications/editor.desktop\n\n",
+            b"%FILES%\nusr/share/applications/editor.desktop\n\n",
+        );
+        tree.local_dependency_package(
+            "editor-runtime-1.0-1",
+            "editor-runtime",
+            b"%FILES%\nusr/bin/editor\n\n",
         );
         tree.local_dependency_package(
             "dependency-editor-1.0-1",
@@ -7241,6 +7339,10 @@ library\tlibarchphene_kde_config.so\tlibarchphene_pkg_999999999999999999999999.s
         let catalog = runtime.desktop_catalog().expect("owned desktop catalog");
         assert_eq!(catalog.entries.len(), 1);
         assert_eq!(catalog.entries[0].source_package.as_deref(), Some("editor"));
+        assert_eq!(
+            catalog.entries[0].executable_package.as_deref(),
+            Some("editor-runtime")
+        );
         assert!(!catalog.truncated);
         assert!(
             catalog
@@ -7248,8 +7350,20 @@ library\tlibarchphene_kde_config.so\tlibarchphene_pkg_999999999999999999999999.s
                 .expect("owned desktop page")
                 .as_str()
                 .expect("UTF-8 desktop page")
-                .ends_with("\teditor\n")
+                .ends_with("\teditor\teditor-runtime\n")
         );
+
+        tree.local_package(
+            "other-runtime-1.0-1",
+            "other-runtime",
+            b"%FILES%\nusr/bin/editor\n",
+        );
+        let catalog = runtime
+            .desktop_catalog()
+            .expect("ambiguous executable owner catalog");
+        assert_eq!(catalog.entries.len(), 1);
+        assert!(catalog.entries[0].executable_package.is_none());
+        assert!(catalog.truncated);
 
         tree.local_package(
             "other-editor-1.0-1",
@@ -7827,6 +7941,30 @@ unknown-metadata\t1.0-1\t1\t0\t0\n",
                 diagnostic: None,
             },
         );
+    }
+
+    #[test]
+    fn verified_archive_analysis_classifies_terminal_desktop_entries_as_cli() {
+        let archive = package_tar(&[
+            (
+                "usr/share/applications/btop.desktop",
+                0o644,
+                b"[Desktop Entry]\nType=Application\nName=btop++\nExec=btop\nTerminal=true\n",
+            ),
+            ("usr/bin/btop", 0o755, b"#!/bin/sh\n"),
+        ]);
+        let analysis = inspect_package_tar(
+            Cursor::new(archive),
+            RepositoryArchitecture::X86_64,
+            false,
+            4096,
+            true,
+        )
+        .expect("terminal package compatibility");
+
+        assert_eq!(analysis.capabilities, PACKAGE_CAPABILITY_COMMAND_LINE);
+        assert_eq!(analysis.command_count, 1);
+        assert_eq!(analysis.diagnostic, None);
     }
 
     #[test]

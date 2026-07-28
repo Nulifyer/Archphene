@@ -17,10 +17,10 @@ if [[ "$rebuild_image" == true ]] || ! archphene_podman_image_exists "$image"; t
 fi
 mkdir -p "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64"
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
-  $(pkg-config --cflags glib-2.0 gobject-2.0 gmodule-2.0) \
-  -Wl,--allow-shlib-undefined \
+  $(pkg-config --cflags glib-2.0 gobject-2.0 gmodule-2.0 gio-2.0) \
   -o "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so" \
-  "$ARCHPHENE_ROOT/native/archphene-gtk3-settings/archphene_gtk3_settings.c"
+  "$ARCHPHENE_ROOT/native/archphene-gtk3-settings/archphene_gtk3_settings.c" \
+  $(pkg-config --libs glib-2.0 gobject-2.0 gmodule-2.0 gio-2.0)
 strip --strip-unneeded \
   "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so"
 readelf -h "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so" |
@@ -28,12 +28,30 @@ readelf -h "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settin
 podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace "$image" bash -lc '
 set -euo pipefail
 source_file=/workspace/native/archphene-gtk3-settings/archphene_gtk3_settings.c
+glib_archive=/tmp/glib2-2.88.2-1-aarch64.pkg.tar.xz
+glib_root=/tmp/archphene-aarch64-glib
+curl -fsSL \
+  https://ca.us.mirror.archlinuxarm.org/aarch64/core/glib2-2.88.2-1-aarch64.pkg.tar.xz \
+  -o "$glib_archive"
+echo "662ee8c1c9546b10e394cac1d25205417b76580fab5d51524c5377e10024b34c  $glib_archive" |
+  sha256sum -c -
+mkdir -p "$glib_root"
+bsdtar -xf "$glib_archive" -C "$glib_root" \
+  "usr/lib/libgio-2.0.so*" \
+  "usr/lib/libgobject-2.0.so*" \
+  "usr/lib/libgmodule-2.0.so*" \
+  "usr/lib/libglib-2.0.so*"
 mkdir -p /workspace/prebuilt/gtk3-compat/aarch64
 aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
-  $(pkg-config --cflags glib-2.0 gobject-2.0 gmodule-2.0) \
-  -Wl,--allow-shlib-undefined -o /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so "$source_file"
+  $(pkg-config --cflags glib-2.0 gobject-2.0 gmodule-2.0 gio-2.0) \
+  -o /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so \
+  "$source_file" \
+  -L"$glib_root/usr/lib" -Wl,-rpath-link,"$glib_root/usr/lib" \
+  -lgio-2.0 -lgobject-2.0 -lgmodule-2.0 -lglib-2.0
 aarch64-linux-gnu-strip --strip-unneeded /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so
 aarch64-linux-gnu-readelf -h /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so | grep -F AArch64
+aarch64-linux-gnu-readelf -d /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so |
+  grep -F "Shared library: [libgio-2.0.so.0]"
 '
 python3 - "$ARCHPHENE_ROOT/prebuilt/gtk3-compat" <<'PY'
 import hashlib, json, pathlib, sys

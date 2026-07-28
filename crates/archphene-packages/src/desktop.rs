@@ -38,6 +38,7 @@ pub enum ExecArgument {
 pub struct DesktopEntry {
     pub desktop_id: String,
     pub source_package: Option<String>,
+    pub executable_package: Option<String>,
     pub name: String,
     pub executable: String,
     pub arguments: Vec<ExecArgument>,
@@ -333,6 +334,7 @@ where
     Ok(Some(DesktopEntry {
         desktop_id: desktop_id.to_owned(),
         source_package: None,
+        executable_package: None,
         name,
         executable,
         arguments,
@@ -1156,12 +1158,12 @@ MimeType=text/plain;\n",
         };
         assert_eq!(
             catalog.page(0).expect("catalog page").as_bytes(),
-            b"D2\t1\t1\t1\t0\t0\n\
-org.kde.kate.desktop\tKate\t/usr/bin/kate\t0\tkate\t/usr/bin/kate\tL:--startanon\x1fU\ttext/plain;\t\n",
+            b"D3\t1\t1\t1\t0\t0\n\
+org.kde.kate.desktop\tKate\t/usr/bin/kate\t0\tkate\t/usr/bin/kate\tL:--startanon\x1fU\ttext/plain;\t\t\n",
         );
         assert_eq!(
             catalog.page(1).expect("terminal page").as_bytes(),
-            b"D2\t1\t1\t1\t0\t0\n",
+            b"D3\t1\t1\t1\t0\t0\n",
         );
         assert!(matches!(
             catalog.page(2),
@@ -1175,6 +1177,7 @@ org.kde.kate.desktop\tKate\t/usr/bin/kate\t0\tkate\t/usr/bin/kate\tL:--startanon
             .map(|index| DesktopEntry {
                 desktop_id: format!("fixture-{index:03}.desktop"),
                 source_package: None,
+                executable_package: None,
                 name: format!("Fixture {index:03}"),
                 executable: "/usr/bin/fixture".to_owned(),
                 arguments: vec![ExecArgument::Literal("x".repeat(500))],

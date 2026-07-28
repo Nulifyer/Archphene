@@ -1,0 +1,117 @@
+package org.archphene.app.runtime
+
+import java.nio.charset.StandardCharsets
+import org.archphene.app.launcher.LauncherApkAssembler
+
+internal data class PackageLauncherReview(
+    val status: String,
+    val capabilities: Int,
+    val capabilitiesAnalyzed: Boolean,
+    val launchers: Int,
+    val verifiedExecutables: Int,
+    val current: Int,
+    val pending: Int,
+    val attention: Int,
+    val failed: Int,
+)
+
+internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherReview {
+    val text = String(bytes, StandardCharsets.US_ASCII)
+    if (!text.endsWith('\n') || text.count { character -> character == '\n' } != 1) {
+        throw IllegalStateException("Rust returned invalid package launcher review")
+    }
+    val fields = text.dropLast(1).split('\t')
+    val status = fields.getOrNull(1)
+    val capabilities = reviewCapabilities(fields.getOrNull(2))
+    val analyzed =
+        when (fields.getOrNull(3)) {
+            "0" -> false
+            "1" -> true
+            else -> null
+        }
+    val launchers = reviewCount(fields.getOrNull(4))
+    val verifiedExecutables = reviewCount(fields.getOrNull(5))
+    val current = reviewCount(fields.getOrNull(6))
+    val pending = reviewCount(fields.getOrNull(7))
+    val attention = reviewCount(fields.getOrNull(8))
+    val failed = reviewCount(fields.getOrNull(9))
+    val validStatus =
+        when (status) {
+            "not-installed",
+            "no-launcher",
+            "ready",
+            "pending",
+            "attention",
+            "failed",
+            "unavailable",
+            -> true
+            else -> false
+        }
+    if (
+        fields.size != 11 ||
+        fields[0] != "R1" ||
+        !validStatus ||
+        capabilities == null ||
+        analyzed == null ||
+        launchers == null ||
+        verifiedExecutables == null ||
+        current == null ||
+        pending == null ||
+        attention == null ||
+        failed == null ||
+        fields[10] != LauncherApkAssembler.CAPABILITIES_V2 ||
+        verifiedExecutables > launchers ||
+        current + pending + attention + failed > launchers ||
+        status == "not-installed" &&
+            (
+                capabilities != 0 ||
+                    analyzed ||
+                    launchers != 0 ||
+                    verifiedExecutables != 0
+            ) ||
+        status == "no-launcher" && launchers != 0 ||
+        status == "ready" &&
+            (
+                launchers == 0 ||
+                    verifiedExecutables != launchers ||
+                    current != launchers ||
+                    pending != 0 ||
+                    attention != 0 ||
+                    failed != 0
+            ) ||
+        status == "pending" && (pending == 0 || attention != 0 || failed != 0) ||
+        status == "attention" && (attention == 0 || failed != 0) ||
+        status == "failed" && failed == 0
+    ) {
+        throw IllegalStateException("Rust returned inconsistent package launcher review")
+    }
+    return PackageLauncherReview(
+        status = checkNotNull(status),
+        capabilities = capabilities,
+        capabilitiesAnalyzed = analyzed,
+        launchers = launchers,
+        verifiedExecutables = verifiedExecutables,
+        current = current,
+        pending = pending,
+        attention = attention,
+        failed = failed,
+    )
+}
+
+private fun reviewCapabilities(value: String?): Int? {
+    if (
+        value == null ||
+        value.isEmpty() ||
+        value.length > 2 ||
+        value.length > 1 && value.startsWith('0') ||
+        value.any { character -> character !in '0'..'9' && character !in 'a'..'f' }
+    ) {
+        return null
+    }
+    return value.toIntOrNull(16)?.takeIf { capabilities -> capabilities in 0..0xff }
+}
+
+private fun reviewCount(value: String?): Int? {
+    val parsed = value?.toIntOrNull() ?: return null
+    return parsed.takeIf { count -> count in 0..256 && count.toString() == value }
+}
