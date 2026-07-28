@@ -152,7 +152,15 @@
     <string name="package_search_prompt">Search the official Arch repositories</string>
     <string name="package_search_official">Official</string>
     <string name="package_search_installed">Installed</string>
-    <string name="package_search_version_differs">Differs from %1$s</string>
+    <string name="package_search_update_from">Update from %1$s</string>
+    <string name="package_search_not_update">Installed %1$s · Not an update</string>
+    <string name="package_search_installed_candidate_analysis">%1$s installed · Candidate not analyzed</string>
+    <string name="package_capabilities_unanalyzed">Not analyzed</string>
+    <string name="package_capabilities_data">Data</string>
+    <string name="package_capabilities_graphical">Graphical</string>
+    <string name="package_capabilities_command_line">CLI</string>
+    <string name="package_capabilities_library">Library</string>
+    <string name="package_capabilities_system">System</string>
     <string name="session_channel_name">Linux activity</string>
     <string name="session_channel_description">Keeps user-started Archphene work running</string>
     <string name="session_notification_title">Archphene Linux session</string>

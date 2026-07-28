@@ -435,6 +435,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Ensure search results distinguish graphical apps, CLI tools, libraries, installed packages, available updates, AUR results, unsupported packages, and compatibility status.
   - [x] Preserve pacman's authoritative installed marker across the bounded Rust/JNI snapshot and show Official, Installed, or the exact differing installed version without name/description heuristics. Current, differing, and available fixtures pass light/dark full-device emulator inspection; the physical Samsung shows its real installed Foot package while preserving all 255 installed packages.
   - [ ] Derive GUI, CLI, library, and compatibility classes from verified package file/capability metadata; integrate AUR results and a version-order-safe update state without guessing from names or descriptions.
+    - [x] Derive bounded Graphical, CLI, Library, System, and Data classes from installed pacman file-ownership records, keep missing/unverified candidate metadata explicitly Not analyzed, and use pacman/libalpm ordering to distinguish updates from locally newer versions. The manager refuses an automatic downgrade. Multi-page installed and four-state local-search fixtures pass exact-ABI light/dark full-device visual gates on the emulator and Samsung.
+    - [ ] Derive package-specific bridge compatibility/unsupported diagnostics from the verified candidate closure and launcher capability review rather than treating a file class as a support claim.
+    - [ ] Integrate reviewed AUR results into the same source, class, installed-version, update, and compatibility presentation.
 - [ ] Add clear disk-use estimates and controls for package archives, shared runtime data, build caches, and user files.
 
 ## P0 - VS Code and .NET daily-use milestone

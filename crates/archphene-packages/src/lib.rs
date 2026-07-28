@@ -86,6 +86,10 @@ const LOCAL_DESCRIPTION_LIMIT: u64 = 64 * 1024;
 const LOCAL_FILES_LIMIT: u64 = 8 * 1024 * 1024;
 const LOCAL_FILES_TOTAL_LIMIT: u64 = 128 * 1024 * 1024;
 const LOCAL_FILE_PATH_LIMIT: usize = 4 * 1024;
+const PACKAGE_CAPABILITY_GRAPHICAL: u8 = 1 << 0;
+const PACKAGE_CAPABILITY_COMMAND_LINE: u8 = 1 << 1;
+const PACKAGE_CAPABILITY_LIBRARY: u8 = 1 << 2;
+const PACKAGE_CAPABILITY_SYSTEM: u8 = 1 << 3;
 const O_NOFOLLOW: i32 = 0o400000;
 const O_CLOEXEC: i32 = 0o2000000;
 const PATH_BRIDGE_NAME: &str = "libarchphene_path_bridge.so";
@@ -375,7 +379,15 @@ pub struct VerifiedAurArchive<'a> {
 }
 
 pub struct InstalledPackageCatalog {
-    packages: Vec<(String, String, bool)>,
+    packages: Vec<InstalledPackage>,
+}
+
+struct InstalledPackage {
+    name: String,
+    version: String,
+    explicitly_installed: bool,
+    capabilities: u8,
+    capabilities_analyzed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -455,16 +467,22 @@ impl InstalledPackageCatalog {
             return Err(PackageRuntimeError::InvalidQuery);
         }
         let mut output = empty_tool_output();
-        for (name, version, explicitly_installed) in self
+        for package in self
             .packages
             .iter()
             .skip(offset)
             .take(INSTALLED_PACKAGE_PAGE_SIZE)
         {
-            output.push(name.as_bytes())?;
+            output.push(package.name.as_bytes())?;
             output.push(b"\t")?;
-            output.push(version.as_bytes())?;
-            output.push(if *explicitly_installed {
+            output.push(package.version.as_bytes())?;
+            output.push(if package.explicitly_installed {
+                b"\t1\t"
+            } else {
+                b"\t0\t"
+            })?;
+            output.push(&[hex_nibble(package.capabilities)])?;
+            output.push(if package.capabilities_analyzed {
                 b"\t1\n"
             } else {
                 b"\t0\n"
@@ -1011,7 +1029,7 @@ impl PackageRuntime {
             let mut count = 0_usize;
             append_search_output_pass(raw.as_str()?, query, true, &mut output, &mut count)?;
             if count != 0 {
-                return Ok(output);
+                return self.annotate_search_updates(output, config, root, database);
             }
         }
         let raw = match self.run(
@@ -1029,7 +1047,41 @@ impl PackageRuntime {
             }
             Err(error) => return Err(error),
         };
-        parse_search_output(raw.as_str()?, query)
+        self.annotate_search_updates(
+            parse_search_output(raw.as_str()?, query)?,
+            config,
+            root,
+            database,
+        )
+    }
+
+    fn annotate_search_updates(
+        &self,
+        output: ToolOutput,
+        config: &str,
+        root: &str,
+        database: &str,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        let differing = differing_search_packages(&output)?;
+        if differing.is_empty() {
+            return Ok(output);
+        }
+        let mut arguments = Vec::with_capacity(7 + differing.len());
+        arguments.extend([
+            "--config", config, "--root", root, "--dbpath", database, "-Quq",
+        ]);
+        arguments.extend(differing.iter().map(String::as_str));
+        let raw_updates = match self.run(PackageTool::Pacman, &arguments) {
+            Ok(output) => output,
+            Err(PackageRuntimeError::ToolFailed(1, diagnostic))
+                if diagnostic.as_bytes().is_empty() =>
+            {
+                return Ok(output);
+            }
+            Err(error) => return Err(error),
+        };
+        let updates = parse_quiet_update_names(raw_updates.as_str()?, &differing)?;
+        annotate_search_update_names(output, &updates)
     }
 
     pub fn resolve(&self, package: &str) -> Result<PackageResolution, PackageRuntimeError> {
@@ -1210,6 +1262,46 @@ impl PackageRuntime {
         }
     }
 
+    pub fn available_version_state(
+        &self,
+        package: &str,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) || !self.catalogs_ready() {
+            return Err(if safe_logical_name(package) {
+                PackageRuntimeError::InvalidCatalog
+            } else {
+                PackageRuntimeError::InvalidQuery
+            });
+        }
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let state = match self.run(
+            PackageTool::Pacman,
+            &[
+                "--config", config, "--root", root, "--dbpath", database, "-Quq", package,
+            ],
+        ) {
+            Ok(output) => parse_exact_quiet_update(output.as_str()?, package)?,
+            Err(PackageRuntimeError::ToolFailed(1, output)) if output.as_bytes().is_empty() => {
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        let mut output = empty_tool_output();
+        output.push(if state { b"update" } else { b"different" })?;
+        Ok(output)
+    }
+
     pub fn installed_origin(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         if !safe_logical_name(package) {
             return Err(PackageRuntimeError::InvalidQuery);
@@ -1301,6 +1393,7 @@ impl PackageRuntime {
 
         let mut packages = Vec::new();
         let mut contents = String::with_capacity(4096);
+        let mut files_total_bytes = 0_u64;
         for entry in fs::read_dir(&local)? {
             if packages.len() >= LOCAL_DATABASE_ENTRY_LIMIT {
                 return Err(PackageRuntimeError::OutputLimit);
@@ -1354,10 +1447,17 @@ impl PackageRuntime {
                 Some("1") => false,
                 Some(_) => return Err(PackageRuntimeError::InvalidResolution),
             };
-            packages.push((name.to_owned(), version.to_owned(), explicitly_installed));
+            let capabilities = installed_package_capabilities(&entry_path, &mut files_total_bytes)?;
+            packages.push(InstalledPackage {
+                name: name.to_owned(),
+                version: version.to_owned(),
+                explicitly_installed,
+                capabilities: capabilities.unwrap_or(0),
+                capabilities_analyzed: capabilities.is_some(),
+            });
         }
-        packages.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        if packages.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        packages.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        if packages.windows(2).any(|pair| pair[0].name == pair[1].name) {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         Ok(InstalledPackageCatalog { packages })
@@ -1373,9 +1473,9 @@ impl PackageRuntime {
             };
             installed
                 .packages
-                .binary_search_by(|(name, _, _)| name.as_str().cmp(source_package))
+                .binary_search_by(|package| package.name.as_str().cmp(source_package))
                 .ok()
-                .is_some_and(|index| installed.packages[index].2)
+                .is_some_and(|index| installed.packages[index].explicitly_installed)
         });
         Ok(catalog)
     }
@@ -4189,6 +4289,109 @@ fn parse_search_output(
     Ok(output)
 }
 
+fn differing_search_packages(output: &ToolOutput) -> Result<Vec<String>, PackageRuntimeError> {
+    let mut packages = Vec::new();
+    for line in output.as_str()?.lines() {
+        let mut fields = line.split('\t');
+        let repository = fields.next();
+        let name = fields.next();
+        let version = fields.next();
+        let description = fields.next();
+        let state = fields.next();
+        let installed_version = fields.next();
+        if fields.next().is_some()
+            || !matches!(repository, Some("core" | "extra"))
+            || !name.is_some_and(safe_logical_name)
+            || version.is_none()
+            || description.is_none()
+            || !matches!(state, Some("available" | "installed" | "different"))
+            || installed_version.is_none()
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        if state == Some("different") {
+            packages.push(name.expect("validated package name").to_owned());
+        }
+    }
+    Ok(packages)
+}
+
+fn parse_quiet_update_names(
+    input: &str,
+    candidates: &[String],
+) -> Result<BTreeSet<String>, PackageRuntimeError> {
+    let mut updates = BTreeSet::new();
+    for name in input.lines() {
+        if !safe_logical_name(name)
+            || !candidates.iter().any(|candidate| candidate == name)
+            || !updates.insert(name.to_owned())
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+    }
+    Ok(updates)
+}
+
+fn parse_exact_quiet_update(
+    input: &str,
+    expected_package: &str,
+) -> Result<bool, PackageRuntimeError> {
+    if input.is_empty() {
+        return Ok(false);
+    }
+    let mut lines = input.lines();
+    let update = lines.next().ok_or(PackageRuntimeError::InvalidResolution)?;
+    if update != expected_package || lines.next().is_some() {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(true)
+}
+
+fn annotate_search_update_names(
+    output: ToolOutput,
+    updates: &BTreeSet<String>,
+) -> Result<ToolOutput, PackageRuntimeError> {
+    let mut annotated = empty_tool_output();
+    for line in output.as_str()?.lines() {
+        let mut fields = line.split('\t');
+        let (
+            Some(repository),
+            Some(name),
+            Some(version),
+            Some(description),
+            Some(state),
+            Some(installed_version),
+        ) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        )
+        else {
+            return Err(PackageRuntimeError::InvalidResolution);
+        };
+        if fields.next().is_some() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        append_search_result(
+            &mut annotated,
+            repository,
+            name,
+            version,
+            description,
+            if state == "different" && updates.contains(name) {
+                "update"
+            } else {
+                state
+            },
+            installed_version,
+        )?;
+    }
+    Ok(annotated)
+}
+
 fn append_search_output_pass(
     input: &str,
     preferred_name: &str,
@@ -4368,6 +4571,165 @@ fn read_local_package_name(path: &Path) -> Option<String> {
         .flatten()
         .filter(|name| safe_logical_name(name))
         .map(str::to_owned)
+}
+
+fn installed_package_capabilities(
+    package_entry: &Path,
+    total_bytes: &mut u64,
+) -> Result<Option<u8>, PackageRuntimeError> {
+    let files_path = package_entry.join("files");
+    let metadata = match fs::symlink_metadata(&files_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > LOCAL_FILES_LIMIT
+    {
+        return Err(PackageRuntimeError::UnsafeEntry(files_path));
+    }
+    if metadata.len() == 0 {
+        return Ok(None);
+    }
+    *total_bytes = total_bytes
+        .checked_add(metadata.len())
+        .filter(|bytes| *bytes <= LOCAL_FILES_TOTAL_LIMIT)
+        .ok_or(PackageRuntimeError::OutputLimit)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(&files_path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+
+    let mut read_bytes = 0_u64;
+    let mut chunk = [0_u8; 8 * 1024];
+    let mut line = [0_u8; LOCAL_FILE_PATH_LIMIT];
+    let mut line_length = 0_usize;
+    let mut in_files = false;
+    let mut found_files_header = false;
+    let mut capabilities = 0_u8;
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        read_bytes = read_bytes
+            .checked_add(u64::try_from(read).expect("read size"))
+            .filter(|bytes| *bytes <= metadata.len())
+            .ok_or(PackageRuntimeError::SizeMismatch)?;
+        for byte in &chunk[..read] {
+            if *byte == b'\n' {
+                process_package_capability_line(
+                    &line[..line_length],
+                    &mut in_files,
+                    &mut found_files_header,
+                    &mut capabilities,
+                )?;
+                line_length = 0;
+            } else {
+                if line_length >= line.len() {
+                    return Err(PackageRuntimeError::OutputLimit);
+                }
+                line[line_length] = *byte;
+                line_length += 1;
+            }
+        }
+    }
+    if line_length != 0 {
+        process_package_capability_line(
+            &line[..line_length],
+            &mut in_files,
+            &mut found_files_header,
+            &mut capabilities,
+        )?;
+    }
+    if read_bytes != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    if !found_files_header {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(Some(capabilities))
+}
+
+fn process_package_capability_line(
+    raw_line: &[u8],
+    in_files: &mut bool,
+    found_files_header: &mut bool,
+    capabilities: &mut u8,
+) -> Result<(), PackageRuntimeError> {
+    let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+    if line == b"%FILES%" {
+        if *found_files_header {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        *found_files_header = true;
+        *in_files = true;
+        return Ok(());
+    }
+    if line.len() >= 2 && line.first() == Some(&b'%') && line.last() == Some(&b'%') {
+        *in_files = false;
+        return Ok(());
+    }
+    if !*in_files || line.is_empty() {
+        return Ok(());
+    }
+    if line.starts_with(b"/")
+        || line.contains(&0)
+        || line
+            .split(|byte| *byte == b'/')
+            .any(|part| part.is_empty() || part == b"." || part == b"..")
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    if line.ends_with(b"/") {
+        return Ok(());
+    }
+
+    if line.starts_with(b"usr/share/applications/") && line.ends_with(b".desktop") {
+        *capabilities |= PACKAGE_CAPABILITY_GRAPHICAL;
+    }
+    if line.starts_with(b"usr/bin/")
+        || line.starts_with(b"usr/sbin/")
+        || line.starts_with(b"bin/")
+        || line.starts_with(b"sbin/")
+    {
+        *capabilities |= PACKAGE_CAPABILITY_COMMAND_LINE;
+    }
+    if line.starts_with(b"usr/include/")
+        || (line.starts_with(b"usr/lib/") && is_library_metadata_path(line))
+        || (line.starts_with(b"usr/share/pkgconfig/") && line.ends_with(b".pc"))
+    {
+        *capabilities |= PACKAGE_CAPABILITY_LIBRARY;
+    }
+    if line.starts_with(b"usr/lib/systemd/")
+        || line.starts_with(b"usr/lib/udev/")
+        || line.starts_with(b"usr/lib/sysusers.d/")
+        || line.starts_with(b"usr/lib/tmpfiles.d/")
+    {
+        *capabilities |= PACKAGE_CAPABILITY_SYSTEM;
+    }
+    Ok(())
+}
+
+fn is_library_metadata_path(path: &[u8]) -> bool {
+    let name = path.rsplit(|byte| *byte == b'/').next().unwrap_or(path);
+    name.ends_with(b".a")
+        || name.ends_with(b".so")
+        || name.windows(4).any(|window| window == b".so.")
+        || (path.starts_with(b"usr/lib/pkgconfig/") && name.ends_with(b".pc"))
+}
+
+fn hex_nibble(value: u8) -> u8 {
+    debug_assert!(value <= 0x0f);
+    match value {
+        0..=9 => b'0' + value,
+        _ => b'a' + (value - 10),
+    }
 }
 
 fn scan_desktop_owners(
@@ -5956,6 +6318,29 @@ extra/available 1.0-1\n    Available package\n",
 extra\tchanged\t3.0-1\tDifferent package\tdifferent\t2.5-1\n\
 extra\tavailable\t1.0-1\tAvailable package\tavailable\t\n",
         );
+        let differing = differing_search_packages(&parsed).expect("differing packages");
+        assert_eq!(differing, ["changed"]);
+        let updates =
+            parse_quiet_update_names("changed\n", &differing).expect("version-safe update names");
+        assert!(parse_exact_quiet_update("changed\n", "changed").expect("exact update"));
+        assert!(!parse_exact_quiet_update("", "changed").expect("no update"));
+        assert!(matches!(
+            parse_exact_quiet_update("other\n", "changed"),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert_eq!(
+            annotate_search_update_names(parsed, &updates)
+                .expect("annotated search")
+                .as_str()
+                .expect("UTF-8"),
+            "extra\tcurrent\t2.0-1\tCurrent package\tinstalled\t2.0-1\n\
+extra\tchanged\t3.0-1\tDifferent package\tupdate\t2.5-1\n\
+extra\tavailable\t1.0-1\tAvailable package\tavailable\t\n",
+        );
+        assert!(matches!(
+            parse_quiet_update_names("unrelated\n", &differing),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
         assert!(matches!(
             parse_search_output(
                 "extra/broken 1.0-1 [installed: invalid version]\n    Broken\n",
@@ -6089,16 +6474,16 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         let first = catalog.page(0).expect("first page");
         let first = first.as_str().expect("first page UTF-8");
         assert_eq!(first.lines().count(), INSTALLED_PACKAGE_PAGE_SIZE);
-        assert!(first.starts_with("fixture-000\t1.0.0-1\t1\n"));
-        assert!(first.ends_with("fixture-059\t1.0.59-1\t0\n"));
+        assert!(first.starts_with("fixture-000\t1.0.0-1\t1\t0\t0\n"));
+        assert!(first.ends_with("fixture-059\t1.0.59-1\t0\t0\t0\n"));
         let second = catalog
             .page(INSTALLED_PACKAGE_PAGE_SIZE)
             .expect("second page");
         assert_eq!(
             second.as_str().expect("second page UTF-8"),
-            "fixture-060\t1.0.60-1\t1\nfixture-061\t1.0.61-1\t0\n\
-fixture-062\t1.0.62-1\t1\nfixture-063\t1.0.63-1\t0\n\
-fixture-064\t1.0.64-1\t1\nfixture-065\t1.0.65-1\t0\n",
+            "fixture-060\t1.0.60-1\t1\t0\t0\nfixture-061\t1.0.61-1\t0\t0\t0\n\
+fixture-062\t1.0.62-1\t1\t0\t0\nfixture-063\t1.0.63-1\t0\t0\t0\n\
+fixture-064\t1.0.64-1\t1\t0\t0\nfixture-065\t1.0.65-1\t0\t0\t0\n",
         );
         assert!(catalog.page(66).expect("empty page").as_bytes().is_empty());
 
@@ -6121,6 +6506,71 @@ fixture-064\t1.0.64-1\t1\nfixture-065\t1.0.65-1\t0\n",
         assert!(matches!(
             runtime.installed_package_catalog(),
             Err(PackageRuntimeError::UnsafeEntry(_))
+        ));
+    }
+
+    #[test]
+    fn installed_package_capabilities_come_only_from_owned_files() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        tree.local_package(
+            "desktop-tool-1.0-1",
+            "desktop-tool",
+            b"%FILES%\nusr/bin/desktop-tool\nusr/share/applications/desktop-tool.desktop\n\n",
+        );
+        tree.local_package(
+            "development-kit-1.0-1",
+            "development-kit",
+            b"%FILES%\nusr/include/tool/api.h\nusr/lib/libtool.so.2\nusr/lib/pkgconfig/tool.pc\n\n",
+        );
+        tree.local_package(
+            "system-data-1.0-1",
+            "system-data",
+            b"%FILES%\nusr/lib/systemd/system/tool.service\nusr/share/tool/data.bin\n\n",
+        );
+        let unknown = tree
+            .root
+            .join("var/lib/pacman/local/unknown-metadata-1.0-1");
+        fs::create_dir_all(&unknown).expect("unknown package database entry");
+        fs::write(
+            unknown.join("desc"),
+            b"%NAME%\nunknown-metadata\n\n%VERSION%\n1.0-1\n",
+        )
+        .expect("unknown package description");
+
+        let catalog = runtime
+            .installed_package_catalog()
+            .expect("installed package catalog");
+        assert_eq!(
+            catalog
+                .page(0)
+                .expect("catalog page")
+                .as_str()
+                .expect("UTF-8"),
+            "desktop-tool\t1.0-1\t1\t3\t1\n\
+development-kit\t1.0-1\t1\t4\t1\n\
+system-data\t1.0-1\t1\t8\t1\n\
+unknown-metadata\t1.0-1\t1\t0\t0\n",
+        );
+
+        fs::write(
+            unknown.join("files"),
+            b"%FILES%\n../../data/com.android.shell/escape\n",
+        )
+        .expect("unsafe package file list");
+        assert!(matches!(
+            runtime.installed_package_catalog(),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+
+        fs::write(
+            unknown.join("files"),
+            b"%FILES%\n../../data/com.android.shell/escape/\n",
+        )
+        .expect("unsafe package directory list");
+        assert!(matches!(
+            runtime.installed_package_catalog(),
+            Err(PackageRuntimeError::InvalidResolution)
         ));
     }
 

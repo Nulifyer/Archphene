@@ -80,7 +80,7 @@ archphene_tap_ui_pattern \
   "$ui" 'text="Search"[^>]*class="android.widget.Button"' Search
 
 archphene_wait_ui_exact_text \
-  "3 official packages match dotnet" "available-packages-count-$serial" 20
+  "4 official packages match dotnet" "available-packages-count-$serial" 20
 archphene_wait_ui_exact_text \
   "dotnet-runtime" "available-packages-runtime-$serial" 15
 archphene_wait_ui_exact_text \
@@ -88,19 +88,44 @@ archphene_wait_ui_exact_text \
 archphene_wait_ui_exact_text \
   "dotnet-sdk-preview" "available-packages-preview-$serial" 15
 archphene_wait_ui_exact_text \
+  "dotnet-workload" "available-packages-newer-$serial" 15
+archphene_wait_ui_exact_text \
   "The .NET SDK" "available-packages-description-$serial" 15
 archphene_wait_ui_exact_text \
   "extra" "available-packages-repository-$serial" 15
 archphene_wait_ui_exact_text \
   "Official" "available-packages-official-$serial" 15
 archphene_wait_ui_exact_text \
-  "Installed" "available-packages-installed-$serial" 15
+  "Not analyzed" "available-packages-unanalyzed-$serial" 15
 archphene_wait_ui_exact_text \
-  "Differs from 10.0.0.preview.1-1" \
+  "CLI" "available-packages-installed-$serial" 15
+archphene_wait_ui_exact_text \
+  "Update from 10.0.0.preview.1-1" \
+  "available-packages-update-$serial" 15
+archphene_wait_ui_exact_text \
+  "CLI installed · Candidate not analyzed" \
+  "available-packages-candidate-analysis-$serial" 15
+archphene_wait_ui_exact_text \
+  "Installed 2.0-1 · Not an update" \
   "available-packages-different-$serial" 15
 archphene_wait_ui_exact_text \
   "Install · Failed · 0%" "available-packages-job-state-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-light.png"
+
+ui="$ARCHPHENE_UI"
+archphene_tap_ui_pattern \
+  "$ui" 'text="dotnet-workload"[^>]*class="android.widget.TextView"' "dotnet-workload"
+archphene_wait_ui_text \
+  "The repository version is not an update; Archphene will not downgrade it automatically." \
+  "available-packages-no-downgrade-$serial" 20
+archphene_wait_ui \
+  'text="Keep installed"[^>]*class="android.widget.Button"[^>]*enabled="false"' \
+  "available-packages-keep-installed-$serial" 15
+ui="$ARCHPHENE_UI"
+archphene_tap_ui_pattern \
+  "$ui" 'text="Search results"[^>]*class="android.widget.Button"' "Search results"
+archphene_wait_ui_exact_text \
+  "4 official packages match dotnet" "available-packages-return-newer-$serial" 15
 
 ui="$ARCHPHENE_UI"
 archphene_tap_ui_pattern \
@@ -127,11 +152,11 @@ ui="$ARCHPHENE_UI"
 archphene_tap_ui_pattern \
   "$ui" 'text="Search results"[^>]*class="android.widget.Button"' "Search results"
 archphene_wait_ui_exact_text \
-  "3 official packages match dotnet" "available-packages-return-$serial" 15
+  "4 official packages match dotnet" "available-packages-return-$serial" 15
 
 archphene_adb_run shell cmd uimode night yes >/dev/null
 archphene_wait_ui_exact_text \
-  "3 official packages match dotnet" "available-packages-dark-$serial" 20
+  "4 official packages match dotnet" "available-packages-dark-$serial" 20
 archphene_wait_ui_exact_text \
   "dotnet-sdk" "available-packages-dark-sdk-$serial" 15
 archphene_wait_ui \
@@ -147,5 +172,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene available package list passed on $serial"
-archphene_note "  Real local pacman search, revision-gated Retry, recreation, and theme passed"
+archphene_note "  Real local pacman search, version-safe update/no-downgrade states, revision-gated Retry, recreation, and theme passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{light,retry,dark}.png"

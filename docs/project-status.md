@@ -158,13 +158,18 @@ database entries once, caches that immutable snapshot in the runtime, and pages
 60 compact records at a time through a coarse direct-buffer JNI call. Kotlin
 publishes one revisioned snapshot after bootstrap and package mutation; the
 Activity checks only its revision during status polls and uses recycled native
-Android list rows for name, exact version, and explicit/dependency reason.
+Android list rows for name, exact version, verified capability class, and
+explicit/dependency reason. Rust derives Graphical, CLI, Library, and System
+bits only from each installed package's bounded pacman `files` record; missing
+metadata remains visibly Not analyzed instead of being guessed from names or
+descriptions.
 Installed and Search results are distinct retained modes, selecting an
 installed row routes to exact package details, and a changed installed count
 returns to the installed view. A debug-only 67-package local-database fixture
-proves the second native page, virtualized scrolling, result-mode switching,
-light/dark appearance, manager restart, scoped logs, and visually inspected
-full-device screenshots on the emulator and Samsung without package downloads.
+proves the second native page, all capability classes, virtualized scrolling,
+result-mode switching, light/dark appearance, manager restart, scoped logs, and
+visually inspected full-device screenshots on the emulator and Samsung without
+package downloads.
 
 Official search results now use a separate revisioned Binder snapshot and
 virtualized Android list rather than joining the bounded Rust response into one
@@ -175,10 +180,16 @@ durable package activity replaces the row's repository label with its operation
 and state, and the adapter can append an unmatched active job immediately from
 the existing journal fields without reparsing display strings. A debug-only
 dependency-free tar/gzip writer generates minimal real core/extra pacman
-databases inside app storage. Pacman itself searches those catalogs, and both
-exact ABIs pass three-result `dotnet` rows, row selection, retained query and
-results across theme recreation, durable Failed overlay, scoped fatal logs, and
-visually inspected full-device light/dark screenshots without network access.
+databases inside app storage. Pacman itself searches those catalogs and
+libalpm's `-Quq` comparison is the authority for whether a differing version is
+an update. Uninstalled candidate archives remain explicitly Not analyzed;
+installed classifications apply only to the installed version. A locally newer
+version renders Not an update, disables the primary action, and explains that
+Archphene will not downgrade it automatically. Both exact ABIs pass four-result
+`dotnet` rows covering available, exact-installed, update, and locally-newer
+states, row selection, retained query and results across theme recreation,
+durable Failed overlay, scoped fatal logs, and visually inspected full-device
+light/dark screenshots without network access.
 The local Binder path makes the Queued boundary deterministic in code: after
 the journal commit, the Service posts worker start to the next main-Looper turn
 and the Activity synchronously consumes the new job revision before its Install

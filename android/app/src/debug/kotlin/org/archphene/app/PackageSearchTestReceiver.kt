@@ -70,6 +70,11 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
                                 "11.0.0.preview.6-1",
                                 "Preview .NET SDK for early testing",
                             ),
+                            PackageRecord(
+                                "dotnet-workload",
+                                "1.0-1",
+                                "Development workload fixture",
+                            ),
                         ),
                     )
                     val local =
@@ -83,12 +88,21 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
                         "dotnet-runtime",
                         "10.0.4.sdk104-1",
                         "The .NET runtime",
+                        "usr/bin/dotnet",
                     )
                     writeInstalledPackage(
                         local,
                         "dotnet-sdk-preview",
                         "10.0.0.preview.1-1",
                         "Previously installed preview .NET SDK",
+                        "usr/bin/dotnet-preview",
+                    )
+                    writeInstalledPackage(
+                        local,
+                        "dotnet-workload",
+                        "2.0-1",
+                        "Locally newer development workload",
+                        "usr/bin/dotnet-workload",
                     )
                     if (workerHoldMillis != 0) {
                         check(
@@ -117,6 +131,7 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
         name: String,
         version: String,
         description: String,
+        vararg files: String,
     ) {
         val directory = File(local, "$name-$version")
         check(directory.mkdirs() || directory.isDirectory) {
@@ -127,7 +142,17 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
                 "%ARCH%\nany\n\n%REASON%\n0\n\n%VALIDATION%\npgp\n",
             StandardCharsets.UTF_8,
         )
-        File(directory, "files").writeText("%FILES%\n", StandardCharsets.UTF_8)
+        File(directory, "files").writeText(
+            buildString {
+                append("%FILES%\n")
+                files.forEach { path ->
+                    append(path)
+                    append('\n')
+                }
+                append('\n')
+            },
+            StandardCharsets.UTF_8,
+        )
     }
 
     private fun writeCatalog(

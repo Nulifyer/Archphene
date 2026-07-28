@@ -29,14 +29,29 @@ internal class InstalledPackagesTestReceiver : BroadcastReceiver() {
                         "could not create local package database"
                     }
                     File(local, "ALPM_DB_VERSION").writeText("9\n")
-                    writePackage(local, "dotnet-sdk", "10.0.100.sdk100-1", true)
-                    writePackage(local, "glibc", "2.42+r33+gde5fe48316ed-1", false)
+                    writePackage(
+                        local,
+                        "dotnet-sdk",
+                        "10.0.100.sdk100-1",
+                        true,
+                        "usr/bin/dotnet",
+                        "usr/share/dotnet/sdk/10.0.100/dotnet.dll",
+                    )
+                    writePackage(
+                        local,
+                        "glibc",
+                        "2.42+r33+gde5fe48316ed-1",
+                        false,
+                        "usr/include/stdio.h",
+                        "usr/lib/libc.so.6",
+                    )
                     repeat(FIXTURE_PACKAGE_COUNT) { index ->
                         writePackage(
                             local,
                             "fixture-${index.toString().padStart(3, '0')}",
                             "1.0.$index-1",
                             index % 2 == 0,
+                            *fixtureFiles(index),
                         )
                     }
                     Log.i(TAG, "Seeded installed packages token=$token")
@@ -55,6 +70,7 @@ internal class InstalledPackagesTestReceiver : BroadcastReceiver() {
         name: String,
         version: String,
         explicit: Boolean,
+        vararg files: String,
     ) {
         val directory = File(local, "$name-$version")
         check(directory.mkdir()) { "could not create package entry for $name" }
@@ -62,7 +78,30 @@ internal class InstalledPackagesTestReceiver : BroadcastReceiver() {
             "%NAME%\n$name\n\n%VERSION%\n$version\n\n%REASON%\n" +
                 if (explicit) "0\n" else "1\n",
         )
+        File(directory, "files").writeText(
+            buildString {
+                append("%FILES%\n")
+                files.forEach { path ->
+                    append(path)
+                    append('\n')
+                }
+                append('\n')
+            },
+        )
     }
+
+    private fun fixtureFiles(index: Int): Array<String> =
+        when (index % 5) {
+            0 ->
+                arrayOf(
+                    "usr/bin/fixture-$index",
+                    "usr/share/applications/fixture-$index.desktop",
+                )
+            1 -> arrayOf("usr/bin/fixture-$index")
+            2 -> arrayOf("usr/lib/libfixture-$index.so.1")
+            3 -> arrayOf("usr/lib/systemd/user/fixture-$index.service")
+            else -> arrayOf("usr/share/fixture-$index/data.bin")
+        }
 
     private companion object {
         private const val TAG = "ArchpheneInstalledPackagesProbe"

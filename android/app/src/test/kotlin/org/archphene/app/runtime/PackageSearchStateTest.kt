@@ -16,6 +16,8 @@ class PackageSearchStateTest {
             arrayOf("Capture library"),
             arrayOf(state),
             arrayOf(installedVersion),
+            intArrayOf(4),
+            booleanArrayOf(true),
             "1 official package matches",
             7,
         )
@@ -27,10 +29,14 @@ class PackageSearchStateTest {
                 snapshot("different", "50.0-2.1"),
                 "libsysprof-capture",
                 "50.0-3",
+                4,
+                true,
             )
 
         assertEquals("installed", updated.installStates.single())
         assertEquals("50.0-3", updated.installedVersions.single())
+        assertEquals(4, updated.installedCapabilities.single())
+        assertEquals(true, updated.installedCapabilitiesAnalyzed.single())
         assertEquals(8, updated.revision)
     }
 
@@ -45,6 +51,8 @@ class PackageSearchStateTest {
 
         assertEquals("available", updated.installStates.single())
         assertEquals("", updated.installedVersions.single())
+        assertEquals(0, updated.installedCapabilities.single())
+        assertEquals(false, updated.installedCapabilitiesAnalyzed.single())
         assertEquals(8, updated.revision)
     }
 
@@ -61,6 +69,8 @@ class PackageSearchStateTest {
                 current,
                 "libsysprof-capture",
                 "50.0-3",
+                4,
+                true,
             ),
         )
     }

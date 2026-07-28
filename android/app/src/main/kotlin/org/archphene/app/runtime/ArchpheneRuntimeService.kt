@@ -63,6 +63,8 @@ internal class InstalledPackageSnapshot(
     val names: Array<String>,
     val versions: Array<String>,
     val explicitlyInstalled: BooleanArray,
+    val capabilities: IntArray,
+    val capabilitiesAnalyzed: BooleanArray,
     val status: String,
     val revision: Int,
 )
@@ -97,6 +99,8 @@ internal class AvailablePackageSnapshot(
     val descriptions: Array<String>,
     val installStates: Array<String>,
     val installedVersions: Array<String>,
+    val installedCapabilities: IntArray,
+    val installedCapabilitiesAnalyzed: BooleanArray,
     val status: String,
     val revision: Int,
 )
@@ -363,6 +367,7 @@ class ArchpheneRuntimeService : Service() {
         val packagePrimaryActionAvailable: Boolean
             get() =
                 lastResolvedPackage.isNotEmpty() &&
+                    primaryActionPermitted &&
                     !catalogRefreshActive &&
                     !packageCacheActive &&
                     !searchActive &&
@@ -998,6 +1003,8 @@ class ArchpheneRuntimeService : Service() {
             emptyArray(),
             emptyArray(),
             BooleanArray(0),
+            IntArray(0),
+            BooleanArray(0),
             "Loading installed packages…",
             0,
         )
@@ -1035,6 +1042,8 @@ class ArchpheneRuntimeService : Service() {
             emptyArray(),
             emptyArray(),
             emptyArray(),
+            IntArray(0),
+            BooleanArray(0),
             "Search the official Arch repositories",
             0,
         )
@@ -1101,6 +1110,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var lastResolvedInstalledVersion = ""
     @Volatile private var lastResolvedAvailableVersion = ""
     @Volatile private var primaryActionLabel = "Install"
+    @Volatile private var primaryActionPermitted = true
     @Volatile private var removeActionLabel = "Remove"
     @Volatile private var removeAvailable = false
     @Volatile private var recoveryReviewedJobRevision = Int.MIN_VALUE
@@ -5125,6 +5135,8 @@ class ArchpheneRuntimeService : Service() {
         val names = ArrayList<String>()
         val versions = ArrayList<String>()
         val explicitFlags = BooleanArray(NativeRuntime.INSTALLED_PACKAGE_LIMIT)
+        val capabilityFlags = IntArray(NativeRuntime.INSTALLED_PACKAGE_LIMIT)
+        val capabilitiesAnalyzed = BooleanArray(NativeRuntime.INSTALLED_PACKAGE_LIMIT)
         var offset = 0
         var previousName = ""
         try {
@@ -5154,6 +5166,8 @@ class ArchpheneRuntimeService : Service() {
                 while (rowStart < outputLength) {
                     var firstTab = -1
                     var secondTab = -1
+                    var thirdTab = -1
+                    var fourthTab = -1
                     var rowEnd = -1
                     var index = rowStart
                     while (index < outputLength) {
@@ -5163,6 +5177,10 @@ class ArchpheneRuntimeService : Service() {
                                     firstTab = index
                                 } else if (secondTab < 0) {
                                     secondTab = index
+                                } else if (thirdTab < 0) {
+                                    thirdTab = index
+                                } else if (fourthTab < 0) {
+                                    fourthTab = index
                                 } else {
                                     throw IllegalStateException("Invalid installed package row")
                                 }
@@ -5177,7 +5195,9 @@ class ArchpheneRuntimeService : Service() {
                     if (
                         firstTab <= rowStart ||
                         secondTab <= firstTab + 1 ||
-                        rowEnd != secondTab + 2
+                        thirdTab != secondTab + 2 ||
+                        fourthTab != thirdTab + 2 ||
+                        rowEnd != fourthTab + 2
                     ) {
                         throw IllegalStateException("Invalid installed package row")
                     }
@@ -5204,7 +5224,30 @@ class ArchpheneRuntimeService : Service() {
                             '0'.code.toByte() -> false
                             else -> throw IllegalStateException("Invalid package install reason")
                         }
+                    val capabilities =
+                        when (val encoded = installedPackageOutputBytes[thirdTab + 1].toInt()) {
+                            in '0'.code..'9'.code -> encoded - '0'.code
+                            in 'a'.code..'f'.code -> encoded - 'a'.code + 10
+                            else ->
+                                throw IllegalStateException(
+                                    "Invalid installed package capabilities",
+                                )
+                        }
+                    val analyzed =
+                        when (installedPackageOutputBytes[fourthTab + 1]) {
+                            '1'.code.toByte() -> true
+                            '0'.code.toByte() -> false
+                            else ->
+                                throw IllegalStateException(
+                                    "Invalid package capability analysis state",
+                                )
+                        }
+                    if (!analyzed && capabilities != 0) {
+                        throw IllegalStateException("Unanalyzed package reports capabilities")
+                    }
                     explicitFlags[names.size] = explicitlyInstalled
+                    capabilityFlags[names.size] = capabilities
+                    capabilitiesAnalyzed[names.size] = analyzed
                     names.add(name)
                     versions.add(version)
                     previousName = name
@@ -5229,6 +5272,8 @@ class ArchpheneRuntimeService : Service() {
                     names.toTypedArray(),
                     versions.toTypedArray(),
                     explicitFlags.copyOf(names.size),
+                    capabilityFlags.copyOf(names.size),
+                    capabilitiesAnalyzed.copyOf(names.size),
                     if (names.isEmpty()) {
                         "No Linux packages installed"
                     } else {
@@ -5244,6 +5289,8 @@ class ArchpheneRuntimeService : Service() {
                     previous.names,
                     previous.versions,
                     previous.explicitlyInstalled,
+                    previous.capabilities,
+                    previous.capabilitiesAnalyzed,
                     "Installed package list unavailable",
                     previous.revision + 1,
                 )
@@ -6703,6 +6750,8 @@ class ArchpheneRuntimeService : Service() {
                 emptyArray(),
                 emptyArray(),
                 emptyArray(),
+                IntArray(0),
+                BooleanArray(0),
                 status,
                 previousRevision + 1,
             )
@@ -6718,6 +6767,9 @@ class ArchpheneRuntimeService : Service() {
         val descriptions = ArrayList<String>()
         val installStates = ArrayList<String>()
         val installedVersions = ArrayList<String>()
+        val installedCapabilities = IntArray(AVAILABLE_PACKAGE_LIMIT)
+        val installedCapabilitiesAnalyzed = BooleanArray(AVAILABLE_PACKAGE_LIMIT)
+        val installed = installedPackageSnapshot
         String(bytes, StandardCharsets.UTF_8)
             .trimEnd('\n')
             .lineSequence()
@@ -6732,7 +6784,7 @@ class ArchpheneRuntimeService : Service() {
                         when (fields[4]) {
                             "available" -> fields[5].isEmpty()
                             "installed" -> fields[5] == fields[2]
-                            "different" -> fields[5].isNotEmpty()
+                            "update", "different" -> fields[5].isNotEmpty()
                             else -> false
                         }
                 if (
@@ -6763,6 +6815,15 @@ class ArchpheneRuntimeService : Service() {
                 descriptions.add(fields[3])
                 installStates.add(fields[4])
                 installedVersions.add(fields[5])
+                if (fields[4] != "available") {
+                    val installedIndex = installed.names.binarySearch(fields[1])
+                    if (installedIndex >= 0) {
+                        installedCapabilities[names.lastIndex] =
+                            installed.capabilities[installedIndex]
+                        installedCapabilitiesAnalyzed[names.lastIndex] =
+                            installed.capabilitiesAnalyzed[installedIndex]
+                    }
+                }
             }
         val previousRevision = availablePackageSnapshot.revision
         val status =
@@ -6779,6 +6840,8 @@ class ArchpheneRuntimeService : Service() {
                 descriptions.toTypedArray(),
                 installStates.toTypedArray(),
                 installedVersions.toTypedArray(),
+                installedCapabilities.copyOf(names.size),
+                installedCapabilitiesAnalyzed.copyOf(names.size),
                 status,
                 previousRevision + 1,
             )
@@ -6810,6 +6873,7 @@ class ArchpheneRuntimeService : Service() {
         lastResolvedInstalledVersion = ""
         lastResolvedAvailableVersion = ""
         primaryActionLabel = "Install"
+        primaryActionPermitted = true
         removeActionLabel = "Remove"
         removeAvailable = false
         searchStatus = "Resolving $normalized and its dependencies"
@@ -6837,6 +6901,12 @@ class ArchpheneRuntimeService : Service() {
                                 "Resolved packages omit the requested target",
                             )
                     val installedVersion = installedPackageVersion(activeHandle, normalized)
+                    val availableVersionState =
+                        when {
+                            installedVersion.isEmpty() -> "available"
+                            installedVersion == resolvedTarget.version -> "installed"
+                            else -> availablePackageVersionState(activeHandle, normalized)
+                        }
                     lastResolvedPackage = normalized
                     lastResolvedRepository = resolvedTarget.repository
                     lastResolvedInstalledVersion = installedVersion
@@ -6855,12 +6925,14 @@ class ArchpheneRuntimeService : Service() {
                         }
                     primaryActionLabel =
                         when {
+                            availableVersionState == "different" -> "Keep installed"
                             recoveryOperation == NativeRuntime.JOB_OPERATION_INSTALL ||
                                 recoveryOperation == NativeRuntime.JOB_OPERATION_UPDATE -> "Retry"
                             installedVersion.isEmpty() -> "Install"
                             installedVersion == resolvedTarget.version -> "Verify"
                             else -> "Update"
                         }
+                    primaryActionPermitted = availableVersionState != "different"
                     removeAvailable = installedVersion.isNotEmpty()
                     removeActionLabel =
                         if (
@@ -6891,6 +6963,12 @@ class ArchpheneRuntimeService : Service() {
                                 },
                             )
                             append('\n')
+                            if (availableVersionState == "different") {
+                                append(
+                                    "The repository version is not an update; " +
+                                        "Archphene will not downgrade it automatically.\n",
+                                )
+                            }
                             append("Dependency closure: ")
                             append(packages.size)
                             append(if (packages.size == 1) " package · " else " packages · ")
@@ -6986,6 +7064,7 @@ class ArchpheneRuntimeService : Service() {
         lastResolvedRepository = ""
         lastResolvedInstalledVersion = ""
         lastResolvedAvailableVersion = ""
+        primaryActionPermitted = true
         removeAvailable = false
         searchStatus = "Downloading the AUR review for $normalized"
         Thread(
@@ -9348,6 +9427,35 @@ class ArchpheneRuntimeService : Service() {
         return String(bytes, StandardCharsets.UTF_8)
     }
 
+    private fun availablePackageVersionState(
+        activeHandle: Long,
+        packageName: String,
+    ): String {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
+        packageBuffer.put(packageBytes)
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val outputLength =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_AVAILABLE_VERSION_STATE,
+                packageBuffer,
+                packageBytes.size,
+                outputBuffer,
+            )
+        if (outputLength <= 0) {
+            throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
+        }
+        val bytes = ByteArray(outputLength)
+        outputBuffer.position(0)
+        outputBuffer.get(bytes)
+        return String(bytes, StandardCharsets.US_ASCII).also { state ->
+            if (state != "update" && state != "different") {
+                throw IllegalStateException("Invalid available package version state")
+            }
+        }
+    }
+
     private fun packageInstallationBytes(
         activeHandle: Long,
         packageName: String,
@@ -11643,11 +11751,20 @@ class ArchpheneRuntimeService : Service() {
         packageName: String,
         installedVersion: String,
     ) {
+        val installed = installedPackageSnapshot
+        val installedIndex =
+            if (installedVersion.isEmpty()) {
+                -1
+            } else {
+                installed.names.binarySearch(packageName)
+            }
         availablePackageSnapshot =
             reconcileAvailablePackageInstalledVersion(
                 availablePackageSnapshot,
                 packageName,
                 installedVersion,
+                installed.capabilities.getOrElse(installedIndex) { 0 },
+                installed.capabilitiesAnalyzed.getOrElse(installedIndex) { false },
             )
     }
 

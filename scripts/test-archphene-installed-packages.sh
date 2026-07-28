@@ -65,9 +65,11 @@ archphene_wait_ui_exact_text \
 archphene_wait_ui_exact_text \
   "10.0.100.sdk100-1" "installed-packages-version-$serial" 15
 archphene_wait_ui_exact_text \
-  "Explicit" "installed-packages-reason-$serial" 15
+  "CLI · Explicit" "installed-packages-reason-$serial" 15
 archphene_wait_ui_exact_text \
-  "Dependency" "installed-packages-dependency-$serial" 15
+  "CLI · Dependency" "installed-packages-dependency-$serial" 15
+archphene_wait_ui_exact_text \
+  "Graphical · CLI · Explicit" "installed-packages-graphical-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-top.png"
 
 archphene_tap_text "$ARCHPHENE_UI" "Search results"
@@ -115,5 +117,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene installed package list passed on $serial"
-archphene_note "  Native pagination, virtualized rows, modes, themes, reasons, and restart passed"
+archphene_note "  Native pagination, verified capability classes, virtualized rows, modes, themes, reasons, and restart passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{top,dark,scrolled}.png"

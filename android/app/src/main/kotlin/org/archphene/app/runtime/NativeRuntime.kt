@@ -16,6 +16,11 @@ internal object NativeRuntime {
     const val AUR_SOURCE_MAX_SIZE = 4L * 1024 * 1024 * 1024
     const val INSTALLED_PACKAGE_PAGE_SIZE = 60
     const val INSTALLED_PACKAGE_LIMIT = 4096
+    const val PACKAGE_CAPABILITY_GRAPHICAL = 1 shl 0
+    const val PACKAGE_CAPABILITY_COMMAND_LINE = 1 shl 1
+    const val PACKAGE_CAPABILITY_LIBRARY = 1 shl 2
+    const val PACKAGE_CAPABILITY_SYSTEM = 1 shl 3
+    const val PACKAGE_CAPABILITY_MASK = 0x0f
     const val DESKTOP_ENTRY_LIMIT = 256
     const val LAUNCHER_PROCESS_LOG_SIZE = 16 * 1024
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
@@ -47,6 +52,7 @@ internal object NativeRuntime {
     const val PACKAGE_COMMAND_PENDING_MUTATION = 6
     const val PACKAGE_COMMAND_REPAIR_MUTATION = 7
     const val PACKAGE_COMMAND_UPDATE = 8
+    const val PACKAGE_COMMAND_AVAILABLE_VERSION_STATE = 9
     const val JOB_QUEUED = 1
     const val JOB_RESOLVING = 2
     const val JOB_DOWNLOADING = 3

@@ -2620,6 +2620,82 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
     }
 
+    private val packageCapabilityLabels: Array<String> by lazy(LazyThreadSafetyMode.NONE) {
+        Array(NativeRuntime.PACKAGE_CAPABILITY_MASK + 1) { flags ->
+            if (flags == 0) {
+                getString(R.string.package_capabilities_data)
+            } else {
+                buildString(48) {
+                    fun appendLabel(resource: Int) {
+                        if (isNotEmpty()) {
+                            append(" · ")
+                        }
+                        append(getString(resource))
+                    }
+                    if (flags and NativeRuntime.PACKAGE_CAPABILITY_GRAPHICAL != 0) {
+                        appendLabel(R.string.package_capabilities_graphical)
+                    }
+                    if (flags and NativeRuntime.PACKAGE_CAPABILITY_COMMAND_LINE != 0) {
+                        appendLabel(R.string.package_capabilities_command_line)
+                    }
+                    if (flags and NativeRuntime.PACKAGE_CAPABILITY_LIBRARY != 0) {
+                        appendLabel(R.string.package_capabilities_library)
+                    }
+                    if (flags and NativeRuntime.PACKAGE_CAPABILITY_SYSTEM != 0) {
+                        appendLabel(R.string.package_capabilities_system)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun packageCapabilitiesLabel(
+        capabilities: Int,
+        analyzed: Boolean,
+    ): String =
+        if (analyzed && capabilities in packageCapabilityLabels.indices) {
+            packageCapabilityLabels[capabilities]
+        } else {
+            getString(R.string.package_capabilities_unanalyzed)
+        }
+
+    private val installedPackageMetadataLabels: Array<String> by lazy(LazyThreadSafetyMode.NONE) {
+        Array((NativeRuntime.PACKAGE_CAPABILITY_MASK + 1) * 2 + 2) { index ->
+            val unknownStart = (NativeRuntime.PACKAGE_CAPABILITY_MASK + 1) * 2
+            val explicitlyInstalled = index % 2 == 1
+            val capabilities =
+                if (index < unknownStart) {
+                    packageCapabilityLabels[index / 2]
+                } else {
+                    getString(R.string.package_capabilities_unanalyzed)
+                }
+            val reason =
+                getString(
+                    if (explicitlyInstalled) {
+                        R.string.package_reason_explicit
+                    } else {
+                        R.string.package_reason_dependency
+                    },
+                )
+            "$capabilities · $reason"
+        }
+    }
+
+    private fun installedPackageMetadataLabel(
+        capabilities: Int,
+        analyzed: Boolean,
+        explicitlyInstalled: Boolean,
+    ): String {
+        val reasonOffset = if (explicitlyInstalled) 1 else 0
+        val index =
+            if (analyzed && capabilities in packageCapabilityLabels.indices) {
+                capabilities * 2 + reasonOffset
+            } else {
+                (NativeRuntime.PACKAGE_CAPABILITY_MASK + 1) * 2 + reasonOffset
+            }
+        return installedPackageMetadataLabels[index]
+    }
+
     private inner class AvailablePackageAdapter : BaseAdapter() {
         private var packages: AvailablePackageSnapshot? = null
         private var jobPackage = ""
@@ -2704,6 +2780,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         maxLines = 1
                         ellipsize = TextUtils.TruncateAt.END
                     }
+                val analysis =
+                    TextView(this@MainActivity).apply {
+                        setTextColor(getColor(R.color.archphene_primary))
+                        textSize = 13f
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
                 val state =
                     TextView(this@MainActivity).apply {
                         setTextColor(getColor(R.color.archphene_on_surface_muted))
@@ -2715,7 +2798,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
-                        minimumHeight = dp(76)
+                        minimumHeight = dp(104)
                         setPadding(dp(16), dp(6), dp(16), dp(6))
                         setBackgroundColor(getColor(R.color.archphene_surface))
                         addView(
@@ -2723,29 +2806,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 orientation = LinearLayout.VERTICAL
                                 gravity = Gravity.CENTER_VERTICAL
                                 addView(name)
-                                addView(
-                                    LinearLayout(this@MainActivity).apply {
-                                        orientation = LinearLayout.HORIZONTAL
-                                        gravity = Gravity.CENTER_VERTICAL
-                                        addView(
-                                            version,
-                                            LinearLayout.LayoutParams(
-                                                0,
-                                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                                1f,
-                                            ),
-                                        )
-                                        addView(
-                                            kind,
-                                            LinearLayout.LayoutParams(
-                                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                            ).apply {
-                                                marginStart = dp(8)
-                                            },
-                                        )
-                                    },
-                                )
+                                addView(version)
+                                addView(kind)
+                                addView(analysis)
                                 addView(description)
                             },
                             LinearLayout.LayoutParams(
@@ -2764,7 +2827,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             },
                         )
                     }
-                views = AvailablePackageRowViews(name, version, kind, description, state)
+                views =
+                    AvailablePackageRowViews(
+                        name,
+                        version,
+                        kind,
+                        analysis,
+                        description,
+                        state,
+                    )
                 row.tag = views
             }
             val snapshot = packages
@@ -2776,10 +2847,34 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     when (snapshot.installStates[position]) {
                         "available" -> getString(R.string.package_search_official)
                         "installed" -> getString(R.string.package_search_installed)
+                        "update" ->
+                            getString(
+                                R.string.package_search_update_from,
+                                snapshot.installedVersions[position],
+                            )
                         else ->
                             getString(
-                                R.string.package_search_version_differs,
+                                R.string.package_search_not_update,
                                 snapshot.installedVersions[position],
+                            )
+                    },
+                )
+                setTextIfChanged(
+                    views.analysis,
+                    when (snapshot.installStates[position]) {
+                        "available" -> getString(R.string.package_capabilities_unanalyzed)
+                        "installed" ->
+                            packageCapabilitiesLabel(
+                                snapshot.installedCapabilities[position],
+                                snapshot.installedCapabilitiesAnalyzed[position],
+                            )
+                        else ->
+                            getString(
+                                R.string.package_search_installed_candidate_analysis,
+                                packageCapabilitiesLabel(
+                                    snapshot.installedCapabilities[position],
+                                    snapshot.installedCapabilitiesAnalyzed[position],
+                                ),
                             )
                     },
                 )
@@ -2796,6 +2891,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextIfChanged(views.name, jobPackage)
                 setTextIfChanged(views.version, "")
                 setTextIfChanged(views.kind, "")
+                setTextIfChanged(views.analysis, "")
                 setTextIfChanged(views.description, jobMessage)
                 setTextIfChanged(views.state, jobLabel)
             }
@@ -2860,70 +2956,49 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         maxLines = 1
                         ellipsize = TextUtils.TruncateAt.END
                     }
-                val reason =
+                val capabilities =
                     TextView(this@MainActivity).apply {
-                        setTextColor(getColor(R.color.archphene_on_surface_muted))
+                        setTextColor(getColor(R.color.archphene_primary))
                         textSize = 13f
-                        gravity = Gravity.CENTER_VERTICAL or Gravity.END
                         maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
                     }
                 row =
                     LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
-                        minimumHeight = dp(64)
+                        minimumHeight = dp(76)
                         setPadding(dp(16), dp(6), dp(16), dp(6))
                         setBackgroundColor(getColor(R.color.archphene_surface))
                         addView(
                             LinearLayout(this@MainActivity).apply {
                                 orientation = LinearLayout.VERTICAL
                                 gravity = Gravity.CENTER_VERTICAL
-                                addView(
-                                    name,
-                                    LinearLayout.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        0,
-                                        1f,
-                                    ),
-                                )
-                                addView(
-                                    version,
-                                    LinearLayout.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        0,
-                                        1f,
-                                    ),
-                                )
+                                addView(name)
+                                addView(version)
+                                addView(capabilities)
                             },
                             LinearLayout.LayoutParams(
                                 0,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
                                 1f,
                             ),
                         )
-                        addView(
-                            reason,
-                            LinearLayout.LayoutParams(
-                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            ).apply {
-                                marginStart = dp(12)
-                            },
-                        )
                     }
-                views = InstalledPackageRowViews(name, version, reason)
+                views = InstalledPackageRowViews(name, version, capabilities)
                 row.tag = views
             }
             val snapshot = packages
             if (snapshot != null && position in snapshot.names.indices) {
                 setTextIfChanged(views.name, snapshot.names[position])
                 setTextIfChanged(views.version, snapshot.versions[position])
-                views.reason.setText(
-                    if (snapshot.explicitlyInstalled[position]) {
-                        R.string.package_reason_explicit
-                    } else {
-                        R.string.package_reason_dependency
-                    },
+                setTextIfChanged(
+                    views.capabilities,
+                    installedPackageMetadataLabel(
+                        snapshot.capabilities[position],
+                        snapshot.capabilitiesAnalyzed[position],
+                        snapshot.explicitlyInstalled[position],
+                    ),
                 )
             }
             return row
@@ -2933,13 +3008,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private class InstalledPackageRowViews(
         val name: TextView,
         val version: TextView,
-        val reason: TextView,
+        val capabilities: TextView,
     )
 
     private class AvailablePackageRowViews(
         val name: TextView,
         val version: TextView,
         val kind: TextView,
+        val analysis: TextView,
         val description: TextView,
         val state: TextView,
     )
