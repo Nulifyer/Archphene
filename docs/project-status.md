@@ -1263,7 +1263,9 @@ awaits restoration of the clean-data device roots.
 
 The terminal now consumes bounded DECSCUSR cursor requests and publishes
 block, underline, or bar shape plus steady/blinking behavior in reserved damage
-flags. Android renders those shapes without another terminal-grid allocation,
+flags. The terminfo-used DEC private mode 12 now independently controls and
+reports blink state, so `cnorm`/`cvvis` no longer fall through as ignored
+sequences. Android renders those shapes without another terminal-grid allocation,
 resets the 500 ms phase when cursor content or presentation changes, and stops
 the callback while the surface is detached, hidden, or unfocused. Rust unit,
 warmed zero-allocation, and clippy gates plus Android lint/unit and exact

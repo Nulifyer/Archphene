@@ -1788,6 +1788,7 @@ impl Terminal {
                 5 => self.set_reverse_screen(enabled),
                 6 => self.set_origin_mode(enabled),
                 7 => self.set_auto_wrap(enabled),
+                12 => self.set_cursor_blink(enabled),
                 25 => {
                     if self.cursor_visible != enabled {
                         self.cursor_visible = enabled;
@@ -1932,6 +1933,7 @@ impl Terminal {
                 5 => mode_status(self.reverse_screen),
                 6 => mode_status(self.origin_mode),
                 7 => mode_status(self.auto_wrap),
+                12 => mode_status(self.cursor_blink),
                 25 => mode_status(self.cursor_visible),
                 47 | 1047 | 1049 => mode_status(self.alternate_active),
                 66 => mode_status(self.application_keypad),
@@ -2055,9 +2057,16 @@ impl Terminal {
             6 => (CURSOR_STYLE_BAR, false),
             _ => return,
         };
-        if self.cursor_style != style || self.cursor_blink != blink {
+        if self.cursor_style != style {
             self.cursor_style = style;
-            self.cursor_blink = blink;
+            self.mark_dirty(self.cursor_row);
+        }
+        self.set_cursor_blink(blink);
+    }
+
+    fn set_cursor_blink(&mut self, enabled: bool) {
+        if self.cursor_blink != enabled {
+            self.cursor_blink = enabled;
             self.mark_dirty(self.cursor_row);
         }
     }
@@ -4001,6 +4010,23 @@ mod tests {
         terminal.feed(b"\x1b[99 q");
         assert_eq!(terminal.cursor_style, DEFAULT_CURSOR_STYLE);
         assert!(!terminal.cursor_blink);
+
+        terminal.feed(b"\x1b[?12h\x1b[?12$p");
+        terminal.write_damage(&mut output).unwrap();
+        assert_ne!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()) & FLAG_CURSOR_BLINK,
+            0
+        );
+        assert_eq!(terminal.pending_reply(), b"\x1b[?12;1$y");
+        terminal.consume_reply(usize::MAX);
+
+        terminal.feed(b"\x1b[?12l\x1b[?12$p");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()) & FLAG_CURSOR_BLINK,
+            0
+        );
+        assert_eq!(terminal.pending_reply(), b"\x1b[?12;2$y");
     }
 
     #[test]
