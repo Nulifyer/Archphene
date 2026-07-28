@@ -22,7 +22,8 @@ use archphene_packages::{
     desktop::{DesktopCatalog, ExecArgument},
 };
 use archphene_process::{
-    GuiAppearance, GuiRegistry, MAX_COMMAND_ARGUMENTS, ProcessError, PtyRegistry, PtyWaiter,
+    GuiAppearance, GuiRegistry, MAX_COMMAND_ARGUMENTS, MAX_GUI_SESSIONS, ProcessError, PtyRegistry,
+    PtyWaiter, integration::IntegrationObservation,
 };
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 use archphene_storage::{
@@ -61,11 +62,20 @@ pub struct RuntimeHost {
     aur_source_download: Option<AurSourceDownload>,
     pty_sessions: PtyRegistry,
     gui_sessions: GuiRegistry,
+    launcher_observations: [Option<ActiveLauncherObservation>; MAX_GUI_SESSIONS],
     gui_appearance: Option<GuiAppearance>,
     session_marker: Option<PathBuf>,
     mirror_import: Option<MirrorImport>,
     mirror_cancellation: Option<MirrorCancellation>,
     project_sync: Option<ProjectSyncSession>,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveLauncherObservation {
+    handle: u64,
+    descriptor_id: [u8; 32],
+    generation: u64,
+    recorded: IntegrationObservation,
 }
 
 struct ProjectSyncSession {
@@ -122,6 +132,9 @@ pub struct PackageLauncherReview {
     pub integration_topology: u16,
     pub profiled_executables: u16,
     pub incomplete_profiles: u16,
+    pub observed_topology: u16,
+    pub observed_launchers: u16,
+    pub incomplete_observations: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -265,6 +278,7 @@ impl RuntimeHost {
             aur_source_download: None,
             pty_sessions: PtyRegistry::new(),
             gui_sessions: GuiRegistry::new(),
+            launcher_observations: [None; MAX_GUI_SESSIONS],
             gui_appearance: None,
             session_marker: None,
             mirror_import: None,
@@ -923,6 +937,9 @@ impl RuntimeHost {
                     integration_topology: 0,
                     profiled_executables: 0,
                     incomplete_profiles: 0,
+                    observed_topology: 0,
+                    observed_launchers: 0,
+                    incomplete_observations: 0,
                 });
             }
         };
@@ -945,6 +962,9 @@ impl RuntimeHost {
             integration_topology: 0,
             profiled_executables: 0,
             incomplete_profiles: 0,
+            observed_topology: 0,
+            observed_launchers: 0,
+            incomplete_observations: 0,
         };
         for entry in catalog
             .entries
@@ -978,6 +998,14 @@ impl RuntimeHost {
             {
                 review.status = PackageLauncherReviewStatus::Unavailable;
                 continue;
+            }
+            if descriptor.integration_observed {
+                review.observed_topology |= descriptor.observed_topology;
+                review.observed_launchers = review.observed_launchers.saturating_add(1);
+                if !descriptor.integration_observation_complete {
+                    review.incomplete_observations =
+                        review.incomplete_observations.saturating_add(1);
+                }
             }
             match descriptor.status {
                 WrapperStatus::Current => review.current = review.current.saturating_add(1),
@@ -1039,7 +1067,7 @@ impl RuntimeHost {
         appearance: GuiAppearance,
         portal_bus_address: Option<&str>,
     ) -> Result<u64, LauncherProcessError> {
-        let (command, arguments) = {
+        let (command, arguments, descriptor_id) = {
             let descriptor = self
                 .launcher_registry
                 .as_ref()
@@ -1075,7 +1103,7 @@ impl RuntimeHost {
                     | ExecArgument::MultipleUrls => {}
                 }
             }
-            (command, arguments)
+            (command, arguments, descriptor.descriptor_id)
         };
         let package_runtime = self
             .package_runtime
@@ -1103,6 +1131,20 @@ impl RuntimeHost {
                 wayland_display,
             )
             .map_err(LauncherProcessError::from)?;
+        let Some(binding) = self
+            .launcher_observations
+            .iter_mut()
+            .find(|binding| binding.is_none())
+        else {
+            let _ = self.gui_sessions.close(handle);
+            return Err(LauncherProcessError::Process(ProcessError::GuiLimit));
+        };
+        *binding = Some(ActiveLauncherObservation {
+            handle,
+            descriptor_id,
+            generation,
+            recorded: IntegrationObservation::default(),
+        });
         self.gui_appearance = Some(appearance);
         Ok(handle)
     }
@@ -1133,9 +1175,12 @@ impl RuntimeHost {
         &mut self,
         handle: u64,
     ) -> Result<Option<i32>, LauncherProcessError> {
-        self.gui_sessions
+        let status = self
+            .gui_sessions
             .exit_status(handle)
-            .map_err(LauncherProcessError::from)
+            .map_err(LauncherProcessError::from)?;
+        self.record_launcher_observation(handle);
+        Ok(status)
     }
 
     pub fn launcher_process_logs(
@@ -1149,9 +1194,64 @@ impl RuntimeHost {
     }
 
     pub fn close_launcher_process(&mut self, handle: u64) -> Result<(), LauncherProcessError> {
-        self.gui_sessions
+        self.record_launcher_observation(handle);
+        let result = self
+            .gui_sessions
             .close(handle)
-            .map_err(LauncherProcessError::from)
+            .map_err(LauncherProcessError::from);
+        if let Some(binding) = self
+            .launcher_observations
+            .iter_mut()
+            .find(|binding| binding.is_some_and(|binding| binding.handle == handle))
+        {
+            *binding = None;
+        }
+        result
+    }
+
+    fn record_launcher_observation(&mut self, handle: u64) {
+        let Some(index) = self
+            .launcher_observations
+            .iter()
+            .position(|binding| binding.is_some_and(|binding| binding.handle == handle))
+        else {
+            return;
+        };
+        let Some(root) = self.arch_root.as_ref() else {
+            return;
+        };
+        let Ok(observation) = self
+            .gui_sessions
+            .integration_observation(handle, root.path())
+        else {
+            return;
+        };
+        let binding = self.launcher_observations[index].expect("observed launcher binding");
+        if !observation.observed
+            || binding.recorded.observed
+                && binding.recorded.topology == observation.topology
+                && binding.recorded.complete == observation.complete
+        {
+            return;
+        }
+        let Some(registry) = self.launcher_registry.as_mut() else {
+            return;
+        };
+        if registry
+            .record_integration_observation(
+                root.path(),
+                &binding.descriptor_id,
+                binding.generation,
+                observation.topology,
+                observation.complete,
+            )
+            .is_ok()
+        {
+            self.launcher_observations[index] = Some(ActiveLauncherObservation {
+                recorded: observation,
+                ..binding
+            });
+        }
     }
 
     pub fn claim_launcher_publish(

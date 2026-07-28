@@ -1,6 +1,8 @@
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod integration;
+
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -45,6 +47,9 @@ const MAX_SHEBANG_BYTES: usize = 256;
 const MAX_GUI_LOG_DRAIN_BYTES: usize = 64 * 1024;
 const GUI_CLOSE_GRACE: Duration = Duration::from_millis(750);
 const GUI_TERMINATE_GRACE: Duration = Duration::from_millis(750);
+const GUI_INTEGRATION_WARM_OBSERVATION_INTERVAL: Duration = Duration::from_secs(2);
+const GUI_INTEGRATION_STEADY_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
+const GUI_INTEGRATION_WARM_OBSERVATIONS: u8 = 15;
 const TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_GDK_PIXBUF_MODULE_FILE_BYTES: u64 = 16 * 1024;
 const GTK_SETTINGS_LOGICAL_PATH: &str = "/home/archphene/.config/gtk-3.0/settings.ini";
@@ -435,6 +440,9 @@ impl CommandEnvironment {
             log_bytes: [0; MAX_GUI_LOG_BYTES],
             log_start: 0,
             log_length: 0,
+            integration_observation: integration::IntegrationObservation::default(),
+            next_integration_observation: Instant::now(),
+            integration_observation_count: 0,
         })
     }
 
@@ -769,6 +777,9 @@ pub struct GuiProcess {
     log_bytes: [u8; MAX_GUI_LOG_BYTES],
     log_start: usize,
     log_length: usize,
+    integration_observation: integration::IntegrationObservation,
+    next_integration_observation: Instant,
+    integration_observation_count: u8,
 }
 
 impl GuiProcess {
@@ -799,6 +810,40 @@ impl GuiProcess {
             *destination = self.log_bytes[(self.log_start + skipped + index) % MAX_GUI_LOG_BYTES];
         }
         Ok(length)
+    }
+
+    pub fn integration_observation(
+        &mut self,
+        arch_root: &Path,
+    ) -> integration::IntegrationObservation {
+        let now = Instant::now();
+        if now < self.next_integration_observation {
+            return self.integration_observation;
+        }
+        self.integration_observation_count = self.integration_observation_count.saturating_add(1);
+        self.next_integration_observation = now
+            + if self.integration_observation_count < GUI_INTEGRATION_WARM_OBSERVATIONS {
+                GUI_INTEGRATION_WARM_OBSERVATION_INTERVAL
+            } else {
+                GUI_INTEGRATION_STEADY_OBSERVATION_INTERVAL
+            };
+        match integration::observe_process_group(self.process_group, arch_root) {
+            Ok(observation) => {
+                self.integration_observation.topology |= observation.topology;
+                self.integration_observation.complete = if self.integration_observation.observed {
+                    self.integration_observation.complete && observation.complete
+                } else {
+                    observation.complete
+                };
+                self.integration_observation.observed = true;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) if self.integration_observation.observed => {
+                self.integration_observation.complete = false;
+            }
+            Err(_) => {}
+        }
+        self.integration_observation
     }
 
     fn drain_logs(&mut self) -> Result<(), ProcessError> {
@@ -927,6 +972,14 @@ impl GuiRegistry {
 
     pub fn read_logs(&mut self, handle: u64, output: &mut [u8]) -> Result<usize, ProcessError> {
         self.process_mut(handle)?.read_logs(output)
+    }
+
+    pub fn integration_observation(
+        &mut self,
+        handle: u64,
+        arch_root: &Path,
+    ) -> Result<integration::IntegrationObservation, ProcessError> {
+        Ok(self.process_mut(handle)?.integration_observation(arch_root))
     }
 
     pub fn close(&mut self, handle: u64) -> Result<(), ProcessError> {
@@ -2763,6 +2816,9 @@ mod tests {
             log_bytes: [0; MAX_GUI_LOG_BYTES],
             log_start: 0,
             log_length: 0,
+            integration_observation: integration::IntegrationObservation::default(),
+            next_integration_observation: Instant::now(),
+            integration_observation_count: 0,
         };
         let mut output = [0_u8; MAX_GUI_LOG_BYTES];
         assert_eq!(
@@ -2770,6 +2826,44 @@ mod tests {
             MAX_GUI_LOG_BYTES
         );
         assert!(output.iter().all(|byte| *byte == b'b'));
+    }
+
+    #[test]
+    fn exited_process_group_does_not_downgrade_a_completed_observation() {
+        let (reader, _writer) = UnixStream::pair().expect("log pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        let expected = integration::IntegrationObservation {
+            topology: integration::TOPOLOGY_WAYLAND,
+            observed: true,
+            complete: true,
+        };
+        let mut process = GuiProcess {
+            process_group: u32::MAX,
+            child: None,
+            leader_exit_status: Some(0),
+            exit_status: Some(0),
+            log_reader: reader,
+            log_bytes: [0; MAX_GUI_LOG_BYTES],
+            log_start: 0,
+            log_length: 0,
+            integration_observation: expected,
+            next_integration_observation: Instant::now(),
+            integration_observation_count: 0,
+        };
+        assert_eq!(process.integration_observation(Path::new("/")), expected);
+        assert_eq!(process.integration_observation_count, 1);
+        process.integration_observation_count = GUI_INTEGRATION_WARM_OBSERVATIONS - 1;
+        process.next_integration_observation = Instant::now();
+        assert_eq!(process.integration_observation(Path::new("/")), expected);
+        assert_eq!(
+            process.integration_observation_count,
+            GUI_INTEGRATION_WARM_OBSERVATIONS
+        );
+        assert!(
+            process.next_integration_observation
+                >= Instant::now() + GUI_INTEGRATION_STEADY_OBSERVATION_INTERVAL
+                    - Duration::from_secs(1)
+        );
     }
 
     #[test]
@@ -2802,6 +2896,9 @@ mod tests {
             log_bytes: [0; MAX_GUI_LOG_BYTES],
             log_start: 0,
             log_length: 0,
+            integration_observation: integration::IntegrationObservation::default(),
+            next_integration_observation: Instant::now(),
+            integration_observation_count: 0,
         };
         let deadline = Instant::now() + Duration::from_secs(2);
         while process.exit_status().expect("exit status").is_none() && Instant::now() < deadline {
@@ -2900,6 +2997,9 @@ mod tests {
             log_bytes: [0; MAX_GUI_LOG_BYTES],
             log_start: 0,
             log_length: 0,
+            integration_observation: integration::IntegrationObservation::default(),
+            next_integration_observation: Instant::now(),
+            integration_observation_count: 0,
         };
 
         process.close();

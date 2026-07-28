@@ -16,7 +16,12 @@ internal data class PackageLauncherReview(
     val integrationTopology: Int,
     val profiledExecutables: Int,
     val incompleteProfiles: Int,
+    val observedTopology: Int,
+    val observedLaunchers: Int,
+    val incompleteObservations: Int,
 )
+
+private const val INTEGRATION_TOPOLOGY_MASK = 0x0f7f
 
 internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherReview {
     val text = String(bytes, StandardCharsets.US_ASCII)
@@ -41,6 +46,9 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
     val integrationTopology = reviewHex(fields.getOrNull(10), 4, 0xffff)
     val profiledExecutables = reviewCount(fields.getOrNull(11))
     val incompleteProfiles = reviewCount(fields.getOrNull(12))
+    val observedTopology = reviewHex(fields.getOrNull(13), 4, 0xffff)
+    val observedLaunchers = reviewCount(fields.getOrNull(14))
+    val incompleteObservations = reviewCount(fields.getOrNull(15))
     val validStatus =
         when (status) {
             "not-installed",
@@ -54,8 +62,8 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
             else -> false
         }
     if (
-        fields.size != 14 ||
-        fields[0] != "R2" ||
+        fields.size != 17 ||
+        fields[0] != "R3" ||
         !validStatus ||
         capabilities == null ||
         analyzed == null ||
@@ -68,10 +76,19 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
         integrationTopology == null ||
         profiledExecutables == null ||
         incompleteProfiles == null ||
-        fields[13] != LauncherApkAssembler.CAPABILITIES_V2 ||
+        observedTopology == null ||
+        observedLaunchers == null ||
+        incompleteObservations == null ||
+        fields[16] != LauncherApkAssembler.CAPABILITIES_V2 ||
         verifiedExecutables > launchers ||
         profiledExecutables > launchers ||
         incompleteProfiles > profiledExecutables ||
+        profiledExecutables == 0 && integrationTopology != 0 ||
+        (integrationTopology and INTEGRATION_TOPOLOGY_MASK.inv()) != 0 ||
+        observedLaunchers > launchers ||
+        incompleteObservations > observedLaunchers ||
+        observedLaunchers == 0 && observedTopology != 0 ||
+        (observedTopology and INTEGRATION_TOPOLOGY_MASK.inv()) != 0 ||
         current + pending + attention + failed > launchers ||
         status == "not-installed" &&
             (
@@ -81,14 +98,20 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
                     verifiedExecutables != 0 ||
                     integrationTopology != 0 ||
                     profiledExecutables != 0 ||
-                    incompleteProfiles != 0
+                    incompleteProfiles != 0 ||
+                    observedTopology != 0 ||
+                    observedLaunchers != 0 ||
+                    incompleteObservations != 0
             ) ||
         status == "no-launcher" &&
             (
                 launchers != 0 ||
                     integrationTopology != 0 ||
                     profiledExecutables != 0 ||
-                    incompleteProfiles != 0
+                    incompleteProfiles != 0 ||
+                    observedTopology != 0 ||
+                    observedLaunchers != 0 ||
+                    incompleteObservations != 0
             ) ||
         status == "ready" &&
             (
@@ -118,6 +141,9 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
         integrationTopology = integrationTopology,
         profiledExecutables = profiledExecutables,
         incompleteProfiles = incompleteProfiles,
+        observedTopology = observedTopology,
+        observedLaunchers = observedLaunchers,
+        incompleteObservations = incompleteObservations,
     )
 }
 

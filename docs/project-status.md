@@ -2237,8 +2237,19 @@ dependency graph with fixed-size ELF/program/dynamic-table reads rather than
 loading whole binaries. Package details can report Qt 5/6, GTK 3/4, SDL 2/3,
 native Wayland, X11 linkage, OpenGL/EGL, and Vulkan with incomplete-graph
 provenance. Current Foot reports Native Wayland on both devices. Scripts and
-plugin- or `dlopen`-only stacks remain unresolved until an observed-process
-topology is added.
+plugin- or `dlopen`-only stacks are now covered by a separate observed-process
+topology. Every active generated launcher scans only its supervised process
+group on a two-second startup warm-up and a 30-second steady cadence, streams
+`/proc` maps through fixed stack buffers, recognizes loaded
+toolkit/protocol/graphics SONAMEs and Chromium child roles, and accumulates
+results against the exact launcher generation. The
+Android `/data/user/0` and `/data/data` alias is accepted only after the two
+roots have identical device/inode identity. Registry v4 migration, stale
+generation rejection, content-change reset, malformed map/root cases, and an
+exact Chromium-role fixture pass. Real Foot launches persist Native Wayland
+observations on current x86_64 and AArch64 installs; package details retain
+static, observed, partial-scan, and launcher-coverage provenance and do not
+promote any topology into a compatibility claim.
 
 ## Validated
 

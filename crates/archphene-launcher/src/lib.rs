@@ -18,7 +18,8 @@ const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
 const REGISTRY_FILE: &str = "launcher-registry-v1";
 const REGISTRY_TEMP_FILE: &str = ".launcher-registry-v1.tmp";
 const REGISTRY_MAGIC: &[u8; 8] = b"ARCHLREG";
-const REGISTRY_VERSION: u32 = 4;
+const REGISTRY_VERSION: u32 = 5;
+const EXECUTABLE_PACKAGE_REGISTRY_VERSION: u32 = 4;
 const PREVIOUS_REGISTRY_VERSION: u32 = 3;
 const ICON_REGISTRY_VERSION: u32 = 2;
 const LEGACY_REGISTRY_VERSION: u32 = 1;
@@ -78,6 +79,9 @@ pub struct LauncherDescriptor {
     icon_digest: Option<[u8; 32]>,
     pub mime_types: Vec<String>,
     pub terminal: bool,
+    pub observed_topology: u16,
+    pub integration_observed: bool,
+    pub integration_observation_complete: bool,
     pub desired_present: bool,
     pub desired_generation: u64,
     pub published_generation: u64,
@@ -428,6 +432,64 @@ impl LauncherRegistry {
             return None;
         }
         Some(descriptor)
+    }
+
+    pub fn record_integration_observation(
+        &mut self,
+        arch_root: &Path,
+        descriptor_id: &[u8; 32],
+        generation: u64,
+        topology: u16,
+        complete: bool,
+    ) -> Result<bool, LauncherRegistryError> {
+        let index = self
+            .descriptors
+            .iter()
+            .position(|descriptor| {
+                descriptor.descriptor_id == *descriptor_id
+                    && descriptor.status == WrapperStatus::Current
+                    && descriptor.desired_present
+                    && descriptor.desired_generation == generation
+                    && descriptor.published_generation == generation
+                    && descriptor.pending_generation == 0
+            })
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        let descriptor = &self.descriptors[index];
+        let merged_topology = descriptor.observed_topology | topology;
+        let merged_complete = if descriptor.integration_observed {
+            descriptor.integration_observation_complete && complete
+        } else {
+            complete
+        };
+        if descriptor.integration_observed
+            && descriptor.observed_topology == merged_topology
+            && descriptor.integration_observation_complete == merged_complete
+        {
+            return Ok(false);
+        }
+        let previous_generation = self.generation;
+        let previous = (
+            descriptor.observed_topology,
+            descriptor.integration_observed,
+            descriptor.integration_observation_complete,
+        );
+        let descriptor = &mut self.descriptors[index];
+        descriptor.observed_topology = merged_topology;
+        descriptor.integration_observed = true;
+        descriptor.integration_observation_complete = merged_complete;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(LauncherRegistryError::LimitExceeded)?;
+        if let Err(error) = self.store(arch_root) {
+            self.generation = previous_generation;
+            let descriptor = &mut self.descriptors[index];
+            descriptor.observed_topology = previous.0;
+            descriptor.integration_observed = previous.1;
+            descriptor.integration_observation_complete = previous.2;
+            return Err(error);
+        }
+        Ok(true)
     }
 
     pub fn mark_building(
@@ -1036,6 +1098,9 @@ fn descriptor_from_entry(
         icon_digest,
         mime_types: entry.mime_types.clone(),
         terminal: entry.terminal,
+        observed_topology: 0,
+        integration_observed: false,
+        integration_observation_complete: false,
         desired_present: true,
         desired_generation,
         published_generation,
@@ -1319,6 +1384,7 @@ fn encode_registry_version(
         LEGACY_REGISTRY_VERSION
             | ICON_REGISTRY_VERSION
             | PREVIOUS_REGISTRY_VERSION
+            | EXECUTABLE_PACKAGE_REGISTRY_VERSION
             | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
@@ -1331,7 +1397,7 @@ fn encode_registry_version(
             ICON_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION => {
                 previous_descriptor_digest(descriptor)
             }
-            REGISTRY_VERSION => descriptor.content_digest,
+            EXECUTABLE_PACKAGE_REGISTRY_VERSION | REGISTRY_VERSION => descriptor.content_digest,
             _ => return Err(LauncherRegistryError::Corrupt),
         };
         body.extend_from_slice(&content_digest);
@@ -1344,8 +1410,13 @@ fn encode_registry_version(
         push_string(&mut body, &descriptor.android_package)?;
         push_string(&mut body, &descriptor.desktop_id)?;
         push_optional_string(&mut body, descriptor.source_package.as_deref())?;
-        if version >= REGISTRY_VERSION {
+        if version >= EXECUTABLE_PACKAGE_REGISTRY_VERSION {
             push_optional_string(&mut body, descriptor.executable_package.as_deref())?;
+        }
+        if version >= REGISTRY_VERSION {
+            body.extend_from_slice(&descriptor.observed_topology.to_le_bytes());
+            body.push(u8::from(descriptor.integration_observed));
+            body.push(u8::from(descriptor.integration_observation_complete));
         }
         push_string(&mut body, &descriptor.name)?;
         push_string(&mut body, &descriptor.executable)?;
@@ -1422,6 +1493,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
         LEGACY_REGISTRY_VERSION
             | ICON_REGISTRY_VERSION
             | PREVIOUS_REGISTRY_VERSION
+            | EXECUTABLE_PACKAGE_REGISTRY_VERSION
             | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
@@ -1450,11 +1522,17 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
         let android_package = cursor.string()?;
         let desktop_id = cursor.string()?;
         let source_package = cursor.optional_string()?;
-        let executable_package = if version >= REGISTRY_VERSION {
+        let executable_package = if version >= EXECUTABLE_PACKAGE_REGISTRY_VERSION {
             cursor.optional_string()?
         } else {
             None
         };
+        let (observed_topology, integration_observed, integration_observation_complete) =
+            if version >= REGISTRY_VERSION {
+                (cursor.u16()?, cursor.boolean()?, cursor.boolean()?)
+            } else {
+                (0, false, false)
+            };
         let name = cursor.string()?;
         let executable = cursor.string()?;
         let try_exec = cursor.optional_string()?;
@@ -1508,6 +1586,9 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
             icon_digest,
             mime_types,
             terminal,
+            observed_topology,
+            integration_observed,
+            integration_observation_complete,
             desired_present,
             desired_generation,
             published_generation,
@@ -1528,7 +1609,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
                 }
                 descriptor.content_digest = descriptor_digest(&descriptor);
             }
-            REGISTRY_VERSION => {}
+            EXECUTABLE_PACKAGE_REGISTRY_VERSION | REGISTRY_VERSION => {}
             _ => return Err(LauncherRegistryError::Corrupt),
         }
         descriptors.push(descriptor);
@@ -1556,6 +1637,9 @@ fn validate_registry(registry: &LauncherRegistry) -> Result<(), LauncherRegistry
             || descriptor.android_package != android_package(&descriptor.descriptor_id)
             || descriptor.content_digest != descriptor_digest(descriptor)
             || !valid_descriptor_strings(descriptor)
+            || !descriptor.integration_observed
+                && (descriptor.observed_topology != 0
+                    || descriptor.integration_observation_complete)
         {
             return Err(LauncherRegistryError::Corrupt);
         }
@@ -1747,6 +1831,12 @@ impl<'a> Cursor<'a> {
             1 => Ok(true),
             _ => Err(LauncherRegistryError::Corrupt),
         }
+    }
+
+    fn u16(&mut self) -> Result<u16, LauncherRegistryError> {
+        let mut bytes = [0_u8; 2];
+        bytes.copy_from_slice(self.take(2)?);
+        Ok(u16::from_le_bytes(bytes))
     }
 
     fn u32(&mut self) -> Result<u32, LauncherRegistryError> {
@@ -2217,6 +2307,80 @@ mod tests {
             reconciled.descriptors[0].executable_package.as_deref(),
             Some("kate"),
         );
+    }
+
+    #[test]
+    fn executable_owner_registry_migrates_without_inventing_observations() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("current registry");
+        let previous = encode_registry_version(&registry, EXECUTABLE_PACKAGE_REGISTRY_VERSION)
+            .expect("executable-owner registry");
+        fs::write(
+            root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE),
+            previous,
+        )
+        .expect("replace with executable-owner registry");
+        let loaded = LauncherRegistry::load(&root.path).expect("load previous registry");
+        assert_eq!(
+            loaded.descriptors[0].executable_package.as_deref(),
+            Some("kate")
+        );
+        assert!(!loaded.descriptors[0].integration_observed);
+        assert_eq!(loaded.descriptors[0].observed_topology, 0);
+        assert!(!loaded.descriptors[0].integration_observation_complete);
+    }
+
+    #[test]
+    fn observed_topology_is_exactly_bound_persisted_and_reset_on_change() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial registry");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("building");
+        registry
+            .mark_awaiting_install(&root.path, &package, 1)
+            .expect("awaiting install");
+        registry
+            .confirm_installed(&root.path, &package, 1)
+            .expect("installed");
+        let descriptor_id = registry.descriptors[0].descriptor_id;
+        assert!(
+            registry
+                .record_integration_observation(&root.path, &descriptor_id, 1, 0x100, true)
+                .expect("first observation")
+        );
+        let generation = registry.generation();
+        assert!(
+            !registry
+                .record_integration_observation(&root.path, &descriptor_id, 1, 0x100, true)
+                .expect("unchanged observation")
+        );
+        assert_eq!(registry.generation(), generation);
+        assert!(
+            registry
+                .record_integration_observation(&root.path, &descriptor_id, 1, 0x400, false)
+                .expect("expanded observation")
+        );
+        let loaded = LauncherRegistry::load(&root.path).expect("persisted observation");
+        assert_eq!(loaded.descriptors[0].observed_topology, 0x500);
+        assert!(loaded.descriptors[0].integration_observed);
+        assert!(!loaded.descriptors[0].integration_observation_complete);
+        assert!(matches!(
+            registry.record_integration_observation(&root.path, &descriptor_id, 2, 0x2, true),
+            Err(LauncherRegistryError::InvalidTransition)
+        ));
+
+        let changed = catalog(vec![entry("org.kde.kate.desktop", "Kate Editor")]);
+        let (changed, report) =
+            LauncherRegistry::reconcile(&root.path, &changed).expect("changed registry");
+        assert_eq!(report.changed, 1);
+        assert!(!changed.descriptors[0].integration_observed);
+        assert_eq!(changed.descriptors[0].observed_topology, 0);
     }
 
     #[test]

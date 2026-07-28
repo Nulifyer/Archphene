@@ -2093,6 +2093,7 @@ class ArchpheneRuntimeService : Service() {
         private const val INTEGRATION_GTK4 = 1 shl 3
         private const val INTEGRATION_SDL2 = 1 shl 4
         private const val INTEGRATION_SDL3 = 1 shl 5
+        private const val INTEGRATION_CHROMIUM = 1 shl 6
         private const val INTEGRATION_WAYLAND = 1 shl 8
         private const val INTEGRATION_X11 = 1 shl 9
         private const val INTEGRATION_OPENGL = 1 shl 10
@@ -9594,10 +9595,56 @@ class ArchpheneRuntimeService : Service() {
         }
 
     private fun packageIntegrationStack(review: PackageLauncherReview): String {
-        if (review.profiledExecutables == 0) {
+        if (review.profiledExecutables == 0 && review.observedLaunchers == 0) {
             return "stack unresolved until observed launch"
         }
-        val topology = review.integrationTopology
+        val static =
+            if (review.profiledExecutables == 0) {
+                null
+            } else {
+                integrationLabels(
+                    review.integrationTopology,
+                    review.incompleteProfiles != 0,
+                    "native ELF",
+                    "partial static graph",
+                )
+            }
+        val observed =
+            if (review.observedLaunchers == 0) {
+                null
+            } else {
+                integrationLabels(
+                    review.observedTopology,
+                    review.incompleteObservations != 0,
+                    "mapped Linux process",
+                    "partial process scan",
+                )
+            }
+        return when {
+            static != null &&
+                observed != null &&
+                review.integrationTopology == review.observedTopology &&
+                review.incompleteProfiles == 0 &&
+                review.incompleteObservations == 0 -> {
+                if (review.observedLaunchers == review.launchers) {
+                    "$static (static + observed)"
+                } else {
+                    "$static (static; observed on ${review.observedLaunchers}/" +
+                        "${review.launchers} launchers)"
+                }
+            }
+            static != null && observed != null -> "Static: $static · Observed: $observed"
+            static != null -> "Static: $static"
+            else -> "Observed: ${checkNotNull(observed)}"
+        }
+    }
+
+    private fun integrationLabels(
+        topology: Int,
+        partial: Boolean,
+        emptyLabel: String,
+        partialLabel: String,
+    ): String {
         val labels = ArrayList<String>(8)
         if (topology and INTEGRATION_QT5 != 0) labels.add("Qt 5")
         if (topology and INTEGRATION_QT6 != 0) labels.add("Qt 6")
@@ -9605,13 +9652,15 @@ class ArchpheneRuntimeService : Service() {
         if (topology and INTEGRATION_GTK4 != 0) labels.add("GTK 4")
         if (topology and INTEGRATION_SDL2 != 0) labels.add("SDL 2")
         if (topology and INTEGRATION_SDL3 != 0) labels.add("SDL 3")
+        if (topology and INTEGRATION_CHROMIUM != 0) labels.add("Electron/Chromium")
         val toolkitMask =
             INTEGRATION_QT5 or
                 INTEGRATION_QT6 or
                 INTEGRATION_GTK3 or
                 INTEGRATION_GTK4 or
                 INTEGRATION_SDL2 or
-                INTEGRATION_SDL3
+                INTEGRATION_SDL3 or
+                INTEGRATION_CHROMIUM
         if (topology and INTEGRATION_WAYLAND != 0) {
             labels.add(if (topology and toolkitMask == 0) "Native Wayland" else "Wayland")
         }
@@ -9620,8 +9669,8 @@ class ArchpheneRuntimeService : Service() {
         }
         if (topology and INTEGRATION_OPENGL != 0) labels.add("OpenGL/EGL")
         if (topology and INTEGRATION_VULKAN != 0) labels.add("Vulkan")
-        if (labels.isEmpty()) labels.add("native ELF")
-        if (review.incompleteProfiles != 0) labels.add("partial dependency graph")
+        if (labels.isEmpty()) labels.add(emptyLabel)
+        if (partial) labels.add(partialLabel)
         return labels.joinToString(" · ")
     }
 

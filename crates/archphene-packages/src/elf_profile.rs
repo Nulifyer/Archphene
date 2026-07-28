@@ -1,4 +1,9 @@
 use crate::desktop;
+use archphene_process::integration::classify_library;
+pub use archphene_process::integration::{
+    TOPOLOGY_CHROMIUM, TOPOLOGY_GTK3, TOPOLOGY_GTK4, TOPOLOGY_OPENGL, TOPOLOGY_QT5, TOPOLOGY_QT6,
+    TOPOLOGY_SDL2, TOPOLOGY_SDL3, TOPOLOGY_VULKAN, TOPOLOGY_WAYLAND, TOPOLOGY_X11,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -16,17 +21,6 @@ const MAX_NEEDED_PER_OBJECT: usize = 256;
 const MAX_NEEDED_NAME_BYTES: usize = 255;
 const MAX_PROFILE_OBJECTS: usize = 256;
 const MAX_PROFILE_EDGES: usize = 4096;
-
-pub const TOPOLOGY_QT5: u16 = 1 << 0;
-pub const TOPOLOGY_QT6: u16 = 1 << 1;
-pub const TOPOLOGY_GTK3: u16 = 1 << 2;
-pub const TOPOLOGY_GTK4: u16 = 1 << 3;
-pub const TOPOLOGY_SDL2: u16 = 1 << 4;
-pub const TOPOLOGY_SDL3: u16 = 1 << 5;
-pub const TOPOLOGY_WAYLAND: u16 = 1 << 8;
-pub const TOPOLOGY_X11: u16 = 1 << 9;
-pub const TOPOLOGY_OPENGL: u16 = 1 << 10;
-pub const TOPOLOGY_VULKAN: u16 = 1 << 11;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IntegrationProfile {
@@ -158,51 +152,6 @@ fn valid_library_name(name: &str) -> bool {
         && !name
             .bytes()
             .any(|byte| byte == 0 || byte.is_ascii_control())
-}
-
-fn classify_library(name: &str) -> u16 {
-    let mut topology = 0_u16;
-    if soname_family(name, "libQt5") {
-        topology |= TOPOLOGY_QT5;
-    }
-    if soname_family(name, "libQt6") {
-        topology |= TOPOLOGY_QT6;
-    }
-    if soname_family(name, "libgtk-3") {
-        topology |= TOPOLOGY_GTK3;
-    }
-    if soname_family(name, "libgtk-4") {
-        topology |= TOPOLOGY_GTK4;
-    }
-    if soname_family(name, "libSDL2") {
-        topology |= TOPOLOGY_SDL2;
-    }
-    if soname_family(name, "libSDL3") {
-        topology |= TOPOLOGY_SDL3;
-    }
-    if soname_family(name, "libwayland-client") {
-        topology |= TOPOLOGY_WAYLAND;
-    }
-    if soname_family(name, "libX11") || soname_family(name, "libxcb") {
-        topology |= TOPOLOGY_X11;
-    }
-    if soname_family(name, "libGL")
-        || soname_family(name, "libOpenGL")
-        || soname_family(name, "libEGL")
-        || soname_family(name, "libGLES")
-    {
-        topology |= TOPOLOGY_OPENGL;
-    }
-    if soname_family(name, "libvulkan") {
-        topology |= TOPOLOGY_VULKAN;
-    }
-    topology
-}
-
-fn soname_family(name: &str, family: &str) -> bool {
-    name.strip_prefix(family)
-        .and_then(|suffix| suffix.find(".so").map(|index| &suffix[index + 3..]))
-        .is_some_and(|version| version.is_empty() || version.starts_with('.'))
 }
 
 fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
