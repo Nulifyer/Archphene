@@ -16,10 +16,11 @@ internal class ProjectSyncProviderTimeout(message: String) : Exception(message)
 /**
  * Bounded SAF access for the project synchronizer.
  *
- * Queries and descriptor opens use Android cancellation signals. Mutations do
- * not expose a cancellation signal, so a watchdog terminates the manager
- * process if a provider fails to return; the on-disk synchronization journal
- * makes the possibly completed mutation recoverable on the next Sync.
+ * Queries and descriptor opens first use Android cancellation signals. If a
+ * provider ignores cancellation, the watchdog terminates the manager process
+ * after a short grace period. Mutations do not expose a cancellation signal,
+ * so their watchdog terminates immediately; the on-disk synchronization
+ * journal makes a possibly completed mutation recoverable on the next Sync.
  */
 internal class ProjectSyncProvider(
     private val resolver: ContentResolver,
@@ -90,14 +91,28 @@ internal class ProjectSyncProvider(
         val signal = CancellationSignal()
         val previous = activeSignal.getAndSet(signal)
         val timedOut = AtomicBoolean(false)
+        val completed = AtomicBoolean(false)
+        val forceTimeout =
+            Runnable {
+                if (!completed.get()) {
+                    onMutationTimeout(label)
+                }
+            }
         val timeout =
             Runnable {
                 timedOut.set(true)
                 signal.cancel()
+                handler.postDelayed(forceTimeout, CANCELLATION_GRACE_MILLIS)
             }
         handler.postDelayed(timeout, deadlineMillis)
         try {
-            return operation(signal)
+            val result = operation(signal)
+            if (timedOut.get()) {
+                throw ProjectSyncProviderTimeout(
+                    "Android provider timed out while attempting to $label",
+                )
+            }
+            return result
         } catch (error: OperationCanceledException) {
             if (timedOut.get()) {
                 throw ProjectSyncProviderTimeout(
@@ -106,7 +121,9 @@ internal class ProjectSyncProvider(
             }
             throw InterruptedException("Android provider operation was cancelled")
         } finally {
+            completed.set(true)
             handler.removeCallbacks(timeout)
+            handler.removeCallbacks(forceTimeout)
             activeSignal.compareAndSet(signal, previous)
         }
     }
@@ -135,5 +152,9 @@ internal class ProjectSyncProvider(
             completed.set(true)
             handler.removeCallbacks(timeout)
         }
+    }
+
+    private companion object {
+        private const val CANCELLATION_GRACE_MILLIS = 2_000L
     }
 }

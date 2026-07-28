@@ -35,6 +35,8 @@ action_send_multiple=org.archphene.app.debug.action.SEND_MULTIPLE_DOCUMENT_IMPOR
 action_clean=org.archphene.app.debug.action.CLEAN_DOCUMENT_IMPORT_SOURCE
 output_dir="$ARCHPHENE_ROOT/tooling/build/document-import"
 debug_import_delay_extra=org.archphene.app.extra.DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS
+debug_provider_deadline_extra=org.archphene.app.extra.DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS
+test_provider_authority="$package.import-test"
 mkdir -p "$output_dir"
 
 cleanup() {
@@ -160,6 +162,90 @@ archphene_adb_run shell am broadcast -n "$receiver" -a "$action_verify" \
 archphene_wait_log "Document imports verified token=$token" \
   15 'ArchpheneDocumentsTest:V AndroidRuntime:E *:S' >/dev/null
 
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  -a android.intent.action.VIEW -c android.intent.category.DEFAULT \
+  -t text/plain -d "content://$test_provider_authority/ignore-open/$token" -f 1 \
+  --ei "$debug_provider_deadline_extra" 500 >/dev/null
+ignored_open_log="$(archphene_wait_log \
+  "Android provider stopped responding while attempting to open the document; terminating the manager" \
+  10 'ArchpheneRuntime:V ArchpheneImportProvider:V AndroidRuntime:E *:S')"
+[[ "$ignored_open_log" == *"Ignoring descriptor open cancellation token=$token"* ]] ||
+  archphene_die "provider did not exercise ignored open cancellation: $ignored_open_log"
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -z "$(archphene_adb_run shell pidof "$package" 2>/dev/null || true)" ]] && break
+  sleep 0.2
+done
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+archphene_open_manager_section Files "document-import-ignored-open-files-$serial"
+archphene_wait_ui_unwrapped \
+  "The previous document transfer was interrupted. Choose it again." \
+  "document-import-ignored-open-$serial" 20
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-ignored-open.png"
+
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  -a android.intent.action.VIEW -c android.intent.category.DEFAULT \
+  -t text/plain -d "content://$test_provider_authority/stall-open/$token" -f 1 \
+  --ei "$debug_provider_deadline_extra" 500 >/dev/null
+archphene_wait_ui_unwrapped \
+  "Import failed: Android provider timed out while attempting to open the document" \
+  "document-import-open-timeout-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-open-timeout.png"
+open_timeout_log="$(
+  archphene_adb_run logcat -d -v brief \
+    -s ArchpheneRuntime:V ArchpheneImportProvider:V AndroidRuntime:E '*:S' 2>/dev/null || true
+)"
+[[ "$open_timeout_log" == *"Stalling descriptor open token=$token"* &&
+   "$open_timeout_log" == *"Android provider timed out while attempting to open the document"* ]] ||
+  archphene_die "document provider open timeout was not bounded: $open_timeout_log"
+
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  -a android.intent.action.VIEW -c android.intent.category.DEFAULT \
+  -t text/plain -d "content://$test_provider_authority/stall-read/$token" -f 1 \
+  --ei "$debug_provider_deadline_extra" 500 >/dev/null
+archphene_wait_ui_unwrapped \
+  "Import failed: Android provider stopped sending document data" \
+  "document-import-read-timeout-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-read-timeout.png"
+read_timeout_log="$(
+  archphene_adb_run logcat -d -v brief \
+    -s ArchpheneRuntime:V ArchpheneImportProvider:V AndroidRuntime:E '*:S' 2>/dev/null || true
+)"
+[[ "$read_timeout_log" == *"Stalling descriptor read token=$token"* &&
+   "$read_timeout_log" == *"Android provider stopped sending document data"* ]] ||
+  archphene_die "document provider read timeout was not bounded: $read_timeout_log"
+
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  -a android.intent.action.VIEW -c android.intent.category.DEFAULT \
+  -t text/plain -d "content://$test_provider_authority/paced-read/$token" -f 1 \
+  --ei "$debug_provider_deadline_extra" 500 >/dev/null
+archphene_wait_log \
+  "Android document imported name=Provider-paced-$token\\.txt bytes=[1-9][0-9]*" \
+  15 'ArchpheneRuntime:V AndroidRuntime:E *:S' >/dev/null
+archphene_wait_ui_unwrapped \
+  "Imported Provider-paced-$token\\.txt .* to ~/Downloads" \
+  "document-import-paced-read-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-paced-read.png"
+
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  -a android.intent.action.VIEW -c android.intent.category.DEFAULT \
+  -t text/plain -d "content://$test_provider_authority/normal/$token" -f 1 \
+  --ei "$debug_provider_deadline_extra" 500 >/dev/null
+archphene_wait_log \
+  "Android document imported name=Provider-$token\\.txt bytes=[1-9][0-9]*" \
+  15 'ArchpheneRuntime:V AndroidRuntime:E *:S' >/dev/null
+archphene_adb_run logcat -c
+archphene_adb_run shell am broadcast -n "$receiver" -a "$action_verify" \
+  --es token "$token" --ez expect_multiple true \
+  --ez expect_provider_deadlines true >/dev/null
+archphene_wait_log "Document imports verified token=$token" \
+  15 'ArchpheneDocumentsTest:V AndroidRuntime:E *:S' >/dev/null
+
 manager_ui="$ARCHPHENE_UI"
 archphene_tap_text "$manager_ui" "Import"
 archphene_wait_ui 'package="com\.(google\.)?android\.documentsui"' \
@@ -191,9 +277,15 @@ archphene_note "Archphene document import passed on $serial"
 archphene_note "  ACTION_VIEW and ACTION_SEND streamed exact bytes into ~/Downloads"
 archphene_note "  ACTION_SEND_MULTIPLE imported two ordered, deduplicated documents"
 archphene_note "  Live byte progress and chunk-boundary cancellation left no file"
+archphene_note "  Provider open/read deadlines failed cleanly and paced reads succeeded"
+archphene_note "  A provider ignoring open cancellation triggered bounded process recovery"
 archphene_note "  Collision-safe naming and process-restart status passed"
 archphene_note "  Android system picker launched from the manager"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"
 archphene_note "  Multiple-import screenshot: $output_dir/$serial-multiple.png"
 archphene_note "  Progress screenshot: $output_dir/$serial-progress.png"
 archphene_note "  Cancellation screenshot: $output_dir/$serial-cancelled.png"
+archphene_note "  Provider-open timeout screenshot: $output_dir/$serial-open-timeout.png"
+archphene_note "  Ignored-open recovery screenshot: $output_dir/$serial-ignored-open.png"
+archphene_note "  Provider-read timeout screenshot: $output_dir/$serial-read-timeout.png"
+archphene_note "  Paced-read screenshot: $output_dir/$serial-paced-read.png"

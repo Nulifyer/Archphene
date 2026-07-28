@@ -1888,6 +1888,17 @@ cancellation, slow-copy progress, and mid-copy cancellation on Android 16
 x86_64 and Samsung Android 15 AArch64. Both exact ABIs preserve prior files,
 leave no cancelled destination or staging residue, emit the scoped cancellation
 log, and pass inspected full-device progress and terminal-state frames.
+Provider access is now bounded as well. Metadata queries and descriptor opens
+use Android cancellation with a 30-second deadline and a short fail-safe
+process-recovery grace period for providers that ignore cancellation. Rust
+polls imported descriptors without blocking indefinitely, checks cancellation
+every 100 ms, and resets its 30-second idle deadline whenever bytes arrive.
+The separate-process hostile provider gate proves cooperative open timeout,
+ignored-open manager recovery and durable interrupted status, stalled-pipe
+rollback, a three-chunk stream whose total duration exceeds its debug deadline,
+normal exact-byte retry, and no partial publication on both exact ABIs. The
+resulting full-device failure and recovery messages are readable on both
+targets.
 
 The initial mirror now records a real synchronization ancestor while it copies:
 a stable random 128-bit mapping identity, sorted directory entries, exact byte

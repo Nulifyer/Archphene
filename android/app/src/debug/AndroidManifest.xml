@@ -43,5 +43,11 @@
         <receiver
             android:name=".PerformanceTestReceiver"
             android:exported="true" />
+        <provider
+            android:name=".DocumentImportTestProvider"
+            android:authorities="${applicationId}.import-test"
+            android:exported="false"
+            android:grantUriPermissions="true"
+            android:process=":import_test_provider" />
     </application>
 </manifest>

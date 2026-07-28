@@ -52,6 +52,7 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
                                 context,
                                 token,
                                 intent.getBooleanExtra(EXTRA_EXPECT_MULTIPLE, false),
+                                intent.getBooleanExtra(EXTRA_EXPECT_PROVIDER_DEADLINES, false),
                             )
                             Log.i(TAG, "Document imports verified token=$token")
                         }
@@ -387,6 +388,11 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
                 importThirdName(token),
                 importFourthName(token),
                 secondImportName(token),
+                providerName(token),
+                providerOpenName(token),
+                providerIgnoreName(token),
+                providerReadName(token),
+                providerPacedName(token),
             )
         ) {
             val imported = File(downloads, name)
@@ -406,6 +412,7 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         context: Context,
         token: String,
         expectMultiple: Boolean,
+        expectProviderDeadlines: Boolean,
     ) {
         val downloads = File(context.filesDir, "$HOME_RELATIVE_PATH/Downloads")
         val expected =
@@ -446,6 +453,23 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         } else {
             check(!File(downloads, importFourthName(token)).exists()) {
                 "cancelled import was published"
+            }
+        }
+        if (expectProviderDeadlines) {
+            val providerContent = DocumentImportTestProvider.providerContent(token)
+            for (name in arrayOf(providerName(token), providerPacedName(token))) {
+                check(File(downloads, name).readBytes().contentEquals(providerContent)) {
+                    "provider deadline retry content differs: $name"
+                }
+            }
+            check(!File(downloads, providerOpenName(token)).exists()) {
+                "timed-out provider open published a file"
+            }
+            check(!File(downloads, providerIgnoreName(token)).exists()) {
+                "uncancellable provider open published a file"
+            }
+            check(!File(downloads, providerReadName(token)).exists()) {
+                "timed-out provider read published a file"
             }
         }
     }
@@ -524,6 +548,7 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_RETAIN_VISUAL = "retain_visual"
         private const val EXTRA_EXPECT_MULTIPLE = "expect_multiple"
+        private const val EXTRA_EXPECT_PROVIDER_DEADLINES = "expect_provider_deadlines"
         private const val HOME_ID = "home"
         private const val SHELL_STARTUP_ID = "shell-startup"
         private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/bashrc"
@@ -554,5 +579,15 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private fun importFourthName(token: String): String = "Android-$token (4).txt"
 
         private fun secondImportName(token: String): String = "Android-$token-second.txt"
+
+        private fun providerName(token: String): String = "Provider-$token.txt"
+
+        private fun providerOpenName(token: String): String = "Provider-open-$token.txt"
+
+        private fun providerIgnoreName(token: String): String = "Provider-ignore-$token.txt"
+
+        private fun providerReadName(token: String): String = "Provider-read-$token.txt"
+
+        private fun providerPacedName(token: String): String = "Provider-paced-$token.txt"
     }
 }

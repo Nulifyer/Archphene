@@ -1742,6 +1742,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 0,
             ),
         )
+        ArchpheneRuntimeService.setDebugDocumentImportProviderDeadline(
+            applicationInfo.flags,
+            intent.getIntExtra(
+                ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS,
+                0,
+            ),
+        )
         configureDebugDocumentHandoff(intent)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
         val restoredImports =
@@ -1850,6 +1857,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             applicationInfo.flags,
             intent.getIntExtra(
                 ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS,
+                0,
+            ),
+        )
+        ArchpheneRuntimeService.setDebugDocumentImportProviderDeadline(
+            applicationInfo.flags,
+            intent.getIntExtra(
+                ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS,
                 0,
             ),
         )

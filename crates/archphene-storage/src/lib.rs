@@ -11,6 +11,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -21,7 +22,7 @@ mod sys {
     use std::fs::File;
     use std::io;
     use std::os::fd::{FromRawFd, RawFd};
-    use std::os::raw::{c_char, c_int, c_long, c_uint};
+    use std::os::raw::{c_char, c_int, c_long, c_short, c_uint, c_ulong};
 
     pub const O_RDONLY: c_int = 0;
     pub const O_WRONLY: c_int = 1;
@@ -37,6 +38,17 @@ mod sys {
     pub const AT_REMOVEDIR: c_int = 0x200;
     const F_DUPFD_CLOEXEC: c_int = 1030;
     const RENAME_NOREPLACE: c_uint = 1;
+    const POLLIN: c_short = 0x0001;
+    const POLLERR: c_short = 0x0008;
+    const POLLHUP: c_short = 0x0010;
+    const POLLNVAL: c_short = 0x0020;
+
+    #[repr(C)]
+    struct PollDescriptor {
+        descriptor: c_int,
+        events: c_short,
+        returned_events: c_short,
+    }
 
     #[cfg(target_arch = "x86_64")]
     const SYS_RENAMEAT2: c_long = 316;
@@ -55,6 +67,7 @@ mod sys {
             new_name: *const c_char,
         ) -> c_int;
         fn fcntl(descriptor: c_int, command: c_int, ...) -> c_int;
+        fn poll(descriptors: *mut PollDescriptor, count: c_ulong, timeout: c_int) -> c_int;
         fn syscall(number: c_long, ...) -> c_long;
     }
 
@@ -118,6 +131,27 @@ mod sys {
         let duplicate = descriptor(unsafe { fcntl(source_descriptor, F_DUPFD_CLOEXEC, 0) })?;
         // SAFETY: `fcntl` returned a new owned descriptor.
         Ok(unsafe { File::from_raw_fd(duplicate) })
+    }
+
+    pub fn wait_readable(descriptor: RawFd, timeout_millis: c_int) -> io::Result<bool> {
+        let mut poll_descriptor = PollDescriptor {
+            descriptor,
+            events: POLLIN,
+            returned_events: 0,
+        };
+        // SAFETY: `poll_descriptor` is a valid single-element writable array
+        // for the duration of the call, and the descriptor is only borrowed.
+        let result = unsafe { poll(&mut poll_descriptor, 1, timeout_millis) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        if poll_descriptor.returned_events & POLLNVAL != 0 {
+            return Err(io::Error::from_raw_os_error(9));
+        }
+        Ok(poll_descriptor.returned_events & (POLLIN | POLLERR | POLLHUP) != 0)
     }
 
     pub fn rename_noreplace_between(
@@ -216,6 +250,7 @@ pub enum StorageError {
     RootMutation,
     DocumentTooLarge,
     TransferCancelled,
+    ProviderTimeout,
     ImportCollision,
     MirrorBusy,
     MirrorExists,
@@ -237,6 +272,9 @@ impl fmt::Display for StorageError {
             Self::RootMutation => formatter.write_str("cannot mutate Archphene home"),
             Self::DocumentTooLarge => formatter.write_str("document exceeds 16 GiB"),
             Self::TransferCancelled => formatter.write_str("document transfer was cancelled"),
+            Self::ProviderTimeout => {
+                formatter.write_str("Android provider stopped sending document data")
+            }
             Self::ImportCollision => {
                 formatter.write_str("too many documents use this imported name")
             }
@@ -2110,6 +2148,31 @@ where
     )
 }
 
+pub fn import_document_from_fd_with_progress_and_timeout<F>(
+    root: &Path,
+    parent_id: &str,
+    display_name: &str,
+    source_descriptor: RawFd,
+    idle_timeout: Duration,
+    mut continue_after_chunk: F,
+) -> Result<ImportReport, StorageError>
+where
+    F: FnMut(u64) -> bool,
+{
+    if source_descriptor < 0 || idle_timeout.is_zero() {
+        return Err(StorageError::InvalidDocument);
+    }
+    let mut source = sys::duplicate(source_descriptor)?;
+    import_document_with_copy(root, parent_id, display_name, |pending| {
+        copy_bounded_descriptor_with_progress(
+            &mut source,
+            pending,
+            idle_timeout,
+            &mut continue_after_chunk,
+        )
+    })
+}
+
 pub fn import_document<R: Read>(
     root: &Path,
     parent_id: &str,
@@ -2126,6 +2189,20 @@ fn import_document_with_progress<R: Read, F: FnMut(u64) -> bool>(
     source: &mut R,
     continue_after_chunk: &mut F,
 ) -> Result<ImportReport, StorageError> {
+    import_document_with_copy(root, parent_id, display_name, |pending| {
+        copy_bounded_document_with_progress(source, pending, continue_after_chunk)
+    })
+}
+
+fn import_document_with_copy<F>(
+    root: &Path,
+    parent_id: &str,
+    display_name: &str,
+    copy: F,
+) -> Result<ImportReport, StorageError>
+where
+    F: FnOnce(&mut File) -> Result<u64, StorageError>,
+{
     validate_visible_name(display_name)?;
     let root_directory = open_directory(root, &[])?;
     let staging_name = c_string(OsStr::new(IMPORT_STAGING_DIRECTORY))?;
@@ -2150,8 +2227,7 @@ fn import_document_with_progress<R: Read, F: FnMut(u64) -> bool>(
         0o600,
     )?;
     let result = (|| {
-        let bytes =
-            copy_bounded_document_with_progress(source, &mut pending, continue_after_chunk)?;
+        let bytes = copy(&mut pending)?;
         pending.sync_all()?;
         drop(pending);
 
@@ -2184,6 +2260,58 @@ fn import_document_with_progress<R: Read, F: FnMut(u64) -> bool>(
         let _ = staging.sync_all();
     }
     result
+}
+
+fn copy_bounded_descriptor_with_progress<W: Write, F: FnMut(u64) -> bool>(
+    source: &mut File,
+    destination: &mut W,
+    idle_timeout: Duration,
+    continue_after_chunk: &mut F,
+) -> Result<u64, StorageError> {
+    const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        let idle_started = Instant::now();
+        loop {
+            let Some(remaining) = idle_timeout.checked_sub(idle_started.elapsed()) else {
+                return Err(StorageError::ProviderTimeout);
+            };
+            let interval = remaining.min(CANCELLATION_POLL_INTERVAL);
+            let timeout_millis = i32::try_from(interval.as_millis().max(1)).unwrap_or(i32::MAX);
+            match sys::wait_readable(source.as_raw_fd(), timeout_millis) {
+                Ok(true) => break,
+                Ok(false) => {
+                    if !continue_after_chunk(bytes) {
+                        return Err(StorageError::TransferCancelled);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(StorageError::Io(error)),
+            }
+        }
+
+        let count = match source.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(StorageError::Io(error)),
+        };
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or(StorageError::DocumentTooLarge)?;
+        if bytes > MAX_DOCUMENT_TRANSFER_BYTES {
+            return Err(StorageError::DocumentTooLarge);
+        }
+        destination.write_all(&buffer[..count])?;
+        if !continue_after_chunk(bytes) {
+            return Err(StorageError::TransferCancelled);
+        }
+    }
+    Ok(bytes)
 }
 
 pub fn copy_document_between_fds(
@@ -2459,6 +2587,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Seek, Write};
     use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2670,6 +2799,31 @@ mod tests {
         assert!(matches!(result, Err(StorageError::TransferCancelled)));
         assert_eq!(progress, [32 * 1024, 64 * 1024]);
         assert!(!home.0.join("Downloads/cancelled.bin").exists());
+        assert!(
+            home.0
+                .join(IMPORT_STAGING_DIRECTORY)
+                .read_dir()
+                .expect("staging")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn document_import_times_out_a_stalled_descriptor_without_publication() {
+        let home = TestDirectory::new();
+        create_document(&home.0, HOME_DOCUMENT_ID, "Downloads", true).expect("downloads");
+        let (source, _held_writer) = UnixStream::pair().expect("descriptor pair");
+        let result = import_document_from_fd_with_progress_and_timeout(
+            &home.0,
+            "home/Downloads",
+            "stalled.bin",
+            source.as_raw_fd(),
+            Duration::from_millis(30),
+            |_| true,
+        );
+        assert!(matches!(result, Err(StorageError::ProviderTimeout)));
+        assert!(!home.0.join("Downloads/stalled.bin").exists());
         assert!(
             home.0
                 .join(IMPORT_STAGING_DIRECTORY)

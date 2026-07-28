@@ -800,9 +800,13 @@ mod android {
         request_length: jint,
         source_descriptor: jint,
         debug_chunk_delay_millis: jint,
+        provider_idle_timeout_millis: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
-        if source_descriptor < 0 || !(0..=100).contains(&debug_chunk_delay_millis) {
+        if source_descriptor < 0
+            || !(0..=100).contains(&debug_chunk_delay_millis)
+            || !(1..=30_000).contains(&provider_idle_timeout_millis)
+        {
             return ERROR_INVALID_ARGUMENT;
         }
         let Ok(output) = storage_output(&environment, &output_buffer) else {
@@ -819,11 +823,12 @@ mod android {
         }
         let _guard = DocumentImportGuard;
         let delay = Duration::from_millis(debug_chunk_delay_millis as u64);
-        match archphene_storage::import_document_from_fd_with_progress(
+        match archphene_storage::import_document_from_fd_with_progress_and_timeout(
             Path::new(&request[0]),
             &request[1],
             &request[2],
             source_descriptor,
+            Duration::from_millis(provider_idle_timeout_millis as u64),
             |bytes| {
                 DOCUMENT_IMPORT_BYTES.store(bytes, Ordering::Release);
                 if !delay.is_zero() {

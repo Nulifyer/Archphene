@@ -106,6 +106,7 @@ internal object NativeRuntime {
         requestLength: Int,
         sourceDescriptor: Int,
         debugChunkDelayMillis: Int,
+        providerIdleTimeoutMillis: Int,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeDocumentImportProgress(): Long

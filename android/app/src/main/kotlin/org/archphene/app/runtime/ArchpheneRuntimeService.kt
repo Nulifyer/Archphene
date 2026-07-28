@@ -627,6 +627,7 @@ class ArchpheneRuntimeService : Service() {
                 return false
             }
             storageDocumentImportCancellationRequested = true
+            activeDocumentImportProvider?.cancel()
             NativeRuntime.nativeCancelDocumentImport()
             storageStatus = "Cancelling import…"
             return true
@@ -1019,6 +1020,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var storageDocumentImportName = ""
     @Volatile private var storageDocumentImportIndex = 0
     @Volatile private var storageDocumentImportCount = 0
+    @Volatile private var activeDocumentImportProvider: ProjectSyncProvider? = null
     @Volatile private var storageDocumentExportActive = false
     @Volatile private var storageDocumentExportCancellationRequested = false
     @Volatile private var storageDocumentExportName = ""
@@ -1961,10 +1963,13 @@ class ArchpheneRuntimeService : Service() {
             "org.archphene.app.extra.DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS"
         internal const val EXTRA_DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS =
             "org.archphene.app.extra.DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS"
+        internal const val EXTRA_DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS =
+            "org.archphene.app.extra.DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS"
         internal const val EXTRA_DEBUG_DOCUMENT_HANDOFF_FAILURE =
             "org.archphene.app.extra.DEBUG_DOCUMENT_HANDOFF_FAILURE"
         private val DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS = AtomicLong()
         private val DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS = AtomicLong()
+        private val DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS = AtomicLong()
         private val DEBUG_DOCUMENT_HANDOFF_FAILURE = AtomicBoolean()
 
         internal fun setDebugDocumentExportChunkDelay(
@@ -1997,6 +2002,26 @@ class ArchpheneRuntimeService : Service() {
                 delayMillis.coerceIn(0, MAX_DOCUMENT_EXPORT_TEST_CHUNK_DELAY_MILLIS).toLong(),
             )
             Log.i(TAG, "Debug document import chunk delay configured")
+        }
+
+        internal fun setDebugDocumentImportProviderDeadline(
+            applicationFlags: Int,
+            deadlineMillis: Int,
+        ) {
+            if (
+                applicationFlags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+                deadlineMillis <= 0
+            ) {
+                return
+            }
+            DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS.set(
+                deadlineMillis
+                    .coerceIn(
+                        MIN_DOCUMENT_IMPORT_PROVIDER_TEST_DEADLINE_MILLIS,
+                        DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS.toInt(),
+                    ).toLong(),
+            )
+            Log.i(TAG, "Debug document import provider deadline configured")
         }
 
         internal fun setDebugDocumentHandoffFailure(
@@ -2166,6 +2191,8 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_STORAGE_TRANSFER_BYTES = 16L * 1024 * 1024 * 1024
         private const val MAX_DOCUMENT_HANDOFF_MESSAGE_BYTES = 1024
         private const val MAX_DOCUMENT_EXPORT_TEST_CHUNK_DELAY_MILLIS = 100
+        private const val DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS = 30_000L
+        private const val MIN_DOCUMENT_IMPORT_PROVIDER_TEST_DEADLINE_MILLIS = 100
         private const val DOCUMENT_EXPORT_DELETE_SETTLE_MILLIS = 1_000L
         private val PROCESS_STORAGE_ACTIVE = AtomicBoolean()
         private val FOLDER_MAPPING_ID_PATTERN = Regex("[0-9a-f]{32}")
@@ -4060,6 +4087,19 @@ class ArchpheneRuntimeService : Service() {
             PROCESS_STORAGE_ACTIVE.set(false)
             return false
         }
+        val providerDeadlineMillis = documentImportProviderDeadlineMillis()
+        val importProvider =
+            ProjectSyncProvider(
+                contentResolver,
+                mainHandler,
+                providerDeadlineMillis,
+            ) { operation ->
+                storageStatus =
+                    "Android provider stopped responding while attempting to $operation"
+                Log.e(TAG, "$storageStatus; terminating the manager")
+                Process.killProcess(Process.myPid())
+            }
+        activeDocumentImportProvider = importProvider
         storageDocumentActive = true
         storageDocumentImportActive = true
         storageDocumentImportCopyActive = false
@@ -4089,7 +4129,7 @@ class ArchpheneRuntimeService : Service() {
                                 break
                             }
                             try {
-                                val displayName = safeImportDisplayName(uri)
+                                val displayName = safeImportDisplayName(uri, importProvider)
                                 storageDocumentImportName = displayName
                                 storageDocumentImportIndex = index + 1
                                 persistStorageStatus(
@@ -4112,10 +4152,11 @@ class ArchpheneRuntimeService : Service() {
                                 request.put(requestBytes)
                                 output.clear()
                                 val descriptor =
-                                    contentResolver.openFileDescriptor(uri, "r", null)
-                                        ?: throw IllegalStateException(
-                                            "Android provider returned no file descriptor",
-                                        )
+                                    importProvider.open(
+                                        uri,
+                                        "r",
+                                        "open the document",
+                                    )
                                 val result =
                                     descriptor.use {
                                         if (storageDocumentImportCancellationRequested) {
@@ -4130,6 +4171,7 @@ class ArchpheneRuntimeService : Service() {
                                                 requestBytes.size,
                                                 it.fd,
                                                 debugDocumentImportChunkDelayMillis(),
+                                                providerDeadlineMillis.toInt(),
                                                 output,
                                             )
                                         } finally {
@@ -4209,6 +4251,8 @@ class ArchpheneRuntimeService : Service() {
                                         "(${formatStorageBytes(importedBytesTotal)}) " +
                                         "to ~/Downloads"
                                 }
+                            } else if (importedCount == 0 && normalized.size == 1) {
+                                "Import failed: $lastFailure"
                             } else {
                                 "Imported $importedCount of ${normalized.size} documents; " +
                                     "$failedCount failed: $lastFailure"
@@ -4227,6 +4271,7 @@ class ArchpheneRuntimeService : Service() {
                         persistStorageStatus(STORAGE_FAILED, status)
                         Log.e(TAG, "Android document import failed", error)
                     } finally {
+                        activeDocumentImportProvider = null
                         storageDocumentImportActive = false
                         storageDocumentImportCopyActive = false
                         storageDocumentImportCancellationRequested = false
@@ -4248,6 +4293,7 @@ class ArchpheneRuntimeService : Service() {
             true
         } catch (error: Exception) {
             storageThread = null
+            activeDocumentImportProvider = null
             storageDocumentImportActive = false
             storageDocumentImportCopyActive = false
             storageDocumentImportCancellationRequested = false
@@ -4525,13 +4571,17 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
-    private fun safeImportDisplayName(uri: Uri): String {
+    private fun safeImportDisplayName(
+        uri: Uri,
+        provider: ProjectSyncProvider? = null,
+    ): String {
         val queried =
-            runCatching {
-                contentResolver
-                    .query(
+            try {
+                val projection = arrayOf(OpenableColumns.DISPLAY_NAME)
+                if (provider == null) {
+                    contentResolver.query(
                         uri,
-                        arrayOf(OpenableColumns.DISPLAY_NAME),
+                        projection,
                         null,
                         null,
                         null,
@@ -4542,7 +4592,26 @@ class ArchpheneRuntimeService : Service() {
                             null
                         }
                     }
-            }.getOrNull()
+                } else {
+                    provider.query(
+                        uri,
+                        projection,
+                        "read document metadata",
+                    ) { cursor ->
+                        if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                            cursor.getString(0)
+                        } else {
+                            null
+                        }
+                    }
+                }
+            } catch (error: ProjectSyncProviderTimeout) {
+                throw error
+            } catch (error: InterruptedException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
         return queried?.takeIf(::safeVisibleName) ?: "Imported file"
     }
 
@@ -4617,6 +4686,18 @@ class ArchpheneRuntimeService : Service() {
             Log.i(TAG, "Debug document import chunk delay active")
         }
         return delay
+    }
+
+    private fun documentImportProviderDeadlineMillis(): Long {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS
+        }
+        val configured = DEBUG_DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS.getAndSet(0L)
+        if (configured != 0L) {
+            Log.i(TAG, "Debug document import provider deadline active")
+            return configured
+        }
+        return DOCUMENT_IMPORT_PROVIDER_DEADLINE_MILLIS
     }
 
     private fun releaseDocumentExportGrant(

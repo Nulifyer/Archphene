@@ -101,8 +101,14 @@ restart-status, and system-picker gates pass on both targets. While a
 descriptor is copying, the Files page shows the current item and live byte
 count and replaces Import with a cancellation action. Cancellation is checked
 at each fixed-size Rust copy chunk, removes the private staging file, and
-never publishes a partial destination. Exact slow-copy progress, cancellation,
-cleanup, logs, and full-device states pass on both exact ABIs.
+never publishes a partial destination. Provider metadata queries and descriptor
+opens have a 30-second cancellation deadline; a provider that ignores
+cancellation triggers bounded manager-process recovery. Native descriptor
+reads use a sliding 30-second idle deadline and poll cancellation every 100 ms,
+so a slowly progressing stream can continue while a stalled pipe rolls back.
+Exact slow-copy progress, cancellation, cooperative and ignored open timeouts,
+stalled and paced reads, retry, cleanup, logs, and full-device states pass on
+both exact ABIs.
 
 Linux desktop applications use a separate XDG FileChooser contract. Open
 creates a durable non-replacing snapshot under
