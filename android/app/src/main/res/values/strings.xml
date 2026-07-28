@@ -76,8 +76,10 @@
     <string name="aur_section_logs">Build logs</string>
     <string name="aur_section_collapsed_description">%1$s, collapsed. Tap to expand</string>
     <string name="aur_section_expanded_description">%1$s, expanded. Tap to collapse</string>
-    <string name="verify_sources">Verify</string>
-    <string name="verify_sources_description">Download and verify reviewed AUR sources</string>
+    <string name="prepare_aur">Prepare</string>
+    <string name="prepare_aur_description">Resolve dependencies and prepare verified AUR sources</string>
+    <string name="verify_sources">Sources</string>
+    <string name="verify_sources_description">Verify the reviewed dependency graph sources and signed build closure</string>
     <string name="build">Build</string>
     <string name="build_aur_description">Build the exact verified AUR package offline</string>
     <string name="built">Built</string>

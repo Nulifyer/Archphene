@@ -221,6 +221,9 @@ class ArchpheneRuntimeService : Service() {
                     !packageOperationActive &&
                     !commandActive
 
+        val aurDependencyEvidenceAvailable: Boolean
+            get() = retainedAurDependencyReviews.isNotEmpty()
+
         val aurBuildAvailable: Boolean
             get() =
                 retainedAurBuilderReport?.packageName != null &&
@@ -7870,23 +7873,15 @@ class ArchpheneRuntimeService : Service() {
                             buildTargets.environment,
                         )
                     retainedAurBuildEnvironment = buildEnvironment
-                    val builder =
-                        probeAurBuilderCompanion(
-                            activeHandle,
-                            orderedReviews.first(),
-                            evidenceByBase.getValue(orderedReviews.first().packageBase),
-                            buildEnvironment,
-                        )
-                    retainedAurBuilderReport = builder
                     publishAurReviewPresentation(
                         review,
                         totalVerified,
                         retainedAurSourceEvidence,
-                        builder,
+                        null,
                         buildEnvironment,
                     )
                     val restoredGraph =
-                        if (builder == null || orderedReviews.size == 1) {
+                        if (orderedReviews.size == 1) {
                             emptyArray()
                         } else {
                             runCatching {
@@ -7895,7 +7890,7 @@ class ArchpheneRuntimeService : Service() {
                                     activeHandle,
                                     graph,
                                     review,
-                                    builder,
+                                    buildEnvironment.closureManifestSha256,
                                 )
                             }.onFailure { error ->
                                 Log.w(
@@ -7911,7 +7906,7 @@ class ArchpheneRuntimeService : Service() {
                                 .filter { output -> output.packageBase == review.packageBase }
                                 .map(AurGraphBuiltPackage::built)
                                 .toTypedArray()
-                        } else if (builder == null || orderedReviews.size > 1) {
+                        } else if (orderedReviews.size > 1) {
                             emptyArray()
                         } else {
                             runCatching {
@@ -7919,7 +7914,7 @@ class ArchpheneRuntimeService : Service() {
                                 restorePersistedAurBuiltPackages(
                                     activeHandle,
                                     review,
-                                    builder,
+                                    buildEnvironment.closureManifestSha256,
                                 )
                             }.onFailure { error ->
                                 Log.w(
@@ -7929,6 +7924,27 @@ class ArchpheneRuntimeService : Service() {
                                 )
                             }.getOrDefault(emptyArray())
                         }
+                    val builder =
+                        if (restored.isNotEmpty()) {
+                            null
+                        } else {
+                            probeAurBuilderCompanion(
+                                activeHandle,
+                                orderedReviews.first(),
+                                evidenceByBase.getValue(orderedReviews.first().packageBase),
+                                buildEnvironment,
+                            )
+                        }
+                    retainedAurBuilderReport = builder
+                    if (builder != null) {
+                        publishAurReviewPresentation(
+                            review,
+                            totalVerified,
+                            retainedAurSourceEvidence,
+                            builder,
+                            buildEnvironment,
+                        )
+                    }
                     if (restored.isNotEmpty()) {
                         clearRetainedAurBuiltPackages()
                         retainedAurGraphBuiltPackages = restoredGraph
@@ -7976,7 +7992,14 @@ class ArchpheneRuntimeService : Service() {
                             "downloaded=${buildEnvironment.downloadedPackages}) " +
                             "manifest=${buildEnvironment.closureManifestSha256}",
                     )
-                    if (builder != null) {
+                    if (restored.isNotEmpty()) {
+                        Log.i(
+                            TAG,
+                            "Restored ${restored.size} durable verified AUR output(s) " +
+                                "for ${review.packageName} ${review.version} without " +
+                                "provisioning an isolated build root",
+                        )
+                    } else if (builder != null) {
                         Log.i(
                             TAG,
                             "AUR builder boundary ready: package=${builder.packageName} " +
@@ -7993,13 +8016,6 @@ class ArchpheneRuntimeService : Service() {
                                 "recipe=${builder.recipeEntries}/" +
                                 "${builder.recipeBytes}+${builder.recipeSourceBytes}",
                         )
-                        if (restored.isNotEmpty()) {
-                            Log.i(
-                                TAG,
-                                "Restored ${restored.size} durable verified AUR output(s) " +
-                                    "for ${review.packageName} ${review.version}",
-                            )
-                        }
                     } else {
                         Log.i(TAG, "AUR builder companion is not installed")
                     }
@@ -11451,14 +11467,19 @@ class ArchpheneRuntimeService : Service() {
         val builtPackages = retainedAurBuiltPackages
         val graphBuiltPackages = retainedAurGraphBuiltPackages
         val graph = retainedAurBuildGraph
-        val builder = retainedAurBuilderReport
+        val buildEnvironment = retainedAurBuildEnvironment
+        val closureManifestSha256 =
+            buildEnvironment
+                ?.takeIf(AurBuildEnvironment::verified)
+                ?.closureManifestSha256
+                .orEmpty()
         val activeHandle = readyHandle
         val graphInstall = graph != null && graph.packageBases.size > 1
         if (
             activeHandle == 0L ||
             review == null ||
             built == null ||
-            builder == null ||
+            !closureManifestSha256.matches(SHA256_HEX) ||
             normalized != review.packageName ||
             builtPackages.isEmpty() ||
             graphInstall != graphBuiltPackages.isNotEmpty() ||
@@ -11611,7 +11632,7 @@ class ArchpheneRuntimeService : Service() {
                                             graphManifest,
                                             graphManifest.capacity(),
                                             review.packageName,
-                                            builder.closureManifestSha256,
+                                            closureManifestSha256,
                                             nativeOutput,
                                         )
                                     } else {
@@ -11626,7 +11647,7 @@ class ArchpheneRuntimeService : Service() {
                                             review.packageName,
                                             review.version,
                                             architecture,
-                                            builder.closureManifestSha256,
+                                            closureManifestSha256,
                                             nativeOutput,
                                         )
                                     }
@@ -11897,8 +11918,9 @@ class ArchpheneRuntimeService : Service() {
     private fun restorePersistedAurBuiltPackages(
         activeHandle: Long,
         review: AurReviewData,
-        builder: AurBuilderReport,
+        closureManifestSha256: String,
     ): Array<AurBuiltPackage> {
+        require(closureManifestSha256.matches(SHA256_HEX))
         aurBuildClosureOutputBuffer.clear()
         val length =
             NativeRuntime.nativeRestoreAurBuiltPackages(
@@ -11907,7 +11929,7 @@ class ArchpheneRuntimeService : Service() {
                 review.packageName,
                 review.version,
                 currentLinuxArchitecture(),
-                builder.closureManifestSha256,
+                closureManifestSha256,
                 aurBuildClosureOutputBuffer,
             )
         if (length == 0) {
@@ -12049,15 +12071,16 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         graph: AurBuildGraph,
         rootReview: AurReviewData,
-        builder: AurBuilderReport,
+        closureManifestSha256: String,
     ): Array<AurGraphBuiltPackage> {
+        require(closureManifestSha256.matches(SHA256_HEX))
         aurBuildClosureOutputBuffer.clear()
         val length =
             NativeRuntime.nativeRestoreAurGraphBuiltPackages(
                 activeHandle,
                 rootReview.packageName,
                 currentLinuxArchitecture(),
-                builder.closureManifestSha256,
+                closureManifestSha256,
                 aurBuildClosureOutputBuffer,
             )
         if (length == 0) {

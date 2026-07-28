@@ -1880,8 +1880,21 @@ and 339-package closure were reconstructed, and returned directly to
 **Built**/**Update** without running either recipe again. The physical gate
 also found a stale 256-package persisted-provenance bound; it now matches the
 bounded 512-official-plus-256-AUR Builder model and has a 339/340-package
-regression. Prepared-root reuse, clearer per-stage graph progress, and adaptive
-safe build concurrency remain open.
+regression.
+
+Persisted AUR outputs are now checked before the Manager binds or provisions
+the Builder. Restoration uses the newly reverified signed-closure digest
+directly; a capability miss still follows the unchanged isolated build path,
+while a hit remains installable without transient Builder state. A physical
+Samsung replay reverified all 339 official packages, independently restored
+the current `libpamac-aur` → `pamac-aur` graph without a Builder service
+binding or any closure staging/root scan/provisioning, and then completed a
+real same-version `pamac-aur 11.7.5-1` transaction. The compact action now
+advances through **AUR**, **Prepare**, **Sources**, **Build**, and **Built**
+instead of repeating **Verify**; full-device evidence covers dependency
+review, exact base/package verification counters, restored **Built** /
+**Update**, and completed installation. Safe prepared-root reuse between
+untrusted recipes and adaptive build concurrency remain open.
 
 Current AArch64 Code now reaches and retains its Ozone/Wayland workbench without
 a package patch. The generic bridge passes Chromium's kernel `/proc`
@@ -2432,8 +2445,8 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild. The GTK settings bridge now has a clean checksum-pinned AArch64 GLib link sysroot.
 - Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.
 - Reuse unchanged content-addressed recursive-AUR closures and prepared roots
-  where safe, clarify each graph stage in the UI, and make the conservative
-  build concurrency limit adaptive/configurable.
+  between untrusted recipes where the isolation model permits it, and make the
+  conservative build concurrency limit adaptive/configurable.
 
 ## Package-manager efficiency rules
 

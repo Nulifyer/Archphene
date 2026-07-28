@@ -3399,11 +3399,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             binder.aurBuildAvailable && binder.aurReviewedPackage == aurPackage
         val builtAvailable =
             binder.aurInstallAvailable && binder.aurReviewedPackage == aurPackage
+        val dependencyEvidenceAvailable =
+            sourcesAvailable && binder.aurDependencyEvidenceAvailable
         aurReviewButton.setText(
             when {
                 builtAvailable -> R.string.built
                 buildAvailable -> R.string.build
-                sourcesAvailable -> R.string.verify_sources
+                dependencyEvidenceAvailable -> R.string.verify_sources
+                sourcesAvailable -> R.string.prepare_aur
                 else -> R.string.aur
             },
         )
@@ -3412,7 +3415,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 when {
                     builtAvailable -> R.string.built_aur_description
                     buildAvailable -> R.string.build_aur_description
-                    sourcesAvailable -> R.string.verify_sources_description
+                    dependencyEvidenceAvailable -> R.string.verify_sources_description
+                    sourcesAvailable -> R.string.prepare_aur_description
                     else -> R.string.aur_review_description
                 },
             )
