@@ -102,8 +102,8 @@ mod android {
         PackageRuntimeError, PersistedAurCapabilityArchive, Repository, RepositoryArchitecture,
         ToolOutput, VerifiedAurArchive, VerifiedAurCapabilityArchive, VerifiedPackageClosure,
         aur::{
-            MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, MAX_AUR_SOURCE_BYTES,
-            aur_snapshot_path, review_aur_snapshot,
+            AurReview, MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES,
+            MAX_AUR_SOURCE_BYTES, ReviewedInstallScript, aur_snapshot_path, review_aur_snapshot,
         },
     };
     use archphene_process::{
@@ -439,6 +439,15 @@ mod android {
             }
         }
         Ok(encoded.into_bytes())
+    }
+
+    fn reviewed_install_script<'a>(
+        review: &'a AurReview,
+        package_name: &str,
+    ) -> Result<Option<ReviewedInstallScript<'a>>, jint> {
+        review
+            .reviewed_install_script(package_name)
+            .map_err(|_| ERROR_INVALID_STATE)
     }
 
     const fn hex_value(value: u8) -> Option<u8> {
@@ -2451,17 +2460,24 @@ mod android {
         let output =
             unsafe { slice::from_raw_parts_mut(output_address, BUILT_PACKAGE_REPORT_BYTES) };
         output.fill(0);
-        let closure = {
+        let (review, closure) = {
             let Ok(mut registry) = registry().lock() else {
                 return ERROR_INTERNAL;
             };
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return ERROR_INVALID_HANDLE;
             };
-            match runtime.verified_aur_build_closure() {
-                Ok(closure) => closure,
+            match runtime.verified_aur_capability_context(&package_name, &version) {
+                Ok((review, closure, _)) => (review, closure),
                 Err(error) => return copy_package_error(&error, output),
             }
+        };
+        if review.package_base != package_base {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let expected_install_script = match reviewed_install_script(&review, &package_name) {
+            Ok(script) => script,
+            Err(error) => return error,
         };
         // SAFETY: The descriptor is borrowed only for dup. Kotlin retains the
         // original ParcelFileDescriptor for the duration of this call.
@@ -2479,6 +2495,7 @@ mod android {
             &architecture,
             closure.as_bytes(),
             closure_sha256,
+            expected_install_script.map(|script| script.contents),
         ) {
             Ok(report) => report,
             Err(error) => return copy_package_error(&error, output),
@@ -2600,6 +2617,10 @@ mod android {
                 return ERROR_INVALID_ARGUMENT;
             };
             let mut archive = File::from(owned);
+            let expected_install_script = match reviewed_install_script(&review, required_package) {
+                Ok(script) => script,
+                Err(error) => return error,
+            };
             let report = match archphene_builder::verify_copied_built_package(
                 &mut archive,
                 filename,
@@ -2609,6 +2630,7 @@ mod android {
                 &architecture,
                 closure.as_bytes(),
                 closure_sha256,
+                expected_install_script.map(|script| script.contents),
             ) {
                 Ok(report) => report,
                 Err(error) => return copy_package_error(&error, output),
@@ -2722,6 +2744,10 @@ mod android {
                 Ok(archive) => archive,
                 Err(error) => return copy_package_error(&PackageRuntimeError::Io(error), output),
             };
+            let expected_install_script = match reviewed_install_script(&review, required_package) {
+                Ok(script) => script,
+                Err(error) => return error,
+            };
             let report = match archphene_builder::verify_copied_built_package(
                 &mut archive,
                 &candidate.filename,
@@ -2731,6 +2757,7 @@ mod android {
                 &architecture,
                 closure.as_bytes(),
                 closure_sha256,
+                expected_install_script.map(|script| script.contents),
             ) {
                 Ok(report) => report,
                 Err(error) => return copy_package_error(&error, output),
@@ -2832,26 +2859,31 @@ mod android {
         // SAFETY: JNI verified the direct output-buffer capacity.
         let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         output.fill(0);
-        let (closure, dependencies, package_runtime) = {
+        let (review, closure, dependencies, package_runtime) = {
             let Ok(mut registry) = registry().lock() else {
                 return ERROR_INTERNAL;
             };
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return ERROR_INVALID_HANDLE;
             };
-            let closure = match runtime.verified_aur_build_closure() {
-                Ok(closure) => closure,
-                Err(error) => return copy_package_error(&error, output),
-            };
+            let (review, closure, package_runtime) =
+                match runtime.verified_aur_capability_context(&package_name, &version) {
+                    Ok(context) => context,
+                    Err(error) => return copy_package_error(&error, output),
+                };
+            if review.package_base != package_base {
+                return ERROR_INVALID_ARGUMENT;
+            }
             let dependencies =
                 match runtime.verified_aur_runtime_dependencies(&package_name, &version) {
                     Ok(dependencies) => dependencies,
                     Err(error) => return copy_package_error(&error, output),
                 };
-            let Some(package_runtime) = runtime.package_runtime().cloned() else {
-                return ERROR_INVALID_STATE;
-            };
-            (closure, dependencies, package_runtime)
+            (review, closure, dependencies, package_runtime)
+        };
+        let expected_install_script = match reviewed_install_script(&review, &package_name) {
+            Ok(script) => script,
+            Err(error) => return error,
         };
         // SAFETY: The descriptor is borrowed only for dup. Kotlin retains the
         // original ParcelFileDescriptor for the duration of this call.
@@ -2869,6 +2901,7 @@ mod android {
             &architecture,
             closure.as_bytes(),
             closure_sha256,
+            expected_install_script.map(|script| script.contents),
         ) {
             Ok(report) => report,
             Err(error) => return copy_package_error(&error, output),
@@ -2877,15 +2910,17 @@ mod android {
         if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
             return copy_package_error(&error, output);
         }
+        let mut install_input = VerifiedAurArchive {
+            source: &mut archive,
+            filename: &report.filename,
+            package: &package_name,
+            version: &version,
+            expected_bytes: report.archive_bytes,
+            expected_sha256: report.sha256,
+            install_script_sha256: expected_install_script.map(|script| script.sha256),
+        };
         copy_tool_result(
-            package_runtime.install_verified_aur_archive(
-                &mut archive,
-                &report.filename,
-                &package_name,
-                &version,
-                report.archive_bytes,
-                report.sha256,
-            ),
+            package_runtime.install_verified_aur_archive(&mut install_input),
             output,
         )
     }
@@ -2969,31 +3004,34 @@ mod android {
         // SAFETY: JNI verified the direct output-buffer capacity.
         let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         output.fill(0);
-        let (closure, dependencies, required_packages, package_runtime) = {
+        let (review, closure, dependencies, required_packages, package_runtime) = {
             let Ok(mut registry) = registry().lock() else {
                 return ERROR_INTERNAL;
             };
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return ERROR_INVALID_HANDLE;
             };
-            let closure = match runtime.verified_aur_build_closure() {
-                Ok(closure) => closure,
-                Err(error) => return copy_package_error(&error, output),
-            };
+            let (review, closure, package_runtime) =
+                match runtime.verified_aur_capability_context(&package_name, &version) {
+                    Ok(context) => context,
+                    Err(error) => return copy_package_error(&error, output),
+                };
+            if review.package_base != package_base {
+                return ERROR_INVALID_ARGUMENT;
+            }
             let dependencies =
                 match runtime.verified_aur_runtime_dependencies(&package_name, &version) {
                     Ok(dependencies) => dependencies,
                     Err(error) => return copy_package_error(&error, output),
                 };
-            let required_packages =
-                match runtime.verified_aur_required_packages(&package_name, &version) {
-                    Ok(packages) => packages,
-                    Err(error) => return copy_package_error(&error, output),
-                };
-            let Some(package_runtime) = runtime.package_runtime().cloned() else {
-                return ERROR_INVALID_STATE;
-            };
-            (closure, dependencies, required_packages, package_runtime)
+            let required_packages = review.required_packages.clone();
+            (
+                review,
+                closure,
+                dependencies,
+                required_packages,
+                package_runtime,
+            )
         };
         if required_packages.len() != filenames.len() {
             return ERROR_INVALID_ARGUMENT;
@@ -3015,6 +3053,10 @@ mod android {
                 return ERROR_INVALID_ARGUMENT;
             };
             let mut archive = File::from(owned);
+            let expected_install_script = match reviewed_install_script(&review, required_package) {
+                Ok(script) => script,
+                Err(error) => return error,
+            };
             let report = match archphene_builder::verify_copied_built_package(
                 &mut archive,
                 filename,
@@ -3024,11 +3066,16 @@ mod android {
                 &architecture,
                 closure.as_bytes(),
                 closure_sha256,
+                expected_install_script.map(|script| script.contents),
             ) {
                 Ok(report) => report,
                 Err(error) => return copy_package_error(&error, output),
             };
-            verified.push((archive, report));
+            verified.push((
+                archive,
+                report,
+                expected_install_script.map(|script| script.sha256),
+            ));
         }
         let dependency_names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
         if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
@@ -3037,14 +3084,17 @@ mod android {
         let mut install_inputs: Vec<VerifiedAurArchive<'_>> = verified
             .iter_mut()
             .zip(&required_packages)
-            .map(|((archive, report), package)| VerifiedAurArchive {
-                source: archive,
-                filename: &report.filename,
-                package,
-                version: &version,
-                expected_bytes: report.archive_bytes,
-                expected_sha256: report.sha256,
-            })
+            .map(
+                |((archive, report, install_script_sha256), package)| VerifiedAurArchive {
+                    source: archive,
+                    filename: &report.filename,
+                    package,
+                    version: &version,
+                    expected_bytes: report.archive_bytes,
+                    expected_sha256: report.sha256,
+                    install_script_sha256: *install_script_sha256,
+                },
+            )
             .collect();
         copy_tool_result(
             package_runtime.install_verified_aur_archives(&mut install_inputs, &package_name),

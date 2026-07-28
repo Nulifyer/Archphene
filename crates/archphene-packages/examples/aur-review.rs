@@ -40,10 +40,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         review.make_dependencies.len(),
     );
     println!(
-        "{} unverified sources, {} insecure transports, install script: {}",
+        "{} unverified sources, {} insecure transports, {} install script(s)",
         review.unverified_source_count,
         review.insecure_source_count,
-        review.install_script.as_deref().unwrap_or("none"),
+        review.install_scripts.len(),
     );
     println!(
         "AUR commit {}, snapshot SHA-256 {}",

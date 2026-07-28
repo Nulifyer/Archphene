@@ -78,6 +78,11 @@ const AUR_PACKAGE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-packages";
 const AUR_BUILT_CAPABILITY_FILE: &str = ".built-capability-v1.json";
 const AUR_BUILT_CAPABILITY_TEMP_FILE: &str = ".built-capability-v1.tmp";
 const AUR_BUILT_CAPABILITY_LIMIT: u64 = 256 * 1024;
+const AUR_LIFECYCLE_CAPABILITY_FILE: &str = "aur-lifecycle-capabilities-v1";
+const AUR_LIFECYCLE_CAPABILITY_TEMP_FILE: &str = "aur-lifecycle-capabilities-v1.tmp";
+const AUR_LIFECYCLE_CAPABILITY_HEADER: &str = "org.archphene.aur-lifecycle-capabilities.v1";
+const AUR_LIFECYCLE_CAPABILITY_LIMIT: u64 = 2 * 1024 * 1024;
+const AUR_LIFECYCLE_CAPABILITY_ENTRIES: usize = 8192;
 const PACKAGE_COMPATIBILITY_CACHE_DIRECTORY: &str = "var/cache/archphene/package-compatibility-v1";
 const PACKAGE_COMPATIBILITY_CACHE_DOMAIN: &[u8] = b"org.archphene.package-compatibility-cache.v2\0";
 const PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT: u64 = 1024;
@@ -282,6 +287,7 @@ pub enum PackageRuntimeError {
     CompatibilityReview(String, Box<PackageRuntimeError>),
     MissingTarget,
     NotInstalled,
+    UnreviewedInstallScript,
     InvalidPayload,
     InvalidSignature,
     ToolFailed(i32, Box<ToolOutput>),
@@ -327,6 +333,9 @@ impl fmt::Display for PackageRuntimeError {
                 formatter.write_str("resolved packages omit the requested target")
             }
             Self::NotInstalled => formatter.write_str("package is not installed"),
+            Self::UnreviewedInstallScript => formatter.write_str(
+                "the installed AUR lifecycle script is missing exact review authorization",
+            ),
             Self::InvalidPayload => formatter.write_str("invalid package payload"),
             Self::InvalidSignature => formatter.write_str("invalid package signature"),
             Self::ToolFailed(code, output) => {
@@ -435,6 +444,7 @@ pub struct VerifiedAurArchive<'a> {
     pub version: &'a str,
     pub expected_bytes: u64,
     pub expected_sha256: [u8; 32],
+    pub install_script_sha256: Option<[u8; 32]>,
 }
 
 pub struct VerifiedAurCapabilityArchive<'a> {
@@ -480,6 +490,14 @@ struct AurBuiltCapabilityOutputRecord {
     installed_bytes: u64,
     build_package_count: usize,
     sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct AurLifecycleCapability {
+    package: String,
+    version: String,
+    archive_sha256: [u8; 32],
+    install_script_sha256: Option<[u8; 32]>,
 }
 
 pub struct InstalledPackageCatalog {
@@ -2476,15 +2494,98 @@ impl PackageRuntime {
         Ok(())
     }
 
-    pub fn install_verified_aur_archive(
+    fn publish_aur_lifecycle_capabilities(
         &self,
-        source: &mut File,
-        filename: &str,
+        pending: &[AurLifecycleCapability],
+    ) -> Result<(), PackageRuntimeError> {
+        if pending.is_empty()
+            || pending.len() > aur::MAX_AUR_DEPENDENCIES
+            || pending.iter().any(|capability| {
+                !safe_logical_name(&capability.package)
+                    || !safe_package_version(&capability.version)
+                    || capability.archive_sha256 == [0; 32]
+            })
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let state_root = aur_lifecycle_state_root(&self.arch_root)?;
+        let installed = self.installed_package_catalog()?;
+        let mut capabilities = read_aur_lifecycle_capabilities(&state_root)?;
+        capabilities.retain(|capability| {
+            installed.packages.iter().any(|package| {
+                package.name == capability.package && package.version == capability.version
+            })
+        });
+        for capability in pending {
+            capabilities.retain(|existing| {
+                existing.package != capability.package || existing.version != capability.version
+            });
+            capabilities.push(capability.clone());
+        }
+        capabilities.sort();
+        capabilities.dedup();
+        if capabilities.len() > AUR_LIFECYCLE_CAPABILITY_ENTRIES {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        publish_aur_lifecycle_capability_file(&state_root, &capabilities)
+    }
+
+    fn reconcile_aur_lifecycle_capabilities(&self) -> Result<(), PackageRuntimeError> {
+        let state_root = aur_lifecycle_state_root(&self.arch_root)?;
+        let installed = self.installed_package_catalog()?;
+        let mut capabilities = read_aur_lifecycle_capabilities(&state_root)?;
+        capabilities.retain(|capability| {
+            installed.packages.iter().any(|package| {
+                package.name == capability.package && package.version == capability.version
+            })
+        });
+        publish_aur_lifecycle_capability_file(&state_root, &capabilities)
+    }
+
+    fn aur_removal_scriptlets_authorized(
+        &self,
         package: &str,
         version: &str,
-        expected_bytes: u64,
-        expected_sha256: [u8; 32],
+    ) -> Result<bool, PackageRuntimeError> {
+        let local_entry = find_local_database_entry(&self.arch_root, package, version)?;
+        let install_script = local_entry.join("install");
+        let metadata = match fs::symlink_metadata(&install_script) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > LOCAL_DATABASE_PACKAGE_FILE_LIMIT
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(install_script));
+        }
+        let actual_sha256 = hash_regular_file(
+            &install_script,
+            metadata.len(),
+            LOCAL_DATABASE_PACKAGE_FILE_LIMIT,
+        )?;
+        let state_root = aur_lifecycle_state_root(&self.arch_root)?;
+        let capabilities = read_aur_lifecycle_capabilities(&state_root)?;
+        Ok(capabilities.iter().any(|capability| {
+            capability.package == package
+                && capability.version == version
+                && capability.install_script_sha256 == Some(actual_sha256)
+        }))
+    }
+
+    pub fn install_verified_aur_archive(
+        &self,
+        input: &mut VerifiedAurArchive<'_>,
     ) -> Result<ToolOutput, PackageRuntimeError> {
+        let source = &mut *input.source;
+        let filename = input.filename;
+        let package = input.package;
+        let version = input.version;
+        let expected_bytes = input.expected_bytes;
+        let expected_sha256 = input.expected_sha256;
+        let install_script_sha256 = input.install_script_sha256;
         if !safe_package_filename(filename)
             || !safe_logical_name(package)
             || version.is_empty()
@@ -2494,6 +2595,7 @@ impl PackageRuntime {
                 .any(|byte| byte.is_ascii_whitespace() || byte == 0)
             || expected_bytes == 0
             || expected_bytes > PACKAGE_ARCHIVE_LIMIT
+            || install_script_sha256 == Some([0; 32])
         {
             return Err(PackageRuntimeError::InvalidPayload);
         }
@@ -2600,6 +2702,12 @@ impl PackageRuntime {
             TRANSACTION_TIMEOUT,
         )?;
         validate_install_plan(plan.as_str()?, &archives)?;
+        self.publish_aur_lifecycle_capabilities(&[AurLifecycleCapability {
+            package: package.to_owned(),
+            version: version.to_owned(),
+            archive_sha256: expected_sha256,
+            install_script_sha256,
+        }])?;
         self.publish_install_reason_intent(&archives)?;
         if let Err(error) = self.run_bytes_with_timeout(
             PackageTool::Pacman,
@@ -2614,7 +2722,6 @@ impl PackageRuntime {
                 cache,
                 "--noconfirm",
                 "--noprogressbar",
-                "--noscriptlet",
                 "--asdeps",
                 "-U",
                 archive_path,
@@ -2632,6 +2739,7 @@ impl PackageRuntime {
         if installed.as_str()? != version {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        self.reconcile_aur_lifecycle_capabilities()?;
         Ok(installed)
     }
 
@@ -2649,6 +2757,7 @@ impl PackageRuntime {
         let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
         prepare_private_directory(&directory)?;
         let mut archives = Vec::with_capacity(inputs.len());
+        let mut lifecycle_capabilities = Vec::with_capacity(inputs.len());
         for input in inputs {
             if !safe_package_filename(input.filename)
                 || !safe_logical_name(input.package)
@@ -2661,6 +2770,7 @@ impl PackageRuntime {
                 || input.expected_bytes == 0
                 || input.expected_bytes > PACKAGE_ARCHIVE_LIMIT
                 || input.expected_sha256 == [0; 32]
+                || input.install_script_sha256 == Some([0; 32])
                 || archives
                     .iter()
                     .any(|archive: &InstallArchive| archive.name == input.package)
@@ -2731,6 +2841,12 @@ impl PackageRuntime {
                 version: input.version.to_owned(),
                 explicitly_installed: input.package == selected_package,
             });
+            lifecycle_capabilities.push(AurLifecycleCapability {
+                package: input.package.to_owned(),
+                version: input.version.to_owned(),
+                archive_sha256: input.expected_sha256,
+                install_script_sha256: input.install_script_sha256,
+            });
         }
         if !archives.iter().any(|archive| archive.explicitly_installed) {
             return Err(PackageRuntimeError::InvalidPayload);
@@ -2772,6 +2888,7 @@ impl PackageRuntime {
         let plan =
             self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
         validate_install_plan(plan.as_str()?, &archives)?;
+        self.publish_aur_lifecycle_capabilities(&lifecycle_capabilities)?;
         self.publish_install_reason_intent(&archives)?;
         let mut transaction_arguments = vec![
             "--config",
@@ -2784,7 +2901,6 @@ impl PackageRuntime {
             cache,
             "--noconfirm",
             "--noprogressbar",
-            "--noscriptlet",
             "--asdeps",
             "-U",
         ];
@@ -2806,6 +2922,7 @@ impl PackageRuntime {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
         }
+        self.reconcile_aur_lifecycle_capabilities()?;
         self.installed_version(selected_package)
     }
 
@@ -2994,6 +3111,12 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         let installed_version = self.installed_version(package)?;
+        let aur_package = self.installed_origin(package)?.as_str()? == "aur";
+        let run_scriptlets = aur_package
+            && self.aur_removal_scriptlets_authorized(package, installed_version.as_str()?)?;
+        if aur_package && !run_scriptlets {
+            return Err(PackageRuntimeError::UnreviewedInstallScript);
+        }
         let removal_database_sha256 =
             self.prepare_removal_repair(package, installed_version.as_str()?)?;
         self.publish_remove_mutation_intent(
@@ -3001,23 +3124,21 @@ impl PackageRuntime {
             installed_version.as_str()?,
             Some(removal_database_sha256),
         )?;
-        let result = self.run_with_timeout(
-            PackageTool::Pacman,
-            &[
-                "--config",
-                config,
-                "--root",
-                root,
-                "--dbpath",
-                database,
-                "--noconfirm",
-                "--noprogressbar",
-                "--noscriptlet",
-                "-R",
-                package,
-            ],
-            TRANSACTION_TIMEOUT,
-        );
+        let mut arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--noconfirm",
+            "--noprogressbar",
+        ];
+        if !run_scriptlets {
+            arguments.push("--noscriptlet");
+        }
+        arguments.extend(["-R", package]);
+        let result = self.run_with_timeout(PackageTool::Pacman, &arguments, TRANSACTION_TIMEOUT);
         if let Err(error) = result {
             self.recover_database_lock()?;
             return Err(error);
@@ -3028,6 +3149,7 @@ impl PackageRuntime {
         }
         self.clear_removal_repair()?;
         self.clear_pending_mutation()?;
+        self.reconcile_aur_lifecycle_capabilities()?;
         Ok(empty_tool_output())
     }
 
@@ -5256,6 +5378,231 @@ fn verify_persisted_aur_file(
         return Err(PackageRuntimeError::InvalidPayload);
     }
     Ok(())
+}
+
+fn aur_lifecycle_state_root(arch_root: &Path) -> Result<PathBuf, PackageRuntimeError> {
+    let parent = arch_root.parent().ok_or(PackageRuntimeError::InvalidPath)?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(parent.to_path_buf()));
+    }
+    let root_name = arch_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 128
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+        .ok_or(PackageRuntimeError::InvalidPath)?;
+    let state_root = parent.join(format!(".{root_name}-manager-state-v1"));
+    prepare_private_directory(&state_root)?;
+    Ok(state_root)
+}
+
+fn read_aur_lifecycle_capabilities(
+    state_root: &Path,
+) -> Result<Vec<AurLifecycleCapability>, PackageRuntimeError> {
+    let path = state_root.join(AUR_LIFECYCLE_CAPABILITY_FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.len() == 0
+        || metadata.len() > AUR_LIFECYCLE_CAPABILITY_LIMIT
+    {
+        return Err(PackageRuntimeError::UnsafeEntry(path));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(&path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
+    );
+    file.take(AUR_LIFECYCLE_CAPABILITY_LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| PackageRuntimeError::OutputLimit)? != metadata.len()
+        || !bytes.ends_with(b"\n")
+    {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| PackageRuntimeError::InvalidManifest)?;
+    let mut lines = text.lines();
+    if lines.next() != Some(AUR_LIFECYCLE_CAPABILITY_HEADER) {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    let mut capabilities = Vec::new();
+    for line in lines {
+        if line.is_empty() || capabilities.len() >= AUR_LIFECYCLE_CAPABILITY_ENTRIES {
+            return Err(PackageRuntimeError::InvalidManifest);
+        }
+        let mut fields = line.split('\t');
+        let package = fields.next().ok_or(PackageRuntimeError::InvalidManifest)?;
+        let version = fields.next().ok_or(PackageRuntimeError::InvalidManifest)?;
+        let archive_sha256 = fields.next().ok_or(PackageRuntimeError::InvalidManifest)?;
+        let install_script_sha256 = fields.next().ok_or(PackageRuntimeError::InvalidManifest)?;
+        if fields.next().is_some()
+            || !safe_logical_name(package)
+            || !safe_package_version(version)
+            || capabilities
+                .iter()
+                .any(|existing: &AurLifecycleCapability| {
+                    existing.package == package && existing.version == version
+                })
+        {
+            return Err(PackageRuntimeError::InvalidManifest);
+        }
+        capabilities.push(AurLifecycleCapability {
+            package: package.to_owned(),
+            version: version.to_owned(),
+            archive_sha256: parse_lower_sha256(archive_sha256)?,
+            install_script_sha256: if install_script_sha256 == "-" {
+                None
+            } else {
+                Some(parse_lower_sha256(install_script_sha256)?)
+            },
+        });
+    }
+    Ok(capabilities)
+}
+
+fn publish_aur_lifecycle_capability_file(
+    state_root: &Path,
+    capabilities: &[AurLifecycleCapability],
+) -> Result<(), PackageRuntimeError> {
+    if capabilities.len() > AUR_LIFECYCLE_CAPABILITY_ENTRIES {
+        return Err(PackageRuntimeError::OutputLimit);
+    }
+    let destination = state_root.join(AUR_LIFECYCLE_CAPABILITY_FILE);
+    let temporary = state_root.join(AUR_LIFECYCLE_CAPABILITY_TEMP_FILE);
+    prepare_output_path(&temporary)?;
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(PackageRuntimeError::UnsafeEntry(destination));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    if capabilities.is_empty() {
+        match fs::remove_file(&destination) {
+            Ok(()) => File::open(state_root)?.sync_all()?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        return Ok(());
+    }
+    let mut bytes = String::with_capacity(128 + capabilities.len() * 240);
+    bytes.push_str(AUR_LIFECYCLE_CAPABILITY_HEADER);
+    bytes.push('\n');
+    for capability in capabilities {
+        bytes.push_str(&capability.package);
+        bytes.push('\t');
+        bytes.push_str(&capability.version);
+        bytes.push('\t');
+        bytes.push_str(&hex_sha256(&capability.archive_sha256));
+        bytes.push('\t');
+        match capability.install_script_sha256 {
+            Some(sha256) => bytes.push_str(&hex_sha256(&sha256)),
+            None => bytes.push('-'),
+        }
+        bytes.push('\n');
+        if bytes.len() as u64 > AUR_LIFECYCLE_CAPABILITY_LIMIT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+    }
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        output.write_all(bytes.as_bytes())?;
+        output.sync_all()?;
+        drop(output);
+        fs::rename(&temporary, &destination)?;
+        File::open(state_root)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+fn parse_lower_sha256(value: &str) -> Result<[u8; 32], PackageRuntimeError> {
+    if !is_lower_hex_sha256(value) {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    let bytes = value.as_bytes();
+    let mut output = [0_u8; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        let high = match pair[0] {
+            b'0'..=b'9' => pair[0] - b'0',
+            b'a'..=b'f' => pair[0] - b'a' + 10,
+            _ => return Err(PackageRuntimeError::InvalidManifest),
+        };
+        let low = match pair[1] {
+            b'0'..=b'9' => pair[1] - b'0',
+            b'a'..=b'f' => pair[1] - b'a' + 10,
+            _ => return Err(PackageRuntimeError::InvalidManifest),
+        };
+        output[index] = high << 4 | low;
+    }
+    if output == [0; 32] {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    Ok(output)
+}
+
+fn find_local_database_entry(
+    arch_root: &Path,
+    package: &str,
+    version: &str,
+) -> Result<PathBuf, PackageRuntimeError> {
+    let local = arch_root.join("var/lib/pacman/local");
+    let metadata = fs::symlink_metadata(&local)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(local));
+    }
+    let mut matched = None;
+    let mut count = 0_usize;
+    for entry in fs::read_dir(&local)? {
+        count = count.saturating_add(1);
+        if count > LOCAL_DATABASE_ENTRY_LIMIT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if entry.file_name() == "ALPM_DB_VERSION"
+            && metadata.is_file()
+            && !metadata.file_type().is_symlink()
+        {
+            continue;
+        }
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        if !local_database_entry_matches(&path, package, version)? {
+            continue;
+        }
+        if matched.replace(path).is_some() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+    }
+    matched.ok_or(PackageRuntimeError::NotInstalled)
 }
 
 fn read_output_bytes(path: &Path, maximum: usize) -> Result<Vec<u8>, PackageRuntimeError> {
@@ -7627,6 +7974,10 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
 
     impl Drop for TestTree {
         fn drop(&mut self) {
+            if let (Some(parent), Some(name)) = (self.root.parent(), self.root.file_name()) {
+                let state = parent.join(format!(".{}-manager-state-v1", name.to_string_lossy()));
+                let _ = fs::remove_dir_all(state);
+            }
             let _ = fs::remove_dir_all(&self.root);
         }
     }
@@ -9754,6 +10105,75 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                 .expect("cleared capability")
                 .is_none(),
         );
+    }
+
+    #[test]
+    fn aur_lifecycle_capability_is_private_exact_and_reconciled() {
+        let tree = TestTree::new();
+        tree.local_package(
+            "aur-tool-1.0-1",
+            "aur-tool",
+            b"%FILES%\nusr/bin/aur-tool\n\n",
+        );
+        let local = tree.root.join("var/lib/pacman/local/aur-tool-1.0-1");
+        fs::write(
+            local.join("desc"),
+            b"%NAME%\naur-tool\n\n%VERSION%\n1.0-1\n\n%VALIDATION%\nnone\n",
+        )
+        .expect("AUR local description");
+        let script = b"post_remove() { true; }\n";
+        fs::write(local.join("install"), script).expect("installed lifecycle script");
+        let runtime = tree.package_runtime();
+        let capability = AurLifecycleCapability {
+            package: "aur-tool".to_owned(),
+            version: "1.0-1".to_owned(),
+            archive_sha256: [7_u8; 32],
+            install_script_sha256: Some(Sha256::digest(script).into()),
+        };
+        runtime
+            .publish_aur_lifecycle_capabilities(std::slice::from_ref(&capability))
+            .expect("publish lifecycle capability");
+        let state_root = aur_lifecycle_state_root(&tree.root).expect("manager state");
+        assert!(!state_root.starts_with(&tree.root));
+        let state = state_root.join(AUR_LIFECYCLE_CAPABILITY_FILE);
+        assert_eq!(
+            fs::metadata(&state)
+                .expect("capability metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+        assert_eq!(
+            read_aur_lifecycle_capabilities(&state_root).expect("read capability"),
+            vec![capability],
+        );
+        assert!(
+            runtime
+                .aur_removal_scriptlets_authorized("aur-tool", "1.0-1")
+                .expect("authorized exact script"),
+        );
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o644))
+            .expect("weaken capability mode");
+        assert!(matches!(
+            runtime.aur_removal_scriptlets_authorized("aur-tool", "1.0-1"),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == state,
+        ));
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600))
+            .expect("restore capability mode");
+
+        fs::write(local.join("install"), b"post_remove() { false; }\n")
+            .expect("tampered lifecycle script");
+        assert!(
+            !runtime
+                .aur_removal_scriptlets_authorized("aur-tool", "1.0-1")
+                .expect("reject changed script"),
+        );
+        fs::remove_dir_all(local).expect("remove installed package");
+        runtime
+            .reconcile_aur_lifecycle_capabilities()
+            .expect("reconcile removed package");
+        assert!(!state.exists());
     }
 
     #[test]

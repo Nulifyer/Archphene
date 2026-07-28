@@ -1,0 +1,31 @@
+record_archphene_lifecycle_event() {
+    install -d -m 755 /var/lib/archphene-lifecycle-fixture
+    printf '%s' "$1" >>/var/lib/archphene-lifecycle-fixture/events
+    shift
+    printf ' %s' "$@" >>/var/lib/archphene-lifecycle-fixture/events
+    printf '\n' >>/var/lib/archphene-lifecycle-fixture/events
+}
+
+pre_install() {
+    record_archphene_lifecycle_event pre_install "$1"
+}
+
+post_install() {
+    record_archphene_lifecycle_event post_install "$1"
+}
+
+pre_upgrade() {
+    record_archphene_lifecycle_event pre_upgrade "$1" "$2"
+}
+
+post_upgrade() {
+    record_archphene_lifecycle_event post_upgrade "$1" "$2"
+}
+
+pre_remove() {
+    record_archphene_lifecycle_event pre_remove "$1"
+}
+
+post_remove() {
+    record_archphene_lifecycle_event post_remove "$1"
+}

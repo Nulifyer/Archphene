@@ -1,0 +1,13 @@
+pkgname=archphene-lifecycle-fixture
+pkgver=1.0
+pkgrel=1
+pkgdesc='Archphene package lifecycle test fixture'
+arch=('any')
+license=('MIT')
+install=archphene-lifecycle-fixture.install
+
+package() {
+    install -d "$pkgdir/usr/share/archphene-lifecycle-fixture"
+    printf '%s\n' "$pkgver-$pkgrel" \
+        >"$pkgdir/usr/share/archphene-lifecycle-fixture/version"
+}

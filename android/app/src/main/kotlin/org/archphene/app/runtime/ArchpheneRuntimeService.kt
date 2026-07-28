@@ -1399,6 +1399,12 @@ class ArchpheneRuntimeService : Service() {
         val descriptor: ParcelFileDescriptor,
     )
 
+    private data class AurInstallScriptReview(
+        val packageName: String,
+        val path: String,
+        val contents: String,
+    )
+
     private data class AurReviewData(
         val packageBase: String,
         val packageName: String,
@@ -1419,9 +1425,8 @@ class ArchpheneRuntimeService : Service() {
         val sources: Array<AurSourceReview>,
         val validPgpKeys: Array<String>,
         val buildSteps: Array<String>,
-        val installScript: String,
+        val installScripts: Array<AurInstallScriptReview>,
         val pkgbuild: String,
-        val installScriptContents: String,
         val unverifiedSources: Boolean,
         val insecureSources: Boolean,
     )
@@ -9177,7 +9182,7 @@ class ArchpheneRuntimeService : Service() {
     ): AurReviewData {
         require(length in 1..NativeRuntime.AUR_REVIEW_SIZE)
         val reader = AurWireReader(source, length)
-        require(reader.bytes(8).contentEquals("ARVW0004".toByteArray(StandardCharsets.US_ASCII)))
+        require(reader.bytes(8).contentEquals("ARVW0005".toByteArray(StandardCharsets.US_ASCII)))
         reader.bytes(32)
         val snapshotSha256Bytes = reader.bytes(32)
         require(snapshotSha256Bytes.any { byte -> byte != 0.toByte() })
@@ -9193,6 +9198,7 @@ class ArchpheneRuntimeService : Service() {
         val sourceCount = boundedAurCount(reader.int(), 64)
         val pgpKeyCount = boundedAurCount(reader.int(), 32)
         val buildStepCount = boundedAurCount(reader.int(), 4)
+        val installScriptCount = boundedAurCount(reader.int(), 256)
         val packageBase = reader.string(128)
         val packageName = reader.string(128)
         val version = reader.string(128)
@@ -9201,11 +9207,8 @@ class ArchpheneRuntimeService : Service() {
         val projectUrl = reader.string(4 * 1024, allowEmpty = true)
         val snapshotPath = reader.string(4 * 1024)
         val snapshotCommit = reader.string(64)
-        val installScript = reader.string(4 * 1024, allowEmpty = true)
         val pkgbuild =
             decodeAurScript(reader.blob(256 * 1024), allowEmpty = false)
-        val installScriptContents =
-            decodeAurScript(reader.blob(512 * 1024), allowEmpty = true)
         require(packageBase.matches(AUR_PACKAGE_NAME))
         require(packageName.matches(AUR_PACKAGE_NAME))
         require(version.none(Char::isWhitespace))
@@ -9221,8 +9224,6 @@ class ArchpheneRuntimeService : Service() {
             snapshotPath == "/cgit/aur.git/snapshot/$packageBase.tar.gz",
         )
         require((flags and (1 shl 1) != 0) == maintainer.isEmpty())
-        require((flags and (1 shl 2) != 0) == installScript.isNotEmpty())
-        require(installScript.isEmpty() == installScriptContents.isEmpty())
 
         fun strings(
             count: Int,
@@ -9303,6 +9304,36 @@ class ArchpheneRuntimeService : Service() {
                     else -> "package"
                 }
             }
+        val installScripts =
+            Array(installScriptCount) {
+                val scriptPackage = reader.string(128)
+                val scriptPath = reader.string(4 * 1024)
+                val scriptContents =
+                    decodeAurScript(reader.blob(512 * 1024), allowEmpty = false)
+                require(scriptPackage.matches(AUR_PACKAGE_NAME))
+                require(scriptPackage in requiredPackages)
+                require(
+                    scriptPath.isNotEmpty() &&
+                        !scriptPath.startsWith('/') &&
+                        scriptPath
+                            .split('/')
+                            .all { segment ->
+                                segment.isNotEmpty() &&
+                                    segment != "." &&
+                                    segment != ".." &&
+                                    segment.matches(AUR_SOURCE_FILENAME)
+                            },
+                )
+                AurInstallScriptReview(scriptPackage, scriptPath, scriptContents)
+            }
+        require(
+            installScripts
+                .map { script -> script.packageName }
+                .let { packages ->
+                    packages == packages.sorted() && packages.toSet().size == packages.size
+                },
+        )
+        require((flags and (1 shl 2) != 0) == installScripts.isNotEmpty())
         require(reader.exhausted())
         val unverifiedSources = sources.any { sourceReview -> sourceReview.checksum == null }
         val insecureSources = sources.any { sourceReview -> sourceReview.insecureTransport }
@@ -9328,9 +9359,8 @@ class ArchpheneRuntimeService : Service() {
             sources,
             validPgpKeys,
             buildSteps,
-            installScript,
+            installScripts,
             pkgbuild,
-            installScriptContents,
             unverifiedSources,
             insecureSources,
         )
@@ -9617,7 +9647,9 @@ class ArchpheneRuntimeService : Service() {
             buildString(
                 minOf(
                     NativeRuntime.AUR_REVIEW_SIZE,
-                    review.pkgbuild.length + review.installScriptContents.length + 2048,
+                    review.pkgbuild.length +
+                        review.installScripts.sumOf { script -> script.contents.length } +
+                        2048,
                 ),
             ) {
                 appendAurValues("Runtime dependencies", review.dependencies)
@@ -9626,9 +9658,13 @@ class ArchpheneRuntimeService : Service() {
                 appendAurValues("Valid PGP keys", review.validPgpKeys)
                 append("\nVisible build functions\n")
                 review.buildSteps.forEach { step -> append("• ").append(step).append('\n') }
-                if (review.installScript.isNotEmpty()) {
-                    append("\nInstall script: ").append(review.installScript).append('\n')
-                    append(review.installScriptContents).append('\n')
+                review.installScripts.forEach { script ->
+                    append("\nInstall script for ")
+                        .append(script.packageName)
+                        .append(": ")
+                        .append(script.path)
+                        .append('\n')
+                    append(script.contents).append('\n')
                 }
                 append("\nPKGBUILD\n")
                 append(review.pkgbuild)
@@ -12476,15 +12512,20 @@ class ArchpheneRuntimeService : Service() {
                     ),
                 validPgpKeys = arrayOf("0123456789ABCDEF0123456789ABCDEF01234567"),
                 buildSteps = arrayOf("prepare()", "build()", "check()", "package()"),
-                installScript = "$packageName.install",
+                installScripts =
+                    arrayOf(
+                        AurInstallScriptReview(
+                            packageName,
+                            "$packageName.install",
+                            "post_install() {\n  echo 'fixture installed'\n}\n",
+                        ),
+                    ),
                 pkgbuild =
                     "pkgname=$packageName\n" +
                         "pkgver=1.2.3\n" +
                         "pkgrel=1\n" +
                         "arch=('x86_64' 'aarch64')\n" +
                         "sha256sums=('$sourceDigest')\n",
-                installScriptContents =
-                    "post_install() {\n  echo 'fixture installed'\n}\n",
                 unverifiedSources = false,
                 insecureSources = false,
             )

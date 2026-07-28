@@ -872,9 +872,11 @@ blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. A real AArch64 older-to-newer
 upgrade now passes; the x86_64 replay and replacement coverage remain open.
-Scriptlets/hooks remain disabled. Replacement handling, exact rollback,
-whole-operation AUR recovery, dependency-orphan cleanup, and retry-to-completion
-under real storage pressure remain open.
+Reviewed AUR lifecycle scripts are enabled under the exact capability described
+above; official-package scriptlets remain disabled, and generic hook policy is
+still open. Replacement handling, exact rollback, whole-operation AUR recovery,
+dependency-orphan cleanup, and retry-to-completion under real storage pressure
+remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -1780,6 +1782,22 @@ Code archive, killed and replaced the manager, re-established the exact
 running Build again. The full-device result shows disabled **Built**, enabled
 **Install**, and “restored verified build · ready to install.”
 
+Reviewed AUR lifecycle scripts now cross the same exact-evidence boundary.
+Rust retains the effective `.install` path and bytes for every required split
+output, review wire v5 renders all of them, and independent Builder-output
+verification rejects missing, extra, or changed `.INSTALL` content. Before
+pacman mutation, a mode-0600 manager capability outside the shared Arch root
+binds each package/version/archive/script digest. Install and upgrade may run
+only those reviewed AUR scripts; removal rehashes the installed pacman-local
+script and fails closed without the exact capability. Controlled fixtures run
+all install, upgrade, and removal phases through the production fake-root
+bridge. On Samsung, current Code restored its 212 MiB output after manager
+death, installed with exact script SHA-256
+`c910a24270895767939b23194673d76641432aa107e6e81ca8ad6f7a8fc6e9b7`,
+survived another manager death, removed normally, and pruned the capability.
+Full-device screenshots and the installed/removed UI states were inspected.
+Official-package scriptlets and the generic hook/recovery policy remain open.
+
 The AUR pre-install decision surface is now explicitly gated as a complete
 contract rather than by one token per section. Six mutually compact,
 expandable, selectable sections expose source origins and licenses; maintainer,
@@ -1814,9 +1832,9 @@ installed wrapper with an untrusted signer remains a visible retryable failure;
 explicit Retry persists removal across catalog refresh, opens Android's
 uninstall confirmation, waits for confirmed absence, then opens the trusted
 replacement install confirmation. A real stale emulator Foot identity
-completed that full-device flow and returned to Current. Recursive AUR
-dependencies, the install-script/scriptlet policy, and cross-package-base AUR
-dependency builds remain open.
+completed that full-device flow and returned to Current. Recursive
+cross-package-base AUR dependency review/builds and official-package
+scriptlet/hook policy remain open.
 
 Split-package build and installation now close the boundary exposed by .NET.
 The Builder returns every required archive instead of only the selected output;

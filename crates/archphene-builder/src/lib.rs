@@ -59,6 +59,7 @@ const MAX_RECIPE_ENTRIES: u64 = 128;
 const MAX_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PACKAGE_INFO_BYTES: usize = 64 * 1024;
 const MAX_BUILD_INFO_BYTES: usize = 256 * 1024;
+const MAX_INSTALL_SCRIPT_BYTES: usize = 512 * 1024;
 const MAX_BUILT_PACKAGES: usize = 32;
 const EXPECTED_MANIFEST_NAME: &str = "expected-manifest";
 const PUBLISHED_MANIFEST_NAME: &str = "manifest";
@@ -984,6 +985,8 @@ struct BuiltPackageMetadata {
     name: String,
     installed_bytes: u64,
     build_package_count: usize,
+    install_script_bytes: u64,
+    install_script_sha256: Option<[u8; 32]>,
 }
 
 pub fn verify_and_copy_built_package(
@@ -1153,6 +1156,7 @@ pub fn verify_copied_built_package(
     architecture: &str,
     closure_manifest: &[u8],
     expected_closure_sha256: [u8; 32],
+    expected_install_script: Option<&[u8]>,
 ) -> Result<BuiltPackageReport, BuilderError> {
     if !safe_name(package_base)
         || !safe_name(package_name)
@@ -1164,6 +1168,8 @@ pub fn verify_copied_built_package(
         || closure_manifest.is_empty()
         || closure_manifest.len() > MAX_CLOSURE_MANIFEST_BYTES
         || sha256_bytes(closure_manifest) != expected_closure_sha256
+        || expected_install_script
+            .is_some_and(|script| script.is_empty() || script.len() > MAX_INSTALL_SCRIPT_BYTES)
     {
         return Err(BuilderError::InvalidInput);
     }
@@ -1182,6 +1188,17 @@ pub fn verify_copied_built_package(
     )?;
     if built.name != package_name {
         return Err(BuilderError::InvalidArchive);
+    }
+    match (
+        expected_install_script,
+        built.install_script_sha256,
+        built.install_script_bytes,
+    ) {
+        (None, None, 0) => {}
+        (Some(expected), Some(actual_sha256), actual_bytes)
+            if actual_bytes == expected.len() as u64 && actual_sha256 == sha256_bytes(expected) => {
+        }
+        _ => return Err(BuilderError::InvalidArchive),
     }
     archive.seek(SeekFrom::Start(0))?;
     let mut digest = Sha256::new();
@@ -1257,6 +1274,7 @@ fn inspect_built_package_tar(
     let mut archive = Archive::new(reader);
     let mut package_info = None;
     let mut build_info = None;
+    let mut install_script = None;
     let mut entry_count = 0_u64;
     let mut expanded_bytes = 0_u64;
     for entry in archive.entries()? {
@@ -1282,6 +1300,7 @@ fn inspect_built_package_tar(
         let target = match path.as_os_str().as_bytes() {
             b".PKGINFO" => (&mut package_info, MAX_PACKAGE_INFO_BYTES),
             b".BUILDINFO" => (&mut build_info, MAX_BUILD_INFO_BYTES),
+            b".INSTALL" => (&mut install_script, MAX_INSTALL_SCRIPT_BYTES),
             _ => continue,
         };
         if target.0.is_some()
@@ -1322,6 +1341,10 @@ fn inspect_built_package_tar(
         name,
         installed_bytes,
         build_package_count,
+        install_script_bytes: install_script
+            .as_ref()
+            .map_or(0, |script| script.len() as u64),
+        install_script_sha256: install_script.as_deref().map(sha256_bytes),
     })
 }
 
@@ -4047,6 +4070,13 @@ summary\t1\t{}\n",
     }
 
     fn built_package_archive(installed: &str) -> Vec<u8> {
+        built_package_archive_with_install(installed, None)
+    }
+
+    fn built_package_archive_with_install(
+        installed: &str,
+        install_script: Option<&[u8]>,
+    ) -> Vec<u8> {
         let encoder = XzEncoder::new(Vec::new(), 6);
         let mut builder = tar::Builder::new(encoder);
         builder.mode(tar::HeaderMode::Deterministic);
@@ -4074,6 +4104,9 @@ summary\t1\t{}\n",
               size = 7\n\
               arch = aarch64\n",
         );
+        if let Some(install_script) = install_script {
+            append_file(&mut builder, ".INSTALL", 0o644, install_script);
+        }
         append_file(&mut builder, "usr/bin/example", 0o755, b"example");
         let encoder = builder.into_inner().expect("finish tar archive");
         encoder.finish().expect("finish xz archive")
@@ -4601,7 +4634,9 @@ summary\t1\t{}\n",
     #[test]
     fn verifies_and_copies_only_exact_provenanced_build_output() {
         let directory = test_directory();
-        let archive = built_package_archive("base-devel-1-1-any");
+        let install_script = b"post_install() { printf '%s\\n' reviewed; }\n";
+        let archive =
+            built_package_archive_with_install("base-devel-1-1-any", Some(install_script));
         let closure = built_output_fixture(&directory, &archive);
         let destination = directory.join("manager-output");
         let mut output = OpenOptions::new()
@@ -4642,6 +4677,7 @@ summary\t1\t{}\n",
             "aarch64",
             &manifest,
             closure,
+            Some(install_script),
         )
         .expect("manager independently verified output");
         assert_eq!(manager_report.archive_bytes, report.archive_bytes);
@@ -4651,6 +4687,34 @@ summary\t1\t{}\n",
             manager_report.build_package_count,
             report.build_package_count
         );
+        assert!(matches!(
+            verify_copied_built_package(
+                &mut output,
+                &report.filename,
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "aarch64",
+                &manifest,
+                closure,
+                Some(b"post_install() { false; }\n"),
+            ),
+            Err(BuilderError::InvalidArchive),
+        ));
+        assert!(matches!(
+            verify_copied_built_package(
+                &mut output,
+                &report.filename,
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "aarch64",
+                &manifest,
+                closure,
+                None,
+            ),
+            Err(BuilderError::InvalidArchive),
+        ));
         fs::remove_dir_all(directory).expect("cleanup");
     }
 

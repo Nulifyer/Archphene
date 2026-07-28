@@ -1,6 +1,6 @@
 # Architecture
 
-Updated: 2026-07-27
+Updated: 2026-07-28
 
 Archphene is one user-owned Arch Linux environment inside one ordinary Android
 application. Pacman and AUR packages intentionally share one filesystem, home,
@@ -162,10 +162,16 @@ unexpected archives, unsafe tar entries, and mismatched `.PKGINFO` or
 descriptor while hashing it. The manager independently applies the same
 verifier to the copied archive and retained closure. It installs signed
 official runtime dependencies, atomically retains the verified AUR archive by
-SHA-256, and commits that local archive through pacman with scriptlets disabled
-and exact plan/version postconditions. The physical Samsung gate completed this
-path for current `visual-studio-code-bin`, retaining SHA-256
-`51e44c87e8ffbe9b7f3c441bfad6ab8e2fdff1d9f0402d0fa27b94d9a11d3c5c`.
+SHA-256, and commits that local archive through pacman with exact plan/version
+postconditions. Every required split output's effective `.install` file is
+retained from the reviewed snapshot and must match the independently verified
+archive's `.INSTALL` bytes exactly. Rust authorizes those AUR lifecycle scripts
+with a mode-0600 package/version/archive/script capability outside the
+recipe-accessible shared root, rechecks the installed script before removal,
+and prunes authorization with package state. Official-package scriptlets remain
+disabled until their broader recovery policy is complete. The physical Samsung
+gate completed current `visual-studio-code-bin` install, process-death
+reattachment, authorized removal, and capability pruning.
 
 ### Thin launcher application
 

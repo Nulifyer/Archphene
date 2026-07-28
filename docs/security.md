@@ -49,8 +49,9 @@ AUR v5 response and one cgit snapshot as a single review candidate. The
 requested package, package base, version, selected architecture, snapshot path,
 `.SRCINFO`, and PKGBUILD must agree. The snapshot reader rejects traversal,
 links, special files, duplicate paths, oversized compressed or expanded
-content, missing local sources, local-source checksum mismatches, and a missing
-install script. It records both the exact snapshot SHA-256 and the AUR cgit
+content, missing local sources, local-source checksum mismatches, and any
+missing install script required by the selected split-package closure. It
+records both the exact snapshot SHA-256 and the AUR cgit
 commit advertised in the snapshot's PAX header, and reports every selected
 source without treating that advertised commit as an official Arch signature.
 Common package-base `provides` declarations are accepted as inherited
@@ -62,8 +63,8 @@ accepted by Rust, over Android HTTPS without ambient credentials. A versioned,
 bounded binary JNI result drives an on-device review showing the community
 trust warning, shared trust domain, maintainer, cgit commit, snapshot digest,
 architecture-selected sources and checksums, dependencies, visible build
-functions, install script, and exact PKGBUILD. Review does not enable the
-official-package Install action or mutate pacman state.
+functions, every required output's install script, and exact PKGBUILD. Review
+does not enable the official-package Install action or mutate pacman state.
 
 For supported direct-HTTPS sources, Rust derives one bounded cache filename and
 the expected SHA-256 from the retained review. Android follows at most five
@@ -167,11 +168,24 @@ closure, then installs signed official runtime dependencies and the reviewed
 local package through one recoverable pacman transaction. Official repository
 signatures remain required; only the already verified local AUR archive uses
 the generated pacman configuration's optional local-file signature policy.
-Scriptlets are disabled, the exact transaction plan is checked, install reasons
-are recoverable, and the installed version is verified afterward. The physical
-Samsung gate completed this path for current `visual-studio-code-bin`, retaining
-the archive under SHA-256
-`51e44c87e8ffbe9b7f3c441bfad6ab8e2fdff1d9f0402d0fa27b94d9a11d3c5c`.
+The exact transaction plan is checked, install reasons are recoverable, and
+installed versions are verified afterward. For each required split output,
+Rust derives the effective `.install` file from the reviewed `.SRCINFO`,
+retains its exact snapshot bytes, and requires the independently copied
+Builder archive to contain exactly the same `.INSTALL` bytes—or no `.INSTALL`
+when none was declared. Review wire v5 presents all such scripts to the user.
+Before mutation, Rust atomically publishes package/version/archive/script
+digests in a mode-0600 manager capability file outside the shared Arch root.
+Only these reviewed AUR lifecycle scripts may run on install or upgrade.
+Removal rehashes the installed pacman-local script and requires the exact
+manager capability; missing authorization or changed bytes fail closed.
+Successful mutation reconciles stale entries, and removal deletes the final
+entry. Official-package scriptlets remain disabled pending their separate
+failure-recovery policy; normal pacman hooks still require a generic policy.
+The physical Samsung gate completed current `visual-studio-code-bin` install,
+manager death, authorized removal, and capability pruning with exact installed
+script SHA-256
+`c910a24270895767939b23194673d76641432aa107e6e81ca8ad6f7a8fc6e9b7`.
 The installed package is not isolated: it joins the shared Archphene Linux
 trust domain.
 

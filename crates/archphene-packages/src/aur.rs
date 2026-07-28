@@ -83,6 +83,19 @@ impl AurSourceChecksum {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AurInstallScript {
+    pub package_name: String,
+    pub path: String,
+    pub contents: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewedInstallScript<'a> {
+    pub contents: &'a [u8],
+    pub sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AurReview {
     pub package_base: String,
     pub package_name: String,
@@ -100,7 +113,7 @@ pub struct AurReview {
     pub check_dependencies: Vec<String>,
     pub sources: Vec<AurSource>,
     pub valid_pgp_keys: Vec<String>,
-    pub install_script: Option<String>,
+    pub install_scripts: Vec<AurInstallScript>,
     pub build_steps: Vec<AurBuildStep>,
     pub unverified_source_count: usize,
     pub insecure_source_count: usize,
@@ -108,7 +121,6 @@ pub struct AurReview {
     pub snapshot_sha256: Option<[u8; 32]>,
     pub snapshot_commit: Option<String>,
     pub pkgbuild: Vec<u8>,
-    pub install_script_contents: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -458,10 +470,9 @@ pub fn review_aur_snapshot(
     verify_snapshot_files(&review, &snapshot.files)?;
     review.snapshot_sha256 = Some(Sha256::digest(snapshot_bytes).into());
     review.snapshot_commit = Some(snapshot.commit);
-    review.install_script_contents = review
-        .install_script
-        .as_deref()
-        .and_then(|path| snapshot.files.get(Path::new(path)).cloned());
+    for script in &mut review.install_scripts {
+        script.contents = snapshot.files.get(Path::new(&script.path)).cloned();
+    }
     Ok(review)
 }
 
@@ -520,6 +531,7 @@ struct SrcInfo {
     architecture_sha512: Vec<String>,
     valid_pgp_keys: Vec<String>,
     install_script: Option<String>,
+    package_install_scripts: BTreeMap<String, String>,
 }
 
 pub fn review_aur_package(
@@ -556,6 +568,7 @@ pub fn review_aur_package(
     }
     let required_packages = required_split_packages(&srcinfo, requested_package)?;
     let dependencies = required_runtime_dependencies(&srcinfo, &required_packages)?;
+    let install_scripts = required_install_scripts(&srcinfo, &required_packages)?;
 
     let mut sources = Vec::with_capacity(
         srcinfo
@@ -619,7 +632,7 @@ pub fn review_aur_package(
         check_dependencies: srcinfo.check_dependencies,
         sources,
         valid_pgp_keys: srcinfo.valid_pgp_keys,
-        install_script: srcinfo.install_script,
+        install_scripts,
         build_steps,
         unverified_source_count,
         insecure_source_count,
@@ -627,11 +640,38 @@ pub fn review_aur_package(
         snapshot_sha256: None,
         snapshot_commit: None,
         pkgbuild: pkgbuild_bytes.to_vec(),
-        install_script_contents: None,
     })
 }
 
 impl AurReview {
+    pub fn reviewed_install_script(
+        &self,
+        package_name: &str,
+    ) -> Result<Option<ReviewedInstallScript<'_>>, AurReviewError> {
+        validate_package_name(package_name)?;
+        let Some(script) = self
+            .install_scripts
+            .iter()
+            .find(|script| script.package_name == package_name)
+        else {
+            return Ok(None);
+        };
+        match script.contents.as_deref() {
+            Some(contents)
+                if !contents.is_empty()
+                    && contents.len() <= MAX_AUR_SNAPSHOT_ENTRY_BYTES as usize =>
+            {
+                Ok(Some(ReviewedInstallScript {
+                    contents,
+                    sha256: Sha256::digest(contents).into(),
+                }))
+            }
+            _ => Err(AurReviewError::InvalidSnapshot(
+                "incomplete install script evidence",
+            )),
+        }
+    }
+
     pub fn write_wire(&self, destination: &mut [u8]) -> Result<usize, AurReviewError> {
         if destination.len() < MAX_AUR_REVIEW_BYTES {
             return Err(AurReviewError::SizeLimit("review output"));
@@ -640,14 +680,14 @@ impl AurReview {
             destination,
             position: 0,
         };
-        writer.bytes(b"ARVW0004")?;
+        writer.bytes(b"ARVW0005")?;
         writer.bytes(&self.review_sha256)?;
         writer.bytes(&self.snapshot_sha256.unwrap_or([0; 32]))?;
         writer.u64(self.last_modified)?;
         writer.u32(
             u32::from(self.out_of_date)
                 | (u32::from(self.maintainer.is_none()) << 1)
-                | (u32::from(self.install_script.is_some()) << 2)
+                | (u32::from(!self.install_scripts.is_empty()) << 2)
                 | (u32::from(self.unverified_source_count > 0) << 3)
                 | (u32::from(self.insecure_source_count > 0) << 4),
         )?;
@@ -660,6 +700,7 @@ impl AurReview {
             self.sources.len(),
             self.valid_pgp_keys.len(),
             self.build_steps.len(),
+            self.install_scripts.len(),
         ] {
             writer.u32(u32::try_from(count).map_err(|_| AurReviewError::Limit("wire count"))?)?;
         }
@@ -671,9 +712,7 @@ impl AurReview {
         writer.string(self.project_url.as_deref().unwrap_or(""))?;
         writer.string(&self.snapshot_path)?;
         writer.string(self.snapshot_commit.as_deref().unwrap_or(""))?;
-        writer.string(self.install_script.as_deref().unwrap_or(""))?;
         writer.blob(&self.pkgbuild)?;
-        writer.blob(self.install_script_contents.as_deref().unwrap_or_default())?;
         for value in &self.licenses {
             writer.string(value)?;
         }
@@ -724,6 +763,36 @@ impl AurReview {
                 AurBuildStep::Check => 3,
                 AurBuildStep::Package => 4,
             })?;
+        }
+        let mut previous_package = None;
+        for script in &self.install_scripts {
+            validate_package_name(&script.package_name)?;
+            if !self
+                .required_packages
+                .iter()
+                .any(|package| package == &script.package_name)
+                || previous_package.is_some_and(|previous| previous >= script.package_name.as_str())
+            {
+                return Err(AurReviewError::InvalidSnapshot(
+                    "invalid install script package",
+                ));
+            }
+            safe_snapshot_path(&script.path)?;
+            let contents = script
+                .contents
+                .as_deref()
+                .ok_or(AurReviewError::InvalidSnapshot(
+                    "incomplete install script evidence",
+                ))?;
+            if contents.is_empty() || contents.len() > MAX_AUR_SNAPSHOT_ENTRY_BYTES as usize {
+                return Err(AurReviewError::InvalidSnapshot(
+                    "invalid install script contents",
+                ));
+            }
+            writer.string(&script.package_name)?;
+            writer.string(&script.path)?;
+            writer.blob(contents)?;
+            previous_package = Some(script.package_name.as_str());
         }
         Ok(writer.position)
     }
@@ -894,10 +963,10 @@ fn verify_snapshot_files(
     review: &AurReview,
     files: &BTreeMap<std::path::PathBuf, Vec<u8>>,
 ) -> Result<(), AurReviewError> {
-    if let Some(install_script) = review.install_script.as_deref()
-        && !files.contains_key(safe_snapshot_path(install_script)?)
-    {
-        return Err(AurReviewError::InvalidSnapshot("missing install script"));
+    for install_script in &review.install_scripts {
+        if !files.contains_key(safe_snapshot_path(&install_script.path)?) {
+            return Err(AurReviewError::InvalidSnapshot("missing install script"));
+        }
     }
     for source in &review.sources {
         if !source.local {
@@ -1044,6 +1113,20 @@ fn parse_srcinfo(
             push_limited(provides, value, MAX_AUR_DEPENDENCIES, "provides")?;
             continue;
         }
+        if key == "install" {
+            if let Some(package) = current_package {
+                if info
+                    .package_install_scripts
+                    .insert(package.to_owned(), value.to_owned())
+                    .is_some()
+                {
+                    return Err(AurReviewError::InvalidSrcInfo);
+                }
+            } else {
+                set_once(&mut info.install_script, value)?;
+            }
+            continue;
+        }
         let applies = current_package.is_none() || current_package == Some(requested_package);
         if !applies {
             continue;
@@ -1083,7 +1166,6 @@ fn parse_srcinfo(
                 "source SHA-512 hashes",
             )?,
             "validpgpkeys" => push_limited(&mut info.valid_pgp_keys, value, 32, "PGP keys")?,
-            "install" => set_once(&mut info.install_script, value)?,
             _ if key == make_dependencies_architecture => push_limited(
                 &mut info.make_dependencies,
                 value,
@@ -1415,6 +1497,29 @@ fn required_split_packages(
     Ok(required.into_iter().collect())
 }
 
+fn required_install_scripts(
+    info: &SrcInfo,
+    required_packages: &[String],
+) -> Result<Vec<AurInstallScript>, AurReviewError> {
+    let mut scripts = Vec::new();
+    for package_name in required_packages {
+        let path = info
+            .package_install_scripts
+            .get(package_name)
+            .or(info.install_script.as_ref());
+        let Some(path) = path else {
+            continue;
+        };
+        safe_snapshot_path(path)?;
+        scripts.push(AurInstallScript {
+            package_name: package_name.clone(),
+            path: path.clone(),
+            contents: None,
+        });
+    }
+    Ok(scripts)
+}
+
 fn required_runtime_dependencies(
     info: &SrcInfo,
     required_packages: &[String],
@@ -1681,9 +1786,11 @@ package() {
 pkgname = dotnet-runtime-bin
 	depends = runtime-only-dependency
 	provides = dotnet-runtime
+	install = runtime.install
 
 pkgname = dotnet-sdk-bin
 	depends = dotnet-runtime>=10.0
+	install = sdk.install
 "#;
 
     const SPLIT_PKGBUILD: &[u8] = br#"package_dotnet-runtime-bin() {
@@ -1740,7 +1847,7 @@ package_dotnet-sdk-bin() {
             .expect("finish gzip")
     }
 
-    fn split_snapshot() -> Vec<u8> {
+    fn split_snapshot(include_sdk_install_script: bool) -> Vec<u8> {
         let encoder = GzEncoder::new(Vec::new(), Compression::default());
         let mut archive = Builder::new(encoder);
         let provenance = b"52 comment=0123456789abcdef0123456789abcdef01234567\n";
@@ -1752,17 +1859,28 @@ package_dotnet-sdk-bin() {
         archive
             .append_data(&mut provenance_header, "pax_global_header", &provenance[..])
             .expect("append provenance");
-        for (path, bytes) in [
-            ("dotnet-core-bin/.SRCINFO", SPLIT_SRCINFO),
-            ("dotnet-core-bin/PKGBUILD", SPLIT_PKGBUILD),
-        ] {
-            let mut header = Header::new_gnu();
-            header.set_mode(0o644);
-            header.set_size(bytes.len() as u64);
-            header.set_cksum();
-            archive
-                .append_data(&mut header, path, bytes)
-                .expect("append split snapshot file");
+        {
+            let mut append_file = |path: &str, bytes: &[u8]| {
+                let mut header = Header::new_gnu();
+                header.set_mode(0o644);
+                header.set_size(bytes.len() as u64);
+                header.set_cksum();
+                archive
+                    .append_data(&mut header, path, bytes)
+                    .expect("append split snapshot file");
+            };
+            append_file("dotnet-core-bin/.SRCINFO", SPLIT_SRCINFO);
+            append_file("dotnet-core-bin/PKGBUILD", SPLIT_PKGBUILD);
+            append_file(
+                "dotnet-core-bin/runtime.install",
+                b"post_install() { echo runtime; }\n",
+            );
+            if include_sdk_install_script {
+                append_file(
+                    "dotnet-core-bin/sdk.install",
+                    b"post_install() { echo sdk; }\n",
+                );
+            }
         }
         archive
             .into_inner()
@@ -1815,8 +1933,12 @@ package_dotnet-sdk-bin() {
             vec![AurBuildStep::Prepare, AurBuildStep::Package]
         );
         assert_eq!(
-            review.install_script.as_deref(),
-            Some("visual-studio-code-bin.install")
+            review.install_scripts,
+            vec![AurInstallScript {
+                package_name: "visual-studio-code-bin".to_owned(),
+                path: "visual-studio-code-bin.install".to_owned(),
+                contents: None,
+            }]
         );
         assert_ne!(review.review_sha256, [0; 32]);
     }
@@ -1848,7 +1970,7 @@ package_dotnet-sdk-bin() {
         );
         let review = review_aur_snapshot(
             SPLIT_RPC,
-            &split_snapshot(),
+            &split_snapshot(true),
             "dotnet-sdk-bin",
             RepositoryArchitecture::Aarch64,
         )
@@ -1865,6 +1987,41 @@ package_dotnet-sdk-bin() {
             review.required_packages,
             vec!["dotnet-runtime-bin", "dotnet-sdk-bin"]
         );
+        assert_eq!(
+            review
+                .install_scripts
+                .iter()
+                .map(|script| (
+                    script.package_name.as_str(),
+                    script.path.as_str(),
+                    script.contents.as_deref(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "dotnet-runtime-bin",
+                    "runtime.install",
+                    Some(&b"post_install() { echo runtime; }\n"[..]),
+                ),
+                (
+                    "dotnet-sdk-bin",
+                    "sdk.install",
+                    Some(&b"post_install() { echo sdk; }\n"[..]),
+                ),
+            ],
+        );
+        assert!(
+            review
+                .reviewed_install_script("dotnet-runtime-bin")
+                .expect("runtime install script")
+                .is_some()
+        );
+        assert!(
+            review
+                .reviewed_install_script("dotnet-sdk-bin")
+                .expect("SDK install script")
+                .is_some()
+        );
         assert_eq!(review.sources.len(), 1);
         assert_eq!(review.sources[0].architecture.as_deref(), Some("aarch64"));
         assert!(matches!(
@@ -1872,6 +2029,15 @@ package_dotnet-sdk-bin() {
             Some(AurSourceChecksum::Sha512(_))
         ));
         assert!(review.build_steps.contains(&AurBuildStep::Package));
+        assert_eq!(
+            review_aur_snapshot(
+                SPLIT_RPC,
+                &split_snapshot(false),
+                "dotnet-sdk-bin",
+                RepositoryArchitecture::Aarch64,
+            ),
+            Err(AurReviewError::InvalidSnapshot("missing install script")),
+        );
 
         let mismatched_path = String::from_utf8(SPLIT_RPC.to_vec())
             .expect("split RPC")
@@ -1899,14 +2065,17 @@ package_dotnet-sdk-bin() {
         );
         assert_eq!(review.pkgbuild, PKGBUILD);
         assert_eq!(
-            review.install_script_contents.as_deref(),
+            review
+                .reviewed_install_script("visual-studio-code-bin")
+                .expect("reviewed script")
+                .map(|script| script.contents),
             Some(&b"post_install() { true; }\n"[..])
         );
         assert_eq!(review.sources.len(), 2);
         let mut wire = vec![0_u8; MAX_AUR_REVIEW_BYTES];
         let wire_length = review.write_wire(&mut wire).expect("review wire");
         assert!(wire_length < wire.len());
-        assert_eq!(&wire[..8], b"ARVW0004");
+        assert_eq!(&wire[..8], b"ARVW0005");
         assert!(
             wire[..wire_length]
                 .windows(PKGBUILD.len())
