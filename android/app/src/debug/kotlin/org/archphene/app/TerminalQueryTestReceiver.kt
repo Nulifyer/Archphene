@@ -95,6 +95,10 @@ internal class TerminalQueryTestReceiver : BroadcastReceiver() {
                 "printf \$'\\e]104;25\\a'; " +
                 "read -rsn27 -p \$'\\e]4;25;?\\e\\\\' palette_reset; " +
                 "printf \$'\\e]4;25;rgb:12/34/56\\a'; " +
+                "printf \$'\\e[?69h\\e[3;20s'; " +
+                "read -rsn9 -p \$'\\e[?69\$p' margin_on; " +
+                "printf \$'\\e[?69l'; " +
+                "read -rsn9 -p \$'\\e[?69\$p' margin_off; " +
                 "if [[ \$da == \$'\\e[?1;2c' && \$dsr == \$'\\e[0n' " +
                 "&& \$cpr == \$'\\e[3;5R' && \$da2 == \$'\\e[>0;1;0c' " +
                 "&& \$size == \"\$expected_size\" " +
@@ -104,7 +108,9 @@ internal class TerminalQueryTestReceiver : BroadcastReceiver() {
                 "&& \$reverse_reset == \$'\\e[?5;2\$y' " +
                 "&& \$cursor_reset == \$'\\e[?1;2\$y' " +
                 "&& \$palette_custom == \$'\\e]4;25;rgb:1212/3434/5656\\e\\\\' " +
-                "&& \$palette_reset == \$'\\e]4;25;rgb:0000/5f5f/afaf\\e\\\\' ]]; then " +
+                "&& \$palette_reset == \$'\\e]4;25;rgb:0000/5f5f/afaf\\e\\\\' " +
+                "&& \$margin_on == \$'\\e[?69;1\$y' " +
+                "&& \$margin_off == \$'\\e[?69;2\$y' ]]; then " +
                 "printf \$'\\e[2J\\e[H\\e[48;5;25mterminal-query-pass\\e[0m\\n'; else " +
                 "printf \$'\\e[2J\\e[Hterminal-query-fail\\n'; fi"
     }

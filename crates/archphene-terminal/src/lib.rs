@@ -474,6 +474,8 @@ pub struct Terminal {
     saved_column: u16,
     scroll_top: u16,
     scroll_bottom: u16,
+    scroll_left: u16,
+    scroll_right: u16,
     inactive_cursor_row: u16,
     inactive_cursor_column: u16,
     inactive_wrap_pending: bool,
@@ -481,6 +483,8 @@ pub struct Terminal {
     inactive_saved_column: u16,
     inactive_scroll_top: u16,
     inactive_scroll_bottom: u16,
+    inactive_scroll_left: u16,
+    inactive_scroll_right: u16,
     row_soft_wrapped: Vec<bool>,
     inactive_row_soft_wrapped: Vec<bool>,
     scrollback: Scrollback,
@@ -493,6 +497,7 @@ pub struct Terminal {
     new_line_mode: bool,
     backarrow_key: bool,
     reverse_screen: bool,
+    left_right_margin_mode: bool,
     insert_mode: bool,
     origin_mode: bool,
     auto_wrap: bool,
@@ -549,6 +554,8 @@ impl Terminal {
             saved_column: 0,
             scroll_top: 0,
             scroll_bottom: rows - 1,
+            scroll_left: 0,
+            scroll_right: columns - 1,
             inactive_cursor_row: 0,
             inactive_cursor_column: 0,
             inactive_wrap_pending: false,
@@ -556,6 +563,8 @@ impl Terminal {
             inactive_saved_column: 0,
             inactive_scroll_top: 0,
             inactive_scroll_bottom: rows - 1,
+            inactive_scroll_left: 0,
+            inactive_scroll_right: columns - 1,
             row_soft_wrapped: vec![false; usize::from(rows)],
             inactive_row_soft_wrapped: vec![false; usize::from(rows)],
             scrollback: Scrollback::new(),
@@ -568,6 +577,7 @@ impl Terminal {
             new_line_mode: false,
             backarrow_key: false,
             reverse_screen: false,
+            left_right_margin_mode: false,
             insert_mode: false,
             origin_mode: false,
             auto_wrap: true,
@@ -989,9 +999,13 @@ impl Terminal {
         self.wrap_pending = false;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
+        self.scroll_left = 0;
+        self.scroll_right = columns - 1;
         self.inactive_wrap_pending = false;
         self.inactive_scroll_top = 0;
         self.inactive_scroll_bottom = rows - 1;
+        self.inactive_scroll_left = 0;
+        self.inactive_scroll_right = columns - 1;
         self.dirty_start = 0;
         self.dirty_end = rows;
         self.revision = self.revision.saturating_add(1);
@@ -1215,7 +1229,7 @@ impl Terminal {
             }
             b'\r' => {
                 self.wrap_pending = false;
-                self.cursor_column = 0;
+                self.cursor_column = self.line_start_column();
             }
             b'\n' | 0x0b | 0x0c => {
                 self.wrap_pending = false;
@@ -1289,7 +1303,7 @@ impl Terminal {
             b'>' => self.set_application_keypad(false),
             b'D' => self.line_feed(),
             b'E' => {
-                self.cursor_column = 0;
+                self.cursor_column = self.line_start_column();
                 self.line_feed();
             }
             b'H' => {
@@ -1555,6 +1569,7 @@ impl Terminal {
         }
         self.wrap_pending = false;
         let (vertical_top, vertical_bottom) = self.vertical_bounds();
+        let (horizontal_left, horizontal_right) = self.horizontal_bounds();
         match final_byte {
             b'@' => self.insert_characters(self.parameter(0, 1)),
             b'A' => {
@@ -1573,33 +1588,40 @@ impl Terminal {
                 self.cursor_column = self
                     .cursor_column
                     .saturating_add(self.parameter(0, 1))
-                    .min(self.columns - 1);
+                    .min(horizontal_right);
             }
             b'D' => {
-                self.cursor_column = self.cursor_column.saturating_sub(self.parameter(0, 1));
+                self.cursor_column = self
+                    .cursor_column
+                    .saturating_sub(self.parameter(0, 1))
+                    .max(horizontal_left);
             }
             b'E' => {
                 self.cursor_row = self
                     .cursor_row
                     .saturating_add(self.parameter(0, 1))
                     .min(vertical_bottom);
-                self.cursor_column = 0;
+                self.cursor_column = horizontal_left;
             }
             b'F' => {
                 self.cursor_row = self
                     .cursor_row
                     .saturating_sub(self.parameter(0, 1))
                     .max(vertical_top);
-                self.cursor_column = 0;
+                self.cursor_column = horizontal_left;
             }
             b'G' => {
-                self.cursor_column = self.parameter(0, 1).saturating_sub(1).min(self.columns - 1)
+                self.cursor_column = horizontal_left
+                    .saturating_add(self.parameter(0, 1).saturating_sub(1))
+                    .min(horizontal_right)
             }
             b'H' | b'f' => {
                 self.cursor_row = vertical_top
                     .saturating_add(self.parameter(0, 1).saturating_sub(1))
                     .min(vertical_bottom);
-                self.cursor_column = self.parameter(1, 1).saturating_sub(1).min(self.columns - 1);
+                self.cursor_column = horizontal_left
+                    .saturating_add(self.parameter(1, 1).saturating_sub(1))
+                    .min(horizontal_right);
             }
             b'I' => self.tab_forward(self.parameter(0, 1)),
             b'J' => self.erase_display(self.csi_parameters[0]),
@@ -1612,7 +1634,9 @@ impl Terminal {
             b'X' => self.erase_characters(self.parameter(0, 1)),
             b'Z' => self.tab_backward(self.parameter(0, 1)),
             b'`' => {
-                self.cursor_column = self.parameter(0, 1).saturating_sub(1).min(self.columns - 1)
+                self.cursor_column = horizontal_left
+                    .saturating_add(self.parameter(0, 1).saturating_sub(1))
+                    .min(horizontal_right)
             }
             b'b' => self.repeat_last(self.parameter(0, 1)),
             b'd' => {
@@ -1638,9 +1662,14 @@ impl Terminal {
                     self.scroll_top = top;
                     self.scroll_bottom = bottom;
                     self.cursor_row = if self.origin_mode { top } else { 0 };
-                    self.cursor_column = 0;
+                    self.cursor_column = if self.origin_mode {
+                        self.scroll_left
+                    } else {
+                        0
+                    };
                 }
             }
+            b's' if self.left_right_margin_mode => self.set_horizontal_margins(),
             b's' => {
                 self.saved_row = self.cursor_row;
                 self.saved_column = self.cursor_column;
@@ -1687,6 +1716,7 @@ impl Terminal {
                 47 => self.set_alternate_screen(enabled, false),
                 66 => self.set_application_keypad(enabled),
                 67 => self.set_backarrow_key(enabled),
+                69 => self.set_left_right_margin_mode(enabled),
                 1047 | 1049 => self.set_alternate_screen(enabled, enabled),
                 1048 if enabled => {
                     self.saved_row = self.cursor_row;
@@ -1768,6 +1798,7 @@ impl Terminal {
                 47 | 1047 | 1049 => mode_status(self.alternate_active),
                 66 => mode_status(self.application_keypad),
                 67 => mode_status(self.backarrow_key),
+                69 => mode_status(self.left_right_margin_mode),
                 2004 => mode_status(self.bracketed_paste),
                 _ => 0,
             }
@@ -1812,7 +1843,12 @@ impl Terminal {
         length += write_decimal(&mut response[length..], row);
         response[length] = b';';
         length += 1;
-        length += write_decimal(&mut response[length..], self.cursor_column + 1);
+        let column = if self.origin_mode {
+            self.cursor_column.saturating_sub(self.scroll_left) + 1
+        } else {
+            self.cursor_column + 1
+        };
+        length += write_decimal(&mut response[length..], column);
         response[length] = b'R';
         length += 1;
         self.queue_reply(&response[..length]);
@@ -1857,10 +1893,63 @@ impl Terminal {
         }
     }
 
+    fn set_left_right_margin_mode(&mut self, enabled: bool) {
+        if self.left_right_margin_mode == enabled {
+            return;
+        }
+        self.left_right_margin_mode = enabled;
+        self.scroll_left = 0;
+        self.scroll_right = self.columns - 1;
+        self.cursor_row = if self.origin_mode { self.scroll_top } else { 0 };
+        self.cursor_column = 0;
+        self.wrap_pending = false;
+        self.mark_dirty(self.cursor_row);
+    }
+
+    fn set_horizontal_margins(&mut self) {
+        let left = self.parameter(0, 1).saturating_sub(1).min(self.columns - 1);
+        let right = self
+            .parameter(1, self.columns)
+            .saturating_sub(1)
+            .min(self.columns - 1);
+        if left >= right {
+            return;
+        }
+        self.scroll_left = left;
+        self.scroll_right = right;
+        self.cursor_row = if self.origin_mode { self.scroll_top } else { 0 };
+        self.cursor_column = if self.origin_mode { left } else { 0 };
+        self.wrap_pending = false;
+        self.mark_dirty(self.cursor_row);
+    }
+
+    fn horizontal_bounds(&self) -> (u16, u16) {
+        if self.left_right_margin_mode && self.origin_mode {
+            (self.scroll_left, self.scroll_right)
+        } else {
+            (0, self.columns - 1)
+        }
+    }
+
+    fn text_horizontal_bounds(&self) -> (u16, u16) {
+        if self.left_right_margin_mode
+            && self.cursor_column >= self.scroll_left
+            && self.cursor_column <= self.scroll_right
+        {
+            (self.scroll_left, self.scroll_right)
+        } else {
+            (0, self.columns - 1)
+        }
+    }
+
+    fn line_start_column(&self) -> u16 {
+        self.text_horizontal_bounds().0
+    }
+
     fn set_origin_mode(&mut self, enabled: bool) {
         self.origin_mode = enabled;
         self.cursor_row = if enabled { self.scroll_top } else { 0 };
-        self.cursor_column = 0;
+        self.cursor_column = if enabled { self.scroll_left } else { 0 };
         self.wrap_pending = false;
     }
 
@@ -1883,6 +1972,8 @@ impl Terminal {
         std::mem::swap(&mut self.saved_column, &mut self.inactive_saved_column);
         std::mem::swap(&mut self.scroll_top, &mut self.inactive_scroll_top);
         std::mem::swap(&mut self.scroll_bottom, &mut self.inactive_scroll_bottom);
+        std::mem::swap(&mut self.scroll_left, &mut self.inactive_scroll_left);
+        std::mem::swap(&mut self.scroll_right, &mut self.inactive_scroll_right);
         std::mem::swap(
             &mut self.row_soft_wrapped,
             &mut self.inactive_row_soft_wrapped,
@@ -1897,6 +1988,8 @@ impl Terminal {
             self.saved_column = 0;
             self.scroll_top = 0;
             self.scroll_bottom = self.rows - 1;
+            self.scroll_left = 0;
+            self.scroll_right = self.columns - 1;
             self.row_soft_wrapped.fill(false);
         }
         self.mark_dirty_range(0, self.rows);
@@ -1906,17 +1999,18 @@ impl Terminal {
         if self.try_append_codepoint(codepoint) {
             return;
         }
+        let (left, right) = self.text_horizontal_bounds();
         if self.auto_wrap && self.wrap_pending {
             self.row_soft_wrapped[usize::from(self.cursor_row)] = true;
-            self.cursor_column = 0;
+            self.cursor_column = left;
             self.line_feed();
             self.wrap_pending = false;
         }
         let mut width = codepoint_width(codepoint).clamp(1, 2);
-        if width == 2 && self.cursor_column + 1 >= self.columns {
+        if width == 2 && self.cursor_column + 1 > right {
             if self.auto_wrap {
                 self.row_soft_wrapped[usize::from(self.cursor_row)] = true;
-                self.cursor_column = 0;
+                self.cursor_column = left;
                 self.line_feed();
             } else {
                 width = 1;
@@ -1943,11 +2037,11 @@ impl Terminal {
         self.last_printed = Some(self.cells[index]);
         self.mark_dirty(self.cursor_row);
         let last_column = self.cursor_column + u16::from(width) - 1;
-        if self.auto_wrap && last_column + 1 >= self.columns {
+        if self.auto_wrap && last_column >= right {
             self.cursor_column = last_column;
             self.wrap_pending = true;
         } else {
-            self.cursor_column = (last_column + 1).min(self.columns - 1);
+            self.cursor_column = (last_column + 1).min(right);
             self.wrap_pending = false;
         }
     }
@@ -1986,17 +2080,18 @@ impl Terminal {
         cell.grapheme_len += 1;
         let old_width = cell.width.max(1);
         let new_width = grapheme_width(&candidate[..=length]).clamp(1, 2);
-        if new_width > old_width && column + 1 < self.columns {
+        let (_, right) = self.text_horizontal_bounds();
+        if new_width > old_width && column < right {
             self.clear_wide_intersections(row, column, 2);
             self.cells[index + 1] =
                 Cell::continuation(cell.foreground, cell.background, cell.attributes);
             if self.wrap_pending {
-                if column + 1 >= self.columns - 1 {
-                    self.cursor_column = self.columns - 1;
+                if column + 1 >= right {
+                    self.cursor_column = right;
                 }
             } else if self.cursor_row == row && self.cursor_column == column + 1 {
-                self.cursor_column = (column + 2).min(self.columns - 1);
-                self.wrap_pending = self.auto_wrap && column + 2 >= self.columns;
+                self.cursor_column = (column + 2).min(right);
+                self.wrap_pending = self.auto_wrap && column + 2 > right;
             }
             cell.width = new_width;
         } else if new_width < old_width {
@@ -2029,7 +2124,9 @@ impl Terminal {
     }
 
     fn line_feed(&mut self) {
-        if self.cursor_row == self.scroll_bottom {
+        let inside_horizontal_region = !self.left_right_margin_mode
+            || (self.scroll_left..=self.scroll_right).contains(&self.cursor_column);
+        if self.cursor_row == self.scroll_bottom && inside_horizontal_region {
             self.scroll_up();
         } else {
             self.cursor_row = (self.cursor_row + 1).min(self.rows - 1);
@@ -2041,7 +2138,9 @@ impl Terminal {
     }
 
     fn reverse_index(&mut self) {
-        if self.cursor_row == self.scroll_top {
+        let inside_horizontal_region = !self.left_right_margin_mode
+            || (self.scroll_left..=self.scroll_right).contains(&self.cursor_column);
+        if self.cursor_row == self.scroll_top && inside_horizontal_region {
             self.scroll_down_by(1);
         } else {
             self.cursor_row = self.cursor_row.saturating_sub(1);
@@ -2049,10 +2148,13 @@ impl Terminal {
     }
 
     fn insert_characters(&mut self, count: u16) {
+        if self.text_horizontal_bounds() != (0, self.columns - 1) {
+            self.clear_margin_intersections(self.cursor_row);
+        }
         self.clear_wide_intersections(self.cursor_row, self.cursor_column, 1);
         let row_start = self.index(self.cursor_row, 0);
         let start = row_start + usize::from(self.cursor_column);
-        let end = row_start + usize::from(self.columns);
+        let end = row_start + usize::from(self.text_horizontal_bounds().1) + 1;
         let count = usize::from(count).min(end - start);
         if count == 0 {
             return;
@@ -2065,10 +2167,13 @@ impl Terminal {
     }
 
     fn delete_characters(&mut self, count: u16) {
+        if self.text_horizontal_bounds() != (0, self.columns - 1) {
+            self.clear_margin_intersections(self.cursor_row);
+        }
         self.clear_wide_intersections(self.cursor_row, self.cursor_column, count);
         let row_start = self.index(self.cursor_row, 0);
         let start = row_start + usize::from(self.cursor_column);
-        let end = row_start + usize::from(self.columns);
+        let end = row_start + usize::from(self.text_horizontal_bounds().1) + 1;
         let count = usize::from(count).min(end - start);
         if count == 0 {
             return;
@@ -2081,9 +2186,14 @@ impl Terminal {
     }
 
     fn erase_characters(&mut self, count: u16) {
+        if self.text_horizontal_bounds() != (0, self.columns - 1) {
+            self.clear_margin_intersections(self.cursor_row);
+        }
         self.clear_wide_intersections(self.cursor_row, self.cursor_column, count);
         let start = self.index(self.cursor_row, self.cursor_column);
-        let count = usize::from(count).min(usize::from(self.columns - self.cursor_column));
+        let count = usize::from(count).min(usize::from(
+            self.text_horizontal_bounds().1 - self.cursor_column + 1,
+        ));
         if count == 0 {
             return;
         }
@@ -2094,10 +2204,19 @@ impl Terminal {
     }
 
     fn insert_lines(&mut self, count: u16) {
-        if !(self.scroll_top..=self.scroll_bottom).contains(&self.cursor_row) {
+        if !(self.scroll_top..=self.scroll_bottom).contains(&self.cursor_row)
+            || (self.left_right_margin_mode
+                && !(self.scroll_left..=self.scroll_right).contains(&self.cursor_column))
+        {
             return;
         }
         let count = count.min(self.scroll_bottom - self.cursor_row + 1);
+        if self.left_right_margin_mode
+            && (self.scroll_left != 0 || self.scroll_right + 1 != self.columns)
+        {
+            self.scroll_rectangle_down(self.cursor_row, self.scroll_bottom, count);
+            return;
+        }
         let columns = usize::from(self.columns);
         let start = self.index(self.cursor_row, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
@@ -2115,10 +2234,19 @@ impl Terminal {
     }
 
     fn delete_lines(&mut self, count: u16) {
-        if !(self.scroll_top..=self.scroll_bottom).contains(&self.cursor_row) {
+        if !(self.scroll_top..=self.scroll_bottom).contains(&self.cursor_row)
+            || (self.left_right_margin_mode
+                && !(self.scroll_left..=self.scroll_right).contains(&self.cursor_column))
+        {
             return;
         }
         let count = count.min(self.scroll_bottom - self.cursor_row + 1);
+        if self.left_right_margin_mode
+            && (self.scroll_left != 0 || self.scroll_right + 1 != self.columns)
+        {
+            self.scroll_rectangle_up(self.cursor_row, self.scroll_bottom, count);
+            return;
+        }
         let columns = usize::from(self.columns);
         let start = self.index(self.cursor_row, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
@@ -2137,6 +2265,12 @@ impl Terminal {
 
     fn scroll_up_by(&mut self, count: u16) {
         let count = count.min(self.scroll_bottom - self.scroll_top + 1);
+        if self.left_right_margin_mode
+            && (self.scroll_left != 0 || self.scroll_right + 1 != self.columns)
+        {
+            self.scroll_rectangle_up(self.scroll_top, self.scroll_bottom, count);
+            return;
+        }
         let columns = usize::from(self.columns);
         if !self.alternate_active && self.scroll_top == 0 && self.scroll_bottom + 1 == self.rows {
             for row in 0..count {
@@ -2165,6 +2299,12 @@ impl Terminal {
 
     fn scroll_down_by(&mut self, count: u16) {
         let count = count.min(self.scroll_bottom - self.scroll_top + 1);
+        if self.left_right_margin_mode
+            && (self.scroll_left != 0 || self.scroll_right + 1 != self.columns)
+        {
+            self.scroll_rectangle_down(self.scroll_top, self.scroll_bottom, count);
+            return;
+        }
         let columns = usize::from(self.columns);
         let top = self.index(self.scroll_top, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
@@ -2181,23 +2321,78 @@ impl Terminal {
         self.mark_dirty_range(self.scroll_top, self.scroll_bottom + 1);
     }
 
+    fn scroll_rectangle_up(&mut self, top: u16, bottom: u16, count: u16) {
+        let height = bottom - top + 1;
+        let count = count.min(height);
+        let left = usize::from(self.scroll_left);
+        let right = usize::from(self.scroll_right) + 1;
+        let erased = self.erased_cell();
+        for row in top..=bottom {
+            self.clear_margin_intersections(row);
+        }
+        if count < height {
+            for row in top..=bottom - count {
+                let source = self.index(row + count, 0);
+                let destination = self.index(row, 0);
+                self.cells
+                    .copy_within(source + left..source + right, destination + left);
+            }
+        }
+        for row in bottom - count + 1..=bottom {
+            let start = self.index(row, 0);
+            self.cells[start + left..start + right].fill(erased);
+        }
+        for row in top..=bottom {
+            normalize_cell_row(&mut self.cells, self.columns, row);
+            self.row_soft_wrapped[usize::from(row)] = false;
+        }
+        self.mark_dirty_range(top, bottom + 1);
+    }
+
+    fn scroll_rectangle_down(&mut self, top: u16, bottom: u16, count: u16) {
+        let count = count.min(bottom - top + 1);
+        let left = usize::from(self.scroll_left);
+        let right = usize::from(self.scroll_right) + 1;
+        let erased = self.erased_cell();
+        for row in top..=bottom {
+            self.clear_margin_intersections(row);
+        }
+        for row in (top + count..=bottom).rev() {
+            let source = self.index(row - count, 0);
+            let destination = self.index(row, 0);
+            self.cells
+                .copy_within(source + left..source + right, destination + left);
+        }
+        for row in top..top + count {
+            let start = self.index(row, 0);
+            self.cells[start + left..start + right].fill(erased);
+        }
+        for row in top..=bottom {
+            normalize_cell_row(&mut self.cells, self.columns, row);
+            self.row_soft_wrapped[usize::from(row)] = false;
+        }
+        self.mark_dirty_range(top, bottom + 1);
+    }
+
     fn tab_forward(&mut self, count: u16) {
+        let (_, right) = self.horizontal_bounds();
         for _ in 0..count.min(self.columns) {
             let mut next = self.cursor_column + 1;
-            while next < self.columns && !self.tab_stops[usize::from(next)] {
+            while next <= right && !self.tab_stops[usize::from(next)] {
                 next += 1;
             }
-            self.cursor_column = next.min(self.columns - 1);
+            self.cursor_column = next.min(right);
         }
     }
 
     fn tab_backward(&mut self, count: u16) {
+        let (left, _) = self.horizontal_bounds();
         for _ in 0..count.min(self.columns) {
             let mut previous = self.cursor_column.saturating_sub(1);
-            while previous > 0 && !self.tab_stops[usize::from(previous)] {
+            while previous > left && !self.tab_stops[usize::from(previous)] {
                 previous -= 1;
             }
-            self.cursor_column = previous;
+            self.cursor_column = previous.max(left);
         }
     }
 
@@ -2262,23 +2457,30 @@ impl Terminal {
     fn erase_line(&mut self, mode: u16) {
         let start = self.index(self.cursor_row, 0);
         let column = usize::from(self.cursor_column);
-        let end = start + usize::from(self.columns);
+        let (left_column, right_column) = self.text_horizontal_bounds();
+        let left = start + usize::from(left_column);
+        let end = start + usize::from(right_column) + 1;
         let erased = self.erased_cell();
         match mode {
             0 => {
                 self.clear_wide_intersections(
                     self.cursor_row,
                     self.cursor_column,
-                    self.columns - self.cursor_column,
+                    right_column - self.cursor_column + 1,
                 );
                 self.cells[start + column..end].fill(erased);
             }
             1 => {
-                self.clear_wide_intersections(self.cursor_row, 0, self.cursor_column + 1);
-                self.cells[start..=start + column].fill(erased);
+                self.clear_wide_intersections(
+                    self.cursor_row,
+                    left_column,
+                    self.cursor_column - left_column + 1,
+                );
+                self.cells[left..=start + column].fill(erased);
             }
             2 => {
-                self.cells[start..end].fill(erased);
+                self.clear_margin_intersections(self.cursor_row);
+                self.cells[left..end].fill(erased);
                 self.row_soft_wrapped[usize::from(self.cursor_row)] = false;
             }
             _ => return,
@@ -2364,6 +2566,8 @@ impl Terminal {
         self.saved_column = 0;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows - 1;
+        self.scroll_left = 0;
+        self.scroll_right = self.columns - 1;
         self.inactive_cursor_row = 0;
         self.inactive_cursor_column = 0;
         self.inactive_wrap_pending = false;
@@ -2371,6 +2575,8 @@ impl Terminal {
         self.inactive_saved_column = 0;
         self.inactive_scroll_top = 0;
         self.inactive_scroll_bottom = self.rows - 1;
+        self.inactive_scroll_left = 0;
+        self.inactive_scroll_right = self.columns - 1;
         self.row_soft_wrapped.fill(false);
         self.inactive_row_soft_wrapped.fill(false);
         self.cursor_visible = true;
@@ -2380,6 +2586,7 @@ impl Terminal {
         self.new_line_mode = false;
         self.backarrow_key = false;
         self.reverse_screen = false;
+        self.left_right_margin_mode = false;
         self.insert_mode = false;
         self.origin_mode = false;
         self.auto_wrap = true;
@@ -2406,11 +2613,14 @@ impl Terminal {
         self.new_line_mode = false;
         self.backarrow_key = false;
         self.reverse_screen = false;
+        self.left_right_margin_mode = false;
         self.insert_mode = false;
         self.origin_mode = false;
         self.auto_wrap = true;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows - 1;
+        self.scroll_left = 0;
+        self.scroll_right = self.columns - 1;
         self.wrap_pending = false;
         self.saved_row = 0;
         self.saved_column = 0;
@@ -2443,6 +2653,24 @@ impl Terminal {
         Cell {
             background: self.background,
             ..Cell::blank()
+        }
+    }
+
+    fn clear_margin_intersections(&mut self, row: u16) {
+        let erased = self.erased_cell();
+        if self.scroll_left > 0 {
+            let previous = self.index(row, self.scroll_left - 1);
+            if self.cells[previous].width == 2 {
+                self.cells[previous] = erased;
+                self.cells[previous + 1] = erased;
+            }
+        }
+        if self.scroll_right + 1 < self.columns {
+            let right = self.index(row, self.scroll_right);
+            if self.cells[right].width == 2 {
+                self.cells[right] = erased;
+                self.cells[right + 1] = erased;
+            }
         }
     }
 
@@ -3434,7 +3662,7 @@ mod tests {
         terminal.write_damage(&mut output).unwrap();
 
         terminal.feed(
-            b"\x1b[2;3r\x1b[?1;5;6;67;2004h\x1b[2;4H\x1b=\x1b[4;20h\
+            b"\x1b[2;3r\x1b[?1;5;6;67;69;2004h\x1b[2;4H\x1b=\x1b[4;20h\
               \x1b[31;44;1m\x1b(0\x1b[?25l\x1b[?5$p",
         );
         assert_eq!(terminal.pending_reply(), b"\x1b[?5;1$y");
@@ -3465,6 +3693,9 @@ mod tests {
         assert!(!terminal.new_line_mode);
         assert!(!terminal.backarrow_key);
         assert!(!terminal.reverse_screen);
+        assert!(!terminal.left_right_margin_mode);
+        assert_eq!(terminal.scroll_left, 0);
+        assert_eq!(terminal.scroll_right, 7);
         assert!(!terminal.insert_mode);
         assert!(!terminal.origin_mode);
         assert!(terminal.auto_wrap);
@@ -3520,6 +3751,44 @@ mod tests {
         assert_eq!(text(&terminal, 2), "    ");
         assert_eq!(text(&terminal, 3), "3333");
         assert_eq!(text(&terminal, 4), "5555");
+    }
+
+    #[test]
+    fn left_right_margins_bound_wrap_edit_and_rectangular_scroll() {
+        let mut terminal = Terminal::new(5, 8).unwrap();
+        terminal.feed(
+            b"\x1b[1;1H00000000\x1b[2;1H11111111\x1b[3;1H22222222\
+              \x1b[4;1H33333333\x1b[5;1H44444444\
+              \x1b[?69h\x1b[3;6s\x1b[2;4r\x1b[?6habcdefghijklmn",
+        );
+        assert_eq!(text(&terminal, 0), "00000000");
+        assert_eq!(text(&terminal, 1), "11efgh11");
+        assert_eq!(text(&terminal, 2), "22ijkl22");
+        assert_eq!(text(&terminal, 3), "33mn  33");
+        assert_eq!(text(&terminal, 4), "44444444");
+        assert_eq!(terminal.cursor(), (3, 4));
+        assert_eq!(terminal.history_rows(), 0);
+        terminal.feed(b"\x1b[6n");
+        assert_eq!(terminal.pending_reply(), b"\x1b[3;3R");
+        terminal.consume_reply(usize::MAX);
+
+        terminal.feed(b"\x1b[2;2H\x1b[2@\x1b[2P\x1b[?69$p");
+        assert_eq!(text(&terminal, 1), "11efgh11");
+        assert_eq!(text(&terminal, 2), "22ij  22");
+        assert_eq!(terminal.pending_reply(), b"\x1b[?69;1$y");
+        terminal.consume_reply(usize::MAX);
+
+        terminal.feed(b"\x1b[4;5H\xe7\x95\x8c");
+        assert_eq!(text(&terminal, 1), "11ij  11");
+        assert_eq!(text(&terminal, 2), "22mn  22");
+        assert_eq!(text(&terminal, 3), "33界   33");
+        assert_eq!(grapheme(&terminal, 3, 2), "界");
+        assert_eq!(terminal.cell(3, 2).unwrap().width, 2);
+
+        terminal.feed(b"\x1b[?69l\x1b[?69$p");
+        assert_eq!(terminal.scroll_left, 0);
+        assert_eq!(terminal.scroll_right, 7);
+        assert_eq!(terminal.pending_reply(), b"\x1b[?69;2$y");
     }
 
     #[test]

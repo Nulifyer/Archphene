@@ -1247,9 +1247,20 @@ published as exact direct RGB, so no palette block, protocol expansion, or
 per-frame allocation is required. A change invalidates existing rows, queries
 use the fixed reply ring, and malformed, partial, or overlong commands cannot
 partially mutate the palette. Unit and warmed zero-allocation gates pass.
-Clippy and exact x86_64/AArch64 manager builds also pass. Horizontal margins,
-terminal mouse/focus reporting, cursor style/blink, and synchronized output
-remain open parts of the advertised contract.
+Clippy and exact x86_64/AArch64 manager builds also pass.
+
+DECLRMM/DECSLRM horizontal margins are now modeled independently for primary
+and alternate screens, so `CSI s` remains cursor save unless left/right margin
+mode is active. Origin-relative addressing and cursor reports, CR/NEL, tabs,
+autowrap, wide graphemes, character/line edits, and vertical scrolling honor
+the active rectangle. Partial-width scrolling copies only the bounded columns,
+preserves outside content, clears boundary-crossing wide cells, and never
+mislabels a rectangle as full-width scrollback. Resize, soft/hard reset, mode
+queries, and alternate-screen transitions restore bounded defaults. Focused
+unit, warmed zero-allocation, clippy, Android lint/unit, exact x86_64/AArch64
+build, and APK-install gates pass; the exact Bash PTY probe is prepared but
+awaits restoration of the clean-data device roots. Terminal mouse/focus
+reporting, cursor style/blink, and synchronized output remain open.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a
