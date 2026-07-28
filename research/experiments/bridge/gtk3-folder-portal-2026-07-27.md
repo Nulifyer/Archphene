@@ -76,10 +76,27 @@ Linux app. Removing the fault immediately permits an exact one-file import.
 The picker, feedback, and completion evidence is full-device output on both
 exact ABIs.
 
+The maximum-size real-provider gate is:
+
+```bash
+./scripts/test-folder-portal-large-tree.sh \
+  --serial SERIAL \
+  --package org.archphene.linux.p510d0cdd00e00000605a7743b9909630
+```
+
+It builds an exact 10,000-entry tree inside the manager's Linux home and reads
+it back through DocumentsProvider and Binder. Three child cursors expose 9,997
+files; four marker files contain 57 bytes and the rest include preserved empty
+files. The emulator completed the import in 13 seconds and Samsung in 49
+seconds. Exact counts, sampled hashes, empty content, process survival, fatal
+logs, and full-device picker/completion frames pass on both.
+
 Full-device evidence is retained under:
 
 - `tooling/build/folder-portal/emulator-5554/`
 - `tooling/build/folder-portal/RFCT90AEEFA/`
+- `tooling/build/folder-portal-provider-failure/`
+- `tooling/build/folder-portal-large-tree/`
 
 The picker and returned Mousepad surfaces were visually inspected with the
 complete Android status and navigation areas visible.
@@ -90,5 +107,4 @@ complete Android status and navigation areas visible.
   a folder-selection workflow.
 - Validate Qt 6/KDE, GTK 4/libadwaita, and Electron callers.
 - Add MIME/name filters where the Android picker contract can preserve them.
-- Test providers that make slow forward progress and genuinely large
-  provider-backed trees.
+- Test providers that make slow forward progress.

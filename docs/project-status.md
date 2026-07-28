@@ -1661,6 +1661,14 @@ silently dropping back into the Linux app. A normal retry then imports the
 exact fixture, with picker, feedback, and completed full-device frames
 inspected on both devices.
 
+The real DocumentsProvider path also passes the exact 10,000-entry portal
+contract boundary. The fixture spans three bounded child cursors and contains
+9,997 files, including empty files and four nonempty hash sentinels. The
+manager imported all entries and 57 nonempty bytes in 13 seconds on the
+emulator and 49 seconds on Samsung. Counts, sampled hashes, empty content,
+launcher/manager survival, fatal logs, and complete picker/returned-app frames
+are independently checked on both devices.
+
 The same private frontend implements XDG Settings portal v2 for the standard
 appearance color scheme, accent, contrast, and reduced-motion keys, including
 the intentionally nested legacy `Read` result. It honors D-Bus no-reply calls,

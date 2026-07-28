@@ -17,6 +17,55 @@ archphene_launcher() {
   printf '%s' "$activity"
 }
 
+archphene_prepare_portal_probe() {
+  local manager="$1"
+  local bus deadline package_dump native_dir abi abi_directory
+  bus=
+  deadline=$((SECONDS + 10))
+  while ((SECONDS < deadline)); do
+    bus="$(
+      archphene_adb_run shell run-as "$manager" find cache -name bus -print |
+        tr -d '\r'
+    )"
+    [[ "$bus" =~ ^cache/p[1-9][0-9]*-[0-9a-f]{16}/bus$ ]] && break
+    sleep 0.3
+  done
+  [[ "$bus" =~ ^cache/p[1-9][0-9]*-[0-9a-f]{16}/bus$ ]] ||
+    archphene_die "expected exactly one private launcher bus, received: $bus"
+
+  package_dump="$(archphene_adb_run shell dumpsys package "$manager")"
+  native_dir="$(
+    sed -n 's/.*legacyNativeLibraryDir=//p' <<<"$package_dump" |
+      head -n 1 |
+      tr -d '\r'
+  )"
+  [[ "$native_dir" =~ ^/data/app/[A-Za-z0-9_~+./=-]+/lib$ ]] ||
+    archphene_die "manager native library directory is invalid"
+  abi="$(
+    sed -n 's/.*primaryCpuAbi=//p' <<<"$package_dump" |
+      head -n 1 |
+      tr -d '\r'
+  )"
+  case "$abi" in
+    arm64-v8a) abi_directory=arm64 ;;
+    x86_64) abi_directory=x86_64 ;;
+    *) archphene_die "unsupported manager ABI: $abi" ;;
+  esac
+  ARCHPHENE_PORTAL_ADDRESS="unix:path=/data/user/0/$manager/$bus"
+  ARCHPHENE_PORTAL_PROBE="$native_dir/$abi_directory/libarchphene_portal_probe.so"
+}
+
+archphene_run_portal_directory_probe() {
+  local manager="$1"
+  local output="$2"
+  local command
+  [[ -n "${ARCHPHENE_PORTAL_ADDRESS:-}" && -n "${ARCHPHENE_PORTAL_PROBE:-}" ]] ||
+    archphene_die "portal probe context is not prepared"
+  archphene_adb_run shell run-as "$manager" rm -f "$output"
+  command="run-as $manager sh -c 'DBUS_SESSION_BUS_ADDRESS=$ARCHPHENE_PORTAL_ADDRESS \"$ARCHPHENE_PORTAL_PROBE\" open-directory > \"$output\" 2>&1 &'"
+  archphene_adb_run shell "$command"
+}
+
 archphene_wait_log() {
   local pattern="$1"
   local seconds="${2:-20}"

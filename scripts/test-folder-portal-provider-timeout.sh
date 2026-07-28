@@ -66,40 +66,8 @@ archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log \
   'Private desktop portal ready session=' 30 \
   'ArchphenePortal:I ArchpheneLauncherSession:I AndroidRuntime:E *:S' >/dev/null
-
-bus=
-deadline=$((SECONDS + 10))
-while ((SECONDS < deadline)); do
-  bus="$(
-    archphene_adb_run shell run-as "$manager" find cache -name bus -print |
-      tr -d '\r'
-  )"
-  [[ "$bus" =~ ^cache/p[1-9][0-9]*-[0-9a-f]{16}/bus$ ]] && break
-  sleep 0.3
-done
-[[ "$bus" =~ ^cache/p[1-9][0-9]*-[0-9a-f]{16}/bus$ ]] ||
-  archphene_die "expected exactly one private launcher bus, received: $bus"
-
-package_dump="$(archphene_adb_run shell dumpsys package "$manager")"
-native_dir="$(
-  sed -n 's/.*legacyNativeLibraryDir=//p' <<<"$package_dump" |
-    head -n 1 |
-    tr -d '\r'
-)"
-abi="$(
-  sed -n 's/.*primaryCpuAbi=//p' <<<"$package_dump" |
-    head -n 1 |
-    tr -d '\r'
-)"
-case "$abi" in
-  arm64-v8a) abi_directory=arm64 ;;
-  x86_64) abi_directory=x86_64 ;;
-  *) archphene_die "unsupported manager ABI: $abi" ;;
-esac
-address="unix:path=/data/user/0/$manager/$bus"
-probe="$native_dir/$abi_directory/libarchphene_portal_probe.so"
-command="run-as $manager sh -c 'DBUS_SESSION_BUS_ADDRESS=$address \"$probe\" open-directory > \"$probe_output\" 2>&1 &'"
-archphene_adb_run shell "$command"
+archphene_prepare_portal_probe "$manager"
+archphene_run_portal_directory_probe "$manager" "$probe_output"
 
 archphene_wait_ui \
   'package="com\.(google\.)?android\.documentsui"' \
