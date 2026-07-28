@@ -90,6 +90,11 @@ internal class TerminalQueryTestReceiver : BroadcastReceiver() {
                 "printf \$'\\e[!p'; " +
                 "read -rsn8 -p \$'\\e[?5\$p' reverse_reset; " +
                 "read -rsn8 -p \$'\\e[?1\$p' cursor_reset; " +
+                "printf \$'\\e]4;25;rgb:12/34/56\\a'; " +
+                "read -rsn27 -p \$'\\e]4;25;?\\e\\\\' palette_custom; " +
+                "printf \$'\\e]104;25\\a'; " +
+                "read -rsn27 -p \$'\\e]4;25;?\\e\\\\' palette_reset; " +
+                "printf \$'\\e]4;25;rgb:12/34/56\\a'; " +
                 "if [[ \$da == \$'\\e[?1;2c' && \$dsr == \$'\\e[0n' " +
                 "&& \$cpr == \$'\\e[3;5R' && \$da2 == \$'\\e[>0;1;0c' " +
                 "&& \$size == \"\$expected_size\" " +
@@ -97,8 +102,10 @@ internal class TerminalQueryTestReceiver : BroadcastReceiver() {
                 "&& \$paste_on == \$'\\e[?2004;1\$y' " +
                 "&& \$reverse_on == \$'\\e[?5;1\$y' " +
                 "&& \$reverse_reset == \$'\\e[?5;2\$y' " +
-                "&& \$cursor_reset == \$'\\e[?1;2\$y' ]]; then " +
-                "printf \$'\\e[2J\\e[Hterminal-query-pass\\n'; else " +
+                "&& \$cursor_reset == \$'\\e[?1;2\$y' " +
+                "&& \$palette_custom == \$'\\e]4;25;rgb:1212/3434/5656\\e\\\\' " +
+                "&& \$palette_reset == \$'\\e]4;25;rgb:0000/5f5f/afaf\\e\\\\' ]]; then " +
+                "printf \$'\\e[2J\\e[H\\e[48;5;25mterminal-query-pass\\e[0m\\n'; else " +
                 "printf \$'\\e[2J\\e[Hterminal-query-fail\\n'; fi"
     }
 }

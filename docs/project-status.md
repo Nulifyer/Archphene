@@ -1237,9 +1237,19 @@ one reserved damage-flag bit; Android applies it as an XOR with per-cell
 inverse video and re-records every row only when the mode changes. Rust unit,
 warmed zero-allocation, and clippy gates plus Android lint/unit and exact
 x86_64/AArch64 build gates pass.
-Dynamic palette changes, horizontal margins, terminal mouse/focus reporting,
-cursor style/blink, and synchronized output remain open parts of the advertised
-contract.
+
+The advertised dynamic-color capability is no longer a false promise. A
+fixed-size OSC parser accepts bounded OSC 4 palette set/query and OSC 104
+selective/all reset commands, including xterm `rgb:` and one-to-four-digit
+per-component `#` forms. Cells retain their indexed color internally and on the
+damage wire while the palette is unchanged; only an overridden index is
+published as exact direct RGB, so no palette block, protocol expansion, or
+per-frame allocation is required. A change invalidates existing rows, queries
+use the fixed reply ring, and malformed, partial, or overlong commands cannot
+partially mutate the palette. Unit and warmed zero-allocation gates pass.
+Clippy and exact x86_64/AArch64 manager builds also pass. Horizontal margins,
+terminal mouse/focus reporting, cursor style/blink, and synchronized output
+remain open parts of the advertised contract.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a

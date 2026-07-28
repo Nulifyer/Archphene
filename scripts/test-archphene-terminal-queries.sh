@@ -80,5 +80,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "terminal-query regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene terminal-query regression passed on $serial"
-archphene_note "  DA, DSR/CPR, size, mode-query, reverse-screen, and soft-reset round trips passed"
+archphene_note "  DA, DSR/CPR, size, modes, soft reset, and dynamic-palette round trips passed"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

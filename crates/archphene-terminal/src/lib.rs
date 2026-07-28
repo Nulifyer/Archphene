@@ -20,6 +20,8 @@ pub const SCROLLBACK_LINE_LIMIT: usize = 4 * 1024;
 const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
 const MAX_CSI_PARAMETERS: usize = 16;
 const MAX_STRING_BYTES: usize = 8 * 1024;
+const MAX_OSC_BYTES: usize = 512;
+const MAX_OSC_COLOR_OPERATIONS: usize = 32;
 const DEFAULT_FOREGROUND: u32 = 7;
 const DEFAULT_BACKGROUND: u32 = 0;
 const DIRECT_COLOR_FLAG: u32 = 1 << 24;
@@ -508,12 +510,18 @@ pub struct Terminal {
     csi_intermediate: u8,
     csi_unsupported: bool,
     string_bytes: usize,
+    string_is_osc: bool,
+    osc_bytes: [u8; MAX_OSC_BYTES],
+    osc_length: usize,
+    osc_unsupported: bool,
     utf8_codepoint: u32,
     utf8_minimum: u32,
     utf8_remaining: u8,
     foreground: u32,
     background: u32,
     attributes: u8,
+    palette_colors: [u32; 256],
+    palette_overridden: [bool; 256],
     dirty_start: u16,
     dirty_end: u16,
     revision: u64,
@@ -577,12 +585,18 @@ impl Terminal {
             csi_intermediate: 0,
             csi_unsupported: false,
             string_bytes: 0,
+            string_is_osc: false,
+            osc_bytes: [0; MAX_OSC_BYTES],
+            osc_length: 0,
+            osc_unsupported: false,
             utf8_codepoint: 0,
             utf8_minimum: 0,
             utf8_remaining: 0,
             foreground: DEFAULT_FOREGROUND,
             background: DEFAULT_BACKGROUND,
             attributes: 0,
+            palette_colors: [0; 256],
+            palette_overridden: [false; 256],
             dirty_start: 0,
             dirty_end: rows,
             revision: 1,
@@ -763,13 +777,25 @@ impl Terminal {
                     scratch[..usize::from(self.columns)].fill(Cell::blank());
                 }
                 for cell in &scratch[..usize::from(self.columns)] {
-                    write_wire_cell(output, offset, *cell);
+                    write_wire_cell(
+                        output,
+                        offset,
+                        *cell,
+                        &self.palette_colors,
+                        &self.palette_overridden,
+                    );
                     offset += DAMAGE_CELL_SIZE;
                 }
             } else {
                 let screen_row = (visual_row - history_rows) as u16;
                 for column in 0..self.columns {
-                    write_wire_cell(output, offset, self.cells[self.index(screen_row, column)]);
+                    write_wire_cell(
+                        output,
+                        offset,
+                        self.cells[self.index(screen_row, column)],
+                        &self.palette_colors,
+                        &self.palette_overridden,
+                    );
                     offset += DAMAGE_CELL_SIZE;
                 }
             }
@@ -805,7 +831,13 @@ impl Terminal {
         let mut offset = DAMAGE_HEADER_SIZE;
         for row in dirty_start..dirty_end {
             for column in 0..self.columns {
-                write_wire_cell(output, offset, self.cells[self.index(row, column)]);
+                write_wire_cell(
+                    output,
+                    offset,
+                    self.cells[self.index(row, column)],
+                    &self.palette_colors,
+                    &self.palette_overridden,
+                );
                 offset += DAMAGE_CELL_SIZE;
             }
         }
@@ -1122,19 +1154,23 @@ impl Terminal {
             ParserState::Csi => self.feed_csi(byte),
             ParserState::Osc => {
                 if byte == 0x07 {
+                    self.finish_control_string();
                     self.parser_state = ParserState::Ground;
                 } else if byte == 0x1b {
                     self.parser_state = ParserState::OscEscape;
-                } else if self.string_bytes < MAX_STRING_BYTES {
-                    self.string_bytes += 1;
+                } else {
+                    self.push_control_string_byte(byte);
                 }
             }
             ParserState::OscEscape => {
-                self.parser_state = if byte == b'\\' {
-                    ParserState::Ground
+                if byte == b'\\' {
+                    self.finish_control_string();
+                    self.parser_state = ParserState::Ground;
                 } else {
-                    ParserState::Osc
-                };
+                    self.osc_unsupported = true;
+                    self.push_control_string_byte(byte);
+                    self.parser_state = ParserState::Osc;
+                }
             }
             ParserState::CharsetG0 => {
                 self.g0_charset = charset_designation(byte);
@@ -1230,8 +1266,12 @@ impl Terminal {
                 self.reset_csi();
                 self.parser_state = ParserState::Csi;
             }
-            b']' | b'P' | b'_' | b'^' => {
-                self.string_bytes = 0;
+            b']' => {
+                self.begin_control_string(true);
+                self.parser_state = ParserState::Osc;
+            }
+            b'P' | b'_' | b'^' => {
+                self.begin_control_string(false);
                 self.parser_state = ParserState::Osc;
             }
             b'(' => self.parser_state = ParserState::CharsetG0,
@@ -1259,6 +1299,158 @@ impl Terminal {
             b'Z' => self.queue_reply(b"\x1b[?1;2c"),
             b'c' => self.reset(),
             _ => {}
+        }
+    }
+
+    fn begin_control_string(&mut self, is_osc: bool) {
+        self.string_bytes = 0;
+        self.string_is_osc = is_osc;
+        self.osc_length = 0;
+        self.osc_unsupported = false;
+    }
+
+    fn push_control_string_byte(&mut self, byte: u8) {
+        if self.string_bytes >= MAX_STRING_BYTES {
+            self.osc_unsupported = true;
+            return;
+        }
+        self.string_bytes += 1;
+        if self.string_is_osc {
+            if self.osc_length < self.osc_bytes.len() {
+                self.osc_bytes[self.osc_length] = byte;
+                self.osc_length += 1;
+            } else {
+                self.osc_unsupported = true;
+            }
+        }
+    }
+
+    fn finish_control_string(&mut self) {
+        if self.string_is_osc && !self.osc_unsupported {
+            let bytes = self.osc_bytes;
+            self.execute_osc(&bytes[..self.osc_length]);
+        }
+        self.string_bytes = 0;
+        self.string_is_osc = false;
+        self.osc_length = 0;
+        self.osc_unsupported = false;
+    }
+
+    fn execute_osc(&mut self, bytes: &[u8]) {
+        let mut fields = bytes.split(|byte| *byte == b';');
+        match fields.next() {
+            Some(b"4") => self.execute_palette_change(fields),
+            Some(b"104") => self.execute_palette_reset(fields),
+            _ => {}
+        }
+    }
+
+    fn execute_palette_change<'a>(&mut self, mut fields: impl Iterator<Item = &'a [u8]>) {
+        let mut indexes = [0_u8; MAX_OSC_COLOR_OPERATIONS];
+        let mut colors = [0_u32; MAX_OSC_COLOR_OPERATIONS];
+        let mut queries = [false; MAX_OSC_COLOR_OPERATIONS];
+        let mut count = 0;
+        loop {
+            let Some(index_field) = fields.next() else {
+                break;
+            };
+            let Some(color_field) = fields.next() else {
+                return;
+            };
+            if count == MAX_OSC_COLOR_OPERATIONS {
+                return;
+            }
+            let Some(index) = parse_palette_index(index_field) else {
+                return;
+            };
+            if color_field == b"?" {
+                queries[count] = true;
+            } else {
+                let Some(color) = parse_palette_color(color_field) else {
+                    return;
+                };
+                colors[count] = color;
+            }
+            indexes[count] = index;
+            count += 1;
+        }
+        if count == 0 {
+            return;
+        }
+        let mut changed = false;
+        for operation in 0..count {
+            let index = usize::from(indexes[operation]);
+            if queries[operation] {
+                self.report_palette_color(indexes[operation]);
+            } else if !self.palette_overridden[index]
+                || self.palette_colors[index] != colors[operation]
+            {
+                self.palette_colors[index] = colors[operation];
+                self.palette_overridden[index] = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_dirty_range(0, self.rows);
+        }
+    }
+
+    fn execute_palette_reset<'a>(&mut self, mut fields: impl Iterator<Item = &'a [u8]>) {
+        let mut reset = [false; 256];
+        let mut has_indexes = false;
+        for field in fields.by_ref() {
+            let Some(index) = parse_palette_index(field) else {
+                return;
+            };
+            reset[usize::from(index)] = true;
+            has_indexes = true;
+        }
+        let mut changed = false;
+        if has_indexes {
+            for (index, should_reset) in reset.into_iter().enumerate() {
+                if should_reset && self.palette_overridden[index] {
+                    self.palette_overridden[index] = false;
+                    changed = true;
+                }
+            }
+        } else {
+            changed = self.palette_overridden.iter().any(|overridden| *overridden);
+            self.palette_overridden.fill(false);
+        }
+        if changed {
+            self.mark_dirty_range(0, self.rows);
+        }
+    }
+
+    fn report_palette_color(&mut self, index: u8) {
+        let color = self.palette_color(index);
+        let mut response = [0_u8; 32];
+        response[..4].copy_from_slice(b"\x1b]4;");
+        let mut length = 4;
+        length += write_decimal(&mut response[length..], u16::from(index));
+        response[length..length + 5].copy_from_slice(b";rgb:");
+        length += 5;
+        length += write_hex_u16(
+            &mut response[length..],
+            ((color >> 16) as u8 as u16) * 0x101,
+        );
+        response[length] = b'/';
+        length += 1;
+        length += write_hex_u16(&mut response[length..], ((color >> 8) as u8 as u16) * 0x101);
+        response[length] = b'/';
+        length += 1;
+        length += write_hex_u16(&mut response[length..], (color as u8 as u16) * 0x101);
+        response[length..length + 2].copy_from_slice(b"\x1b\\");
+        length += 2;
+        self.queue_reply(&response[..length]);
+    }
+
+    fn palette_color(&self, index: u8) -> u32 {
+        let index = usize::from(index);
+        if self.palette_overridden[index] {
+            self.palette_colors[index]
+        } else {
+            default_palette_color(index as u8)
         }
     }
 
@@ -2363,7 +2555,15 @@ fn cell_is_text_blank(cell: Cell) -> bool {
     cell.width == 1 && cell.grapheme_len == 1 && cell.codepoint == u32::from(' ')
 }
 
-fn write_wire_cell(output: &mut [u8], offset: usize, cell: Cell) {
+fn write_wire_cell(
+    output: &mut [u8],
+    offset: usize,
+    mut cell: Cell,
+    palette_colors: &[u32; 256],
+    palette_overridden: &[bool; 256],
+) {
+    cell.foreground = wire_color(cell.foreground, palette_colors, palette_overridden);
+    cell.background = wire_color(cell.background, palette_colors, palette_overridden);
     for codepoint_index in 0..MAX_GRAPHEME_CODEPOINTS {
         let start = offset + codepoint_index * 4;
         output[start..start + 4].copy_from_slice(&cell.codepoint(codepoint_index).to_le_bytes());
@@ -2373,6 +2573,18 @@ fn write_wire_cell(output: &mut [u8], offset: usize, cell: Cell) {
     output[offset + 72] = cell.attributes;
     output[offset + 73] = cell.width;
     output[offset + 74] = cell.grapheme_len;
+}
+
+fn wire_color(color: u32, palette_colors: &[u32; 256], palette_overridden: &[bool; 256]) -> u32 {
+    if color & DIRECT_COLOR_FLAG != 0 {
+        return color;
+    }
+    let index = color.min(255) as usize;
+    if palette_overridden[index] {
+        DIRECT_COLOR_FLAG | palette_colors[index]
+    } else {
+        color
+    }
 }
 
 fn write_decimal(output: &mut [u8], value: u16) -> usize {
@@ -2391,6 +2603,113 @@ fn write_decimal(output: &mut [u8], value: u16) -> usize {
         output[index] = reversed[length - index - 1];
     }
     length
+}
+
+fn write_hex_u16(output: &mut [u8], value: u16) -> usize {
+    for (index, shift) in [12, 8, 4, 0].into_iter().enumerate() {
+        output[index] = hex_digit(((value >> shift) & 0xf) as u8);
+    }
+    4
+}
+
+const fn hex_digit(value: u8) -> u8 {
+    if value < 10 {
+        b'0' + value
+    } else {
+        b'a' + value - 10
+    }
+}
+
+fn parse_palette_index(bytes: &[u8]) -> Option<u8> {
+    if bytes.is_empty() || bytes.len() > 3 {
+        return None;
+    }
+    let mut value = 0_u16;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value
+            .checked_mul(10)?
+            .checked_add(u16::from(*byte - b'0'))?;
+    }
+    u8::try_from(value).ok()
+}
+
+fn parse_palette_color(bytes: &[u8]) -> Option<u32> {
+    if let Some(components) = bytes.strip_prefix(b"rgb:") {
+        let mut fields = components.split(|byte| *byte == b'/');
+        let red = parse_palette_component(fields.next()?)?;
+        let green = parse_palette_component(fields.next()?)?;
+        let blue = parse_palette_component(fields.next()?)?;
+        if fields.next().is_some() {
+            return None;
+        }
+        return Some((u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue));
+    }
+    let components = bytes.strip_prefix(b"#")?;
+    if components.len() % 3 != 0 {
+        return None;
+    }
+    let component_length = components.len() / 3;
+    if !(1..=4).contains(&component_length) {
+        return None;
+    }
+    let red = parse_palette_component(&components[..component_length])?;
+    let green = parse_palette_component(&components[component_length..component_length * 2])?;
+    let blue = parse_palette_component(&components[component_length * 2..])?;
+    Some((u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue))
+}
+
+fn parse_palette_component(bytes: &[u8]) -> Option<u8> {
+    if bytes.is_empty() || bytes.len() > 4 {
+        return None;
+    }
+    let mut value = 0_u32;
+    for byte in bytes {
+        value = (value << 4) | u32::from(parse_hex_digit(*byte)?);
+    }
+    let maximum = (1_u32 << (bytes.len() * 4)) - 1;
+    Some(((value * 255 + maximum / 2) / maximum) as u8)
+}
+
+const fn parse_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+const fn default_palette_color(index: u8) -> u32 {
+    const BASIC: [u32; 16] = [
+        0x1f2326, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xcba6f7, 0x94e2d5, 0xcdd6f4, 0x585b70,
+        0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xcba6f7, 0x94e2d5, 0xffffff,
+    ];
+    if index < 16 {
+        BASIC[index as usize]
+    } else if index < 232 {
+        let cube = index - 16;
+        let red = ansi_cube_component(cube / 36);
+        let green = ansi_cube_component((cube % 36) / 6);
+        let blue = ansi_cube_component(cube % 6);
+        (red << 16) | (green << 8) | blue
+    } else {
+        let level = 8 + (index as u32 - 232) * 10;
+        (level << 16) | (level << 8) | level
+    }
+}
+
+const fn ansi_cube_component(index: u8) -> u32 {
+    match index {
+        0 => 0,
+        1 => 95,
+        2 => 135,
+        3 => 175,
+        4 => 215,
+        _ => 255,
+    }
 }
 
 const fn mode_status(enabled: bool) -> u16 {
@@ -2909,6 +3228,61 @@ mod tests {
     }
 
     #[test]
+    fn osc_palette_changes_are_bounded_queryable_and_resettable() {
+        let mut terminal = Terminal::new(2, 6).unwrap();
+        let mut damage = [0_u8; 2048];
+        terminal.feed(b"\x1b[48;5;25mA");
+        terminal.write_damage(&mut damage).unwrap();
+        assert_eq!(terminal.cell(0, 0).unwrap().background, 25);
+
+        terminal.feed(b"\x1b]4;25;rgb:12/34/56\x07");
+        let length = terminal.write_damage(&mut damage).unwrap();
+        assert_eq!(length, DAMAGE_HEADER_SIZE + 2 * 6 * DAMAGE_CELL_SIZE);
+        assert_eq!(
+            u32::from_le_bytes(
+                damage[DAMAGE_HEADER_SIZE + 68..DAMAGE_HEADER_SIZE + 72]
+                    .try_into()
+                    .unwrap()
+            ),
+            DIRECT_COLOR_FLAG | 0x123456
+        );
+        assert_eq!(terminal.cell(0, 0).unwrap().background, 25);
+
+        terminal.feed(b"\x1b]4;25;?\x1b\\");
+        assert_eq!(
+            terminal.pending_reply(),
+            b"\x1b]4;25;rgb:1212/3434/5656\x1b\\"
+        );
+        terminal.consume_reply(usize::MAX);
+
+        terminal.feed(b"\x1b]4;25;#abc;196;#ff0000\x07");
+        assert_eq!(terminal.palette_color(25), 0xaabbcc);
+        assert_eq!(terminal.palette_color(196), 0xff0000);
+        terminal.feed(b"\x1b]104;25\x07");
+        assert!(!terminal.palette_overridden[25]);
+        assert!(terminal.palette_overridden[196]);
+        terminal.write_damage(&mut damage).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(
+                damage[DAMAGE_HEADER_SIZE + 68..DAMAGE_HEADER_SIZE + 72]
+                    .try_into()
+                    .unwrap()
+            ),
+            25
+        );
+
+        terminal.feed(b"\x1b]4;999;#ffffff\x07\x1b]4;25;not-a-color\x07");
+        assert!(!terminal.palette_overridden[25]);
+        terminal.feed(b"\x1b]104\x07");
+        assert!(!terminal.palette_overridden.iter().any(|value| *value));
+        terminal.feed(b"\x1b]4;16;?\x07");
+        assert_eq!(
+            terminal.pending_reply(),
+            b"\x1b]4;16;rgb:0000/0000/0000\x1b\\"
+        );
+    }
+
+    #[test]
     fn background_color_erase_applies_to_edits_and_new_scroll_rows() {
         let mut terminal = Terminal::new(3, 6).unwrap();
         terminal.feed(b"abcdef\x1b[1;3H\x1b[48;5;25m\x1b[K");
@@ -3219,6 +3593,12 @@ mod tests {
         terminal.feed(b"ok\x1b]0;secret\x07\x1bPignored\x1b\\!");
         assert_eq!(text(&terminal, 0), "ok!         ");
         assert_eq!(terminal.take_dirty_rows(), Some((0, 1)));
+
+        let mut overlong_palette = b"\x1b]4;25;#".to_vec();
+        overlong_palette.extend(std::iter::repeat_n(b'f', MAX_OSC_BYTES + 1));
+        overlong_palette.push(0x07);
+        terminal.feed(&overlong_palette);
+        assert!(!terminal.palette_overridden[25]);
     }
 
     #[test]
