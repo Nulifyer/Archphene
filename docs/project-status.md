@@ -870,8 +870,9 @@ The generic compatibility layer maps Linux root ownership to the Android app
 UID, copies when SELinux rejects hard links, avoids Android app seccomp's
 blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
-and proves the requested package and version. A real AArch64 older-to-newer
-upgrade now passes; the x86_64 replay and replacement coverage remain open.
+and proves the requested package and version. Real AArch64 and x86_64
+older-to-newer upgrades now pass; changed-dependency and replacement coverage
+remain open.
 Reviewed AUR lifecycle scripts are enabled under the exact capability described
 above; official-package scriptlets remain disabled, and generic hook policy is
 still open. Replacement handling, exact rollback, whole-operation AUR recovery,
@@ -904,11 +905,14 @@ installation semantics. On July 27, a signed cached AArch64
 and updated through the normal Samsung manager UI to 50.0-3. Pacman's local
 record retained `%REASON%=1`, no lock or partial payload remained, and the
 search-result row changed from the older-version warning to Installed in the
-same completion revision. The reusable gate derives the APK's exact pacman
-payload, uses pacman only to establish the signed older test baseline, and
-captures the real manager review/completion as full-device screenshots. The
-x86_64 emulator currently lacks a retained older signed archive, so its replay
-is pending an explicitly supplied archive rather than silently downloading one.
+same completion revision. The reusable gate derives the APK's exact pacman and
+GPGV payloads, prepares and validates the APK-bound trust keybox, requires an
+exact detached-signature `VALIDSIG`, uses pacman only to establish the signed
+older test baseline, and captures the real manager review/completion as
+full-device screenshots. The x86_64 emulator now passes the same gate from the
+official Arch Linux Archive `libsysprof-capture 50.0-2` input to the current
+50.0-3 repository package. It retains dependency reason 1, immediately
+reconciles the row, and leaves neither a database lock nor a partial payload.
 
 Clean nine-package `btop` transaction cycles pass on the x86_64 emulator and
 AArch64 Samsung. Both gates deliberately corrupt the target archive, prove
@@ -916,10 +920,10 @@ rejection, redownload and reverify it, remove the package conservatively, prove
 its executable and database entry are gone, reinstall from the verified cache,
 and prove the durable Complete result survives manager process death. Full-
 device screenshots also verify the responsive closure view and state-driven
-actions. The physical AArch64 older-to-newer update now passes; x86_64 replay,
-replacement handling, hooks/scriptlets, closure-wide rollback, orphan cleanup,
-and a real-storage-pressure retry-to-completion gate remain open, so this is
-not yet a complete production transaction engine.
+actions. Physical AArch64 and emulated x86_64 older-to-newer updates now pass;
+changed-dependency/replacement handling, hooks/scriptlets, closure-wide
+rollback, orphan cleanup, and a real-storage-pressure retry-to-completion gate
+remain open, so this is not yet a complete production transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16

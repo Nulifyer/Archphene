@@ -59,12 +59,19 @@ case "$device_abi" in
     ;;
   *) archphene_die "unsupported device ABI: $device_abi" ;;
 esac
+package_runtime_manifest="$(
+  unzip -p "$apk" "assets/package-runtime-$repository_arch.tsv"
+)"
 pacman_payload="$(
-  unzip -p "$apk" "assets/package-runtime-$repository_arch.tsv" |
-    awk -F '\t' '$2 == "@pacman" { print $3 }'
+  awk -F '\t' '$2 == "@pacman" { print $3 }' <<<"$package_runtime_manifest"
+)"
+gpgv_payload="$(
+  awk -F '\t' '$2 == "@gpgv" { print $3 }' <<<"$package_runtime_manifest"
 )"
 [[ "$pacman_payload" =~ ^libarchphene_pkg_[0-9a-f]{24}\.so$ ]] ||
   archphene_die "APK does not declare one valid pacman payload"
+[[ "$gpgv_payload" =~ ^libarchphene_pkg_[0-9a-f]{24}\.so$ ]] ||
+  archphene_die "APK does not declare one valid gpgv payload"
 
 archive="$(
   archphene_adb_run exec-out run-as "$manager" find "$cache" \
@@ -93,7 +100,22 @@ remote_alias="\$root/run/package-runtime-v1"
 remote_loader="\$alias/$loader_name"
 remote_native="\$(dirname \"\$(readlink \"\$loader\")\")"
 remote_pacman="\$native/$pacman_payload"
+remote_gpgv="\$native/$gpgv_payload"
+remote_keyring="\$root/run/package-trust-v1/pubring.kbx"
 remote_libraries="\$alias:\$native:\$root/usr/lib:\$root/usr/lib/pulseaudio"
+remote_verification="root=\"$remote_root\"; alias=\"$remote_alias\"; loader=\"$remote_loader\"; native=\"$remote_native\"; gpgv=\"$remote_gpgv\"; keyring=\"$remote_keyring\"; libs=\"$remote_libraries\"; env -i HOME=\"\$root/home/archphene\" TMPDIR=\"\$root/tmp\" PATH=\"\$alias:\$root/usr/bin\" LANG=C LC_ALL=C GLIBC_TUNABLES=glibc.pthread.rseq=0 LD_PRELOAD=\"\$alias/libarchphene_path_bridge.so\" ARCHPHENE_RUNTIME_LOADER=\"\$loader\" ARCHPHENE_RUNTIME_LIB=\"\$libs\" ARCHPHENE_RUNTIME_COMMAND_DIR=\"\$alias\" ARCHPHENE_RUNTIME_ROOT=\"\$root\" ARCHPHENE_RUNTIME_PROGRAM_PATH=\"\$gpgv\" ARCHPHENE_ROOT_IDENTITY=1 \"\$loader\" --library-path \"\$libs\" \"\$gpgv\" --keyring \"\$keyring\" --status-fd 1 \"\$PWD/$archive.sig\" \"\$PWD/$archive\""
+signature_status="$(
+  archphene_adb_run exec-out run-as "$manager" sh -c \
+    "$remote_verification" 2>&1
+)"
+archphene_regex_contains \
+  "$signature_status" '\[GNUPG:\] VALIDSIG (?:[0-9A-F]{40}|[0-9A-F]{64}) ' ||
+  archphene_die "older archive did not produce an exact valid signature status"
+if archphene_regex_contains \
+    "$signature_status" \
+    '\[GNUPG:\] (?:BADSIG|ERRSIG|REVKEYSIG|EXPKEYSIG|KEYEXPIRED|SIGEXPIRED)'; then
+  archphene_die "older archive produced a rejected signature status"
+fi
 remote_command="root=\"$remote_root\"; alias=\"$remote_alias\"; loader=\"$remote_loader\"; native=\"$remote_native\"; pacman=\"$remote_pacman\"; libs=\"$remote_libraries\"; env -i HOME=\"\$root/home/archphene\" TMPDIR=\"\$root/tmp\" PATH=\"\$alias:\$root/usr/bin\" LANG=C LC_ALL=C GLIBC_TUNABLES=glibc.pthread.rseq=0 LD_PRELOAD=\"\$alias/libarchphene_path_bridge.so\" ARCHPHENE_RUNTIME_LOADER=\"\$loader\" ARCHPHENE_RUNTIME_LIB=\"\$libs\" ARCHPHENE_RUNTIME_COMMAND_DIR=\"\$alias\" ARCHPHENE_RUNTIME_ROOT=\"\$root\" ARCHPHENE_RUNTIME_PROGRAM_PATH=\"\$pacman\" ARCHPHENE_ROOT_IDENTITY=1 \"\$loader\" --library-path \"\$libs\" \"\$pacman\" --config \"\$root/etc/pacman.conf\" --root \"\$root\" --dbpath \"\$root/var/lib/pacman\" --gpgdir \"\$root/run/package-trust-v1\" --cachedir \"\$root/var/cache/pacman/pkg\" --noconfirm --noprogressbar --noscriptlet $reason_flag -U \"\$PWD/$archive\""
 archphene_adb_run shell "run-as $manager sh -c '$remote_command'" >/dev/null
 
@@ -113,6 +135,7 @@ reason="$(awk '/^%REASON%$/{getline; print; exit}' <<<"$description")"
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+archphene_open_manager_section Packages "package-update-section-$serial"
 archphene_wait_ui 'text="Package catalog ready"' "package-update-catalog-$serial" 25
 archphene_wait_ui 'class="android.widget.EditText"' "package-update-field-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'class="android.widget.EditText"' 'package name'
