@@ -3350,19 +3350,24 @@ mod android {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenReviewedAurSnapshot(
-        environment: JNIEnv,
+        mut environment: JNIEnv,
         _class: JClass,
         handle: jlong,
+        package_base: JString,
         output_buffer: JByteBuffer,
     ) -> jint {
-        open_reviewed_aur_input(environment, handle, None, output_buffer)
+        let Ok(package_base) = java_string(&mut environment, &package_base) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        open_reviewed_aur_input(environment, handle, &package_base, None, output_buffer)
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenVerifiedAurSource(
-        environment: JNIEnv,
+        mut environment: JNIEnv,
         _class: JClass,
         handle: jlong,
+        package_base: JString,
         source_index: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
@@ -3372,12 +3377,22 @@ mod android {
         if source_index >= 64 {
             return ERROR_INVALID_ARGUMENT;
         }
-        open_reviewed_aur_input(environment, handle, Some(source_index), output_buffer)
+        let Ok(package_base) = java_string(&mut environment, &package_base) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        open_reviewed_aur_input(
+            environment,
+            handle,
+            &package_base,
+            Some(source_index),
+            output_buffer,
+        )
     }
 
     fn open_reviewed_aur_input(
         environment: JNIEnv,
         handle: jlong,
+        package_base: &str,
         source_index: Option<usize>,
         output_buffer: JByteBuffer,
     ) -> jint {
@@ -3405,8 +3420,8 @@ mod android {
                 return ERROR_INVALID_HANDLE;
             };
             match source_index {
-                Some(index) => runtime.open_verified_aur_source(index),
-                None => runtime.open_reviewed_aur_snapshot(),
+                Some(index) => runtime.open_verified_aur_source(package_base, index),
+                None => runtime.open_reviewed_aur_snapshot(package_base),
             }
         };
         match result {
@@ -3417,9 +3432,10 @@ mod android {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeVerifiedCachedAurSourceSize(
-        environment: JNIEnv,
+        mut environment: JNIEnv,
         _class: JClass,
         handle: jlong,
+        package_base: JString,
         source_index: jint,
         output_buffer: JByteBuffer,
     ) -> jlong {
@@ -3439,6 +3455,9 @@ mod android {
         if output_address.is_null() {
             return i64::from(ERROR_INVALID_ARGUMENT);
         }
+        let Ok(package_base) = java_string(&mut environment, &package_base) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         let (package_runtime, filename, expected_checksum) = {
             let Ok(mut registry) = registry().lock() else {
@@ -3447,7 +3466,7 @@ mod android {
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return i64::from(ERROR_INVALID_HANDLE);
             };
-            match runtime.aur_source_cache_candidate(source_index) {
+            match runtime.aur_source_cache_candidate(&package_base, source_index) {
                 Ok(candidate) => candidate,
                 Err(error) => return i64::from(copy_package_error(&error, destination)),
             }
@@ -3465,9 +3484,10 @@ mod android {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeBeginAurSourceDownload(
-        environment: JNIEnv,
+        mut environment: JNIEnv,
         _class: JClass,
         handle: jlong,
+        package_base: JString,
         source_index: jint,
         maximum_size: jlong,
         output_buffer: JByteBuffer,
@@ -3495,6 +3515,9 @@ mod android {
         if output_address.is_null() {
             return ERROR_INVALID_ARGUMENT;
         }
+        let Ok(package_base) = java_string(&mut environment, &package_base) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         let Ok(mut registry) = registry().lock() else {
             return ERROR_INTERNAL;
@@ -3503,7 +3526,7 @@ mod android {
             return ERROR_INVALID_HANDLE;
         };
         let (file, endpoint, filename) =
-            match runtime.begin_aur_source_download(source_index, maximum_size) {
+            match runtime.begin_aur_source_download(&package_base, source_index, maximum_size) {
                 Ok(result) => result,
                 Err(error) => return copy_package_error(&error, destination),
             };

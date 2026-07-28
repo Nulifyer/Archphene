@@ -1608,6 +1608,7 @@ impl RuntimeHost {
 
     pub fn begin_aur_source_download(
         &mut self,
+        package_base: &str,
         source_index: usize,
         maximum_size: u64,
     ) -> Result<(File, String, String), PackageRuntimeError> {
@@ -1618,8 +1619,7 @@ impl RuntimeHost {
             return Err(PackageRuntimeError::InvalidPayload);
         }
         let source = self
-            .aur_review
-            .as_ref()
+            .aur_review_by_base(package_base)
             .and_then(|review| review.sources.get(source_index))
             .ok_or(PackageRuntimeError::InvalidPayload)?;
         if source.local || source.insecure_transport {
@@ -1644,6 +1644,7 @@ impl RuntimeHost {
 
     pub fn aur_source_cache_candidate(
         &self,
+        package_base: &str,
         source_index: usize,
     ) -> Result<
         (
@@ -1654,8 +1655,7 @@ impl RuntimeHost {
         PackageRuntimeError,
     > {
         let source = self
-            .aur_review
-            .as_ref()
+            .aur_review_by_base(package_base)
             .and_then(|review| review.sources.get(source_index))
             .ok_or(PackageRuntimeError::InvalidPayload)?;
         if source.local || source.insecure_transport || source.remote_url.is_none() {
@@ -1672,17 +1672,20 @@ impl RuntimeHost {
 
     pub fn open_verified_aur_source(
         &self,
+        package_base: &str,
         source_index: usize,
     ) -> Result<File, PackageRuntimeError> {
         let (package_runtime, filename, expected_checksum) =
-            self.aur_source_cache_candidate(source_index)?;
+            self.aur_source_cache_candidate(package_base, source_index)?;
         package_runtime.open_verified_aur_source(&filename, expected_checksum)
     }
 
-    pub fn open_reviewed_aur_snapshot(&self) -> Result<File, PackageRuntimeError> {
+    pub fn open_reviewed_aur_snapshot(
+        &self,
+        package_base: &str,
+    ) -> Result<File, PackageRuntimeError> {
         let review = self
-            .aur_review
-            .as_ref()
+            .aur_review_by_base(package_base)
             .ok_or(PackageRuntimeError::InvalidPayload)?;
         let expected_sha256 = review
             .snapshot_sha256
@@ -1691,6 +1694,24 @@ impl RuntimeHost {
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
             .open_reviewed_aur_snapshot(&review.package_base, expected_sha256)
+    }
+
+    fn aur_review_by_base(&self, package_base: &str) -> Option<&AurReview> {
+        self.aur_review
+            .as_ref()
+            .filter(|review| review.package_base == package_base)
+            .or_else(|| {
+                self.aur_dependency_reviews
+                    .iter()
+                    .find(|review| review.package_base == package_base)
+            })
+    }
+
+    fn aur_review_by_package(&self, package_name: &str, version: &str) -> Option<&AurReview> {
+        self.aur_review
+            .iter()
+            .chain(self.aur_dependency_reviews.iter())
+            .find(|review| review.package_name == package_name && review.version == version)
     }
 
     pub fn resolve_aur_build_environment(
@@ -1799,9 +1820,7 @@ impl RuntimeHost {
         version: &str,
     ) -> Result<(AurReview, VerifiedPackageClosure, PackageRuntime), PackageRuntimeError> {
         let review = self
-            .aur_review
-            .as_ref()
-            .filter(|review| review.package_name == package_name && review.version == version)
+            .aur_review_by_package(package_name, version)
             .cloned()
             .ok_or(PackageRuntimeError::InvalidPayload)?;
         let closure = self

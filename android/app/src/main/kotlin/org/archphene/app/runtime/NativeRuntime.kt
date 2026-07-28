@@ -379,21 +379,25 @@ internal object NativeRuntime {
     ): Int
     external fun nativeBeginAurSourceDownload(
         handle: Long,
+        packageBase: String,
         sourceIndex: Int,
         maximumSize: Long,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeVerifiedCachedAurSourceSize(
         handle: Long,
+        packageBase: String,
         sourceIndex: Int,
         outputBuffer: ByteBuffer,
     ): Long
     external fun nativeOpenReviewedAurSnapshot(
         handle: Long,
+        packageBase: String,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeOpenVerifiedAurSource(
         handle: Long,
+        packageBase: String,
         sourceIndex: Int,
         outputBuffer: ByteBuffer,
     ): Int

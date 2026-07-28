@@ -1039,6 +1039,10 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var retainedAurDependencyReviews: Array<AurReviewData> = emptyArray()
     @Volatile private var retainedAurVerifiedBytes = 0L
     @Volatile private var retainedAurSourceEvidence: Array<AurSourceEvidence> = emptyArray()
+    @Volatile
+    private var retainedAurSourceEvidenceByBase:
+        Map<String, Array<AurSourceEvidence>> = emptyMap()
+    @Volatile private var retainedAurBuildGraph: AurBuildGraph? = null
     @Volatile private var retainedAurBuilderReport: AurBuilderReport? = null
     @Volatile private var retainedAurBuiltPackage: AurBuiltPackage? = null
     @Volatile private var retainedAurBuiltPackages: Array<AurBuiltPackage> = emptyArray()
@@ -1286,6 +1290,11 @@ class ArchpheneRuntimeService : Service() {
         val endpoint: String,
         val cached: Boolean,
         val sha256: String,
+    )
+
+    private data class AurSourceVerification(
+        val evidence: Array<AurSourceEvidence>,
+        val totalVerifiedBytes: Long,
     )
 
     private data class AurBuilderReport(
@@ -2252,6 +2261,8 @@ class ArchpheneRuntimeService : Service() {
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
         private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
+        private const val AUR_GRAPH_TOTAL_SOURCE_MAX_BYTES =
+            32L * AUR_TOTAL_SOURCE_MAX_BYTES
         private const val SHELL_PREFERENCES = "terminal"
         private const val SHELL_PREFERENCE_ID = "shared_shell_id"
         private const val PACKAGE_RECOVERY_PREFERENCES = "package_recovery"
@@ -6875,6 +6886,8 @@ class ArchpheneRuntimeService : Service() {
         retainedAurDependencyReviews = emptyArray()
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
+        retainedAurSourceEvidenceByBase = emptyMap()
+        retainedAurBuildGraph = null
         retainedAurBuilderReport = null
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         clearAurReviewPresentation()
@@ -7296,6 +7309,8 @@ class ArchpheneRuntimeService : Service() {
         retainedAurDependencyReviews = emptyArray()
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
+        retainedAurSourceEvidenceByBase = emptyMap()
+        retainedAurBuildGraph = null
         retainedAurBuilderReport = null
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         clearAurReviewPresentation()
@@ -7691,7 +7706,6 @@ class ArchpheneRuntimeService : Service() {
         val remoteSources =
             review.sources.withIndex().filter { (_, source) -> !source.local }
         if (
-            remoteSources.isEmpty() ||
             remoteSources.any { (_, source) ->
                 source.remoteUrl == null ||
                     source.checksum == null ||
@@ -7708,17 +7722,20 @@ class ArchpheneRuntimeService : Service() {
         aurBuildCancellationRequested = false
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
+        retainedAurSourceEvidenceByBase = emptyMap()
+        retainedAurBuildGraph = null
         retainedAurBuilderReport = null
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
-        searchStatus = "Preparing ${remoteSources.size} reviewed AUR source download(s)"
+        searchStatus = "Resolving the reviewed AUR build graph"
         val worker =
             Thread({
                 requireRuntimeWorker("AUR source verification")
                 try {
                     throwIfAurBuildCancelled()
                     deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
+                    val dependencyCountBefore = retainedAurDependencyReviews.size
                     val buildTargets = resolveReviewedAurDependencies(activeHandle)
-                    if (retainedAurDependencyReviews.isNotEmpty()) {
+                    if (retainedAurDependencyReviews.size > dependencyCountBefore) {
                         publishAurReviewPresentation(
                             review,
                             buildEnvironment = buildTargets.environment,
@@ -7735,117 +7752,64 @@ class ArchpheneRuntimeService : Service() {
                         )
                         return@Thread
                     }
-                    var totalVerified = 0L
-                    val evidence = ArrayList<AurSourceEvidence>(remoteSources.size)
-                    remoteSources.forEachIndexed { remoteIndex, (sourceIndex, source) ->
-                        throwIfAurBuildCancelled()
-                        val initialEndpoint =
-                            source.remoteUrl
-                                ?: throw SecurityException("AUR source has no HTTPS endpoint")
-                        aurEndpointBuffer.clear()
-                        val cachedSize =
-                            NativeRuntime.nativeVerifiedCachedAurSourceSize(
-                                activeHandle,
-                                sourceIndex,
-                                aurEndpointBuffer,
+                    val graph =
+                        buildTargets.graph
+                            ?: throw SecurityException(
+                                "The reviewed AUR build graph is unavailable",
                             )
-                        if (cachedSize < 0L) {
-                            throw SecurityException(
-                                readNativeMessage(aurEndpointBuffer, cachedSize.toInt()),
+                    val reviewsByBase = LinkedHashMap<String, AurReviewData>()
+                    (retainedAurDependencyReviews.asList() + review).forEach {
+                            reviewedPackage ->
+                        val previous =
+                            reviewsByBase.put(
+                                reviewedPackage.packageBase,
+                                reviewedPackage,
                             )
-                        }
-                        if (cachedSize > 0L) {
-                            totalVerified = Math.addExact(totalVerified, cachedSize)
-                            if (totalVerified > AUR_TOTAL_SOURCE_MAX_BYTES) {
-                                throw SecurityException(
-                                    "AUR sources exceed the total download limit",
-                                )
-                            }
-                            retainedAurVerifiedBytes = totalVerified
-                            evidence +=
-                                AurSourceEvidence(
-                                    source.filename,
-                                    cachedSize,
-                                    initialEndpoint,
-                                    true,
-                                    sha256VerifiedAurSource(
-                                        activeHandle,
-                                        sourceIndex,
-                                        cachedSize,
-                                    ),
-                                )
-                            searchStatus =
-                                "Verified cached source ${remoteIndex + 1}/" +
-                                    "${remoteSources.size}: ${source.filename}"
-                            return@forEachIndexed
-                        }
-                        val connection = openAurSourceConnection(initialEndpoint)
-                        try {
-                            val declaredLength = connection.contentLengthLong
-                            if (
-                                declaredLength == 0L ||
-                                declaredLength > NativeRuntime.AUR_SOURCE_MAX_SIZE
-                            ) {
-                                throw SecurityException("AUR source has an invalid size")
-                            }
-                            val remainingTotal =
-                                AUR_TOTAL_SOURCE_MAX_BYTES - totalVerified
-                            if (remainingTotal <= 0L || declaredLength > remainingTotal) {
-                                throw SecurityException(
-                                    "AUR sources exceed the total download limit",
-                                )
-                            }
-                            val maximumSize =
-                                if (declaredLength > 0L) {
-                                    declaredLength
-                                } else {
-                                    minOf(
-                                        NativeRuntime.AUR_SOURCE_MAX_SIZE,
-                                        remainingTotal,
-                                    )
-                                }
-                            if (
-                                declaredLength > 0L &&
-                                declaredLength + AUR_STORAGE_RESERVE_BYTES > filesDir.usableSpace
-                            ) {
-                                throw IllegalStateException(
-                                    "Not enough private storage for ${source.filename}",
-                                )
-                            }
-                            val (verified, verifiedSha256) =
-                                downloadAndVerifyAurSource(
-                                    activeHandle,
-                                    sourceIndex,
-                                    source,
-                                    connection,
-                                    maximumSize,
-                                    declaredLength,
-                                    remoteIndex + 1,
-                                    remoteSources.size,
-                                )
-                            totalVerified = Math.addExact(totalVerified, verified)
-                            if (totalVerified > AUR_TOTAL_SOURCE_MAX_BYTES) {
-                                throw SecurityException(
-                                    "AUR sources exceed the total download limit",
-                                )
-                            }
-                            retainedAurVerifiedBytes = totalVerified
-                            evidence +=
-                                AurSourceEvidence(
-                                    source.filename,
-                                    verified,
-                                    connection.url.toString(),
-                                    false,
-                                    verifiedSha256,
-                                )
-                        } finally {
-                            if (activePackageConnection === connection) {
-                                activePackageConnection = null
-                            }
-                            connection.disconnect()
+                        require(previous == null || previous == reviewedPackage) {
+                            "Multiple reviews disagree for AUR base " +
+                                reviewedPackage.packageBase
                         }
                     }
-                    retainedAurSourceEvidence = evidence.toTypedArray()
+                    require(
+                        reviewsByBase.size == graph.packageBases.size &&
+                            graph.packageBases.lastOrNull() == review.packageBase,
+                    ) {
+                        "The retained AUR reviews do not match the dependency-first graph"
+                    }
+                    val orderedReviews =
+                        graph.packageBases.map { packageBase ->
+                            reviewsByBase[packageBase]
+                                ?: throw SecurityException(
+                                    "The reviewed AUR graph omitted base $packageBase",
+                                )
+                        }
+                    val graphRemoteSourceCount =
+                        orderedReviews.sumOf { reviewedPackage ->
+                            reviewedPackage.sources.count { source -> !source.local }
+                        }
+                    var totalVerified = 0L
+                    val evidenceByBase =
+                        LinkedHashMap<String, Array<AurSourceEvidence>>(orderedReviews.size)
+                    orderedReviews.forEachIndexed { reviewIndex, reviewedPackage ->
+                        throwIfAurBuildCancelled()
+                        searchStatus =
+                            "Verifying AUR base ${reviewIndex + 1}/${orderedReviews.size}: " +
+                                reviewedPackage.packageBase
+                        val verification =
+                            verifyAurReviewSources(
+                                activeHandle,
+                                reviewedPackage,
+                                totalVerified,
+                            )
+                        evidenceByBase[reviewedPackage.packageBase] =
+                            verification.evidence
+                        totalVerified = verification.totalVerifiedBytes
+                    }
+                    retainedAurSourceEvidenceByBase = evidenceByBase
+                    retainedAurSourceEvidence =
+                        evidenceByBase[review.packageBase] ?: emptyArray()
+                    retainedAurBuildGraph = graph
+                    retainedAurVerifiedBytes = totalVerified
                     throwIfAurBuildCancelled()
                     val buildEnvironment =
                         downloadAndVerifyAurBuildEnvironment(
@@ -7853,12 +7817,16 @@ class ArchpheneRuntimeService : Service() {
                             buildTargets.environment,
                         )
                     val builder =
-                        probeAurBuilderCompanion(
-                            activeHandle,
-                            review,
-                            retainedAurSourceEvidence,
-                            buildEnvironment,
-                        )
+                        if (orderedReviews.size == 1) {
+                            probeAurBuilderCompanion(
+                                activeHandle,
+                                review,
+                                retainedAurSourceEvidence,
+                                buildEnvironment,
+                            )
+                        } else {
+                            null
+                        }
                     retainedAurBuilderReport = builder
                     publishAurReviewPresentation(
                         review,
@@ -7912,11 +7880,13 @@ class ArchpheneRuntimeService : Service() {
                         publishAurBuildLogs(selected.logs)
                     }
                     searchStatus =
-                        "Verified ${remoteSources.size} source(s) · " +
+                        "Verified $graphRemoteSourceCount graph source(s) · " +
                             "${formatStorageBytes(totalVerified)} · " +
                             when {
                                 restored.isNotEmpty() ->
                                     "restored verified build · ready to install"
+                                builder == null && orderedReviews.size > 1 ->
+                                    "dependency graph reviewed; sequential build pending"
                                 builder == null ->
                                     "builder companion unavailable"
                                 else ->
@@ -7924,7 +7894,7 @@ class ArchpheneRuntimeService : Service() {
                             }
                     Log.i(
                         TAG,
-                            "Verified ${remoteSources.size} AUR source(s) for " +
+                            "Verified $graphRemoteSourceCount AUR graph source(s) for " +
                             "${review.packageName}: $totalVerified bytes; " +
                             "build=${buildEnvironment.packageCount} verified packages/" +
                             "${buildEnvironment.downloadBytes} bytes " +
@@ -8490,8 +8460,130 @@ class ArchpheneRuntimeService : Service() {
         return endpoint
     }
 
+    private fun verifyAurReviewSources(
+        activeHandle: Long,
+        review: AurReviewData,
+        initialVerifiedBytes: Long,
+    ): AurSourceVerification {
+        val remoteSources = review.sources.withIndex().filter { (_, source) -> !source.local }
+        if (
+            remoteSources.any { (_, source) ->
+                source.remoteUrl == null ||
+                    source.checksum == null ||
+                    source.insecureTransport
+            }
+        ) {
+            throw SecurityException(
+                "Every remote source for ${review.packageName} must use direct HTTPS " +
+                    "with a SHA-256 or SHA-512 checksum",
+            )
+        }
+        var totalVerified = initialVerifiedBytes
+        val evidence = ArrayList<AurSourceEvidence>(remoteSources.size)
+        remoteSources.forEachIndexed { remoteIndex, (sourceIndex, source) ->
+            throwIfAurBuildCancelled()
+            val initialEndpoint =
+                source.remoteUrl
+                    ?: throw SecurityException("AUR source has no HTTPS endpoint")
+            aurEndpointBuffer.clear()
+            val cachedSize =
+                NativeRuntime.nativeVerifiedCachedAurSourceSize(
+                    activeHandle,
+                    review.packageBase,
+                    sourceIndex,
+                    aurEndpointBuffer,
+                )
+            if (cachedSize < 0L) {
+                throw SecurityException(
+                    readNativeMessage(aurEndpointBuffer, cachedSize.toInt()),
+                )
+            }
+            if (cachedSize > 0L) {
+                totalVerified = Math.addExact(totalVerified, cachedSize)
+                if (totalVerified > AUR_GRAPH_TOTAL_SOURCE_MAX_BYTES) {
+                    throw SecurityException("AUR graph sources exceed the total download limit")
+                }
+                retainedAurVerifiedBytes = totalVerified
+                evidence +=
+                    AurSourceEvidence(
+                        source.filename,
+                        cachedSize,
+                        initialEndpoint,
+                        true,
+                        sha256VerifiedAurSource(
+                            activeHandle,
+                            review.packageBase,
+                            sourceIndex,
+                            cachedSize,
+                        ),
+                    )
+                searchStatus =
+                    "Verified cached ${review.packageName} source ${remoteIndex + 1}/" +
+                        "${remoteSources.size}: ${source.filename}"
+                return@forEachIndexed
+            }
+            val connection = openAurSourceConnection(initialEndpoint)
+            try {
+                val declaredLength = connection.contentLengthLong
+                if (declaredLength == 0L || declaredLength > NativeRuntime.AUR_SOURCE_MAX_SIZE) {
+                    throw SecurityException("AUR source has an invalid size")
+                }
+                val remainingTotal = AUR_GRAPH_TOTAL_SOURCE_MAX_BYTES - totalVerified
+                if (remainingTotal <= 0L || declaredLength > remainingTotal) {
+                    throw SecurityException("AUR graph sources exceed the total download limit")
+                }
+                val maximumSize =
+                    if (declaredLength > 0L) {
+                        declaredLength
+                    } else {
+                        minOf(NativeRuntime.AUR_SOURCE_MAX_SIZE, remainingTotal)
+                    }
+                if (
+                    declaredLength > 0L &&
+                    declaredLength + AUR_STORAGE_RESERVE_BYTES > filesDir.usableSpace
+                ) {
+                    throw IllegalStateException(
+                        "Not enough private storage for ${source.filename}",
+                    )
+                }
+                val (verified, verifiedSha256) =
+                    downloadAndVerifyAurSource(
+                        activeHandle,
+                        review.packageBase,
+                        sourceIndex,
+                        source,
+                        connection,
+                        maximumSize,
+                        declaredLength,
+                        remoteIndex + 1,
+                        remoteSources.size,
+                    )
+                totalVerified = Math.addExact(totalVerified, verified)
+                if (totalVerified > AUR_GRAPH_TOTAL_SOURCE_MAX_BYTES) {
+                    throw SecurityException("AUR graph sources exceed the total download limit")
+                }
+                retainedAurVerifiedBytes = totalVerified
+                evidence +=
+                    AurSourceEvidence(
+                        source.filename,
+                        verified,
+                        connection.url.toString(),
+                        false,
+                        verifiedSha256,
+                    )
+            } finally {
+                if (activePackageConnection === connection) {
+                    activePackageConnection = null
+                }
+                connection.disconnect()
+            }
+        }
+        return AurSourceVerification(evidence.toTypedArray(), totalVerified)
+    }
+
     private fun downloadAndVerifyAurSource(
         activeHandle: Long,
+        packageBase: String,
         sourceIndex: Int,
         source: AurSourceReview,
         connection: HttpsURLConnection,
@@ -8504,6 +8596,7 @@ class ArchpheneRuntimeService : Service() {
         val descriptor =
             NativeRuntime.nativeBeginAurSourceDownload(
                 activeHandle,
+                packageBase,
                 sourceIndex,
                 maximumSize,
                 aurEndpointBuffer,
@@ -8595,6 +8688,7 @@ class ArchpheneRuntimeService : Service() {
 
     private fun sha256VerifiedAurSource(
         activeHandle: Long,
+        packageBase: String,
         sourceIndex: Int,
         expectedBytes: Long,
     ): String {
@@ -8602,6 +8696,7 @@ class ArchpheneRuntimeService : Service() {
         val descriptor =
             NativeRuntime.nativeOpenVerifiedAurSource(
                 activeHandle,
+                packageBase,
                 sourceIndex,
                 aurEndpointBuffer,
             )
@@ -8685,6 +8780,7 @@ class ArchpheneRuntimeService : Service() {
             val snapshotFd =
                 NativeRuntime.nativeOpenReviewedAurSnapshot(
                     activeHandle,
+                    review.packageBase,
                     aurEndpointBuffer,
                 )
             if (snapshotFd < 0) {
@@ -8718,6 +8814,7 @@ class ArchpheneRuntimeService : Service() {
                 val sourceFd =
                     NativeRuntime.nativeOpenVerifiedAurSource(
                         activeHandle,
+                        review.packageBase,
                         sourceIndex,
                         aurEndpointBuffer,
                     )
@@ -12412,6 +12509,8 @@ class ArchpheneRuntimeService : Service() {
                     retainedAurDependencyReviews = emptyArray()
                     retainedAurVerifiedBytes = 0L
                     retainedAurSourceEvidence = emptyArray()
+                    retainedAurSourceEvidenceByBase = emptyMap()
+                    retainedAurBuildGraph = null
                     retainedAurBuilderReport = null
                     retainedAurBuildLogs = ""
                     aurReviewSnapshot =
@@ -13062,6 +13161,8 @@ class ArchpheneRuntimeService : Service() {
         retainedAurDependencyReviews = emptyArray()
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
+        retainedAurSourceEvidenceByBase = emptyMap()
+        retainedAurBuildGraph = null
         retainedAurBuilderReport = null
         deleteRetainedAurBuiltPackageFilesAsync(detachRetainedAurBuiltPackageFiles())
         lastResolvedPackage = ""
