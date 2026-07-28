@@ -5118,7 +5118,7 @@ class ArchpheneRuntimeService : Service() {
                         if (packageMutationStatus.isEmpty()) {
                             refreshPackageInventory(activeHandle)
                             reconcileInstalledLaunchers(activeHandle)
-                            refreshDesktopEntries(activeHandle)
+                            refreshDesktopEntries(activeHandle, false)
                         } else {
                             // A partially committed package transaction can
                             // temporarily hide desktop files. Keep installed
@@ -5414,7 +5414,10 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
-    private fun refreshDesktopEntries(activeHandle: Long): Boolean {
+    private fun refreshDesktopEntries(
+        activeHandle: Long,
+        rescanPackageTree: Boolean = true,
+    ): Boolean {
         val desktopIds = ArrayList<String>()
         val names = ArrayList<String>()
         val executables = ArrayList<String>()
@@ -5436,6 +5439,7 @@ class ArchpheneRuntimeService : Service() {
                     NativeRuntime.nativeListDesktopEntries(
                         activeHandle,
                         offset,
+                        rescanPackageTree && offset == 0,
                         desktopEntryOutputBuffer,
                     )
                 if (outputLength < 0) {
@@ -5718,7 +5722,9 @@ class ArchpheneRuntimeService : Service() {
             refreshSelectedPackageLauncherReview(activeHandle)
             Log.i(
                 TAG,
-                "Desktop catalog refreshed: entries=${desktopIds.size} examined=$examined rejected=$rejected truncated=$truncated",
+                "Desktop catalog ${if (rescanPackageTree) "rescanned" else "reused"}: " +
+                    "entries=${desktopIds.size} examined=$examined " +
+                    "rejected=$rejected truncated=$truncated",
             )
             return true
         } catch (error: Exception) {
@@ -5841,7 +5847,7 @@ class ArchpheneRuntimeService : Service() {
                             "Could not stage untrusted launcher replacement"
                         }
                         launcherPublisherActive.set(false)
-                        refreshDesktopEntries(activeHandle)
+                        refreshDesktopEntries(activeHandle, false)
                         mainHandler.post {
                             if (readyHandle == activeHandle) {
                                 startLauncherPublisher(activeHandle)
@@ -6096,7 +6102,7 @@ class ArchpheneRuntimeService : Service() {
                     )
                 launcherPublisherActive.set(false)
                 if (transitioned) {
-                    refreshDesktopEntries(activeHandle)
+                    refreshDesktopEntries(activeHandle, false)
                     Log.i(
                         TAG,
                         "Launcher package=$androidPackage generation=$generation " +
@@ -6436,7 +6442,7 @@ class ArchpheneRuntimeService : Service() {
                     ) {
                         "Could not persist cancelled launcher decision"
                     }
-                    refreshDesktopEntries(activeHandle)
+                    refreshDesktopEntries(activeHandle, false)
                 } catch (error: Exception) {
                     Log.e(TAG, "Cancelled launcher decision failed", error)
                 } finally {
@@ -6499,7 +6505,7 @@ class ArchpheneRuntimeService : Service() {
                     ) {
                         "Could not persist launcher review"
                     }
-                    refreshDesktopEntries(activeHandle)
+                    refreshDesktopEntries(activeHandle, false)
                 } catch (error: Exception) {
                     Log.e(TAG, "Launcher review failed", error)
                 } finally {

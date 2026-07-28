@@ -3320,6 +3320,7 @@ mod android {
         _class: JClass,
         handle: jlong,
         offset: jint,
+        refresh: jboolean,
         output_buffer: JByteBuffer,
     ) -> jint {
         let (Ok(handle), Ok(offset)) = (u64::try_from(handle), usize::try_from(offset)) else {
@@ -3344,7 +3345,7 @@ mod android {
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return ERROR_INVALID_HANDLE;
             };
-            if offset == 0 {
+            if offset == 0 && refresh != JNI_FALSE {
                 if let Err(error) = runtime.refresh_desktop_entries() {
                     let destination =
                         unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };

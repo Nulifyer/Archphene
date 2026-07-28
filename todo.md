@@ -387,7 +387,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Generalize verified absolute/private RUNPATH translation without globally mixing unrelated application-private libraries.
   - [x] Repeat the nested executable/symlink/script device gate on the x86_64 emulator. Exact-ABI manager builds now pass the complete `/usr/bin` wrapper → `/usr/lib` script → absolute root-internal symlink → ELF chain, real Bash output, fixture cleanup, fatal-log check, and visually inspected full-device capture on both targets.
 - [x] Cache unchanged verified closure analysis so repeat installs do not rescan large package archives.
-- [ ] Cache unchanged wrapper-generation inputs so launcher reconciliation does not repeat large package-tree work.
+- [x] Cache unchanged wrapper-generation inputs so launcher reconciliation does not repeat large package-tree work. The Rust runtime retains the bounded desktop/ownership/integration catalog after its authoritative package-tree scan; launcher-only installer, review, retry, dismissal, and reconciliation transitions page that exact catalog without scanning packages again, while every package mutation still forces a fresh scan. The physical Samsung bootstrap log proves one 151-package rescan followed by one cached four-entry replay with the same examined/rejected/truncated evidence and a correct full-device app list.
 - [ ] Complete and validate the separate 16 KB-aligned x86_64 package/runtime strategy before enabling transactions there.
 
 ## P0 - Manager UX and reliability

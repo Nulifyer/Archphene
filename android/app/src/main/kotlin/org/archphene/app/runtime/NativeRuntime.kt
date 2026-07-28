@@ -381,6 +381,7 @@ internal object NativeRuntime {
     external fun nativeListDesktopEntries(
         handle: Long,
         offset: Int,
+        refresh: Boolean,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativePackageLauncherReview(

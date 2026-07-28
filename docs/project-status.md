@@ -335,6 +335,17 @@ restarts preserve byte-identical registries on the emulator and Samsung;
 fixture removal reconciles cleanly and the manager reports the exact remaining
 catalog without fatal logs.
 
+Launcher-only state transitions no longer repeat desktop parsing, pacman
+ownership scans, and executable integration profiling. The Rust runtime keeps
+the already bounded immutable desktop catalog after an authoritative scan;
+Kotlin explicitly requests a rescan only after package-tree mutation and pages
+the retained catalog after PackageInstaller reconciliation, review, retry,
+dismissal, and result transitions. On the physical Samsung, a state-preserving
+bootstrap logged one scan across its 151 installed packages followed by one
+cached replay of the same four launchable entries and identical
+examined/rejected/truncated evidence. The full-device installed-app view
+remained correct with three current Android launchers.
+
 Package icons now cross the complete generic launcher pipeline. Rust resolves
 absolute icon paths and freedesktop hicolor/pixmaps names within the shared
 Arch root, expands relative and fake-root absolute symlinks with a fixed
