@@ -44,7 +44,15 @@ does no steady-state appearance polling. Stock Mousepad passes live
 light-to-dark-to-light updates on the exact x86_64 emulator and AArch64 Samsung
 without launcher, manager, or Linux process restart. The gate checks portal
 signals/readback, GTK applied state, fatal logs, and measured full-device GTK
-content plus status/navigation-bar luminance.
+content plus status/navigation-bar luminance. The Qt 6 platform-theme module
+now likewise watches `kdeglobals` through an event-driven exact-file watcher
+created after Qt's event dispatcher is ready; it re-arms after atomic
+replacement, uses a directory fallback only if the file is unexpectedly
+absent, and performs no steady-state polling. A native
+gate loads the production plugin and requires a same-process light-to-dark
+palette update (currently 25 ms). Both rebuilt plugin architectures are in the
+exact manager APKs installed on the emulator and Samsung; current shared-root
+KCalc device validation remains pending.
 
 The dense single-screen manager scaffold has been split into focused Packages,
 Files, and Terminal sections with a persistent bottom navigation surface. The
@@ -1635,7 +1643,10 @@ appearance files atomically, and carries Android light/dark, Material color,
 text, visible-control, and touch-target values through a versioned launcher
 request. It does not reintroduce global Qt or GTK geometry scaling. On Samsung,
 the GTK module records the expected Android-light `Adwaita` and 12-point font
-policy. A separate Wayland defect explained both the chooser's tiny scale and
+policy. Qt's production platform-theme plugin now consumes atomic `kdeglobals`
+replacement through a deferred exact-file `QFileSystemWatcher`, with exact x86_64 and
+AArch64 rebuilds and a deterministic same-process palette regression. A
+separate Wayland defect explained both the chooser's tiny scale and
 its displaced touches: only a focused surface had received `wl_surface.enter`.
 Every mapped surface now receives output membership and preferred buffer scale;
 the stock chooser commits scale 3, its visible Open action works, and Code opens

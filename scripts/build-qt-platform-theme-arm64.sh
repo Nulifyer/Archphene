@@ -13,12 +13,10 @@ sysroot=$work/sysroot
 source_dir=$root/native/archphene-qt-platform-theme
 output=$root/prebuilt/qt-bridge/arm64-v8a
 runtime_root=$root/tooling/downloads/arch-curated-kcalc-aarch64/runtime-root
+kde_config_fallback_sha256=90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311
 
 command -v aarch64-linux-gnu-g++ >/dev/null
 test "$(pkg-config --modversion Qt6Core)" = "$qt_version"
-test -f "$runtime_root/usr/include/KF6/KConfig/kconfig_version.h"
-test -f "$runtime_root/usr/include/KF6/KConfigCore/KSharedConfig"
-test -f "$runtime_root/usr/lib/libKF6ConfigCore.so"
 mkdir -p "$download_dir"
 if ! printf "%s  %s\n" "$package_sha256" "$package" | sha256sum -c - >/dev/null 2>&1; then
   rm -f "$package"
@@ -70,21 +68,33 @@ aarch64-linux-gnu-g++ -shared -fPIC -Wl,-O1 -Wl,-rpath,/usr/lib \
   -o "$output/libarchphene_qt_platform_theme.so" \
   "$work/platform/archpheneplatformtheme.o" \
   -L"$sysroot/usr/lib" -lQt6Widgets -lQt6Gui -lQt6Core -lpthread
-aarch64-linux-gnu-g++ -c -O2 -std=gnu++17 -Wall -Wextra -fPIC \
-  -DQT_NO_DEBUG -DQT_PLUGIN -DQT_CORE_LIB \
-  -I"$source_dir" -I"$runtime_root/usr/include/KF6/KConfig" \
-  -I"$runtime_root/usr/include/KF6/KConfigCore" \
-  -I"$sysroot/usr/include/qt6" -I"$sysroot/usr/include/qt6/QtCore" \
-  -o "$work/kde-config/archphenekdeconfig.o" \
-  "$source_dir/archphenekdeconfig.cpp"
-aarch64-linux-gnu-g++ -shared -fPIC -Wl,-O1 -Wl,-rpath,/usr/lib \
-  -Wl,-rpath-link,"$sysroot/usr/lib" -Wl,--allow-shlib-undefined \
-  -o "$output/libarchphene_kde_config.so" \
-  "$work/kde-config/archphenekdeconfig.o" \
-  "$runtime_root/usr/lib/libKF6ConfigCore.so" \
-  -L"$sysroot/usr/lib" -lQt6Core -lpthread
+if test -f "$runtime_root/usr/include/KF6/KConfig/kconfig_version.h" \
+    && test -f "$runtime_root/usr/include/KF6/KConfigCore/KSharedConfig" \
+    && test -f "$runtime_root/usr/lib/libKF6ConfigCore.so"; then
+  aarch64-linux-gnu-g++ -c -O2 -std=gnu++17 -Wall -Wextra -fPIC \
+    -DQT_NO_DEBUG -DQT_PLUGIN -DQT_CORE_LIB \
+    -I"$source_dir" -I"$runtime_root/usr/include/KF6/KConfig" \
+    -I"$runtime_root/usr/include/KF6/KConfigCore" \
+    -I"$sysroot/usr/include/qt6" -I"$sysroot/usr/include/qt6/QtCore" \
+    -o "$work/kde-config/archphenekdeconfig.o" \
+    "$source_dir/archphenekdeconfig.cpp"
+  aarch64-linux-gnu-g++ -shared -fPIC -Wl,-O1 -Wl,-rpath,/usr/lib \
+    -Wl,-rpath-link,"$sysroot/usr/lib" -Wl,--allow-shlib-undefined \
+    -o "$output/libarchphene_kde_config.so" \
+    "$work/kde-config/archphenekdeconfig.o" \
+    "$runtime_root/usr/lib/libKF6ConfigCore.so" \
+    -L"$sysroot/usr/lib" -lQt6Core -lpthread
+else
+  printf "%s  %s\n" "$kde_config_fallback_sha256" \
+    "$output/libarchphene_kde_config.so" | sha256sum -c -
+  echo "Retaining checksum-pinned AArch64 KF6Config helper; its source is unchanged."
+fi
 
 aarch64-linux-gnu-strip --strip-unneeded \
+  "$output/libarchphene_qt_style.so" \
+  "$output/libarchphene_qt_platform_theme.so" \
+  "$output/libarchphene_kde_config.so"
+chmod 644 \
   "$output/libarchphene_qt_style.so" \
   "$output/libarchphene_qt_platform_theme.so" \
   "$output/libarchphene_kde_config.so"

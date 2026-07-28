@@ -136,6 +136,10 @@ grep -Fq 'g_file_monitor_directory(' "$gtk_live" \
   || archphene_die 'GTK live settings do not use an event-driven file monitor'
 ! grep -Fq 'g_timeout_add(' "$gtk_live" \
   || archphene_die 'GTK live settings still poll and allocate continuously'
+grep -Fq 'QFileSystemWatcher' "$platform_theme" \
+  || archphene_die 'Qt live settings do not use an event-driven file monitor'
+! grep -Fq 'setInterval(500)' "$platform_theme" \
+  || archphene_die 'Qt live settings still poll and allocate continuously'
 grep -Fq 'window.statusBarColor = background' "$launcher_activity" \
   || archphene_die 'generated launchers do not repaint their status bar on mode changes'
 

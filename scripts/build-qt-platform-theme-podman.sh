@@ -34,15 +34,15 @@ mkdir -p /tmp/archphene-qt-platform-theme/{platform,style,kde-config}
 cd /tmp/archphene-qt-platform-theme/platform
 qmake6 /workspace/native/archphene-qt-platform-theme/archphene-qt-platform-theme.pro
 make -j$jobs
-install -Dm755 libarchphene_qt_platform_theme.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_qt_platform_theme.so
+install -Dm644 libarchphene_qt_platform_theme.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_qt_platform_theme.so
 cd /tmp/archphene-qt-platform-theme/style
 qmake6 /workspace/native/archphene-qt-platform-theme/archphene-qt-style.pro
 make -j$jobs
-install -Dm755 libarchphene_qt_style.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_qt_style.so
+install -Dm644 libarchphene_qt_style.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_qt_style.so
 cd /tmp/archphene-qt-platform-theme/kde-config
 qmake6 /workspace/native/archphene-qt-platform-theme/archphene-kde-config.pro
 make -j$jobs
-install -Dm755 libarchphene_kde_config.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_kde_config.so"
+install -Dm644 libarchphene_kde_config.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_kde_config.so"
 podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace "$image" bash -lc "$command"
 podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace "$image" \
   bash scripts/build-qt-platform-theme-arm64.sh
@@ -78,4 +78,3 @@ lines += [f'{entry["sha256"]}  arm64-v8a/{entry["name"]}' for entry in arm]
 (root / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 PY
 archphene_note "Qt $qt_version appearance plugins built for x86_64 and arm64-v8a."
-

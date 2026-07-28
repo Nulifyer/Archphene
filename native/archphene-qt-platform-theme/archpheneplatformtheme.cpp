@@ -3,6 +3,8 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QFont>
 #include <QGuiApplication>
 #include <QLibrary>
@@ -96,6 +98,7 @@ private:
         const QString configHome = qEnvironmentVariable("XDG_CONFIG_HOME",
                 QDir::homePath() + QStringLiteral("/.config"));
         m_configPath = configHome + QStringLiteral("/kdeglobals");
+        m_configDirectory = QFileInfo(m_configPath).absolutePath();
         QSettings settings(m_configPath, QSettings::IniFormat);
         settings.sync();
         const QString configuredScheme = settings.value(
@@ -190,55 +193,89 @@ private:
                                             : QStringLiteral("light"),
                             window.name(QColor::HexRgb), view.name(QColor::HexRgb),
                             button.name(QColor::HexRgb), highlight.name(QColor::HexRgb)));
-            m_pollTimer = std::make_unique<QTimer>();
-            m_pollTimer->setInterval(500);
-            QObject::connect(m_pollTimer.get(), &QTimer::timeout, [this]() {
-                ArchphenePlatformTheme refreshed(false);
-                const bool changed = m_scheme != refreshed.m_scheme
-                        || m_palette != refreshed.m_palette;
-                if (!m_forceRefresh && !changed) {
-                    return;
-                }
-                m_forceRefresh = false;
-                if (changed) {
-                    m_palette = refreshed.m_palette;
-                    m_font = refreshed.m_font;
-                    m_fixedFont = refreshed.m_fixedFont;
-                    m_scheme = refreshed.m_scheme;
-                }
-                if (qApp != nullptr) {
-                    // Plasma reparses kdeglobals before ApplicationPaletteChange so
-                    // KColorScheme-backed custom painting reads the new colors.
-                    qApp->setProperty("KDE_COLOR_SCHEME_PATH", QString());
-                    reparseKdeColorConfig();
-                }
-                if (qobject_cast<QApplication *>(QCoreApplication::instance()) != nullptr) {
-                    QApplication::setPalette(m_palette);
-                    if (qApp != nullptr) {
-                        QEvent applicationChange(QEvent::ApplicationPaletteChange);
-                        QCoreApplication::sendEvent(qApp, &applicationChange);
-                    }
-                    QWindowSystemInterface::handleThemeChange();
-                    for (QWidget *widget : QApplication::topLevelWidgets()) {
-                        QEvent widgetChange(QEvent::ApplicationPaletteChange);
-                        QCoreApplication::sendEvent(widget, &widgetChange);
-                        widget->update();
-                    }
-                } else if (qGuiApp != nullptr) {
-                    QGuiApplication::setPalette(m_palette);
-                    QWindowSystemInterface::handleThemeChange();
-                }
-            });
             QTimer::singleShot(0, QCoreApplication::instance(), [this]() {
-                if (qobject_cast<QApplication *>(QCoreApplication::instance()) != nullptr) {
-                    QApplication::setPalette(m_palette);
-                    QWindowSystemInterface::handleThemeChange();
-                } else if (qGuiApp != nullptr) {
-                    QGuiApplication::setPalette(m_palette);
-                    QWindowSystemInterface::handleThemeChange();
-                }
-                m_pollTimer->start();
+                startWatching();
+                refresh();
             });
+        }
+    }
+
+    void startWatching()
+    {
+        m_configWatcher = std::make_unique<QFileSystemWatcher>();
+        QObject::connect(m_configWatcher.get(), &QFileSystemWatcher::fileChanged,
+                [this](const QString &) {
+                    configChanged();
+                });
+        QObject::connect(m_configWatcher.get(), &QFileSystemWatcher::directoryChanged,
+                [this](const QString &) {
+                    configChanged();
+                });
+        watchConfigFile();
+    }
+
+    void watchConfigFile()
+    {
+        if (QFileInfo::exists(m_configPath)) {
+            if (m_configWatcher->directories().contains(m_configDirectory)) {
+                m_configWatcher->removePath(m_configDirectory);
+            }
+            if (!m_configWatcher->files().contains(m_configPath)
+                    && !m_configWatcher->addPath(m_configPath)) {
+                logKdeHelperError(QStringLiteral(
+                        "could not watch appearance file=%1").arg(m_configPath));
+            }
+        } else if (!m_configWatcher->directories().contains(m_configDirectory)
+                && !m_configWatcher->addPath(m_configDirectory)) {
+            logKdeHelperError(QStringLiteral(
+                    "could not watch appearance directory=%1").arg(m_configDirectory));
+        }
+    }
+
+    void configChanged()
+    {
+        // QSaveFile-style publication replaces the inode and removes a direct
+        // file watch. Keep the directory watch and re-arm the exact file.
+        watchConfigFile();
+        refresh();
+    }
+
+    void refresh()
+    {
+        ArchphenePlatformTheme refreshed(false);
+        const bool changed = m_scheme != refreshed.m_scheme
+                || m_palette != refreshed.m_palette;
+        if (!m_forceRefresh && !changed) {
+            return;
+        }
+        m_forceRefresh = false;
+        if (changed) {
+            m_palette = refreshed.m_palette;
+            m_font = refreshed.m_font;
+            m_fixedFont = refreshed.m_fixedFont;
+            m_scheme = refreshed.m_scheme;
+        }
+        if (qApp != nullptr) {
+            // Plasma reparses kdeglobals before ApplicationPaletteChange so
+            // KColorScheme-backed custom painting reads the new colors.
+            qApp->setProperty("KDE_COLOR_SCHEME_PATH", QString());
+            reparseKdeColorConfig();
+        }
+        if (qobject_cast<QApplication *>(QCoreApplication::instance()) != nullptr) {
+            QApplication::setPalette(m_palette);
+            if (qApp != nullptr) {
+                QEvent applicationChange(QEvent::ApplicationPaletteChange);
+                QCoreApplication::sendEvent(qApp, &applicationChange);
+            }
+            QWindowSystemInterface::handleThemeChange();
+            for (QWidget *widget : QApplication::topLevelWidgets()) {
+                QEvent widgetChange(QEvent::ApplicationPaletteChange);
+                QCoreApplication::sendEvent(widget, &widgetChange);
+                widget->update();
+            }
+        } else if (qGuiApp != nullptr) {
+            QGuiApplication::setPalette(m_palette);
+            QWindowSystemInterface::handleThemeChange();
         }
     }
 
@@ -286,7 +323,8 @@ private:
     QFont m_fixedFont;
     Qt::ColorScheme m_scheme = Qt::ColorScheme::Unknown;
     QString m_configPath;
-    std::unique_ptr<QTimer> m_pollTimer;
+    QString m_configDirectory;
+    std::unique_ptr<QFileSystemWatcher> m_configWatcher;
     bool m_forceRefresh = true;
 };
 
