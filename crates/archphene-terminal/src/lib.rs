@@ -1845,8 +1845,9 @@ impl Terminal {
         if count == 0 {
             return;
         }
+        let erased = self.erased_cell();
         self.cells.copy_within(start..end - count, start + count);
-        self.cells[start..start + count].fill(Cell::blank());
+        self.cells[start..start + count].fill(erased);
         normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
         self.mark_dirty(self.cursor_row);
     }
@@ -1860,8 +1861,9 @@ impl Terminal {
         if count == 0 {
             return;
         }
+        let erased = self.erased_cell();
         self.cells.copy_within(start + count..end, start);
-        self.cells[end - count..end].fill(Cell::blank());
+        self.cells[end - count..end].fill(erased);
         normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
         self.mark_dirty(self.cursor_row);
     }
@@ -1873,7 +1875,8 @@ impl Terminal {
         if count == 0 {
             return;
         }
-        self.cells[start..start + count].fill(Cell::blank());
+        let erased = self.erased_cell();
+        self.cells[start..start + count].fill(erased);
         normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
         self.mark_dirty(self.cursor_row);
     }
@@ -1887,8 +1890,9 @@ impl Terminal {
         let start = self.index(self.cursor_row, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
         let offset = usize::from(count) * columns;
+        let erased = self.erased_cell();
         self.cells.copy_within(start..end - offset, start + offset);
-        self.cells[start..start + offset].fill(Cell::blank());
+        self.cells[start..start + offset].fill(erased);
         let row_start = usize::from(self.cursor_row);
         let row_end = usize::from(self.scroll_bottom) + 1;
         let row_count = usize::from(count);
@@ -1907,8 +1911,9 @@ impl Terminal {
         let start = self.index(self.cursor_row, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
         let offset = usize::from(count) * columns;
+        let erased = self.erased_cell();
         self.cells.copy_within(start + offset..end, start);
-        self.cells[end - offset..end].fill(Cell::blank());
+        self.cells[end - offset..end].fill(erased);
         let row_start = usize::from(self.cursor_row);
         let row_end = usize::from(self.scroll_bottom) + 1;
         let row_count = usize::from(count);
@@ -1934,8 +1939,9 @@ impl Terminal {
         let top = self.index(self.scroll_top, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
         let offset = usize::from(count) * columns;
+        let erased = self.erased_cell();
         self.cells.copy_within(top + offset..end, top);
-        self.cells[end - offset..end].fill(Cell::blank());
+        self.cells[end - offset..end].fill(erased);
         let row_start = usize::from(self.scroll_top);
         let row_end = usize::from(self.scroll_bottom) + 1;
         let row_count = usize::from(count);
@@ -1951,8 +1957,9 @@ impl Terminal {
         let top = self.index(self.scroll_top, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
         let offset = usize::from(count) * columns;
+        let erased = self.erased_cell();
         self.cells.copy_within(top..end - offset, top + offset);
-        self.cells[top..top + offset].fill(Cell::blank());
+        self.cells[top..top + offset].fill(erased);
         let row_start = usize::from(self.scroll_top);
         let row_end = usize::from(self.scroll_bottom) + 1;
         let row_count = usize::from(count);
@@ -2001,6 +2008,7 @@ impl Terminal {
     }
 
     fn erase_display(&mut self, mode: u16) {
+        let erased = self.erased_cell();
         match mode {
             0 => {
                 let start = self.index(self.cursor_row, self.cursor_column);
@@ -2009,7 +2017,7 @@ impl Terminal {
                     self.cursor_column,
                     self.columns - self.cursor_column,
                 );
-                self.cells[start..].fill(Cell::blank());
+                self.cells[start..].fill(erased);
                 for row in self.cursor_row..self.rows {
                     normalize_cell_row(&mut self.cells, self.columns, row);
                 }
@@ -2019,7 +2027,7 @@ impl Terminal {
             1 => {
                 let end = self.index(self.cursor_row, self.cursor_column) + 1;
                 self.clear_wide_intersections(self.cursor_row, 0, self.cursor_column + 1);
-                self.cells[..end].fill(Cell::blank());
+                self.cells[..end].fill(erased);
                 for row in 0..=self.cursor_row {
                     normalize_cell_row(&mut self.cells, self.columns, row);
                 }
@@ -2027,7 +2035,7 @@ impl Terminal {
                 self.mark_dirty_range(0, self.cursor_row + 1);
             }
             2 => {
-                self.cells.fill(Cell::blank());
+                self.cells.fill(erased);
                 self.row_soft_wrapped.fill(false);
                 self.mark_dirty_range(0, self.rows);
             }
@@ -2043,6 +2051,7 @@ impl Terminal {
         let start = self.index(self.cursor_row, 0);
         let column = usize::from(self.cursor_column);
         let end = start + usize::from(self.columns);
+        let erased = self.erased_cell();
         match mode {
             0 => {
                 self.clear_wide_intersections(
@@ -2050,14 +2059,14 @@ impl Terminal {
                     self.cursor_column,
                     self.columns - self.cursor_column,
                 );
-                self.cells[start + column..end].fill(Cell::blank());
+                self.cells[start + column..end].fill(erased);
             }
             1 => {
                 self.clear_wide_intersections(self.cursor_row, 0, self.cursor_column + 1);
-                self.cells[start..=start + column].fill(Cell::blank());
+                self.cells[start..=start + column].fill(erased);
             }
             2 => {
-                self.cells[start..end].fill(Cell::blank());
+                self.cells[start..end].fill(erased);
                 self.row_soft_wrapped[usize::from(self.cursor_row)] = false;
             }
             _ => return,
@@ -2188,28 +2197,36 @@ impl Terminal {
         }
     }
 
+    fn erased_cell(&self) -> Cell {
+        Cell {
+            background: self.background,
+            ..Cell::blank()
+        }
+    }
+
     fn clear_wide_intersections(&mut self, row: u16, column: u16, count: u16) {
         if count == 0 || row >= self.rows || column >= self.columns {
             return;
         }
         let start = column;
         let end = column.saturating_add(count).min(self.columns);
+        let erased = self.erased_cell();
         if start > 0 {
             let previous = self.index(row, start - 1);
             if self.cells[previous].width == 2 {
-                self.cells[previous] = Cell::blank();
-                self.cells[previous + 1] = Cell::blank();
+                self.cells[previous] = erased;
+                self.cells[previous + 1] = erased;
             }
         }
         for current in start..end {
             let index = self.index(row, current);
             if self.cells[index].width == 2 {
-                self.cells[index] = Cell::blank();
+                self.cells[index] = erased;
                 if current + 1 < self.columns {
-                    self.cells[index + 1] = Cell::blank();
+                    self.cells[index + 1] = erased;
                 }
             } else if self.cells[index].width == 0 {
-                self.cells[index] = Cell::blank();
+                self.cells[index] = erased;
             }
         }
     }
@@ -2839,6 +2856,35 @@ mod tests {
             ),
             DIRECT_COLOR_FLAG | 0x005faf
         );
+    }
+
+    #[test]
+    fn background_color_erase_applies_to_edits_and_new_scroll_rows() {
+        let mut terminal = Terminal::new(3, 6).unwrap();
+        terminal.feed(b"abcdef\x1b[1;3H\x1b[48;5;25m\x1b[K");
+        assert_eq!(terminal.cell(0, 1).unwrap().background, DEFAULT_BACKGROUND);
+        for column in 2..6 {
+            let cell = terminal.cell(0, column).unwrap();
+            assert_eq!(cell.codepoint, u32::from(' '));
+            assert_eq!(cell.foreground, DEFAULT_FOREGROUND);
+            assert_eq!(cell.background, 25);
+            assert_eq!(cell.attributes, 0);
+        }
+
+        terminal.feed(b"\x1b[0m\x1b[2;1Habcdef\x1b[2;3H\x1b[48;5;46m\x1b[2X");
+        assert_eq!(terminal.cell(1, 2).unwrap().background, 46);
+        assert_eq!(terminal.cell(1, 3).unwrap().background, 46);
+        assert_eq!(terminal.cell(1, 4).unwrap().background, DEFAULT_BACKGROUND);
+        terminal.feed(b"\x1b[P");
+        assert_eq!(terminal.cell(1, 2).unwrap().background, 46);
+        assert_eq!(terminal.cell(1, 3).unwrap().background, DEFAULT_BACKGROUND);
+        assert_eq!(terminal.cell(1, 4).unwrap().background, DEFAULT_BACKGROUND);
+        assert_eq!(terminal.cell(1, 5).unwrap().background, 46);
+
+        terminal.feed(b"\x1b[48;5;21m\x1b[3;1H\n");
+        for column in 0..6 {
+            assert_eq!(terminal.cell(2, column).unwrap().background, 21);
+        }
     }
 
     #[test]

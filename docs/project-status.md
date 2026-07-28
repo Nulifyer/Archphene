@@ -1214,9 +1214,26 @@ selected state and Copy action. Exact x86_64 emulator and AArch64 Samsung gates
 prove long-press selection, off-screen/back stability, rendered-handle
 discovery and drag, edge autoscroll into old history, exact clipboard
 paste-back, scoped fatal logs, and inspected full-device frames. Remaining
-xterm controls and richer terminal accessibility are still required. The
-temporary command field remains as a fallback above the renderer; direct
-terminal input no longer depends on it.
+xterm controls and a real screen-reader workflow are still required.
+
+The current terminal core now honors xterm background-color erase across
+character, line, display, edit, and scroll-created cells while resetting
+foreground and attributes. Its unit and warmed zero-allocation gates pass.
+Android now coalesces terminal text-change and scroll accessibility events,
+publishes the cursor or visible selection as UTF-16 text offsets, accepts
+bounded accessibility selection, and includes nonblank content below the
+cursor. The implementation passes Android-10 lint/unit checks and exact
+x86_64/AArch64 builds. The signed-manager device fixture now includes a real
+`tput el` background-color-erase marker, but the final current-APK device gate
+is pending restoration of a package-installed shell after the intentional
+clean-data navigation regression cleared both test roots.
+
+The temporary command field and Run/Send controls are no longer present in the
+production manager. Active sessions reserve only the measured terminal plus a
+52 dp status/Stop row; normal regression input goes through the focused
+terminal InputConnection and hardware Enter path. Noninteractive command
+coverage remains available only through a bounded debug receiver that is
+absent from the release manifest.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

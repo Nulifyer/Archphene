@@ -35,6 +35,10 @@ printf '\r\n'
 printf '\033[4mUNDERLINE\033[24m \033[9mSTRIKE\033[29m \033[7mINVERSE\033[27m'
 printf '\r\n'
 printf '\033[8mHIDDEN-TEXT\033[28m CONCEAL-END'
+printf '\r\n'
+printf '\033[48;5;25mBCE'
+tput el
+tput sgr0
 printf '\r\n\r\nterminal-color-ready'
 IFS= read -r -n 1
 tput clear

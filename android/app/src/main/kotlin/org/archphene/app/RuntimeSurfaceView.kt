@@ -19,6 +19,8 @@ import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -161,6 +163,41 @@ internal class RuntimeSurfaceView(
     private var selectionAutoScrollDirection = 0
     private var selectionAutoScrollFrame = 0
     private var selectionAutoScrollX = 0f
+    private val accessibilityManager =
+        context.getSystemService(AccessibilityManager::class.java)
+    private var accessibilityEventPosted = false
+    private var accessibilityTextChanged = false
+    private var accessibilityScrolled = false
+    private val accessibilityEventRunnable =
+        Runnable {
+            accessibilityEventPosted = false
+            if (!accessibilityManager.isEnabled || !isAttachedToWindow) {
+                accessibilityTextChanged = false
+                accessibilityScrolled = false
+                return@Runnable
+            }
+            if (accessibilityTextChanged) {
+                accessibilityTextChanged = false
+                sendTerminalAccessibilityEvent(
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+                ) { event ->
+                    event.contentChangeTypes =
+                        AccessibilityEvent.CONTENT_CHANGE_TYPE_TEXT
+                }
+            }
+            if (accessibilityScrolled) {
+                accessibilityScrolled = false
+                sendTerminalAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SCROLLED) { event ->
+                    val firstVisibleRow = (historyRows - viewportOffset).coerceAtLeast(0)
+                    val totalRows = historyRows + rows
+                    event.fromIndex = firstVisibleRow
+                    event.toIndex = (firstVisibleRow + rows - 1).coerceAtMost(totalRows - 1)
+                    event.itemCount = totalRows
+                    event.scrollY = firstVisibleRow
+                    event.maxScrollY = historyRows
+                }
+            }
+        }
     private var needsFullSnapshot = true
     private var composingText = ""
     private val terminalInputConnection by lazy(LazyThreadSafetyMode.NONE) {
@@ -385,6 +422,10 @@ internal class RuntimeSurfaceView(
 
     override fun onDetachedFromWindow() {
         stopSelectionAutoScroll()
+        removeCallbacks(accessibilityEventRunnable)
+        accessibilityEventPosted = false
+        accessibilityTextChanged = false
+        accessibilityScrolled = false
         pastePopup?.dismiss()
         super.onDetachedFromWindow()
     }
@@ -407,6 +448,12 @@ internal class RuntimeSurfaceView(
                         composingText,
                     )}"
                 }
+            terminalAccessibilitySelection(snapshot.length)?.let { selection ->
+                info.setTextSelection(selection.first, selection.last)
+            }
+            if (snapshot.isNotEmpty()) {
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION)
+            }
         }
         if (hasSelection()) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_COPY)
@@ -436,6 +483,8 @@ internal class RuntimeSurfaceView(
                 setViewportOffset(viewportOffset + rows.coerceAtLeast(1))
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ->
                 setViewportOffset(viewportOffset - rows.coerceAtLeast(1))
+            AccessibilityNodeInfo.ACTION_SET_SELECTION ->
+                setAccessibilitySelection(arguments)
             else -> super.performAccessibilityAction(action, arguments)
         }
 
@@ -612,6 +661,10 @@ internal class RuntimeSurfaceView(
             return false
         }
         val nextTerminalRevision = damageBuffer.getLong(24)
+        val contentChanged =
+            terminalRevision == Long.MIN_VALUE ||
+                nextTerminalRevision != terminalRevision ||
+                dirtyStart < dirtyEnd
         val nextHistoryOriginEpoch = damageBuffer.getLong(40)
         if (terminalRevision != Long.MIN_VALUE && nextTerminalRevision < terminalRevision) {
             return false
@@ -713,6 +766,9 @@ internal class RuntimeSurfaceView(
                 recordRow(row)
             }
             invalidate()
+        }
+        if (contentChanged) {
+            scheduleTerminalAccessibilityEvent(textChanged = true)
         }
         return true
     }
@@ -1884,12 +1940,7 @@ internal class RuntimeSurfaceView(
     private fun accessibilitySnapshot(): String {
         val rowsPerSnapshot =
             (ACCESSIBILITY_CHARACTER_LIMIT / (columns + 1)).coerceAtLeast(1)
-        val lastRow =
-            if (viewportOffset > 0) {
-                rows - 1
-            } else {
-                cursorRow.coerceAtMost(rows - 1)
-            }
+        val lastRow = accessibilityLastRow()
         val firstRow = (lastRow - rowsPerSnapshot + 1).coerceAtLeast(0)
         val builder =
             StringBuilder(
@@ -1929,6 +1980,183 @@ internal class RuntimeSurfaceView(
         return builder.toString()
     }
 
+    private fun accessibilityLastRow(): Int {
+        if (viewportOffset > 0) {
+            return rows - 1
+        }
+        var lastRow = cursorRow.coerceIn(0, rows - 1)
+        for (row in lastRow + 1 until rows) {
+            val start = row * columns
+            if ((start until start + columns).any { cell -> !isBlankGlyph(cell) }) {
+                lastRow = row
+            }
+        }
+        return lastRow
+    }
+
+    private fun terminalAccessibilitySelection(snapshotLength: Int): IntRange? {
+        if (viewportOffset == 0 && !hasSelection()) {
+            val cursorOffset =
+                accessibilityOffsetForCell(cursorRow, cursorColumn)
+                    ?: return null
+            return cursorOffset
+                .takeIf { offset -> offset <= snapshotLength }
+                ?.let { offset -> offset..offset }
+        }
+        if (!hasSelection()) {
+            return null
+        }
+        val firstDocumentRow = firstVisibleDocumentRow()
+        val startRow = selectionStart / columns - firstDocumentRow
+        val endRow = selectionEnd / columns - firstDocumentRow
+        if (startRow !in 0 until rows.toLong() || endRow !in 0 until rows.toLong()) {
+            return null
+        }
+        val startOffset =
+            accessibilityOffsetForCell(
+                startRow.toInt(),
+                (selectionStart % columns).toInt(),
+            ) ?: return null
+        val endOffset =
+            accessibilityOffsetForCell(
+                endRow.toInt(),
+                (selectionEnd % columns).toInt() + 1,
+            ) ?: return null
+        return if (startOffset <= endOffset && endOffset <= snapshotLength) {
+            startOffset..endOffset
+        } else {
+            null
+        }
+    }
+
+    private fun accessibilityOffsetForCell(
+        targetRow: Int,
+        targetColumn: Int,
+    ): Int? {
+        val lastRow = accessibilityLastRow()
+        val rowsPerSnapshot =
+            (ACCESSIBILITY_CHARACTER_LIMIT / (columns + 1)).coerceAtLeast(1)
+        val firstRow = (lastRow - rowsPerSnapshot + 1).coerceAtLeast(0)
+        if (targetRow !in firstRow..lastRow) {
+            return null
+        }
+        var offset = 0
+        for (row in firstRow..lastRow) {
+            val start = row * columns
+            var end = columns
+            while (end > 0 && isBlankGlyph(start + end - 1)) {
+                end--
+            }
+            if (row == targetRow) {
+                val requestedEnd = targetColumn.coerceIn(0, end)
+                for (column in 0 until requestedEnd) {
+                    val cell = start + column
+                    if (glyphWidths[cell].toInt() != 0) {
+                        offset += glyphUtf16Length(cell)
+                    }
+                }
+                return offset.coerceAtMost(ACCESSIBILITY_CHARACTER_LIMIT)
+            }
+            for (column in 0 until end) {
+                val cell = start + column
+                if (glyphWidths[cell].toInt() != 0) {
+                    offset += glyphUtf16Length(cell)
+                }
+            }
+            if (row != lastRow) {
+                offset++
+            }
+            if (offset > ACCESSIBILITY_CHARACTER_LIMIT) {
+                return null
+            }
+        }
+        return null
+    }
+
+    private fun accessibilityCellForOffset(requestedOffset: Int): Long? {
+        if (requestedOffset < 0) {
+            return null
+        }
+        val lastRow = accessibilityLastRow()
+        val rowsPerSnapshot =
+            (ACCESSIBILITY_CHARACTER_LIMIT / (columns + 1)).coerceAtLeast(1)
+        val firstRow = (lastRow - rowsPerSnapshot + 1).coerceAtLeast(0)
+        var offset = 0
+        var lastCell: Long? = null
+        for (row in firstRow..lastRow) {
+            val start = row * columns
+            var end = columns
+            while (end > 0 && isBlankGlyph(start + end - 1)) {
+                end--
+            }
+            for (column in 0 until end) {
+                val cell = start + column
+                if (glyphWidths[cell].toInt() == 0) {
+                    continue
+                }
+                val documentCell =
+                    visibleDocumentRow(row) * columns + column
+                val nextOffset = offset + glyphUtf16Length(cell)
+                if (requestedOffset < nextOffset) {
+                    return documentCell
+                }
+                offset = nextOffset
+                lastCell = documentCell
+            }
+            if (row != lastRow) {
+                if (requestedOffset == offset) {
+                    return lastCell
+                }
+                offset++
+            }
+        }
+        return lastCell.takeIf { requestedOffset == offset }
+    }
+
+    private fun glyphUtf16Length(cell: Int): Int {
+        val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
+        val glyphLength = glyphLengths[cell].toInt() and 0xff
+        var length = 0
+        for (index in 0 until glyphLength) {
+            length += Character.charCount(glyphCodepoints[glyphStart + index])
+        }
+        return length
+    }
+
+    private fun setAccessibilitySelection(arguments: Bundle?): Boolean {
+        val start =
+            arguments?.getInt(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,
+                -1,
+            ) ?: return false
+        val end =
+            arguments.getInt(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
+                -1,
+            )
+        val snapshotLength = accessibilitySnapshot().length
+        if (start < 0 || end < start || end > snapshotLength) {
+            return false
+        }
+        if (start == end) {
+            clearSelection()
+            sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED)
+            return true
+        }
+        val startCell = accessibilityCellForOffset(start) ?: return false
+        val endCell = accessibilityCellForOffset(end - 1) ?: return false
+        selectionStart = minOf(startCell, endCell)
+        selectionEnd = maxOf(startCell, endCell)
+        selectionInitialStart = selectionStart
+        selectionInitialEnd = selectionEnd
+        selectionOriginEpoch = historyOriginEpoch
+        selectionDragEndpoint = SELECTION_DRAG_NONE
+        selectionDragging = false
+        recordSelectionRows()
+        sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED)
+        return true
+    }
+
     private fun isBlankGlyph(cell: Int): Boolean =
         glyphWidths[cell].toInt() == 1 &&
             glyphLengths[cell].toInt() == 1 &&
@@ -1941,8 +2169,37 @@ internal class RuntimeSurfaceView(
         }
         viewportOffset = nextOffset
         needsFullSnapshot = true
+        scheduleTerminalAccessibilityEvent(scrolled = true)
         invalidate()
         return true
+    }
+
+    private fun scheduleTerminalAccessibilityEvent(
+        textChanged: Boolean = false,
+        scrolled: Boolean = false,
+    ) {
+        if (!accessibilityManager.isEnabled) {
+            return
+        }
+        accessibilityTextChanged = accessibilityTextChanged || textChanged
+        accessibilityScrolled = accessibilityScrolled || scrolled
+        if (!accessibilityEventPosted) {
+            accessibilityEventPosted = true
+            postDelayed(accessibilityEventRunnable, ACCESSIBILITY_EVENT_DELAY_MILLIS)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sendTerminalAccessibilityEvent(
+        type: Int,
+        configure: (AccessibilityEvent) -> Unit,
+    ) {
+        val event = AccessibilityEvent.obtain(type)
+        event.className = "android.widget.TextView"
+        event.packageName = context.packageName
+        event.isEnabled = isEnabled
+        configure(event)
+        sendAccessibilityEventUnchecked(event)
     }
 
     private fun returnToLiveView() {
@@ -2022,6 +2279,7 @@ internal class RuntimeSurfaceView(
         private const val MIN_COLUMNS = 2
         private const val MAX_COLUMNS = 400
         private const val ACCESSIBILITY_CHARACTER_LIMIT = 8 * 1024
+        private const val ACCESSIBILITY_EVENT_DELAY_MILLIS = 100L
         private const val TERMINAL_INPUT_LIMIT = 8 * 1024
         private const val MAX_COMPOSING_CHARACTERS = 2 * 1024
         private const val MAX_CLIPBOARD_CHARACTERS = 2 * 1024

@@ -71,7 +71,7 @@ archphene_enter_terminal_line \
 archphene_wait_ui 'terminal-color-ready' "terminal-color-ready-$serial" 20
 for marker in RED196 GREEN46 BLUE21 MAGENTA201 YELLOW226 CYAN51 GRAY244 \
   WHITE231-ON-BLUE25 RGB-123456-ABCDEF DEC-LINE BOLD DIM ITALIC UNDERLINE \
-  STRIKE INVERSE HIDDEN-TEXT CONCEAL-END; do
+  STRIKE INVERSE HIDDEN-TEXT CONCEAL-END BCE; do
   archphene_regex_contains "$ARCHPHENE_UI" "$marker" ||
     archphene_die "terminal color output did not render marker: $marker"
 done
