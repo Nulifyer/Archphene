@@ -19,23 +19,26 @@ class PackageLauncherReviewStateTest {
                 pending = 0,
                 attention = 0,
                 failed = 0,
+                integrationTopology = 0x100,
+                profiledExecutables = 2,
+                incompleteProfiles = 0,
             ),
             decodePackageLauncherReview(
-                "R1\tready\t3\t1\t2\t2\t2\t0\t0\t0\twayland,input,ime,clipboard,documents\n"
+                "R2\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n"
                     .ascii(),
             ),
         )
         assertEquals(
             "pending",
             decodePackageLauncherReview(
-                "R1\tpending\tff\t1\t2\t2\t1\t1\t0\t0\twayland,input,ime,clipboard,documents\n"
+                "R2\tpending\tff\t1\t2\t2\t1\t1\t0\t0\t102\t2\t1\twayland,input,ime,clipboard,documents\n"
                     .ascii(),
             ).status,
         )
         assertEquals(
             0xff,
             decodePackageLauncherReview(
-                "R1\tpending\tff\t1\t2\t2\t1\t1\t0\t0\twayland,input,ime,clipboard,documents\n"
+                "R2\tpending\tff\t1\t2\t2\t1\t1\t0\t0\t102\t2\t1\twayland,input,ime,clipboard,documents\n"
                     .ascii(),
             ).capabilities,
         )
@@ -44,16 +47,19 @@ class PackageLauncherReviewStateTest {
     @Test
     fun rejectsContradictoryOrUnboundedLauncherReviews() {
         listOf(
-            "R1\tready\t3\t1\t2\t2\t1\t1\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tpending\t3\t1\t2\t2\t2\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tfailed\t3\t1\t2\t2\t1\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tnot-installed\t1\t0\t0\t0\t0\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tready\t3\t1\t257\t2\t2\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tready\t3\t1\t2\t3\t2\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tready\t3\t1\t2\t2\t2\t0\t0\t0\twayland,input,ime,clipboard\n",
-            "R1\tready\t3\t1\t02\t2\t2\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tready\t03\t1\t2\t2\t2\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
-            "R1\tready\t100\t1\t2\t2\t2\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t3\t1\t2\t2\t1\t1\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tpending\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tfailed\t3\t1\t2\t2\t1\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tnot-installed\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t3\t1\t257\t2\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t3\t1\t2\t3\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t3\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t3\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard\n",
+            "R2\tready\t3\t1\t02\t2\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t03\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t100\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\twayland,input,ime,clipboard,documents\n",
+            "R2\tready\t3\t1\t2\t2\t2\t0\t0\t0\t0100\t2\t0\twayland,input,ime,clipboard,documents\n",
         ).forEach { wire ->
             assertThrows(IllegalStateException::class.java) {
                 decodePackageLauncherReview(wire.ascii())

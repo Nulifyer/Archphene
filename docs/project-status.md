@@ -2232,7 +2232,13 @@ symbols already existing in the target process, causing Foot Client to exit on
 `g_object_unref`. Both checked-in modules now explicitly link
 GIO/GObject/GModule/GLib; the AArch64 build uses a checksum-pinned Arch Linux ARM
 GLib sysroot. Full-device Foot frames map cleanly on both devices. Exact
-toolkit/protocol derivation remains a separate pending compatibility step.
+static toolkit/protocol derivation now walks each installed ELF's bounded
+dependency graph with fixed-size ELF/program/dynamic-table reads rather than
+loading whole binaries. Package details can report Qt 5/6, GTK 3/4, SDL 2/3,
+native Wayland, X11 linkage, OpenGL/EGL, and Vulkan with incomplete-graph
+provenance. Current Foot reports Native Wayland on both devices. Scripts and
+plugin- or `dlopen`-only stacks remain unresolved until an observed-process
+topology is added.
 
 ## Validated
 

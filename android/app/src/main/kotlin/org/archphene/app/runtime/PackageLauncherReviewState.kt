@@ -13,6 +13,9 @@ internal data class PackageLauncherReview(
     val pending: Int,
     val attention: Int,
     val failed: Int,
+    val integrationTopology: Int,
+    val profiledExecutables: Int,
+    val incompleteProfiles: Int,
 )
 
 internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherReview {
@@ -35,6 +38,9 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
     val pending = reviewCount(fields.getOrNull(7))
     val attention = reviewCount(fields.getOrNull(8))
     val failed = reviewCount(fields.getOrNull(9))
+    val integrationTopology = reviewHex(fields.getOrNull(10), 4, 0xffff)
+    val profiledExecutables = reviewCount(fields.getOrNull(11))
+    val incompleteProfiles = reviewCount(fields.getOrNull(12))
     val validStatus =
         when (status) {
             "not-installed",
@@ -48,8 +54,8 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
             else -> false
         }
     if (
-        fields.size != 11 ||
-        fields[0] != "R1" ||
+        fields.size != 14 ||
+        fields[0] != "R2" ||
         !validStatus ||
         capabilities == null ||
         analyzed == null ||
@@ -59,17 +65,31 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
         pending == null ||
         attention == null ||
         failed == null ||
-        fields[10] != LauncherApkAssembler.CAPABILITIES_V2 ||
+        integrationTopology == null ||
+        profiledExecutables == null ||
+        incompleteProfiles == null ||
+        fields[13] != LauncherApkAssembler.CAPABILITIES_V2 ||
         verifiedExecutables > launchers ||
+        profiledExecutables > launchers ||
+        incompleteProfiles > profiledExecutables ||
         current + pending + attention + failed > launchers ||
         status == "not-installed" &&
             (
                 capabilities != 0 ||
                     analyzed ||
                     launchers != 0 ||
-                    verifiedExecutables != 0
+                    verifiedExecutables != 0 ||
+                    integrationTopology != 0 ||
+                    profiledExecutables != 0 ||
+                    incompleteProfiles != 0
             ) ||
-        status == "no-launcher" && launchers != 0 ||
+        status == "no-launcher" &&
+            (
+                launchers != 0 ||
+                    integrationTopology != 0 ||
+                    profiledExecutables != 0 ||
+                    incompleteProfiles != 0
+            ) ||
         status == "ready" &&
             (
                 launchers == 0 ||
@@ -95,20 +115,31 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
         pending = pending,
         attention = attention,
         failed = failed,
+        integrationTopology = integrationTopology,
+        profiledExecutables = profiledExecutables,
+        incompleteProfiles = incompleteProfiles,
     )
 }
 
 private fun reviewCapabilities(value: String?): Int? {
+    return reviewHex(value, 2, 0xff)
+}
+
+private fun reviewHex(
+    value: String?,
+    maximumLength: Int,
+    maximum: Int,
+): Int? {
     if (
         value == null ||
         value.isEmpty() ||
-        value.length > 2 ||
+        value.length > maximumLength ||
         value.length > 1 && value.startsWith('0') ||
         value.any { character -> character !in '0'..'9' && character !in 'a'..'f' }
     ) {
         return null
     }
-    return value.toIntOrNull(16)?.takeIf { capabilities -> capabilities in 0..0xff }
+    return value.toIntOrNull(16)?.takeIf { parsed -> parsed in 0..maximum }
 }
 
 private fun reviewCount(value: String?): Int? {

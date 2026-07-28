@@ -2087,6 +2087,16 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_FIELD_LIMIT = 64
         private const val AVAILABLE_PACKAGE_LIMIT = 100
         private const val PACKAGE_CAPABILITY_COMMAND_LINE = 2
+        private const val INTEGRATION_QT5 = 1 shl 0
+        private const val INTEGRATION_QT6 = 1 shl 1
+        private const val INTEGRATION_GTK3 = 1 shl 2
+        private const val INTEGRATION_GTK4 = 1 shl 3
+        private const val INTEGRATION_SDL2 = 1 shl 4
+        private const val INTEGRATION_SDL3 = 1 shl 5
+        private const val INTEGRATION_WAYLAND = 1 shl 8
+        private const val INTEGRATION_X11 = 1 shl 9
+        private const val INTEGRATION_OPENGL = 1 shl 10
+        private const val INTEGRATION_VULKAN = 1 shl 11
         private const val PACKAGE_CACHE_ENTRY_LIMIT = 4096
         private const val PACKAGE_CACHE_PAGE_SIZE = 32
         private const val MAX_PACKAGE_CACHE_SELECTION = 256
@@ -9564,7 +9574,8 @@ class ArchpheneRuntimeService : Service() {
             "ready" ->
                 "Integration: Ready · ${review.current} Android " +
                     (if (review.current == 1) "launcher" else "launchers") +
-                    " · executable ownership and broker contract verified"
+                    " · ${packageIntegrationStack(review)}" +
+                    " · ownership and broker contract verified"
             "pending" ->
                 "Integration: ${review.pending} Android launcher " +
                     (if (review.pending == 1) "change" else "changes") +
@@ -9581,6 +9592,38 @@ class ArchpheneRuntimeService : Service() {
                 "Integration: Launcher review unavailable · package ownership is incomplete"
             else -> throw IllegalStateException("Invalid package launcher review")
         }
+
+    private fun packageIntegrationStack(review: PackageLauncherReview): String {
+        if (review.profiledExecutables == 0) {
+            return "stack unresolved until observed launch"
+        }
+        val topology = review.integrationTopology
+        val labels = ArrayList<String>(8)
+        if (topology and INTEGRATION_QT5 != 0) labels.add("Qt 5")
+        if (topology and INTEGRATION_QT6 != 0) labels.add("Qt 6")
+        if (topology and INTEGRATION_GTK3 != 0) labels.add("GTK 3")
+        if (topology and INTEGRATION_GTK4 != 0) labels.add("GTK 4")
+        if (topology and INTEGRATION_SDL2 != 0) labels.add("SDL 2")
+        if (topology and INTEGRATION_SDL3 != 0) labels.add("SDL 3")
+        val toolkitMask =
+            INTEGRATION_QT5 or
+                INTEGRATION_QT6 or
+                INTEGRATION_GTK3 or
+                INTEGRATION_GTK4 or
+                INTEGRATION_SDL2 or
+                INTEGRATION_SDL3
+        if (topology and INTEGRATION_WAYLAND != 0) {
+            labels.add(if (topology and toolkitMask == 0) "Native Wayland" else "Wayland")
+        }
+        if (topology and INTEGRATION_X11 != 0) {
+            labels.add(if (topology and toolkitMask == 0) "Native X11" else "X11-linked")
+        }
+        if (topology and INTEGRATION_OPENGL != 0) labels.add("OpenGL/EGL")
+        if (topology and INTEGRATION_VULKAN != 0) labels.add("Vulkan")
+        if (labels.isEmpty()) labels.add("native ELF")
+        if (review.incompleteProfiles != 0) labels.add("partial dependency graph")
+        return labels.joinToString(" · ")
+    }
 
     private fun withPackageLauncherReview(
         details: String,

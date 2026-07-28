@@ -2,6 +2,7 @@
 
 pub mod aur;
 pub mod desktop;
+pub mod elf_profile;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -1931,6 +1932,13 @@ impl PackageRuntime {
                 .ok()
                 .is_some_and(|index| installed.packages[index].explicitly_installed)
         });
+        let mut profiler = elf_profile::IntegrationProfiler::new(&self.arch_root);
+        for entry in &mut catalog.entries {
+            let profile = profiler.profile(&entry.executable);
+            entry.integration_topology = profile.topology;
+            entry.integration_profiled = profile.profiled;
+            entry.integration_complete = profile.complete;
+        }
         Ok(catalog)
     }
 

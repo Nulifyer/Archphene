@@ -3413,7 +3413,7 @@ mod android {
             PackageLauncherReviewStatus::Unavailable => "unavailable",
         };
         let encoded = format!(
-            "R1\t{status}\t{:x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{LAUNCHER_CAPABILITIES_V2}\n",
+            "R2\t{status}\t{:x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:x}\t{}\t{}\t{LAUNCHER_CAPABILITIES_V2}\n",
             review.capabilities,
             u8::from(review.capabilities_analyzed),
             review.launchers,
@@ -3422,6 +3422,9 @@ mod android {
             review.pending,
             review.attention,
             review.failed,
+            review.integration_topology,
+            review.profiled_executables,
+            review.incomplete_profiles,
         );
         if encoded.len() > output_capacity {
             return ERROR_INTERNAL;

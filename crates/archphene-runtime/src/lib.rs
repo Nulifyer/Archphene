@@ -119,6 +119,9 @@ pub struct PackageLauncherReview {
     pub pending: u16,
     pub attention: u16,
     pub failed: u16,
+    pub integration_topology: u16,
+    pub profiled_executables: u16,
+    pub incomplete_profiles: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -917,6 +920,9 @@ impl RuntimeHost {
                     pending: 0,
                     attention: 0,
                     failed: 0,
+                    integration_topology: 0,
+                    profiled_executables: 0,
+                    incomplete_profiles: 0,
                 });
             }
         };
@@ -936,6 +942,9 @@ impl RuntimeHost {
             pending: 0,
             attention: 0,
             failed: 0,
+            integration_topology: 0,
+            profiled_executables: 0,
+            incomplete_profiles: 0,
         };
         for entry in catalog
             .entries
@@ -945,6 +954,13 @@ impl RuntimeHost {
             review.launchers = review.launchers.saturating_add(1);
             if entry.executable_package.is_some() {
                 review.verified_executables = review.verified_executables.saturating_add(1);
+            }
+            review.integration_topology |= entry.integration_topology;
+            if entry.integration_profiled {
+                review.profiled_executables = review.profiled_executables.saturating_add(1);
+                if !entry.integration_complete {
+                    review.incomplete_profiles = review.incomplete_profiles.saturating_add(1);
+                }
             }
             let descriptor = registry.and_then(|registry| {
                 registry

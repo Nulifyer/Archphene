@@ -39,6 +39,9 @@ pub struct DesktopEntry {
     pub desktop_id: String,
     pub source_package: Option<String>,
     pub executable_package: Option<String>,
+    pub integration_topology: u16,
+    pub integration_profiled: bool,
+    pub integration_complete: bool,
     pub name: String,
     pub executable: String,
     pub arguments: Vec<ExecArgument>,
@@ -335,6 +338,9 @@ where
         desktop_id: desktop_id.to_owned(),
         source_package: None,
         executable_package: None,
+        integration_topology: 0,
+        integration_profiled: false,
+        integration_complete: false,
         name,
         executable,
         arguments,
@@ -628,7 +634,11 @@ fn resolve_executable(root: &Path, program: &str) -> Option<String> {
     None
 }
 
-fn resolve_root_regular_file(root: &Path, path: &Path, executable: bool) -> Option<String> {
+pub(crate) fn resolve_root_regular_file(
+    root: &Path,
+    path: &Path,
+    executable: bool,
+) -> Option<String> {
     let relative = path
         .strip_prefix(root)
         .ok()
@@ -1178,6 +1188,9 @@ org.kde.kate.desktop\tKate\t/usr/bin/kate\t0\tkate\t/usr/bin/kate\tL:--startanon
                 desktop_id: format!("fixture-{index:03}.desktop"),
                 source_package: None,
                 executable_package: None,
+                integration_topology: 0,
+                integration_profiled: false,
+                integration_complete: false,
                 name: format!("Fixture {index:03}"),
                 executable: "/usr/bin/fixture".to_owned(),
                 arguments: vec![ExecArgument::Literal("x".repeat(500))],

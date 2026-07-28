@@ -1976,6 +1976,9 @@ mod tests {
             desktop_id: desktop_id.to_owned(),
             source_package: Some("kate".to_owned()),
             executable_package: Some("kate".to_owned()),
+            integration_topology: 0,
+            integration_profiled: false,
+            integration_complete: false,
             name: name.to_owned(),
             executable: "/usr/bin/kate".to_owned(),
             arguments: vec![
