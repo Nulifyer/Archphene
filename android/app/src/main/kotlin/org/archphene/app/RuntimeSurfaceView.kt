@@ -162,6 +162,7 @@ internal class RuntimeSurfaceView(
     private var terminalFocused = false
     private var terminalRevision = Long.MIN_VALUE
     private var sourceRevision = Long.MIN_VALUE
+    private var synchronizedOutputPending = false
     private var historyRows = 0
     private var historyOriginEpoch = 0L
     private var viewportOffset = 0
@@ -731,6 +732,7 @@ internal class RuntimeSurfaceView(
     fun renderFrame(binder: ArchpheneRuntimeService.LocalBinder?) {
         if (binder?.sharedShellRunning != true) {
             runtimeBinder = null
+            synchronizedOutputPending = false
             if (rows != 0) {
                 clearTerminal()
             }
@@ -738,7 +740,11 @@ internal class RuntimeSurfaceView(
         }
         runtimeBinder = binder
         val nextSourceRevision = binder.sharedShellTerminalRevision
-        if (!needsFullSnapshot && nextSourceRevision == sourceRevision) {
+        if (
+            !needsFullSnapshot &&
+            !synchronizedOutputPending &&
+            nextSourceRevision == sourceRevision
+        ) {
             return
         }
         val length =
@@ -746,6 +752,12 @@ internal class RuntimeSurfaceView(
                 needsFullSnapshot,
                 viewportOffset,
             )
+        if (length == 0) {
+            synchronizedOutputPending = true
+            sourceRevision = nextSourceRevision
+            return
+        }
+        synchronizedOutputPending = false
         needsFullSnapshot = false
         if (
             length < DAMAGE_HEADER_SIZE ||
@@ -2477,6 +2489,7 @@ internal class RuntimeSurfaceView(
         terminalFlags = 0
         terminalRevision = Long.MIN_VALUE
         sourceRevision = Long.MIN_VALUE
+        synchronizedOutputPending = false
         historyRows = 0
         historyOriginEpoch = 0L
         viewportOffset = 0

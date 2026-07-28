@@ -1284,8 +1284,20 @@ Shift retains local selection and history scrolling. Rust unit/allocation and
 clippy gates, exact Kotlin encoder tests, Android lint/unit, both exact builds
 and installs, scoped cold-launch logs, and inspected full-device no-shell
 manager frames pass. Real TUI interaction and focus-transition device proof
-remain pending with shell restoration. Synchronized output is the next
-material terminal-control gap.
+remain pending with shell restoration.
+
+DEC private synchronized-output mode 2026 now withholds terminal damage without
+consuming dirty rows and publishes the complete current frame when the client
+ends the update. A monotonic generation distinguishes an end/start pair parsed
+within one PTY read, so a new frame never inherits the preceding frame's
+deadline. If a client crashes or leaves the mode set, a 250 ms fail-safe
+releases a full frame. While suppression is active, Android bypasses its normal
+revision early return and polls the existing native damage buffer until release
+or timeout; the steady-state parser/grid/damage path remains allocation-free.
+Rust unit/allocation and clippy gates, Android unit/lint, both exact builds and
+installs, scoped cold-launch logs, and inspected full-device light/dark manager
+frames pass. Real PTY atomicity and timeout visuals remain pending until a
+package-installed shell is restored on the clean-data devices.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a

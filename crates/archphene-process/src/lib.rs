@@ -43,6 +43,7 @@ const MAX_SHEBANG_BYTES: usize = 256;
 const MAX_GUI_LOG_DRAIN_BYTES: usize = 64 * 1024;
 const GUI_CLOSE_GRACE: Duration = Duration::from_millis(750);
 const GUI_TERMINATE_GRACE: Duration = Duration::from_millis(750);
+const TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_GDK_PIXBUF_MODULE_FILE_BYTES: u64 = 16 * 1024;
 const GTK_SETTINGS_LOGICAL_PATH: &str = "/home/archphene/.config/gtk-3.0/settings.ini";
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
@@ -396,6 +397,8 @@ impl CommandEnvironment {
             rows,
             columns,
             terminal,
+            synchronized_output_started: None,
+            synchronized_output_epoch: 0,
         })
     }
 
@@ -980,6 +983,8 @@ pub struct PtySession {
     rows: u16,
     columns: u16,
     terminal: Terminal,
+    synchronized_output_started: Option<Instant>,
+    synchronized_output_epoch: u64,
 }
 
 impl PtySession {
@@ -994,6 +999,16 @@ impl PtySession {
             }
             Ok(length) => {
                 self.terminal.feed(&output[..length]);
+                let synchronized_epoch = self.terminal.synchronized_output_epoch();
+                if self.terminal.synchronized_output() {
+                    if self.synchronized_output_epoch != synchronized_epoch {
+                        self.synchronized_output_epoch = synchronized_epoch;
+                        self.synchronized_output_started = Some(Instant::now());
+                    }
+                } else {
+                    self.synchronized_output_epoch = synchronized_epoch;
+                    self.synchronized_output_started = None;
+                }
                 self.flush_terminal_replies()?;
                 Ok(length)
             }
@@ -1061,6 +1076,23 @@ impl PtySession {
         full_snapshot: bool,
         viewport_offset: u32,
     ) -> Result<usize, ProcessError> {
+        if self.terminal.synchronized_output() {
+            let synchronized_epoch = self.terminal.synchronized_output_epoch();
+            if self.synchronized_output_epoch != synchronized_epoch {
+                self.synchronized_output_epoch = synchronized_epoch;
+                self.synchronized_output_started = Some(Instant::now());
+            }
+            let started = self
+                .synchronized_output_started
+                .get_or_insert_with(Instant::now);
+            if started.elapsed() < TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT {
+                return Ok(0);
+            }
+            self.terminal.expire_synchronized_output();
+            self.synchronized_output_started = None;
+        } else {
+            self.synchronized_output_started = None;
+        }
         if viewport_offset != 0 {
             self.terminal.write_view_damage(output, viewport_offset)
         } else if full_snapshot {
@@ -2683,6 +2715,8 @@ mod tests {
             rows: 24,
             columns: 80,
             terminal: Terminal::new(24, 80).expect("terminal state"),
+            synchronized_output_started: None,
+            synchronized_output_epoch: 0,
         };
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut output = [0_u8; 64];
@@ -2866,6 +2900,8 @@ mod tests {
             rows: 2,
             columns: 4,
             terminal: Terminal::new(2, 4).expect("terminal state"),
+            synchronized_output_started: None,
+            synchronized_output_epoch: 0,
         };
         let mut damage = vec![0_u8; MAX_TERMINAL_DAMAGE_BYTES];
         session
@@ -2910,6 +2946,73 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_terminal_damage_releases_atomically_and_expires_safely() {
+        let (master, _slave) = system::open_pty(2, 5).expect("PTY pair");
+        let waiter = PtyWaiter::new(&master).expect("PTY waiter");
+        let mut session = PtySession {
+            master,
+            waiter,
+            child: None,
+            exit_status: None,
+            rows: 2,
+            columns: 5,
+            terminal: Terminal::new(2, 5).expect("terminal state"),
+            synchronized_output_started: None,
+            synchronized_output_epoch: 0,
+        };
+        let mut damage = vec![0_u8; MAX_TERMINAL_DAMAGE_BYTES];
+        session
+            .write_terminal_damage(&mut damage, false, 0)
+            .expect("initial damage");
+
+        session.terminal.feed(b"\x1b[?2026hframe");
+        session.synchronized_output_started = Some(Instant::now());
+        session.synchronized_output_epoch = session.terminal.synchronized_output_epoch();
+        assert_eq!(
+            session
+                .write_terminal_damage(&mut damage, false, 0)
+                .expect("withheld damage"),
+            0
+        );
+
+        session.terminal.feed(b"\x1b[?2026l");
+        let released = session
+            .write_terminal_damage(&mut damage, false, 0)
+            .expect("released damage");
+        assert_eq!(
+            released,
+            archphene_terminal::DAMAGE_HEADER_SIZE + 2 * 5 * archphene_terminal::DAMAGE_CELL_SIZE
+        );
+
+        session.terminal.feed(b"\x1b[?2026hnext");
+        session.synchronized_output_started =
+            Some(Instant::now() - TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT);
+        session.synchronized_output_epoch = session.terminal.synchronized_output_epoch();
+        let expired = session
+            .write_terminal_damage(&mut damage, false, 0)
+            .expect("expired damage");
+        assert_eq!(expired, released);
+        assert!(!session.terminal.synchronized_output());
+
+        let previous_epoch = session.terminal.synchronized_output_epoch();
+        session
+            .terminal
+            .feed(b"\x1b[?2026hframe-one\x1b[?2026l\x1b[?2026hframe-two");
+        assert!(session.terminal.synchronized_output());
+        assert!(session.terminal.synchronized_output_epoch() > previous_epoch);
+        session.synchronized_output_epoch = previous_epoch;
+        session.synchronized_output_started =
+            Some(Instant::now() - TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT);
+        assert_eq!(
+            session
+                .write_terminal_damage(&mut damage, false, 0)
+                .expect("new synchronized generation"),
+            0
+        );
+        assert!(session.terminal.synchronized_output());
+    }
+
+    #[test]
     fn terminal_queries_round_trip_through_the_real_pty() {
         let (master, mut slave) = system::open_pty(24, 80).expect("PTY pair");
         let status = Command::new("stty")
@@ -2929,6 +3032,8 @@ mod tests {
             rows: 24,
             columns: 80,
             terminal: Terminal::new(24, 80).expect("terminal state"),
+            synchronized_output_started: None,
+            synchronized_output_epoch: 0,
         };
         slave
             .write_all(b"\x1b[c\x1b[5n\x1b[4;9H\x1b[6n")

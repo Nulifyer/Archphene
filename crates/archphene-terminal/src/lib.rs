@@ -518,6 +518,8 @@ pub struct Terminal {
     mouse_tracking: u8,
     mouse_encoding: u8,
     focus_reporting: bool,
+    synchronized_output: bool,
+    synchronized_output_epoch: u64,
     application_cursor: bool,
     application_keypad: bool,
     bracketed_paste: bool,
@@ -603,6 +605,8 @@ impl Terminal {
             mouse_tracking: MOUSE_TRACKING_NONE,
             mouse_encoding: MOUSE_ENCODING_NORMAL,
             focus_reporting: false,
+            synchronized_output: false,
+            synchronized_output_epoch: 0,
             application_cursor: false,
             application_keypad: false,
             bracketed_paste: false,
@@ -660,6 +664,21 @@ impl Terminal {
         (self.cursor_row, self.cursor_column)
     }
 
+    pub const fn synchronized_output(&self) -> bool {
+        self.synchronized_output
+    }
+
+    pub const fn synchronized_output_epoch(&self) -> u64 {
+        self.synchronized_output_epoch
+    }
+
+    pub fn expire_synchronized_output(&mut self) {
+        if self.synchronized_output {
+            self.synchronized_output = false;
+            self.mark_dirty_range(0, self.rows);
+        }
+    }
+
     pub fn cells(&self) -> &[Cell] {
         &self.cells
     }
@@ -679,6 +698,9 @@ impl Terminal {
     }
 
     pub fn required_damage_bytes(&self) -> usize {
+        if self.synchronized_output {
+            return 0;
+        }
         DAMAGE_HEADER_SIZE
             + usize::from(self.dirty_end.saturating_sub(self.dirty_start))
                 * usize::from(self.columns)
@@ -686,10 +708,16 @@ impl Terminal {
     }
 
     pub fn write_damage(&mut self, output: &mut [u8]) -> Result<usize, TerminalError> {
+        if self.synchronized_output {
+            return Ok(0);
+        }
         self.write_damage_range(output, self.dirty_start, self.dirty_end)
     }
 
     pub fn write_full_damage(&mut self, output: &mut [u8]) -> Result<usize, TerminalError> {
+        if self.synchronized_output {
+            return Ok(0);
+        }
         self.write_damage_range(output, 0, self.rows)
     }
 
@@ -797,6 +825,9 @@ impl Terminal {
         output: &mut [u8],
         viewport_offset: u32,
     ) -> Result<usize, TerminalError> {
+        if self.synchronized_output {
+            return Ok(0);
+        }
         let history_rows = self.history_rows();
         let viewport_offset = viewport_offset.min(history_rows);
         if viewport_offset == 0 {
@@ -1786,6 +1817,7 @@ impl Terminal {
                     self.cursor_column = self.saved_column.min(self.columns - 1);
                 }
                 2004 => self.set_bracketed_paste(enabled),
+                2026 => self.set_synchronized_output(enabled),
                 _ => {}
             }
         }
@@ -1849,6 +1881,18 @@ impl Terminal {
         }
     }
 
+    fn set_synchronized_output(&mut self, enabled: bool) {
+        if self.synchronized_output == enabled {
+            return;
+        }
+        self.synchronized_output = enabled;
+        if enabled {
+            self.synchronized_output_epoch = self.synchronized_output_epoch.saturating_add(1);
+        } else {
+            self.mark_dirty_range(0, self.rows);
+        }
+    }
+
     fn report_device_status(&mut self) {
         if self.csi_count != 1 {
             return;
@@ -1903,6 +1947,7 @@ impl Terminal {
                 1015 => mode_status(self.mouse_encoding == MOUSE_ENCODING_URXVT),
                 1016 => mode_status(self.mouse_encoding == MOUSE_ENCODING_SGR_PIXELS),
                 2004 => mode_status(self.bracketed_paste),
+                2026 => mode_status(self.synchronized_output),
                 _ => 0,
             }
         } else {
@@ -2709,6 +2754,7 @@ impl Terminal {
         self.mouse_tracking = MOUSE_TRACKING_NONE;
         self.mouse_encoding = MOUSE_ENCODING_NORMAL;
         self.focus_reporting = false;
+        self.synchronized_output = false;
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
@@ -2741,6 +2787,7 @@ impl Terminal {
         self.mouse_tracking = MOUSE_TRACKING_NONE;
         self.mouse_encoding = MOUSE_ENCODING_NORMAL;
         self.focus_reporting = false;
+        self.synchronized_output = false;
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
@@ -3826,6 +3873,41 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes(output[20..24].try_into().unwrap()),
             FLAG_CURSOR_VISIBLE
+        );
+    }
+
+    #[test]
+    fn synchronized_output_withholds_damage_until_release_or_expiry() {
+        let mut terminal = Terminal::new(2, 5).unwrap();
+        let mut output = [0_u8; 2048];
+        terminal.write_damage(&mut output).unwrap();
+
+        terminal.feed(b"\x1b[?2026hframe\x1b[?2026$p");
+        assert!(terminal.synchronized_output());
+        let first_epoch = terminal.synchronized_output_epoch();
+        assert_eq!(first_epoch, 1);
+        assert_eq!(terminal.required_damage_bytes(), 0);
+        assert_eq!(terminal.write_damage(&mut output).unwrap(), 0);
+        assert_eq!(terminal.write_full_damage(&mut output).unwrap(), 0);
+        assert_eq!(terminal.pending_reply(), b"\x1b[?2026;1$y");
+        terminal.consume_reply(usize::MAX);
+
+        terminal.feed(b"\x1b[?2026l\x1b[?2026$p");
+        assert!(!terminal.synchronized_output());
+        assert_eq!(terminal.pending_reply(), b"\x1b[?2026;2$y");
+        assert_eq!(
+            terminal.write_damage(&mut output).unwrap(),
+            DAMAGE_HEADER_SIZE + 2 * 5 * DAMAGE_CELL_SIZE
+        );
+
+        terminal.feed(b"\x1b[?2026hnext\x1b[?2026l\x1b[?2026h");
+        assert!(terminal.synchronized_output());
+        assert!(terminal.synchronized_output_epoch() > first_epoch);
+        terminal.expire_synchronized_output();
+        assert!(!terminal.synchronized_output());
+        assert_eq!(
+            terminal.write_damage(&mut output).unwrap(),
+            DAMAGE_HEADER_SIZE + 2 * 5 * DAMAGE_CELL_SIZE
         );
     }
 
