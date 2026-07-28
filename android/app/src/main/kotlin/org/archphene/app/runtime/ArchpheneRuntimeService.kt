@@ -1071,6 +1071,7 @@ class ArchpheneRuntimeService : Service() {
             "Search the official Arch repositories",
             0,
         )
+    @Volatile private var availablePackageQuery = ""
     @Volatile private var packageOperationActive = false
     @Volatile private var packageOperationCancelable = false
     @Volatile private var packageCancellationRequested = false
@@ -1363,6 +1364,11 @@ class ArchpheneRuntimeService : Service() {
         val installScriptContents: String,
         val unverifiedSources: Boolean,
         val insecureSources: Boolean,
+    )
+
+    private data class AurCandidateState(
+        val state: String,
+        val installedVersion: String,
     )
 
     private class AurWireReader(
@@ -2085,7 +2091,6 @@ class ArchpheneRuntimeService : Service() {
         private const val RUNTIME_SHUTDOWN_WORKER_WAIT_MILLIS = 3_000L
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
-        private const val AVAILABLE_PACKAGE_LIMIT = 100
         private const val PACKAGE_CAPABILITY_COMMAND_LINE = 2
         private const val INTEGRATION_QT5 = 1 shl 0
         private const val INTEGRATION_QT6 = 1 shl 1
@@ -6759,6 +6764,7 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         searchActive = true
+        availablePackageQuery = normalized
         retainedAurReview = null
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
@@ -6918,6 +6924,23 @@ class ArchpheneRuntimeService : Service() {
                 installedCapabilitiesAnalyzed.copyOf(names.size),
                 status,
                 previousRevision + 1,
+            )
+    }
+
+    @Synchronized
+    private fun publishReviewedAurPackage(
+        review: AurReviewData,
+        candidate: AurCandidateState,
+    ) {
+        availablePackageSnapshot =
+            mergeReviewedAurPackage(
+                availablePackageSnapshot,
+                installedPackageSnapshot,
+                review.packageName,
+                review.version,
+                review.description,
+                candidate.state,
+                candidate.installedVersion,
             )
     }
 
@@ -7158,6 +7181,10 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         searchActive = true
+        if (availablePackageQuery != normalized) {
+            availablePackageQuery = normalized
+            publishAvailablePackageStatus("Reviewing AUR package $normalized")
+        }
         retainedAurReview = null
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
@@ -7250,7 +7277,9 @@ class ArchpheneRuntimeService : Service() {
                         )
                     }
                     val review = parseAurReview(aurReviewBuffer, reviewLength)
+                    val candidateState = reviewedAurCandidateState(activeHandle, review)
                     retainedAurReview = review
+                    publishReviewedAurPackage(review, candidateState)
                     publishAurReviewPresentation(review)
                     searchStatus =
                         "Reviewed ${review.packageName} ${review.version} · " +
@@ -9787,6 +9816,54 @@ class ArchpheneRuntimeService : Service() {
         return String(bytes, StandardCharsets.UTF_8)
     }
 
+    private fun reviewedAurCandidateState(
+        activeHandle: Long,
+        review: AurReviewData,
+    ): AurCandidateState {
+        val request =
+            "${review.packageName}\t${review.version}"
+                .toByteArray(StandardCharsets.UTF_8)
+        require(request.size <= 257)
+        val requestBuffer = ByteBuffer.allocateDirect(request.size)
+        requestBuffer.put(request)
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val outputLength =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_AUR_CANDIDATE_STATE,
+                requestBuffer,
+                request.size,
+                outputBuffer,
+            )
+        if (outputLength <= 0) {
+            throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
+        }
+        val bytes = ByteArray(outputLength)
+        outputBuffer.position(0)
+        outputBuffer.get(bytes)
+        val fields = String(bytes, StandardCharsets.UTF_8).split('\t', limit = 2)
+        val state = fields.getOrNull(0)
+        val installedVersion = fields.getOrNull(1)
+        require(
+            fields.size == 2 &&
+                (
+                    state == "available" ||
+                        state == "installed" ||
+                        state == "update" ||
+                        state == "different"
+                ) &&
+                installedVersion != null &&
+                installedVersion.length <= 128 &&
+                installedVersion.none { character ->
+                    character.isWhitespace() || character.isISOControl()
+                } &&
+                ((state == "available") == installedVersion.isEmpty()) &&
+                (state != "installed" || installedVersion == review.version) &&
+                (state != "update" && state != "different" || installedVersion.isNotEmpty()),
+        )
+        return AurCandidateState(checkNotNull(state), installedVersion)
+    }
+
     private fun availablePackageVersionState(
         activeHandle: Long,
         packageName: String,
@@ -11743,11 +11820,17 @@ class ArchpheneRuntimeService : Service() {
                 downloadedPackages = 0,
                 verified = true,
             )
+        val candidateState = reviewedAurCandidateState(readyHandle, review)
+        if (availablePackageQuery != packageName) {
+            availablePackageQuery = packageName
+            publishAvailablePackageStatus("Reviewing AUR package $packageName")
+        }
         retainedAurReview = review
         retainedAurVerifiedBytes = evidence.sumOf(AurSourceEvidence::bytes)
         retainedAurSourceEvidence = evidence
         retainedAurBuilderReport = builder
         deleteRetainedAurBuiltPackageFilesAsync(detachRetainedAurBuiltPackageFiles())
+        publishReviewedAurPackage(review, candidateState)
         publishAurReviewPresentation(
             review,
             retainedAurVerifiedBytes,

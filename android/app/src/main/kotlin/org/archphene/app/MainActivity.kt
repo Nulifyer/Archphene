@@ -685,7 +685,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     searchInput.setText(packageName)
                     searchInput.setSelection(packageName.length)
                     showPackageDetails()
-                    runtimeBinder?.resolvePackage(packageName)
+                    val binder = runtimeBinder
+                    if (availablePackageAdapter.repository(position) == "aur") {
+                        if (binder?.aurReviewedPackage != packageName) {
+                            binder?.reviewAurPackage(packageName)
+                        }
+                    } else {
+                        binder?.resolvePackage(packageName)
+                    }
                 }
             }
         availablePackagePanel =
@@ -2732,6 +2739,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             return jobPackage.takeIf { position == snapshot?.names?.size && appendActiveJob() }
         }
 
+        fun repository(position: Int): String? =
+            packages?.repositories?.getOrNull(position)
+
         override fun getCount(): Int {
             val packageCount = packages?.names?.size ?: 0
             return packageCount + if (appendActiveJob()) 1 else 0
@@ -2784,7 +2794,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     TextView(this@MainActivity).apply {
                         setTextColor(getColor(R.color.archphene_primary))
                         textSize = 13f
-                        maxLines = 1
+                        maxLines = 2
                         ellipsize = TextUtils.TruncateAt.END
                     }
                 val state =
@@ -2844,19 +2854,36 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextIfChanged(views.version, snapshot.versions[position])
                 setTextIfChanged(
                     views.kind,
-                    when (snapshot.installStates[position]) {
-                        "available" -> getString(R.string.package_search_official)
-                        "installed" -> getString(R.string.package_search_installed)
-                        "update" ->
-                            getString(
-                                R.string.package_search_update_from,
-                                snapshot.installedVersions[position],
-                            )
-                        else ->
-                            getString(
-                                R.string.package_search_not_update,
-                                snapshot.installedVersions[position],
-                            )
+                    if (snapshot.repositories[position] == "aur") {
+                        when (snapshot.installStates[position]) {
+                            "available" -> getString(R.string.package_search_aur)
+                            "installed" -> getString(R.string.package_search_aur_installed)
+                            "update" ->
+                                getString(
+                                    R.string.package_search_aur_update_from,
+                                    snapshot.installedVersions[position],
+                                )
+                            else ->
+                                getString(
+                                    R.string.package_search_not_update,
+                                    snapshot.installedVersions[position],
+                                )
+                        }
+                    } else {
+                        when (snapshot.installStates[position]) {
+                            "available" -> getString(R.string.package_search_official)
+                            "installed" -> getString(R.string.package_search_installed)
+                            "update" ->
+                                getString(
+                                    R.string.package_search_update_from,
+                                    snapshot.installedVersions[position],
+                                )
+                            else ->
+                                getString(
+                                    R.string.package_search_not_update,
+                                    snapshot.installedVersions[position],
+                                )
+                        }
                     },
                 )
                 setTextIfChanged(
@@ -2885,10 +2912,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextIfChanged(views.description, snapshot.descriptions[position])
                 setTextIfChanged(
                     views.state,
-                    if (position == jobPackageIndex && jobLabel.isNotEmpty()) {
-                        jobLabel
-                    } else {
-                        snapshot.repositories[position]
+                    (
+                        if (snapshot.repositories[position] == "aur") {
+                            "AUR"
+                        } else {
+                            snapshot.repositories[position]
+                        }
+                    ).let { source ->
+                        if (position == jobPackageIndex && jobLabel.isNotEmpty()) {
+                            "$source\n$jobLabel"
+                        } else {
+                            source
+                        }
                     },
                 )
             } else {

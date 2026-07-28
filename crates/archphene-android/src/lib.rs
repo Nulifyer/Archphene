@@ -3215,9 +3215,10 @@ mod android {
         ) else {
             return ERROR_INVALID_ARGUMENT;
         };
+        let maximum_package_length = if action == 10 { 257 } else { 128 };
         if package_length == 0
             || package_length > package_capacity
-            || package_length > 128
+            || package_length > maximum_package_length
             || output_capacity < MAX_TOOL_OUTPUT_BYTES
         {
             return ERROR_INVALID_ARGUMENT;
@@ -3258,6 +3259,12 @@ mod android {
             7 => package_runtime.repair_pending_mutation(package),
             8 => package_runtime.update(package),
             9 => package_runtime.available_version_state(package),
+            10 => match package.split_once('\t') {
+                Some((name, version)) if !version.contains('\t') => {
+                    package_runtime.aur_candidate_state(name, version)
+                }
+                _ => return ERROR_INVALID_ARGUMENT,
+            },
             _ => return ERROR_INVALID_ARGUMENT,
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };

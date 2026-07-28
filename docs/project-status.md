@@ -196,6 +196,22 @@ Archphene will not downgrade it automatically. Both exact ABIs pass four-result
 states, row selection, retained query and results across theme recreation,
 durable Failed overlay, scoped fatal logs, and visually inspected full-device
 light/dark screenshots without network access.
+
+Reviewed AUR packages now join that same bounded search snapshot instead of
+existing only in a separate evidence panel. The manager retains matching
+official rows, replaces any prior AUR review with exactly one community row,
+and bounds the combined result at 100 entries. Source, exact candidate version,
+exact installed version, installed file class, and candidate compatibility
+provenance remain separate: an unverified built candidate says Not analyzed
+even when the installed package has a known Graphical/CLI/Library/System class.
+For differing versions, Rust asks pacman itself to evaluate the exact
+`package>candidate` dependency, so Update and Not an update use Arch/libalpm
+ordering rather than a Kotlin or Rust approximation. Tapping the AUR row
+returns to the retained trust/recipe/build evidence and never falls through to
+official resolution. Exact-ABI no-network fixtures and real installed Foot
+states pass in full-device emulator light and Samsung dark captures; durable
+activity remains visible without hiding the AUR source.
+
 Candidate compatibility is a separate state from file class. Search and Details
 say Not analyzed while any signed archive is absent. Once the complete freshly
 resolved closure is cached, Rust reverifies every archive and signature, then
@@ -2099,8 +2115,8 @@ emulator fixture covers all three states, durable failed/queued/cancelled row
 overlays, cold restoration, Retry, light/dark visuals, and exact non-mutation.
 The physical Samsung manager was updated in place and shows the real current
 Foot package as Installed while preserving its 255-package shared root.
-Verified package-file classification and version-order-safe update labels
-remain pending.
+Verified package-file classification, version-order-safe update labels, and
+reviewed AUR result integration now pass as described above.
 
 The shared-file namespace is now concrete on both devices: root bootstrap
 creates exact fail-closed `/mnt/android/{documents,downloads,media,pictures,shared}`

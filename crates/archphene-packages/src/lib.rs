@@ -1757,6 +1757,70 @@ impl PackageRuntime {
         Ok(output)
     }
 
+    pub fn aur_candidate_state(
+        &self,
+        package: &str,
+        candidate_version: &str,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) || !safe_package_version(candidate_version) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let installed = self.installed_version(package)?;
+        if installed.as_bytes().is_empty() {
+            let mut output = empty_tool_output();
+            output.push(b"available\t")?;
+            return Ok(output);
+        }
+        let installed_version = installed.as_str()?;
+        let state = if installed_version == candidate_version {
+            "installed"
+        } else {
+            let config = self
+                .pacman_config
+                .to_str()
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let root = self
+                .arch_root
+                .to_str()
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let database_path = self.arch_root.join("var/lib/pacman");
+            let database = database_path
+                .to_str()
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let requirement = format!("{package}>{candidate_version}");
+            match self.run_with_timeout(
+                PackageTool::Pacman,
+                &[
+                    "--config",
+                    config,
+                    "--root",
+                    root,
+                    "--dbpath",
+                    database,
+                    "-T",
+                    &requirement,
+                ],
+                COMMAND_TIMEOUT,
+            ) {
+                Ok(output) if output.as_bytes().is_empty() => "different",
+                Err(PackageRuntimeError::ToolFailed(127, output))
+                    if exact_missing_dependency(output.as_str()?, &requirement) =>
+                {
+                    "update"
+                }
+                Ok(_) | Err(PackageRuntimeError::ToolFailed(127, _)) => {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let mut output = empty_tool_output();
+        output.push(state.as_bytes())?;
+        output.push(b"\t")?;
+        output.push(installed.as_bytes())?;
+        Ok(output)
+    }
+
     pub fn installed_origin(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         if !safe_logical_name(package) {
             return Err(PackageRuntimeError::InvalidQuery);
@@ -4984,11 +5048,24 @@ fn search_install_state<'a>(
     Ok(("different", installed_version))
 }
 
+fn safe_package_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 128
+        && version
+            .bytes()
+            .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
+}
+
 fn empty_tool_output() -> ToolOutput {
     ToolOutput {
         bytes: [0; MAX_TOOL_OUTPUT_BYTES],
         length: 0,
     }
+}
+
+fn exact_missing_dependency(output: &str, requirement: &str) -> bool {
+    let mut lines = output.lines();
+    lines.next() == Some(requirement) && lines.next().is_none() && output.ends_with('\n')
 }
 
 fn missing_package_query(output: &str, package: &str) -> bool {
@@ -7705,6 +7782,16 @@ extra\tavailable\t1.0-1\tAvailable package\tavailable\t\n",
         assert!(matches!(
             parse_installed_version("btop 1.4.7-1\nextra output\n", "btop"),
             Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(safe_package_version("1:10.0.0-2"));
+        assert!(!safe_package_version("10.0 release"));
+        assert!(exact_missing_dependency(
+            "visual-studio-code-bin>1.2.3-1\n",
+            "visual-studio-code-bin>1.2.3-1",
+        ));
+        assert!(!exact_missing_dependency(
+            "other>1.2.3-1\n",
+            "visual-studio-code-bin>1.2.3-1",
         ));
         let explicit = "%NAME%\nbtop\n\n%VERSION%\n1.4.7-1\n";
         assert_eq!(

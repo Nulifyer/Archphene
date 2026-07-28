@@ -152,6 +152,9 @@
     <string name="package_search_prompt">Search the official Arch repositories</string>
     <string name="package_search_official">Official</string>
     <string name="package_search_installed">Installed</string>
+    <string name="package_search_aur">Community AUR · Reviewed</string>
+    <string name="package_search_aur_installed">Installed from AUR</string>
+    <string name="package_search_aur_update_from">AUR update from %1$s</string>
     <string name="package_search_update_from">Update from %1$s</string>
     <string name="package_search_not_update">Installed %1$s · Not an update</string>
     <string name="package_search_installed_candidate_analysis">%1$s installed · Candidate: Not analyzed</string>
