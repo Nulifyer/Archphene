@@ -2,6 +2,10 @@ plugins {
     id("com.android.application")
 }
 
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}
+
 android {
     namespace = "org.archphene.launcher"
     compileSdk = 36

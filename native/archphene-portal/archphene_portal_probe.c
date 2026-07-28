@@ -64,6 +64,71 @@ static dbus_bool_t append_bool_property(DBusMessageIter *dict,
             && dbus_message_iter_close_container(dict, &entry);
 }
 
+static dbus_bool_t append_filter(
+        DBusMessageIter *parent,
+        const char *name,
+        const char *const *mime_types,
+        size_t mime_count) {
+    DBusMessageIter filter;
+    DBusMessageIter rules;
+    if (!dbus_message_iter_open_container(
+                parent, DBUS_TYPE_STRUCT, NULL, &filter)
+            || !dbus_message_iter_append_basic(
+                &filter, DBUS_TYPE_STRING, &name)
+            || !dbus_message_iter_open_container(
+                &filter, DBUS_TYPE_ARRAY, "(us)", &rules)) return FALSE;
+    for (size_t index = 0; index < mime_count; index++) {
+        DBusMessageIter rule;
+        uint32_t type = 1;
+        const char *mime = mime_types[index];
+        if (!dbus_message_iter_open_container(
+                    &rules, DBUS_TYPE_STRUCT, NULL, &rule)
+                || !dbus_message_iter_append_basic(
+                    &rule, DBUS_TYPE_UINT32, &type)
+                || !dbus_message_iter_append_basic(
+                    &rule, DBUS_TYPE_STRING, &mime)
+                || !dbus_message_iter_close_container(&rules, &rule))
+            return FALSE;
+    }
+    return dbus_message_iter_close_container(&filter, &rules)
+            && dbus_message_iter_close_container(parent, &filter);
+}
+
+static dbus_bool_t append_filters_property(
+        DBusMessageIter *dict,
+        const char *key,
+        const char *name,
+        const char *const *mime_types,
+        size_t mime_count,
+        dbus_bool_t current) {
+    DBusMessageIter entry;
+    DBusMessageIter variant;
+    if (!dbus_message_iter_open_container(
+                dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+            || !dbus_message_iter_append_basic(
+                &entry, DBUS_TYPE_STRING, &key)) return FALSE;
+    if (current) {
+        if (!dbus_message_iter_open_container(
+                    &entry, DBUS_TYPE_VARIANT, "(sa(us))", &variant)
+                || !append_filter(
+                    &variant, name, mime_types, mime_count)
+                || !dbus_message_iter_close_container(&entry, &variant))
+            return FALSE;
+    } else {
+        DBusMessageIter filters;
+        if (!dbus_message_iter_open_container(
+                    &entry, DBUS_TYPE_VARIANT, "a(sa(us))", &variant)
+                || !dbus_message_iter_open_container(
+                    &variant, DBUS_TYPE_ARRAY, "(sa(us))", &filters)
+                || !append_filter(
+                    &filters, name, mime_types, mime_count)
+                || !dbus_message_iter_close_container(&variant, &filters)
+                || !dbus_message_iter_close_container(&entry, &variant))
+            return FALSE;
+    }
+    return dbus_message_iter_close_container(dict, &entry);
+}
+
 static uint32_t wait_request_response_attempts(DBusConnection *connection,
         const char *path, const char *label, int attempts) {
     for (int attempt = 0; attempt < attempts; attempt++) {
@@ -503,6 +568,71 @@ static void open_directory(DBusConnection *connection) {
     printf("PASS portal folder selected\n");
 }
 
+static void open_filtered(DBusConnection *connection) {
+    const char *parent = "";
+    const char *title = "Open a filtered Android document";
+    const char *token_key = "handle_token";
+    const char *token = "archphene_filtered_probe";
+    const char *filters_key = "filters";
+    const char *current_filter_key = "current_filter";
+    const char *filter_name = "Text and JSON";
+    const char *mime_types[] = {"text/plain", "application/json"};
+    DBusMessage *request = dbus_message_new_method_call(
+            PORTAL_NAME, PORTAL_PATH,
+            "org.freedesktop.portal.FileChooser", "OpenFile");
+    DBusMessageIter arguments;
+    DBusMessageIter options;
+    if (request == NULL) {
+        fprintf(stderr, "FAIL portal filtered: allocation\n");
+        exit(1);
+    }
+    dbus_message_iter_init_append(request, &arguments);
+    if (!dbus_message_iter_append_basic(
+                &arguments, DBUS_TYPE_STRING, &parent)
+            || !dbus_message_iter_append_basic(
+                &arguments, DBUS_TYPE_STRING, &title)
+            || !dbus_message_iter_open_container(
+                &arguments, DBUS_TYPE_ARRAY, "{sv}", &options)
+            || !append_string_property(&options, token_key, token)
+            || !append_filters_property(
+                &options, filters_key, filter_name,
+                mime_types, 2, FALSE)
+            || !append_filters_property(
+                &options, current_filter_key, filter_name,
+                mime_types, 2, TRUE)
+            || !dbus_message_iter_close_container(&arguments, &options)) {
+        dbus_message_unref(request);
+        fprintf(stderr, "FAIL portal filtered: arguments\n");
+        exit(1);
+    }
+    DBusMessage *reply = call(connection, request, "portal filtered");
+    DBusMessageIter output;
+    const char *response_path = NULL;
+    if (!dbus_message_iter_init(reply, &output)
+            || dbus_message_iter_get_arg_type(&output)
+                    != DBUS_TYPE_OBJECT_PATH) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL portal filtered: wrong reply\n");
+        exit(1);
+    }
+    dbus_message_iter_get_basic(&output, &response_path);
+    char path_copy[256];
+    if (response_path == NULL || strlen(response_path) >= sizeof(path_copy)) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL portal filtered: invalid response path\n");
+        exit(1);
+    }
+    strcpy(path_copy, response_path);
+    dbus_message_unref(reply);
+    uint32_t response = wait_request_response_attempts(
+            connection, path_copy, "portal filtered", 600);
+    if (response != 0) {
+        fprintf(stderr, "FAIL portal filtered: response=%u\n", response);
+        exit(1);
+    }
+    printf("PASS portal filtered document selected\n");
+}
+
 static void print_pdf(DBusConnection *connection, const char *path, uint32_t expected_response);
 static void print_pipe(DBusConnection *connection) {
     int descriptors[2];
@@ -819,7 +949,7 @@ static void settings_contract(DBusConnection *connection) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s contract|settings|open-directory|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
+        fprintf(stderr, "usage: %s contract|settings|open-directory|open-filtered|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
                 argv[0]);
         return 2;
     }
@@ -842,6 +972,8 @@ int main(int argc, char **argv) {
         settings_contract(connection);
     } else if (strcmp(argv[1], "open-directory") == 0 && argc == 2) {
         open_directory(connection);
+    } else if (strcmp(argv[1], "open-filtered") == 0 && argc == 2) {
+        open_filtered(connection);
     } else if (strcmp(argv[1], "notify") == 0 && argc == 2) {
         notify(connection);
     } else if (strcmp(argv[1], "withdraw") == 0) {

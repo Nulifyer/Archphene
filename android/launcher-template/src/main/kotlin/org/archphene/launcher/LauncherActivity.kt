@@ -244,10 +244,8 @@ class LauncherActivity :
                                         suggestedName.indexOf('\u0000') >= 0)) ||
                                 (operation != DOCUMENT_OPERATION_SAVE &&
                                     suggestedName.isNotEmpty()) ||
-                                mimeType.isNullOrBlank() ||
-                                mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
-                                mimeType.indexOf('/') <= 0 ||
-                                mimeType.indexOf('\u0000') >= 0 ||
+                                mimeType == null ||
+                                DocumentMimePolicy.parse(mimeType) == null ||
                                 data.dataAvail() != 0
                             ) {
                                 return@runCatching false
@@ -1633,15 +1631,17 @@ class LauncherActivity :
         requestId: Int,
         title: String,
         suggestedName: String,
-        mimeType: String,
+        mimeSpec: String,
     ) {
+        val mimeTypes = DocumentMimePolicy.parse(mimeSpec)
         if (
             requestId <= 0 ||
             sessionId <= 0 ||
             remote == null ||
             pendingDocumentRequestId != 0 ||
             isFinishing ||
-            isDestroyed
+            isDestroyed ||
+            mimeTypes == null
         ) {
             sendDocumentResult(
                 requestId,
@@ -1658,7 +1658,7 @@ class LauncherActivity :
         val intent =
             Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                type = mimeType
+                applyDocumentMimeTypes(this, mimeTypes)
                 putExtra(Intent.EXTRA_TITLE, suggestedName)
         }
         try {
@@ -1756,18 +1756,20 @@ class LauncherActivity :
     private fun beginDocumentOpen(
         requestId: Int,
         title: String,
-        mimeType: String,
+        mimeSpec: String,
         multiple: Boolean,
     ) {
         val operation =
             if (multiple) DOCUMENT_OPERATION_OPEN_MULTIPLE else DOCUMENT_OPERATION_OPEN
+        val mimeTypes = DocumentMimePolicy.parse(mimeSpec)
         if (
             requestId <= 0 ||
             sessionId <= 0 ||
             remote == null ||
             pendingDocumentRequestId != 0 ||
             isFinishing ||
-            isDestroyed
+            isDestroyed ||
+            mimeTypes == null
         ) {
             sendDocumentResult(
                 requestId,
@@ -1784,7 +1786,7 @@ class LauncherActivity :
         val intent =
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                type = mimeType
+                applyDocumentMimeTypes(this, mimeTypes)
                 addFlags(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
@@ -1820,6 +1822,21 @@ class LauncherActivity :
                 false,
             )
         }
+    }
+
+    private fun applyDocumentMimeTypes(
+        intent: Intent,
+        mimeTypes: List<String>,
+    ) {
+        val baseType = DocumentMimePolicy.androidBaseType(mimeTypes)
+        intent.type = baseType
+        if (mimeTypes.size > 1) {
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
+        }
+        Log.i(
+            TAG,
+            "Opening Android document chooser baseMime=$baseType mimeCount=${mimeTypes.size}",
+        )
     }
 
     private fun cancelPendingDocumentRequest() {
@@ -2519,7 +2536,6 @@ class LauncherActivity :
         private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_DOCUMENT_TITLE_UTF16 = 128
         private const val MAX_DOCUMENT_NAME_UTF16 = 255
-        private const val MAX_DOCUMENT_MIME_UTF16 = 128
         private const val MAX_DIRECTORY_ENTRIES = 10_000L
         private const val MAX_DIRECTORY_DEPTH = 64
         private const val MAX_DIRECTORY_PATH_BYTES = 4 * 1024

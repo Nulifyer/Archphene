@@ -31,6 +31,9 @@
 #define MAX_TEXT 8192
 #define MAX_ID 96
 #define MAX_OPEN_RESPONSE (192 * 1024)
+#define MAX_MIME_SPEC 2048
+#define MAX_MIME_TYPE 127
+#define MAX_MIME_TYPES 16
 
 static volatile sig_atomic_t running = 1;
 static uint32_t next_id = 1;
@@ -205,34 +208,107 @@ static void read_vardict_strings(DBusMessageIter *array, char *title, size_t tit
     }
 }
 
-static void read_save_options(
-        DBusMessageIter *array, char *name, size_t name_size) {
-    if (dbus_message_iter_get_arg_type(array) != DBUS_TYPE_ARRAY) return;
-    DBusMessageIter entries;
-    dbus_message_iter_recurse(array, &entries);
-    while (dbus_message_iter_get_arg_type(&entries) == DBUS_TYPE_DICT_ENTRY) {
-        DBusMessageIter entry;
-        dbus_message_iter_recurse(&entries, &entry);
-        if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_STRING) {
-            const char *key = NULL;
-            dbus_message_iter_get_basic(&entry, &key);
-            if (strcmp(key, "current_name") == 0
-                    && dbus_message_iter_next(&entry)
-                    && dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_VARIANT) {
-                DBusMessageIter value;
-                dbus_message_iter_recurse(&entry, &value);
-                (void)copy_basic_string(&value, name, name_size);
+static dbus_bool_t safe_mime_type(const char *value) {
+    if (value == NULL) return FALSE;
+    size_t length = strlen(value);
+    if (length < 3 || length > MAX_MIME_TYPE) return FALSE;
+    const char *separator = strchr(value, '/');
+    if (separator == NULL || separator == value || separator[1] == '\0'
+            || strchr(separator + 1, '/') != NULL) return FALSE;
+    for (const unsigned char *cursor = (const unsigned char *)value;
+            *cursor != '\0'; cursor++) {
+        if (!((*cursor >= 'a' && *cursor <= 'z')
+                || (*cursor >= 'A' && *cursor <= 'Z')
+                || (*cursor >= '0' && *cursor <= '9')
+                || *cursor == '!' || *cursor == '#' || *cursor == '$'
+                || *cursor == '&' || *cursor == '^' || *cursor == '_'
+                || *cursor == '.' || *cursor == '+' || *cursor == '-'
+                || *cursor == '*' || *cursor == '/')) return FALSE;
+    }
+    size_t top_length = (size_t)(separator - value);
+    if (memchr(value, '*', top_length) != NULL
+            && !(top_length == 1 && value[0] == '*')) return FALSE;
+    const char *subtype = separator + 1;
+    if (strchr(subtype, '*') != NULL && strcmp(subtype, "*") != 0) return FALSE;
+    return value[0] != '*' || strcmp(value, "*/*") == 0;
+}
+
+static dbus_bool_t mime_spec_contains(const char *spec, const char *mime) {
+    size_t mime_length = strlen(mime);
+    const char *cursor = spec;
+    while (*cursor != '\0') {
+        const char *end = strchr(cursor, ';');
+        size_t length = end == NULL ? strlen(cursor) : (size_t)(end - cursor);
+        if (length == mime_length && memcmp(cursor, mime, length) == 0) return TRUE;
+        if (end == NULL) break;
+        cursor = end + 1;
+    }
+    return FALSE;
+}
+
+static void append_filter_mime(
+        char *spec, size_t spec_size, size_t *count, const char *value) {
+    if (*count >= MAX_MIME_TYPES || !safe_mime_type(value)) return;
+    char canonical[MAX_MIME_TYPE + 1];
+    size_t length = strlen(value);
+    for (size_t index = 0; index < length; index++) {
+        unsigned char character = (unsigned char)value[index];
+        canonical[index] = character >= 'A' && character <= 'Z'
+                ? (char)(character + ('a' - 'A')) : (char)character;
+    }
+    canonical[length] = '\0';
+    if (mime_spec_contains(spec, canonical)) return;
+    size_t used = strlen(spec);
+    size_t required = used + (used == 0 ? 0 : 1) + length + 1;
+    if (required > spec_size) return;
+    if (used != 0) spec[used++] = ';';
+    memcpy(spec + used, canonical, length + 1);
+    (*count)++;
+}
+
+static void read_filter_mimes(
+        DBusMessageIter *filter, char *spec, size_t spec_size) {
+    if (dbus_message_iter_get_arg_type(filter) != DBUS_TYPE_STRUCT) return;
+    DBusMessageIter fields;
+    dbus_message_iter_recurse(filter, &fields);
+    if (dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_STRING
+            || !dbus_message_iter_next(&fields)
+            || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_ARRAY) return;
+    DBusMessageIter rules;
+    dbus_message_iter_recurse(&fields, &rules);
+    size_t count = 0;
+    while (dbus_message_iter_get_arg_type(&rules) == DBUS_TYPE_STRUCT) {
+        DBusMessageIter rule;
+        dbus_message_iter_recurse(&rules, &rule);
+        uint32_t type = UINT32_MAX;
+        if (dbus_message_iter_get_arg_type(&rule) == DBUS_TYPE_UINT32) {
+            dbus_message_iter_get_basic(&rule, &type);
+            if (dbus_message_iter_next(&rule)
+                    && dbus_message_iter_get_arg_type(&rule) == DBUS_TYPE_STRING
+                    && type == 1) {
+                const char *value = NULL;
+                dbus_message_iter_get_basic(&rule, &value);
+                append_filter_mime(spec, spec_size, &count, value);
             }
         }
-        dbus_message_iter_next(&entries);
+        dbus_message_iter_next(&rules);
     }
 }
 
-static void read_open_options(
-        DBusMessageIter *array, dbus_bool_t *multiple, dbus_bool_t *directory) {
-    *multiple = FALSE;
-    *directory = FALSE;
+static void read_file_options(
+        DBusMessageIter *array,
+        dbus_bool_t *multiple,
+        dbus_bool_t *directory,
+        char *name,
+        size_t name_size,
+        char *mime_spec,
+        size_t mime_spec_size) {
+    if (multiple != NULL) *multiple = FALSE;
+    if (directory != NULL) *directory = FALSE;
+    if (mime_spec != NULL && mime_spec_size > 0) mime_spec[0] = '\0';
     if (dbus_message_iter_get_arg_type(array) != DBUS_TYPE_ARRAY) return;
+    char first_filter[MAX_MIME_SPEC + 1] = {0};
+    char current_filter[MAX_MIME_SPEC + 1] = {0};
     DBusMessageIter entries;
     dbus_message_iter_recurse(array, &entries);
     while (dbus_message_iter_get_arg_type(&entries) == DBUS_TYPE_DICT_ENTRY) {
@@ -245,16 +321,56 @@ static void read_open_options(
                     && dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_VARIANT) {
                 DBusMessageIter value;
                 dbus_message_iter_recurse(&entry, &value);
-                if (dbus_message_iter_get_arg_type(&value) == DBUS_TYPE_BOOLEAN) {
+                if (name != NULL && strcmp(key, "current_name") == 0) {
+                    (void)copy_basic_string(&value, name, name_size);
+                } else if ((multiple != NULL || directory != NULL)
+                        && dbus_message_iter_get_arg_type(&value)
+                                == DBUS_TYPE_BOOLEAN) {
                     dbus_bool_t enabled = FALSE;
                     dbus_message_iter_get_basic(&value, &enabled);
-                    if (strcmp(key, "multiple") == 0) *multiple = enabled;
-                    else if (strcmp(key, "directory") == 0) *directory = enabled;
+                    if (multiple != NULL && strcmp(key, "multiple") == 0)
+                        *multiple = enabled;
+                    else if (directory != NULL && strcmp(key, "directory") == 0)
+                        *directory = enabled;
+                } else if (mime_spec != NULL
+                        && strcmp(key, "current_filter") == 0) {
+                    read_filter_mimes(
+                            &value, current_filter, sizeof(current_filter));
+                } else if (mime_spec != NULL && strcmp(key, "filters") == 0
+                        && dbus_message_iter_get_arg_type(&value)
+                                == DBUS_TYPE_ARRAY) {
+                    DBusMessageIter filters;
+                    dbus_message_iter_recurse(&value, &filters);
+                    read_filter_mimes(
+                            &filters, first_filter, sizeof(first_filter));
                 }
             }
         }
         dbus_message_iter_next(&entries);
     }
+    if (mime_spec != NULL && mime_spec_size > 0) {
+        const char *selected = current_filter[0] != '\0'
+                ? current_filter
+                : (first_filter[0] != '\0' ? first_filter : "*/*");
+        snprintf(mime_spec, mime_spec_size, "%s", selected);
+    }
+}
+
+static void read_save_options(
+        DBusMessageIter *array, char *name, size_t name_size,
+        char *mime_spec, size_t mime_spec_size) {
+    read_file_options(
+            array, NULL, NULL, name, name_size, mime_spec, mime_spec_size);
+}
+
+static void read_open_options(
+        DBusMessageIter *array,
+        dbus_bool_t *multiple,
+        dbus_bool_t *directory,
+        char *mime_spec,
+        size_t mime_spec_size) {
+    read_file_options(
+            array, multiple, directory, NULL, 0, mime_spec, mime_spec_size);
 }
 
 static dbus_bool_t valid_path_element(const char *value) {
@@ -870,7 +986,9 @@ static void handle_open_file(DBusConnection *connection, DBusMessage *request) {
     }
     dbus_bool_t multiple = FALSE;
     dbus_bool_t directory = FALSE;
-    read_open_options(&args, &multiple, &directory);
+    char mime_spec[MAX_MIME_SPEC + 1] = {0};
+    read_open_options(
+            &args, &multiple, &directory, mime_spec, sizeof(mime_spec));
     if (title[0] == '\0') snprintf(title, sizeof(title), "Open Linux document");
     char path[256];
     make_request_path(request, &args, path, sizeof(path));
@@ -889,7 +1007,7 @@ static void handle_open_file(DBusConnection *connection, DBusMessage *request) {
             if (result == 0) uri_count = 1;
         } else {
             result = archphene_android_open_files(
-                    title, "*/*", multiple ? 1 : 0,
+                    title, mime_spec, multiple ? 1 : 0,
                     &uris[0][0], sizeof(uris[0]), 32, &uri_count,
                     response, MAX_OPEN_RESPONSE);
         }
@@ -911,6 +1029,7 @@ static void handle_save_file(DBusConnection *connection, DBusMessage *request) {
     DBusMessageIter args;
     char title[257] = {0};
     char name[256] = {0};
+    char mime_spec[MAX_MIME_SPEC + 1] = {0};
     if (!dbus_message_iter_init(request, &args)
             || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_STRING
             || !dbus_message_iter_next(&args)
@@ -920,7 +1039,8 @@ static void handle_save_file(DBusConnection *connection, DBusMessage *request) {
         send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected (ssa{sv})");
         return;
     }
-    read_save_options(&args, name, sizeof(name));
+    read_save_options(
+            &args, name, sizeof(name), mime_spec, sizeof(mime_spec));
     if (!safe_suggested_name(name)) snprintf(name, sizeof(name), "document");
     if (title[0] == '\0') snprintf(title, sizeof(title), "Save Linux document");
     char path[256];
@@ -930,7 +1050,7 @@ static void handle_save_file(DBusConnection *connection, DBusMessage *request) {
     char uri[4097] = {0};
     char response[256] = {0};
     int result = archphene_android_save_file(
-            title, name, "application/octet-stream",
+            title, name, mime_spec,
             uri, sizeof(uri), response, sizeof(response));
     uint32_t portal_response =
             result == 0 ? 0u : (strcmp(response, "CANCEL") == 0 ? 1u : 2u);

@@ -123,4 +123,5 @@ complete Android status and navigation areas visible.
 - Exercise the GTK interposer from an installed GTK 3 application that exposes
   a folder-selection workflow.
 - Validate Qt 6/KDE, GTK 4/libadwaita, and Electron callers.
-- Add MIME/name filters where the Android picker contract can preserve them.
+- Preserve glob-only name filters when Android exposes an equivalent picker
+  contract. MIME filters are now covered separately.

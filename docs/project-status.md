@@ -1855,6 +1855,20 @@ stale-stage recovery, atomic publication, retained local project, scoped logs,
 and full-device frames. The follow-up synchronizer is described below;
 byte-level transfer progress and richer Android mapping status remain.
 
+The private FileChooser portal now preserves bounded XDG MIME filters through
+Android DocumentsUI. It reads the selected filter, or the first available
+filter when no selection is supplied, canonicalizes at most 16 MIME rules, and
+validates the serialized request again in the manager service and generated
+launcher. Multiple rules use Android's required `*/*` base type plus
+`EXTRA_MIME_TYPES`; a single rule remains narrow. Glob-only XDG filters fall
+back to `*/*` because Android has no equivalent filename-pattern contract.
+The reusable device gate presents text/plain and application/json beside an
+image/png decoy: both Android 16 x86_64 and Samsung Android 15 AArch64 leave
+the requested documents selectable, disable the decoy, import exact bytes,
+return to a clean Mousepad frame, and emit no fatal logs. The pre-existing
+single-open, multi-open, Save As, and folder suites also pass unchanged on
+both devices after the shared parser change.
+
 The initial mirror now records a real synchronization ancestor while it copies:
 a stable random 128-bit mapping identity, sorted directory entries, exact byte
 counts, and streaming SHA-256 fingerprints are atomically retained in private

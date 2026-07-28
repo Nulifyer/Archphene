@@ -270,7 +270,7 @@ internal class LauncherPortalBridge(
             mime == null ||
             title.isBlank() ||
             !safeName(name) ||
-            !safeMime(mime)
+            !PortalMimePolicy.valid(mime)
         ) {
             writeResponse(client, "ERROR\tINVALID_REQUEST")
             return
@@ -307,7 +307,12 @@ internal class LauncherPortalBridge(
         }
         val title = decodeField(fields[2], MAX_TITLE_BYTES)
         val mime = decodeField(fields[3], MAX_MIME_BYTES)
-        if (title == null || mime == null || title.isBlank() || !safeMime(mime)) {
+        if (
+            title == null ||
+            mime == null ||
+            title.isBlank() ||
+            !PortalMimePolicy.valid(mime)
+        ) {
             writeResponse(client, "ERROR\tINVALID_REQUEST")
             return
         }
@@ -709,13 +714,6 @@ internal class LauncherPortalBridge(
                     character.code == 127
             }
 
-    private fun safeMime(mime: String): Boolean =
-        mime.length in 3..127 &&
-            mime.indexOf('/') in 1 until mime.lastIndex &&
-            mime.all { character ->
-                character.code in 33..126 && character != '\t'
-            }
-
     private fun randomHex(bytes: Int): String =
         ByteArray(bytes).also(random::nextBytes).joinToString("") { value ->
             "%02x".format(value.toInt() and 0xff)
@@ -784,7 +782,7 @@ internal class LauncherPortalBridge(
         private const val MAX_REQUEST_BYTES = 16_384
         private const val MAX_TITLE_BYTES = 512
         private const val MAX_NAME_BYTES = 512
-        private const val MAX_MIME_BYTES = 128
+        private const val MAX_MIME_BYTES = PortalMimePolicy.MAX_SPEC_UTF16
         private const val MAX_ACTIVE_SAVES = 8
         private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_IMPORT_COLLISIONS = 1_000

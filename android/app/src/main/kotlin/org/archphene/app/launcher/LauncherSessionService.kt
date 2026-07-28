@@ -1222,10 +1222,7 @@ class LauncherSessionService : Service() {
             suggestedName.length > MAX_DOCUMENT_NAME_UTF16 ||
             suggestedName.indexOf('/') >= 0 ||
             suggestedName.indexOf('\u0000') >= 0 ||
-            mimeType.isBlank() ||
-            mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
-            mimeType.indexOf('/') <= 0 ||
-            mimeType.indexOf('\u0000') >= 0 ||
+            !PortalMimePolicy.valid(mimeType) ||
             payload.size > MAX_DEBUG_DOCUMENT_BYTES
         ) {
             return LauncherSessionDebugResult(false, 0, "invalid-document")
@@ -1625,10 +1622,7 @@ class LauncherSessionService : Service() {
             suggestedName.indexOf('/') >= 0 ||
             suggestedName.indexOf('\\') >= 0 ||
             suggestedName.indexOf('\u0000') >= 0 ||
-            mimeType.isBlank() ||
-            mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
-            mimeType.indexOf('/') <= 0 ||
-            mimeType.indexOf('\u0000') >= 0
+            !PortalMimePolicy.valid(mimeType)
         ) {
             return LauncherPortalSaveResult(null, false)
         }
@@ -1694,10 +1688,7 @@ class LauncherSessionService : Service() {
         if (
             title.isBlank() ||
             title.length > MAX_DOCUMENT_TITLE_UTF16 ||
-            mimeType.isBlank() ||
-            mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
-            mimeType.indexOf('/') <= 0 ||
-            mimeType.indexOf('\u0000') >= 0
+            !PortalMimePolicy.valid(mimeType)
         ) {
             return LauncherPortalOpenResult(emptyList(), false)
         }
@@ -2424,7 +2415,7 @@ class LauncherSessionService : Service() {
             request.operation !in
                 DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_DIRECTORY ||
             (request.operation == DOCUMENT_OPERATION_SAVE && request.suggestedName.isBlank()) ||
-            request.mimeType.isBlank()
+            !PortalMimePolicy.valid(request.mimeType)
         ) {
             return false
         }
@@ -2717,7 +2708,6 @@ class LauncherSessionService : Service() {
         private const val DOCUMENT_REQUEST_TIMEOUT_MINUTES = 10L
         private const val MAX_DOCUMENT_TITLE_UTF16 = 128
         private const val MAX_DOCUMENT_NAME_UTF16 = 255
-        private const val MAX_DOCUMENT_MIME_UTF16 = 128
         private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_DEBUG_DOCUMENT_BYTES = 65_536
         private val stalePortalSavesRecovered = AtomicBoolean(false)

@@ -55,15 +55,22 @@ archphene_prepare_portal_probe() {
   ARCHPHENE_PORTAL_PROBE="$native_dir/$abi_directory/libarchphene_portal_probe.so"
 }
 
-archphene_run_portal_directory_probe() {
+archphene_run_portal_probe() {
   local manager="$1"
-  local output="$2"
+  local probe_command="$2"
+  local output="$3"
   local command
   [[ -n "${ARCHPHENE_PORTAL_ADDRESS:-}" && -n "${ARCHPHENE_PORTAL_PROBE:-}" ]] ||
     archphene_die "portal probe context is not prepared"
+  [[ "$probe_command" =~ ^[a-z][a-z-]*$ ]] ||
+    archphene_die "portal probe command is invalid: $probe_command"
   archphene_adb_run shell run-as "$manager" rm -f "$output"
-  command="run-as $manager sh -c 'DBUS_SESSION_BUS_ADDRESS=$ARCHPHENE_PORTAL_ADDRESS \"$ARCHPHENE_PORTAL_PROBE\" open-directory > \"$output\" 2>&1 &'"
+  command="run-as $manager sh -c 'DBUS_SESSION_BUS_ADDRESS=$ARCHPHENE_PORTAL_ADDRESS \"$ARCHPHENE_PORTAL_PROBE\" \"$probe_command\" > \"$output\" 2>&1 &'"
   archphene_adb_run shell "$command"
+}
+
+archphene_run_portal_directory_probe() {
+  archphene_run_portal_probe "$1" open-directory "$2"
 }
 
 archphene_wait_log() {
