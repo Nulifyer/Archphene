@@ -8353,6 +8353,9 @@ class ArchpheneRuntimeService : Service() {
                     searchStatus =
                         "Preparing isolated AUR base ${index + 1}/${reviews.size}: " +
                             review.packageBase
+                    // Every recipe runs as the same Builder app UID and can mutate its
+                    // prepared root. Reprovision each later base until a distinct UID or
+                    // kernel-enforced immutable/mount boundary can protect a shared root.
                     builder =
                         probeAurBuilderCompanion(
                             activeHandle,

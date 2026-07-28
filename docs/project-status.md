@@ -1903,8 +1903,17 @@ bounded again across Binder/JNI, and applied consistently to Make, Cargo,
 CMake, and a verified Ninja wrapper. The physical Samsung selected
 **Auto · 4**, exposed that value in the full-device build evidence, published
 an exact `ninja -j4` wrapper, started current `libpamac-aur` through the new
-protocol, and cancelled/reaped the build normally. Safe prepared-root reuse
-between untrusted recipes remains open.
+protocol, and cancelled/reaped the build normally.
+
+Prepared Builder roots deliberately are not reused between untrusted recipes.
+Every recipe currently executes as the same Builder application UID, and a
+physical Samsung probe confirmed that this identity can mutate the prepared
+root's `/usr`. Owner read-only modes and hardlinks are therefore not an
+isolation boundary, while Android denies the required user and mount
+namespaces on the production device. Archphene continues to reuse
+manager-owned signed archives and independently verified outputs, but
+reprovisions each recipe root until a distinct UID, kernel-enforced immutable
+lower layer, or equivalent mount boundary is available.
 
 Current AArch64 Code now reaches and retains its Ozone/Wayland workbench without
 a package patch. The generic bridge passes Chromium's kernel `/proc`
@@ -2454,8 +2463,11 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
 - Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild. The GTK settings bridge now has a clean checksum-pinned AArch64 GLib link sysroot.
 - Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.
-- Reuse unchanged content-addressed recursive-AUR closures and prepared roots
-  between untrusted recipes where the isolation model permits it.
+- A stronger Builder isolation primitive—a distinct UID, mount namespace, or
+  kernel-enforced immutable lower root—is required before prepared roots may
+  be shared between untrusted recipes. Production intentionally reprovisions
+  each root today while reusing signed archives and independently verified
+  outputs.
 
 ## Package-manager efficiency rules
 
