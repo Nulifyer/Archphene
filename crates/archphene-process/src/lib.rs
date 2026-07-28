@@ -161,6 +161,22 @@ impl GuiAppearance {
             foreground,
         })
     }
+
+    pub const fn with_colors(
+        self,
+        dark: bool,
+        accent: [u8; 3],
+        background: [u8; 3],
+        foreground: [u8; 3],
+    ) -> Self {
+        Self {
+            dark,
+            accent,
+            background,
+            foreground,
+            ..self
+        }
+    }
 }
 
 impl Default for GuiAppearance {
@@ -270,7 +286,7 @@ impl CommandEnvironment {
         self.gtk_settings_module =
             validate_optional_gui_file(&self.arch_root, gtk_settings_module)?;
         self.qt_plugin_root = validate_optional_gui_directory(&self.arch_root, qt_plugin_root)?;
-        write_gui_appearance(&self.arch_root, appearance)?;
+        publish_gui_appearance(&self.arch_root, appearance)?;
         self.appearance = appearance;
         Ok(self)
     }
@@ -543,14 +559,6 @@ impl CommandEnvironment {
             .env("XDG_SESSION_TYPE", "wayland")
             .env("XDG_CURRENT_DESKTOP", "Archphene")
             .env("GDK_BACKEND", "wayland")
-            .env(
-                "GTK_THEME",
-                if self.appearance.dark {
-                    "Adwaita:dark"
-                } else {
-                    "Adwaita"
-                },
-            )
             .env("ARCHPHENE_GTK_SETTINGS_FILE", GTK_SETTINGS_LOGICAL_PATH)
             .env("GIO_USE_VFS", "local")
             .env("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
@@ -1584,7 +1592,7 @@ fn validate_optional_gui_directory(
     Ok(Some(path.to_path_buf()))
 }
 
-fn write_gui_appearance(root: &Path, appearance: GuiAppearance) -> Result<(), ProcessError> {
+pub fn publish_gui_appearance(root: &Path, appearance: GuiAppearance) -> Result<(), ProcessError> {
     let config = root.join("home/archphene/.config");
     let gtk3 = config.join("gtk-3.0");
     let gtk4 = config.join("gtk-4.0");
@@ -1594,11 +1602,10 @@ fn write_gui_appearance(root: &Path, appearance: GuiAppearance) -> Result<(), Pr
 
     let point_size = (12_u32 * u32::from(appearance.font_percent) + 50) / 100;
     let font_pixels = (16_u32 * u32::from(appearance.font_percent) + 50) / 100;
-    let theme = if appearance.dark {
-        "Adwaita-dark"
-    } else {
-        "Adwaita"
-    };
+    // GTK selects Adwaita's embedded dark variant through the standard
+    // prefer-dark setting. "Adwaita-dark" is not a theme resource name in
+    // current GTK 3 and silently falls back to the light default.
+    let theme = "Adwaita";
     let settings = format!(
         "[Settings]\n\
 gtk-theme-name={theme}\n\
@@ -2489,7 +2496,7 @@ mod tests {
         expected_preload.push(":");
         expected_preload.push(&gtk_alias);
         assert_eq!(value("LD_PRELOAD"), Some(expected_preload.as_os_str()));
-        assert_eq!(value("GTK_THEME"), Some(OsStr::new("Adwaita:dark")));
+        assert_eq!(value("GTK_THEME"), None);
         assert_eq!(value("GDK_SCALE"), None);
         assert_eq!(value("GDK_DPI_SCALE"), None);
         assert_eq!(value("QT_PLUGIN_PATH"), Some(plugins.as_os_str()));
@@ -2524,6 +2531,32 @@ mod tests {
         let kde = fs::read_to_string(root.0.join("home/archphene/.config/kdeglobals"))
             .expect("KDE settings");
         assert!(kde.contains("ColorScheme=ArchpheneDark"));
+        assert!(kde.contains("ControlVisualSize=20"));
+
+        publish_gui_appearance(
+            &root.0,
+            appearance.with_colors(
+                false,
+                [0x10, 0x20, 0x30],
+                [0xf8, 0xf9, 0xfa],
+                [0x11, 0x12, 0x13],
+            ),
+        )
+        .expect("live appearance");
+        let settings =
+            fs::read_to_string(root.0.join("home/archphene/.config/gtk-3.0/settings.ini"))
+                .expect("updated GTK settings");
+        assert!(settings.contains("gtk-application-prefer-dark-theme=false"));
+        assert!(settings.contains("gtk-font-name=Noto Sans 18"));
+        let css = fs::read_to_string(root.0.join("home/archphene/.config/gtk-3.0/gtk.css"))
+            .expect("updated GTK CSS");
+        assert!(css.contains("@define-color accent_color #102030"));
+        assert!(css.contains("min-width: 20px"));
+        assert!(css.contains("min-height: 32px"));
+        let kde = fs::read_to_string(root.0.join("home/archphene/.config/kdeglobals"))
+            .expect("updated KDE settings");
+        assert!(kde.contains("ColorScheme=ArchpheneLight"));
+        assert!(kde.contains("font=Noto Sans,18"));
         assert!(kde.contains("ControlVisualSize=20"));
     }
 

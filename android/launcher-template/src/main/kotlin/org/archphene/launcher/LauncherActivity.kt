@@ -401,6 +401,11 @@ class LauncherActivity :
         val light =
             resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
                 Configuration.UI_MODE_NIGHT_YES
+        val background = getColor(R.color.launcher_background)
+        content.setBackgroundColor(background)
+        window.decorView.setBackgroundColor(background)
+        window.statusBarColor = background
+        window.navigationBarColor = background
         if (Build.VERSION.SDK_INT >= 30) {
             val mask =
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or

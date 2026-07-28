@@ -3649,6 +3649,44 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeUpdateGuiColors(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        dark: jboolean,
+        accent: jint,
+        background: jint,
+        foreground: jint,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let dark = match dark {
+            JNI_FALSE => false,
+            JNI_TRUE => true,
+            _ => return ERROR_INVALID_ARGUMENT,
+        };
+        let rgb = |color: jint| {
+            let color = color as u32;
+            [
+                ((color >> 16) & 0xff) as u8,
+                ((color >> 8) & 0xff) as u8,
+                (color & 0xff) as u8,
+            ]
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.update_gui_colors(dark, rgb(accent), rgb(background), rgb(foreground)) {
+            Ok(()) => 0,
+            Err(_) => ERROR_PACKAGE_RUNTIME,
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCloseLauncherProcess(
         _environment: JNIEnv,
         _class: JClass,

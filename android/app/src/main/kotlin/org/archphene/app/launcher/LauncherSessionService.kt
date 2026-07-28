@@ -169,6 +169,7 @@ class LauncherSessionService : Service() {
             ) {
                 runtimeBinder = service as? ArchpheneRuntimeService.LocalBinder
                 Log.i(TAG, "Shared runtime connected")
+                surfaceHandler.post { publishPortalAppearance() }
             }
 
             override fun onServiceDisconnected(name: ComponentName) {
@@ -1914,10 +1915,20 @@ class LauncherSessionService : Service() {
 
     @Synchronized
     private fun publishPortalAppearance() {
-        for (session in sessions.values) {
-            val bridge = session.portalBridge ?: continue
-            val appearance = resolvedAppearance(session)
-            bridge.updateAppearance(appearance.dark, appearance.accent)
+        val session = sessions.values.firstOrNull() ?: return
+        val appearance = resolvedAppearance(session)
+        for (activeSession in sessions.values) {
+            activeSession.portalBridge?.updateAppearance(appearance.dark, appearance.accent)
+        }
+        if (
+            runtimeBinder?.updateGuiColors(
+                appearance.dark,
+                appearance.accent,
+                appearance.background,
+                appearance.foreground,
+            ) == false
+        ) {
+            Log.w(TAG, "Shared runtime did not accept live Linux appearance")
         }
     }
 

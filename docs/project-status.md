@@ -33,6 +33,19 @@ the bounded runtime evidence used by lifecycle gates without placing it in the
 visible header. Reversible light/dark semantic and full-device visual gates,
 plus clean-data lifecycle gates, pass on the emulator and Samsung.
 
+Generated Linux launchers now repaint their Android decor and system-bar
+backgrounds when configuration changes. The shared Rust runtime republishes
+bounded GTK 3/4 and KDE colors through a primitive JNI call while retaining the
+current published geometry, font, and control dimensions. GTK 3
+uses the embedded Adwaita variant through standard settings rather than a
+process-pinned debug override; its checksum-pinned compatibility module watches
+atomic settings/CSS replacements with an event-driven directory monitor, so it
+does no steady-state appearance polling. Stock Mousepad passes live
+light-to-dark-to-light updates on the exact x86_64 emulator and AArch64 Samsung
+without launcher, manager, or Linux process restart. The gate checks portal
+signals/readback, GTK applied state, fatal logs, and measured full-device GTK
+content plus status/navigation-bar luminance.
+
 The dense single-screen manager scaffold has been split into focused Packages,
 Files, and Terminal sections with a persistent bottom navigation surface. The
 selected section survives Activity recreation and rotation; switching sections

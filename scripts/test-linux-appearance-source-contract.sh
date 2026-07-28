@@ -9,8 +9,15 @@ provider="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/
 manager="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/manager/MainActivity.java"
 style="$ARCHPHENE_ROOT/native/archphene-qt-platform-theme/archphenestyle.cpp"
 platform_theme="$ARCHPHENE_ROOT/native/archphene-qt-platform-theme/archpheneplatformtheme.cpp"
+process_runtime="$ARCHPHENE_ROOT/crates/archphene-process/src/lib.rs"
+gtk_live="$ARCHPHENE_ROOT/native/archphene-gtk3-settings/archphene_gtk3_settings.c"
+runtime_service="$ARCHPHENE_ROOT/android/app/src/main/kotlin/org/archphene/app/runtime/ArchpheneRuntimeService.kt"
+session_service="$ARCHPHENE_ROOT/android/app/src/main/kotlin/org/archphene/app/launcher/LauncherSessionService.kt"
+launcher_activity="$ARCHPHENE_ROOT/android/launcher-template/src/main/kotlin/org/archphene/launcher/LauncherActivity.kt"
 
-for file in "$bridge" "$store" "$provider" "$manager" "$style" "$platform_theme"; do
+for file in "$bridge" "$store" "$provider" "$manager" "$style" "$platform_theme" \
+    "$process_runtime" "$gtk_live" "$runtime_service" "$session_service" \
+    "$launcher_activity"; do
   archphene_require_file "$file"
 done
 
@@ -117,4 +124,19 @@ if grep -Fq 'setFixedHeight' "$style"; then
   archphene_die 'Qt style must not impose app-specific fixed widget heights'
 fi
 
-archphene_note 'Linux appearance source contract passed: complete GTK theme ownership and independent Qt/GTK control density are present.'
+grep -Fq 'let theme = "Adwaita";' "$process_runtime" \
+  || archphene_die 'current GTK launch path does not use the embedded Adwaita variant'
+! grep -Fq '.env("GTK_THEME"' "$process_runtime" \
+  || archphene_die 'current GTK launch path still pins the debug-only GTK_THEME override'
+grep -Fq 'nativeUpdateGuiColors(' "$runtime_service" \
+  || archphene_die 'current manager runtime does not publish live Linux colors'
+grep -Fq 'runtimeBinder?.updateGuiColors(' "$session_service" \
+  || archphene_die 'launcher sessions do not bridge Android appearance changes to Linux'
+grep -Fq 'g_file_monitor_directory(' "$gtk_live" \
+  || archphene_die 'GTK live settings do not use an event-driven file monitor'
+! grep -Fq 'g_timeout_add(' "$gtk_live" \
+  || archphene_die 'GTK live settings still poll and allocate continuously'
+grep -Fq 'window.statusBarColor = background' "$launcher_activity" \
+  || archphene_die 'generated launchers do not repaint their status bar on mode changes'
+
+archphene_note 'Linux appearance source contract passed: live Adwaita selection, event-driven updates, system bars, and independent Qt/GTK control density are present.'

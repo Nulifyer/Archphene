@@ -61,6 +61,7 @@ pub struct RuntimeHost {
     aur_source_download: Option<AurSourceDownload>,
     pty_sessions: PtyRegistry,
     gui_sessions: GuiRegistry,
+    gui_appearance: Option<GuiAppearance>,
     session_marker: Option<PathBuf>,
     mirror_import: Option<MirrorImport>,
     mirror_cancellation: Option<MirrorCancellation>,
@@ -237,6 +238,7 @@ impl RuntimeHost {
             aur_source_download: None,
             pty_sessions: PtyRegistry::new(),
             gui_sessions: GuiRegistry::new(),
+            gui_appearance: None,
             session_marker: None,
             mirror_import: None,
             mirror_cancellation: None,
@@ -957,14 +959,39 @@ impl RuntimeHost {
         for (destination, source) in argument_refs.iter_mut().zip(&arguments) {
             *destination = source;
         }
-        self.gui_sessions
+        let handle = self
+            .gui_sessions
             .open(
                 &environment,
                 &command,
                 &argument_refs[..arguments.len()],
                 wayland_display,
             )
-            .map_err(LauncherProcessError::from)
+            .map_err(LauncherProcessError::from)?;
+        self.gui_appearance = Some(appearance);
+        Ok(handle)
+    }
+
+    pub fn update_gui_colors(
+        &mut self,
+        dark: bool,
+        accent: [u8; 3],
+        background: [u8; 3],
+        foreground: [u8; 3],
+    ) -> Result<(), PackageRuntimeError> {
+        let appearance = self
+            .gui_appearance
+            .unwrap_or_default()
+            .with_colors(dark, accent, background, foreground);
+        if self.gui_appearance == Some(appearance) {
+            return Ok(());
+        }
+        self.package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .publish_gui_appearance(appearance)?;
+        self.gui_appearance = Some(appearance);
+        Ok(())
     }
 
     pub fn launcher_process_exit_status(

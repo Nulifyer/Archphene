@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use archphene_process::{CommandEnvironment, GuiAppearance, ProcessError};
+use archphene_process::{CommandEnvironment, GuiAppearance, ProcessError, publish_gui_appearance};
 use sha2::{Digest, Sha256};
 
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
@@ -3498,6 +3498,13 @@ impl PackageRuntime {
                 appearance,
             )
             .map_err(PackageRuntimeError::from)
+    }
+
+    pub fn publish_gui_appearance(
+        &self,
+        appearance: GuiAppearance,
+    ) -> Result<(), PackageRuntimeError> {
+        publish_gui_appearance(&self.arch_root, appearance).map_err(PackageRuntimeError::from)
     }
 
     pub fn command_environment_with_gui_and_portal(

@@ -396,6 +396,13 @@ internal object NativeRuntime {
         requestLength: Int,
         outputBuffer: ByteBuffer,
     ): Long
+    external fun nativeUpdateGuiColors(
+        handle: Long,
+        dark: Boolean,
+        accent: Int,
+        background: Int,
+        foreground: Int,
+    ): Int
     external fun nativeCloseLauncherProcess(
         handle: Long,
         launcherHandle: Long,

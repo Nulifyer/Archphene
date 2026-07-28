@@ -330,6 +330,19 @@ class ArchpheneRuntimeService : Service() {
                 portalBusAddress,
             )
 
+        internal fun updateGuiColors(
+            dark: Boolean,
+            accent: Int,
+            background: Int,
+            foreground: Int,
+        ): Boolean =
+            this@ArchpheneRuntimeService.updateGuiColors(
+                dark,
+                accent,
+                background,
+                foreground,
+            )
+
         internal fun closeLauncherProcess(launcherHandle: Long): Boolean =
             this@ArchpheneRuntimeService.closeLauncherProcess(launcherHandle)
 
@@ -1731,6 +1744,33 @@ class ArchpheneRuntimeService : Service() {
             color shr 8 and 0xff,
             color and 0xff,
         )
+
+    @Synchronized
+    private fun updateGuiColors(
+        dark: Boolean,
+        accent: Int,
+        background: Int,
+        foreground: Int,
+    ): Boolean {
+        val activeHandle = readyHandle
+        if (activeHandle == 0L) {
+            return false
+        }
+        val result =
+            NativeRuntime.nativeUpdateGuiColors(
+                activeHandle,
+                dark,
+                accent,
+                background,
+                foreground,
+            )
+        if (result != 0) {
+            Log.e(TAG, "Could not publish live Linux appearance: native result $result")
+            return false
+        }
+        Log.i(TAG, "Published live Linux appearance dark=$dark accent=${rgbHex(accent)}")
+        return true
+    }
 
     @Synchronized
     private fun closeLauncherProcess(launcherHandle: Long): Boolean {

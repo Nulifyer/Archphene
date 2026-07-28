@@ -49,6 +49,7 @@ typedef gboolean (*GtkFileChooserSelectFile)(
 typedef void (*GtkFileChooserUnselectAll)(gpointer chooser);
 
 static gchar *settings_path;
+static gchar *settings_css_path;
 static gchar *active_theme;
 static gchar *active_font;
 static gchar *active_css;
@@ -56,6 +57,8 @@ static gboolean active_dark;
 static gboolean have_active_settings;
 static gpointer active_css_provider;
 static gboolean refresh_started;
+static GFileMonitor *settings_monitor;
+static guint refresh_source;
 static gpointer portal_file_chooser;
 static GSList *portal_files;
 
@@ -298,12 +301,13 @@ static void update_libadwaita(gboolean dark)
 static gboolean refresh_settings(gpointer unused)
 {
     (void)unused;
-    if (settings_path == NULL) return G_SOURCE_CONTINUE;
+    refresh_source = 0;
+    if (settings_path == NULL) return G_SOURCE_REMOVE;
 
     GKeyFile *file = g_key_file_new();
     if (!g_key_file_load_from_file(file, settings_path, G_KEY_FILE_NONE, NULL)) {
         g_key_file_unref(file);
-        return G_SOURCE_CONTINUE;
+        return G_SOURCE_REMOVE;
     }
     gchar *theme = g_key_file_get_string(file, "Settings", "gtk-theme-name", NULL);
     gchar *font = g_key_file_get_string(file, "Settings", "gtk-font-name", NULL);
@@ -313,7 +317,7 @@ static gboolean refresh_settings(gpointer unused)
     if (theme == NULL || font == NULL) {
         g_free(theme);
         g_free(font);
-        return G_SOURCE_CONTINUE;
+        return G_SOURCE_REMOVE;
     }
     gchar *directory = g_path_get_dirname(settings_path);
     gchar *css_path = g_build_filename(directory, "gtk.css", NULL);
@@ -323,7 +327,7 @@ static gboolean refresh_settings(gpointer unused)
         g_free(font);
         g_free(css_path);
         g_free(directory);
-        return G_SOURCE_CONTINUE;
+        return G_SOURCE_REMOVE;
     }
     if (have_active_settings && active_dark == dark
             && g_strcmp0(active_theme, theme) == 0
@@ -334,7 +338,7 @@ static gboolean refresh_settings(gpointer unused)
         g_free(css);
         g_free(css_path);
         g_free(directory);
-        return G_SOURCE_CONTINUE;
+        return G_SOURCE_REMOVE;
     }
 
     GtkSettingsGetDefault get_default = resolve_settings_get_default();
@@ -348,7 +352,7 @@ static gboolean refresh_settings(gpointer unused)
         g_free(css);
         g_free(css_path);
         g_free(directory);
-        return G_SOURCE_CONTINUE;
+        return G_SOURCE_REMOVE;
     }
     g_object_set(settings,
             "gtk-theme-name", theme,
@@ -373,7 +377,33 @@ static gboolean refresh_settings(gpointer unused)
     g_free(status);
     g_free(css_path);
     g_free(directory);
-    return G_SOURCE_CONTINUE;
+    return G_SOURCE_REMOVE;
+}
+
+static void settings_changed(GFileMonitor *monitor, GFile *file,
+        GFile *other_file, GFileMonitorEvent event, gpointer unused)
+{
+    (void)monitor;
+    (void)unused;
+    if (settings_path == NULL || file == NULL) return;
+    switch (event) {
+    case G_FILE_MONITOR_EVENT_CHANGED:
+    case G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT:
+    case G_FILE_MONITOR_EVENT_CREATED:
+    case G_FILE_MONITOR_EVENT_MOVED_IN:
+    case G_FILE_MONITOR_EVENT_RENAMED:
+        break;
+    default:
+        return;
+    }
+    const gchar *path = g_file_peek_path(file);
+    const gchar *other_path =
+            other_file == NULL ? NULL : g_file_peek_path(other_file);
+    if (g_strcmp0(path, settings_path) != 0
+            && g_strcmp0(other_path, settings_path) != 0
+            && g_strcmp0(path, settings_css_path) != 0
+            && g_strcmp0(other_path, settings_css_path) != 0) return;
+    if (refresh_source == 0) refresh_source = g_idle_add(refresh_settings, NULL);
 }
 
 static void start_refresh(void)
@@ -383,9 +413,26 @@ static void start_refresh(void)
     if (configured == NULL || !g_path_is_absolute(configured)) return;
     refresh_started = TRUE;
     settings_path = g_strdup(configured);
+    gchar *directory = g_path_get_dirname(settings_path);
+    settings_css_path = g_build_filename(directory, "gtk.css", NULL);
     write_diagnostic("initialized\n");
     refresh_settings(NULL);
-    g_timeout_add(250, refresh_settings, NULL);
+    GFile *directory_file = g_file_new_for_path(directory);
+    GError *error = NULL;
+    settings_monitor = g_file_monitor_directory(
+            directory_file, G_FILE_MONITOR_WATCH_MOVES, NULL, &error);
+    g_object_unref(directory_file);
+    g_free(directory);
+    if (settings_monitor == NULL) {
+        gchar *status = g_strdup_printf("settings monitor failed: %s\n",
+                error == NULL ? "unknown error" : error->message);
+        write_diagnostic(status);
+        g_free(status);
+        g_clear_error(&error);
+        return;
+    }
+    g_signal_connect(settings_monitor, "changed",
+            G_CALLBACK(settings_changed), NULL);
 }
 
 /*
