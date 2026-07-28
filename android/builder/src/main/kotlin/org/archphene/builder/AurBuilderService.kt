@@ -621,7 +621,15 @@ class AurBuilderService : Service() {
         val version = data.readString().orEmpty()
         val inputManifestSha256 = data.readString().orEmpty()
         val closureSha256 = data.readString().orEmpty()
-        require(inputManifestSha256.matches(SHA256) && closureSha256.matches(SHA256))
+        val dependencyManifestSha256 = data.readString().orEmpty()
+        require(
+            inputManifestSha256.matches(SHA256) &&
+                closureSha256.matches(SHA256) &&
+                (
+                    dependencyManifestSha256.isEmpty() ||
+                        dependencyManifestSha256.matches(SHA256)
+                ),
+        )
         val runtimeManifest = readRuntimeManifest()
         val runtimeBuffer = ByteBuffer.allocateDirect(runtimeManifest.size).put(runtimeManifest)
         nativeOutputBuffer.clear()
@@ -635,6 +643,7 @@ class AurBuilderService : Service() {
                 version,
                 inputManifestSha256,
                 closureSha256,
+                dependencyManifestSha256,
                 nativeOutputBuffer,
             )
         check(result == 0) {
@@ -690,7 +699,14 @@ class AurBuilderService : Service() {
         val version = data.readString().orEmpty()
         val architecture = data.readString().orEmpty()
         val closureSha256 = data.readString().orEmpty()
-        require(closureSha256.matches(SHA256))
+        val dependencyManifestSha256 = data.readString().orEmpty()
+        require(
+            closureSha256.matches(SHA256) &&
+                (
+                    dependencyManifestSha256.isEmpty() ||
+                        dependencyManifestSha256.matches(SHA256)
+                ),
+        )
         val destination =
             data.readFileDescriptor()
                 ?: throw IllegalArgumentException("Missing verified-output descriptor")
@@ -707,6 +723,7 @@ class AurBuilderService : Service() {
                     version,
                     architecture,
                     closureSha256,
+                    dependencyManifestSha256,
                     descriptor.fd,
                     output,
                 )

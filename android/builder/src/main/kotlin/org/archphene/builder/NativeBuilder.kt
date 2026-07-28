@@ -141,6 +141,7 @@ internal object NativeBuilder {
         version: String,
         inputManifestSha256: String,
         closureSha256: String,
+        dependencyManifestSha256: String,
         outputBuffer: ByteBuffer,
     ): Int
 
@@ -165,6 +166,7 @@ internal object NativeBuilder {
         version: String,
         architecture: String,
         closureSha256: String,
+        dependencyManifestSha256: String,
         outputDescriptor: Int,
         outputBuffer: ByteBuffer,
     ): Int

@@ -2590,6 +2590,8 @@ mod android {
             &architecture,
             closure.as_bytes(),
             closure_sha256,
+            None,
+            None,
             expected_install_script.map(|script| script.contents),
         ) {
             Ok(report) => report,
@@ -2725,6 +2727,8 @@ mod android {
                 &architecture,
                 closure.as_bytes(),
                 closure_sha256,
+                None,
+                None,
                 expected_install_script.map(|script| script.contents),
             ) {
                 Ok(report) => report,
@@ -2852,6 +2856,8 @@ mod android {
                 &architecture,
                 closure.as_bytes(),
                 closure_sha256,
+                None,
+                None,
                 expected_install_script.map(|script| script.contents),
             ) {
                 Ok(report) => report,
@@ -2996,6 +3002,8 @@ mod android {
             &architecture,
             closure.as_bytes(),
             closure_sha256,
+            None,
+            None,
             expected_install_script.map(|script| script.contents),
         ) {
             Ok(report) => report,
@@ -3161,6 +3169,8 @@ mod android {
                 &architecture,
                 closure.as_bytes(),
                 closure_sha256,
+                None,
+                None,
                 expected_install_script.map(|script| script.contents),
             ) {
                 Ok(report) => report,

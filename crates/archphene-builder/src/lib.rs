@@ -1332,6 +1332,7 @@ impl BuilderRuntime {
 }
 
 impl AurBuildSession {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         files_directory: &Path,
         native_directory: &Path,
@@ -1340,12 +1341,14 @@ impl AurBuildSession {
         version: &str,
         expected_input_manifest_sha256: [u8; 32],
         expected_closure_sha256: [u8; 32],
+        expected_dependency_manifest_sha256: Option<[u8; 32]>,
     ) -> Result<Self, BuilderError> {
         terminate_stale_builder_processes()?;
         let runtime = BuilderRuntime::prepare(files_directory, native_directory, runtime_manifest)?;
         if runtime.closure_sha256() != expected_closure_sha256 {
             return Err(BuilderError::InvalidInput);
         }
+        verified_staged_aur_dependencies(files_directory, expected_dependency_manifest_sha256)?;
         let recipe = prepare_recipe_workspace(
             files_directory,
             package_base,
@@ -1396,6 +1399,7 @@ struct BuiltPackageMetadata {
     install_script_sha256: Option<[u8; 32]>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_and_copy_built_package(
     files_directory: &Path,
     package_base: &str,
@@ -1403,6 +1407,7 @@ pub fn verify_and_copy_built_package(
     version: &str,
     architecture: &str,
     expected_closure_sha256: [u8; 32],
+    expected_dependency_manifest_sha256: Option<[u8; 32]>,
     output: &mut File,
 ) -> Result<BuiltPackageReport, BuilderError> {
     terminate_stale_builder_processes()?;
@@ -1439,6 +1444,10 @@ pub fn verify_and_copy_built_package(
         return Err(BuilderError::InvalidInput);
     }
     let expected_packages = parse_manifest(&manifest)?;
+    let dependency_packages =
+        verified_staged_aur_dependencies(files_directory, expected_dependency_manifest_sha256)?;
+    let expected_installed =
+        expected_build_info_packages(&expected_packages, &dependency_packages)?;
     let root = open_directory(&workspace, BUILD_ROOT_NAME)?;
     let home = open_directory(&root, "home")?;
     let archphene = open_directory(&home, "archphene")?;
@@ -1495,7 +1504,7 @@ pub fn verify_and_copy_built_package(
             package_base,
             version,
             architecture,
-            &expected_packages,
+            &expected_installed,
         )?;
         if seen_output_names.iter().any(|name| name == &built.name) {
             return Err(BuilderError::InvalidArchive);
@@ -1563,6 +1572,8 @@ pub fn verify_copied_built_package(
     architecture: &str,
     closure_manifest: &[u8],
     expected_closure_sha256: [u8; 32],
+    dependency_manifest: Option<&[u8]>,
+    expected_dependency_manifest_sha256: Option<[u8; 32]>,
     expected_install_script: Option<&[u8]>,
 ) -> Result<BuiltPackageReport, BuilderError> {
     if !safe_name(package_base)
@@ -1585,13 +1596,19 @@ pub fn verify_copied_built_package(
         return Err(BuilderError::InvalidArchive);
     }
     let expected_packages = parse_manifest(closure_manifest)?;
+    let dependency_packages = parse_expected_aur_dependency_manifest(
+        dependency_manifest,
+        expected_dependency_manifest_sha256,
+    )?;
+    let expected_installed =
+        expected_build_info_packages(&expected_packages, &dependency_packages)?;
     let built = inspect_built_package_archive(
         archive,
         filename,
         package_base,
         version,
         architecture,
-        &expected_packages,
+        &expected_installed,
     )?;
     if built.name != package_name {
         return Err(BuilderError::InvalidArchive);
@@ -1643,7 +1660,7 @@ fn inspect_built_package_archive(
     expected_base: &str,
     expected_version: &str,
     expected_architecture: &str,
-    expected_packages: &[ExpectedPackage],
+    expected_installed: &[String],
 ) -> Result<BuiltPackageMetadata, BuilderError> {
     archive.seek(SeekFrom::Start(0))?;
     if filename.ends_with(".pkg.tar.xz") {
@@ -1653,7 +1670,7 @@ fn inspect_built_package_archive(
             expected_base,
             expected_version,
             expected_architecture,
-            expected_packages,
+            expected_installed,
         )
     } else if filename.ends_with(".pkg.tar.zst") {
         let decoder = zstd::stream::read::Decoder::new(archive)?;
@@ -1663,7 +1680,7 @@ fn inspect_built_package_archive(
             expected_base,
             expected_version,
             expected_architecture,
-            expected_packages,
+            expected_installed,
         )
     } else {
         Err(BuilderError::InvalidArchive)
@@ -1849,7 +1866,7 @@ fn inspect_built_package_tar(
     expected_base: &str,
     expected_version: &str,
     expected_architecture: &str,
-    expected_packages: &[ExpectedPackage],
+    expected_installed: &[String],
 ) -> Result<BuiltPackageMetadata, BuilderError> {
     let mut archive = Archive::new(reader);
     let mut package_info = None;
@@ -1915,7 +1932,7 @@ fn inspect_built_package_tar(
         expected_base,
         expected_version,
         expected_architecture,
-        expected_packages,
+        expected_installed,
     )?;
     Ok(BuiltPackageMetadata {
         name,
@@ -2004,7 +2021,7 @@ fn validate_built_build_info(
     expected_base: &str,
     expected_version: &str,
     expected_architecture: &str,
-    expected_packages: &[ExpectedPackage],
+    expected_installed: &[String],
 ) -> Result<usize, BuilderError> {
     let text = std::str::from_utf8(build_info).map_err(|_| BuilderError::InvalidArchive)?;
     let mut format = None;
@@ -2012,7 +2029,7 @@ fn validate_built_build_info(
     let mut base = None;
     let mut version = None;
     let mut architecture = None;
-    let mut installed = Vec::<String>::with_capacity(expected_packages.len());
+    let mut installed = Vec::<String>::with_capacity(expected_installed.len());
     for line in text.lines() {
         let Some((key, value)) = line.split_once(" = ") else {
             if line.is_empty() || line.starts_with('#') {
@@ -2040,7 +2057,7 @@ fn validate_built_build_info(
                     !(byte.is_ascii_alphanumeric()
                         || matches!(byte, b'@' | b'+' | b':' | b'.' | b'_' | b'-'))
                 })
-                || installed.len() >= MAX_CLOSURE_PACKAGES
+                || installed.len() >= MAX_CLOSURE_PACKAGES + MAX_AUR_DEPENDENCY_PACKAGES
             {
                 return Err(BuilderError::InvalidArchive);
             }
@@ -2055,18 +2072,8 @@ fn validate_built_build_info(
     {
         return Err(BuilderError::InvalidArchive);
     }
-    let mut expected = Vec::<String>::with_capacity(expected_packages.len());
-    for package in expected_packages {
-        let package_architecture =
-            package_filename_architecture(&package.filename).ok_or(BuilderError::InvalidArchive)?;
-        expected.push(format!(
-            "{}-{}-{package_architecture}",
-            package.name, package.version,
-        ));
-    }
     installed.sort();
-    expected.sort();
-    if installed != expected {
+    if installed != expected_installed {
         return Err(BuilderError::InvalidArchive);
     }
     Ok(installed.len())
@@ -3133,6 +3140,108 @@ fn parse_aur_dependency_manifest(
         return Err(BuilderError::InvalidInput);
     }
     Ok((packages, archive_bytes, installed_bytes))
+}
+
+fn parse_expected_aur_dependency_manifest(
+    manifest: Option<&[u8]>,
+    expected_sha256: Option<[u8; 32]>,
+) -> Result<Vec<StagedAurDependencyPackage>, BuilderError> {
+    match (manifest, expected_sha256) {
+        (None, None) => Ok(Vec::new()),
+        (Some(manifest), Some(expected_sha256))
+            if !manifest.is_empty()
+                && manifest.len() <= MAX_AUR_DEPENDENCY_MANIFEST_BYTES
+                && expected_sha256 != [0; 32]
+                && sha256_bytes(manifest) == expected_sha256 =>
+        {
+            parse_aur_dependency_manifest(manifest).map(|(packages, _, _)| packages)
+        }
+        _ => Err(BuilderError::InvalidInput),
+    }
+}
+
+fn verified_staged_aur_dependencies(
+    files_directory: &Path,
+    expected_sha256: Option<[u8; 32]>,
+) -> Result<Vec<StagedAurDependencyPackage>, BuilderError> {
+    let Some(expected_sha256) = expected_sha256 else {
+        return Ok(Vec::new());
+    };
+    if expected_sha256 == [0; 32] {
+        return Err(BuilderError::InvalidInput);
+    }
+    let files = openat(
+        CWD,
+        files_directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let workspace = open_directory(&files, WORKSPACE_NAME)?;
+    let root = open_directory(&workspace, BUILD_ROOT_NAME)?;
+    let run = open_directory(&root, "run")?;
+    let directory = open_directory(&run, AUR_DEPENDENCIES_NAME)?;
+    let archives = open_directory(&directory, AUR_DEPENDENCY_ARCHIVES_NAME)?;
+    let manifest = read_bounded_regular_file(
+        &directory,
+        AUR_DEPENDENCY_MANIFEST_NAME,
+        MAX_AUR_DEPENDENCY_MANIFEST_BYTES,
+    )?;
+    let packages = parse_expected_aur_dependency_manifest(Some(&manifest), Some(expected_sha256))?;
+    for package in &packages {
+        verify_staged_file(
+            &archives,
+            &package.staged_filename,
+            package.archive_bytes,
+            package.archive_sha256,
+        )?;
+        let mut archive = open_regular_file(&archives, &package.staged_filename)?;
+        let metadata = inspect_aur_dependency_archive(
+            &mut archive,
+            &package.filename,
+            &package.package_base,
+            &package.version,
+            &package.architecture,
+        )?;
+        if metadata.name != package.package_name
+            || metadata.installed_bytes != package.installed_bytes
+            || metadata.build_package_count != package.build_package_count
+        {
+            return Err(BuilderError::InvalidArchive);
+        }
+    }
+    Ok(packages)
+}
+
+fn expected_build_info_packages(
+    official_packages: &[ExpectedPackage],
+    aur_packages: &[StagedAurDependencyPackage],
+) -> Result<Vec<String>, BuilderError> {
+    if official_packages.is_empty()
+        || official_packages.len() > MAX_CLOSURE_PACKAGES
+        || aur_packages.len() > MAX_AUR_DEPENDENCY_PACKAGES
+    {
+        return Err(BuilderError::InvalidInput);
+    }
+    let mut expected = Vec::<String>::with_capacity(official_packages.len() + aur_packages.len());
+    for package in official_packages {
+        let architecture =
+            package_filename_architecture(&package.filename).ok_or(BuilderError::InvalidArchive)?;
+        expected.push(format!(
+            "{}-{}-{architecture}",
+            package.name, package.version
+        ));
+    }
+    for package in aur_packages {
+        expected.push(format!(
+            "{}-{}-{}",
+            package.package_name, package.version, package.architecture,
+        ));
+    }
+    expected.sort();
+    if expected.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(BuilderError::InvalidInput);
+    }
+    Ok(expected)
 }
 
 fn parse_manifest(manifest: &[u8]) -> Result<Vec<ExpectedPackage>, BuilderError> {
@@ -4741,6 +4850,7 @@ mod android {
         version: JString,
         input_manifest_sha256: JString,
         closure_sha256: JString,
+        dependency_manifest_sha256: JString,
         output_buffer: JByteBuffer,
     ) -> jint {
         let Ok(runtime_manifest_length) = usize::try_from(runtime_manifest_length) else {
@@ -4753,6 +4863,7 @@ mod android {
             Ok(version),
             Ok(input_manifest_sha256),
             Ok(closure_sha256),
+            Ok(dependency_manifest_sha256),
         ) = (
             java_string(&mut environment, &files_directory),
             java_string(&mut environment, &native_directory),
@@ -4760,6 +4871,7 @@ mod android {
             java_string(&mut environment, &version),
             java_string(&mut environment, &input_manifest_sha256),
             java_string(&mut environment, &closure_sha256),
+            java_string(&mut environment, &dependency_manifest_sha256),
         )
         else {
             return ERROR_INVALID_ARGUMENT;
@@ -4769,6 +4881,14 @@ mod android {
             parse_sha256(&closure_sha256),
         ) else {
             return ERROR_INVALID_ARGUMENT;
+        };
+        let dependency_manifest_sha256 = if dependency_manifest_sha256.is_empty() {
+            None
+        } else {
+            let Ok(value) = parse_sha256(&dependency_manifest_sha256) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            Some(value)
         };
         let (Ok(manifest_capacity), Ok(manifest_address), Ok(output_capacity), Ok(output_address)) = (
             environment.get_direct_buffer_capacity(&runtime_manifest_buffer),
@@ -4806,6 +4926,7 @@ mod android {
             &version,
             input_manifest_sha256,
             closure_sha256,
+            dependency_manifest_sha256,
         ) {
             Ok(value) => {
                 *slot = Some(value);
@@ -4892,6 +5013,7 @@ mod android {
         version: JString,
         architecture: JString,
         closure_sha256: JString,
+        dependency_manifest_sha256: JString,
         output_descriptor: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
@@ -4902,6 +5024,7 @@ mod android {
             Ok(version),
             Ok(architecture),
             Ok(closure_sha256),
+            Ok(dependency_manifest_sha256),
         ) = (
             java_string(&mut environment, &files_directory),
             java_string(&mut environment, &package_base),
@@ -4909,12 +5032,21 @@ mod android {
             java_string(&mut environment, &version),
             java_string(&mut environment, &architecture),
             java_string(&mut environment, &closure_sha256),
+            java_string(&mut environment, &dependency_manifest_sha256),
         )
         else {
             return ERROR_INVALID_ARGUMENT;
         };
         let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
             return ERROR_INVALID_ARGUMENT;
+        };
+        let dependency_manifest_sha256 = if dependency_manifest_sha256.is_empty() {
+            None
+        } else {
+            let Ok(value) = parse_sha256(&dependency_manifest_sha256) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            Some(value)
         };
         let (Ok(capacity), Ok(address), Ok(mut output_file)) = (
             environment.get_direct_buffer_capacity(&output_buffer),
@@ -4936,6 +5068,7 @@ mod android {
             &version,
             &architecture,
             closure_sha256,
+            dependency_manifest_sha256,
             &mut output_file,
         ) {
             Ok(report) => {
@@ -5709,6 +5842,7 @@ summary\t1\t{}\n",
             "1.2.3-1",
             "aarch64",
             closure,
+            None,
             &mut output,
         )
         .expect("verified built output");
@@ -5734,6 +5868,8 @@ summary\t1\t{}\n",
             "aarch64",
             &manifest,
             closure,
+            None,
+            None,
             Some(install_script),
         )
         .expect("manager independently verified output");
@@ -5754,6 +5890,8 @@ summary\t1\t{}\n",
                 "aarch64",
                 &manifest,
                 closure,
+                None,
+                None,
                 Some(b"post_install() { false; }\n"),
             ),
             Err(BuilderError::InvalidArchive),
@@ -5768,6 +5906,8 @@ summary\t1\t{}\n",
                 "aarch64",
                 &manifest,
                 closure,
+                None,
+                None,
                 None,
             ),
             Err(BuilderError::InvalidArchive),
@@ -5830,6 +5970,133 @@ summary\t1\t{}\n",
         assert_eq!(installed_bytes, 7);
         assert!(safe_aur_requirement("example-bin>=1:1.2.3-1"));
         assert!(!safe_aur_requirement("example-bin||substituted"));
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn exact_aur_dependencies_extend_built_output_provenance() {
+        let directory = test_directory();
+        let output_archive =
+            built_package_archive("base-devel-1-1-any\ninstalled = example-bin-1.2.3-1-aarch64");
+        let closure = built_output_fixture(&directory, &output_archive);
+        fs::write(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(BUILD_ROOT_MANIFEST_NAME),
+            format!(
+                "ABBR0001\nclosure={}\npackages=1\nentries=3\nbytes=4\n",
+                hex_sha256(&closure),
+            ),
+        )
+        .expect("build root manifest");
+
+        let dependency_archive = built_package_archive("base-devel-1-1-any");
+        let dependency_path = directory.join("dependency.pkg.tar.xz");
+        fs::write(&dependency_path, &dependency_archive).expect("dependency archive");
+        let mut dependencies =
+            AurDependencyArchiveSession::begin(&directory, 1).expect("dependency session");
+        dependencies
+            .stage(
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "aarch64",
+                "example-bin-1.2.3-1-aarch64.pkg.tar.xz",
+                dependency_archive.len() as u64,
+                sha256_bytes(&dependency_archive),
+                &mut File::open(&dependency_path).expect("open dependency"),
+            )
+            .expect("stage dependency");
+        let dependency_report = dependencies.finish().expect("dependency manifest");
+        let dependency_manifest = fs::read(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(BUILD_ROOT_NAME)
+                .join("run")
+                .join(AUR_DEPENDENCIES_NAME)
+                .join(AUR_DEPENDENCY_MANIFEST_NAME),
+        )
+        .expect("read dependency manifest");
+
+        let destination = directory.join("manager-output");
+        let mut copied = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&destination)
+            .expect("manager output");
+        let report = verify_and_copy_built_package(
+            &directory,
+            "example-bin",
+            "example-bin",
+            "1.2.3-1",
+            "aarch64",
+            closure,
+            Some(dependency_report.manifest_sha256),
+            &mut copied,
+        )
+        .expect("dependency-provenanced Builder output");
+        let closure_manifest = fs::read(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(CLOSURE_NAME)
+                .join(PUBLISHED_MANIFEST_NAME),
+        )
+        .expect("closure manifest");
+        verify_copied_built_package(
+            &mut copied,
+            &report.filename,
+            "example-bin",
+            "example-bin",
+            "1.2.3-1",
+            "aarch64",
+            &closure_manifest,
+            closure,
+            Some(&dependency_manifest),
+            Some(dependency_report.manifest_sha256),
+            None,
+        )
+        .expect("manager dependency provenance");
+        assert!(
+            verify_copied_built_package(
+                &mut copied,
+                &report.filename,
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "aarch64",
+                &closure_manifest,
+                closure,
+                None,
+                None,
+                None,
+            )
+            .is_err(),
+        );
+        fs::write(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(BUILD_ROOT_NAME)
+                .join("run")
+                .join(AUR_DEPENDENCIES_NAME)
+                .join(AUR_DEPENDENCY_ARCHIVES_NAME)
+                .join("000-example-bin-1.2.3-1-aarch64.pkg.tar.xz"),
+            b"substituted",
+        )
+        .expect("substitute staged dependency");
+        assert!(
+            verify_and_copy_built_package(
+                &directory,
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "aarch64",
+                closure,
+                Some(dependency_report.manifest_sha256),
+                &mut copied,
+            )
+            .is_err(),
+        );
         fs::remove_dir_all(directory).expect("cleanup");
     }
 
@@ -5906,6 +6173,7 @@ summary\t1\t{}\n",
                 "1.2.3-1",
                 "aarch64",
                 closure,
+                None,
                 &mut output,
             )
             .is_err(),
@@ -5937,6 +6205,7 @@ summary\t1\t{}\n",
                 "1.2.3-1",
                 "aarch64",
                 closure,
+                None,
                 &mut output,
             )
             .is_err(),

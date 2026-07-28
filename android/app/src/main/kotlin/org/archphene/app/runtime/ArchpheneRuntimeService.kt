@@ -8156,6 +8156,7 @@ class ArchpheneRuntimeService : Service() {
                     request.writeString(review.version)
                     request.writeString(builder.inputManifestSha256)
                     request.writeString(builder.closureManifestSha256)
+                    request.writeString("")
                 },
             ) {}
             buildStarted = true
@@ -8244,6 +8245,7 @@ class ArchpheneRuntimeService : Service() {
                                         request.writeString(review.version)
                                         request.writeString(architecture)
                                         request.writeString(builder.closureManifestSha256)
+                                        request.writeString("")
                                         request.writeFileDescriptor(destination.fileDescriptor)
                                     },
                                 ) { reply ->
