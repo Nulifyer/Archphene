@@ -8,6 +8,8 @@ package_name=
 old_version=
 new_version=
 install_reason=
+old_dependencies=()
+new_dependencies=()
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
@@ -16,8 +18,10 @@ while (($#)); do
     --old-version) old_version="${2:?missing value for --old-version}"; shift 2 ;;
     --new-version) new_version="${2:?missing value for --new-version}"; shift 2 ;;
     --install-reason) install_reason="${2:?missing value for --install-reason}"; shift 2 ;;
+    --old-dependency) old_dependencies+=("${2:?missing value for --old-dependency}"); shift 2 ;;
+    --new-dependency) new_dependencies+=("${2:?missing value for --new-dependency}"); shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --package NAME --old-version VERSION --new-version VERSION --install-reason explicit|dependency"
+      echo "usage: $0 --serial SERIAL --apk PATH --package NAME --old-version VERSION --new-version VERSION --install-reason explicit|dependency [--old-dependency NAME] [--new-dependency NAME]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -35,6 +39,10 @@ done
   archphene_die "old and new versions must differ"
 [[ "$install_reason" == explicit || "$install_reason" == dependency ]] ||
   archphene_die "--install-reason must be explicit or dependency"
+for dependency in "${old_dependencies[@]}" "${new_dependencies[@]}"; do
+  [[ "$dependency" =~ ^[a-zA-Z0-9@._+-]{1,128}$ ]] ||
+    archphene_die "dependency package name is invalid: $dependency"
+done
 
 archphene_test_init "$serial"
 archphene_require_file "$apk"
@@ -68,10 +76,15 @@ pacman_payload="$(
 gpgv_payload="$(
   awk -F '\t' '$2 == "@gpgv" { print $3 }' <<<"$package_runtime_manifest"
 )"
+bsdtar_payload="$(
+  awk -F '\t' '$2 == "@bsdtar" { print $3 }' <<<"$package_runtime_manifest"
+)"
 [[ "$pacman_payload" =~ ^libarchphene_pkg_[0-9a-f]{24}\.so$ ]] ||
   archphene_die "APK does not declare one valid pacman payload"
 [[ "$gpgv_payload" =~ ^libarchphene_pkg_[0-9a-f]{24}\.so$ ]] ||
   archphene_die "APK does not declare one valid gpgv payload"
+[[ "$bsdtar_payload" =~ ^libarchphene_pkg_[0-9a-f]{24}\.so$ ]] ||
+  archphene_die "APK does not declare one valid bsdtar payload"
 
 archive="$(
   archphene_adb_run exec-out run-as "$manager" find "$cache" \
@@ -101,6 +114,7 @@ remote_loader="\$alias/$loader_name"
 remote_native="\$(dirname \"\$(readlink \"\$loader\")\")"
 remote_pacman="\$native/$pacman_payload"
 remote_gpgv="\$native/$gpgv_payload"
+remote_bsdtar="\$native/$bsdtar_payload"
 remote_keyring="\$root/run/package-trust-v1/pubring.kbx"
 remote_libraries="\$alias:\$native:\$root/usr/lib:\$root/usr/lib/pulseaudio"
 remote_verification="root=\"$remote_root\"; alias=\"$remote_alias\"; loader=\"$remote_loader\"; native=\"$remote_native\"; gpgv=\"$remote_gpgv\"; keyring=\"$remote_keyring\"; libs=\"$remote_libraries\"; env -i HOME=\"\$root/home/archphene\" TMPDIR=\"\$root/tmp\" PATH=\"\$alias:\$root/usr/bin\" LANG=C LC_ALL=C GLIBC_TUNABLES=glibc.pthread.rseq=0 LD_PRELOAD=\"\$alias/libarchphene_path_bridge.so\" ARCHPHENE_RUNTIME_LOADER=\"\$loader\" ARCHPHENE_RUNTIME_LIB=\"\$libs\" ARCHPHENE_RUNTIME_COMMAND_DIR=\"\$alias\" ARCHPHENE_RUNTIME_ROOT=\"\$root\" ARCHPHENE_RUNTIME_PROGRAM_PATH=\"\$gpgv\" ARCHPHENE_ROOT_IDENTITY=1 \"\$loader\" --library-path \"\$libs\" \"\$gpgv\" --keyring \"\$keyring\" --status-fd 1 \"\$PWD/$archive.sig\" \"\$PWD/$archive\""
@@ -116,6 +130,15 @@ if archphene_regex_contains \
     '\[GNUPG:\] (?:BADSIG|ERRSIG|REVKEYSIG|EXPKEYSIG|KEYEXPIRED|SIGEXPIRED)'; then
   archphene_die "older archive produced a rejected signature status"
 fi
+remote_metadata="root=\"$remote_root\"; alias=\"$remote_alias\"; loader=\"$remote_loader\"; native=\"$remote_native\"; bsdtar=\"$remote_bsdtar\"; libs=\"$remote_libraries\"; env -i HOME=\"\$root/home/archphene\" TMPDIR=\"\$root/tmp\" PATH=\"\$alias:\$root/usr/bin\" LANG=C LC_ALL=C GLIBC_TUNABLES=glibc.pthread.rseq=0 LD_PRELOAD=\"\$alias/libarchphene_path_bridge.so\" ARCHPHENE_RUNTIME_LOADER=\"\$loader\" ARCHPHENE_RUNTIME_LIB=\"\$libs\" ARCHPHENE_RUNTIME_COMMAND_DIR=\"\$alias\" ARCHPHENE_RUNTIME_ROOT=\"\$root\" ARCHPHENE_RUNTIME_PROGRAM_PATH=\"\$bsdtar\" ARCHPHENE_ROOT_IDENTITY=1 \"\$loader\" --library-path \"\$libs\" \"\$bsdtar\" -xOf \"\$PWD/$archive\" .PKGINFO"
+old_metadata="$(
+  archphene_adb_run exec-out run-as "$manager" sh -c \
+    "$remote_metadata" | tr -d '\r'
+)"
+for dependency in "${old_dependencies[@]}"; do
+  grep -Fqx "depend = $dependency" <<<"$old_metadata" ||
+    archphene_die "older archive does not declare expected dependency: $dependency"
+done
 remote_command="root=\"$remote_root\"; alias=\"$remote_alias\"; loader=\"$remote_loader\"; native=\"$remote_native\"; pacman=\"$remote_pacman\"; libs=\"$remote_libraries\"; env -i HOME=\"\$root/home/archphene\" TMPDIR=\"\$root/tmp\" PATH=\"\$alias:\$root/usr/bin\" LANG=C LC_ALL=C GLIBC_TUNABLES=glibc.pthread.rseq=0 LD_PRELOAD=\"\$alias/libarchphene_path_bridge.so\" ARCHPHENE_RUNTIME_LOADER=\"\$loader\" ARCHPHENE_RUNTIME_LIB=\"\$libs\" ARCHPHENE_RUNTIME_COMMAND_DIR=\"\$alias\" ARCHPHENE_RUNTIME_ROOT=\"\$root\" ARCHPHENE_RUNTIME_PROGRAM_PATH=\"\$pacman\" ARCHPHENE_ROOT_IDENTITY=1 \"\$loader\" --library-path \"\$libs\" \"\$pacman\" --config \"\$root/etc/pacman.conf\" --root \"\$root\" --dbpath \"\$root/var/lib/pacman\" --gpgdir \"\$root/run/package-trust-v1\" --cachedir \"\$root/var/cache/pacman/pkg\" --noconfirm --noprogressbar --noscriptlet $reason_flag -U \"\$PWD/$archive\""
 archphene_adb_run shell "run-as $manager sh -c '$remote_command'" >/dev/null
 
@@ -172,6 +195,28 @@ description="$(
 reason="$(awk '/^%REASON%$/{getline; print; exit}' <<<"$description")"
 [[ "$reason" == "$expected_reason" ]] ||
   archphene_die "update changed install reason to $reason"
+new_archive="$(
+  archphene_adb_run exec-out run-as "$manager" find "$cache" \
+    -maxdepth 1 -type f -name "$package_name-$new_version-*.pkg.tar.*" \
+    ! -name '*.sig' | tr -d '\r' | head -n1
+)"
+[[ -n "$new_archive" ]] ||
+  archphene_die "manager update did not retain the new verified archive"
+remote_new_metadata="${remote_metadata//$archive/$new_archive}"
+new_metadata="$(
+  archphene_adb_run exec-out run-as "$manager" sh -c \
+    "$remote_new_metadata" | tr -d '\r'
+)"
+for dependency in "${new_dependencies[@]}"; do
+  grep -Fqx "depend = $dependency" <<<"$new_metadata" ||
+    archphene_die "new archive does not declare expected dependency: $dependency"
+  installed_dependency="$(
+    archphene_adb_run exec-out run-as "$manager" find "$local_database" \
+      -maxdepth 1 -type d -name "$dependency-*" -print -quit | tr -d '\r'
+  )"
+  [[ -n "$installed_dependency" ]] ||
+    archphene_die "new dependency was not installed in the shared package database: $dependency"
+done
 archphene_adb_run shell run-as "$manager" test ! -e "$root/var/lib/pacman/db.lck" ||
   archphene_die "update left the pacman database locked"
 temporary="$(
@@ -188,4 +233,7 @@ fatal_log="$(
 
 archphene_note "Archphene older-to-newer package update passed on $serial"
 archphene_note "  $package_name $old_version -> $new_version; reason=$install_reason"
+if ((${#old_dependencies[@]} + ${#new_dependencies[@]} > 0)); then
+  archphene_note "  Dependency metadata: ${old_dependencies[*]:-none} -> ${new_dependencies[*]:-none}"
+fi
 archphene_note "  Full-device screenshots: $output_dir/$serial-{review,complete}.png"

@@ -808,18 +808,28 @@ measures 442 ms and 1,222 ms respectively. Both targets remain under the
 reverify its signed closure through the reused keybox.
 
 Immediately before mutation, Rust re-resolves and re-verifies the full bounded
-closure. It now asks pacman to prepare the complete archive set with normal
-dependency, conflict, and replacement checks, then requires every planned
-name/version to match the already verified resolution exactly before allowing
-mutation. A cache-only gate verifies installed `btop` through that real
-preflight without rewriting or downloading package payloads on the x86_64
-emulator and AArch64 Samsung. Pacman now commits the complete prepared archive
-set through one normal dependency-checking transaction; the former per-package
-`--nodeps` and blanket-overwrite mutations are gone. New packages enter as
-dependencies. A fresh user-requested install marks its target explicit, while
-an update preserves the target's existing explicit/dependency reason. A bounded
-mode-0600 intent preserves every explicit package selected by that operation
-and restores those reasons idempotently after manager death. Startup rejects malformed, oversized,
+closure. It asks pacman to print the complete archive set, then requires every
+planned name/version to match the already verified resolution exactly before
+allowing mutation. A cache-only gate verifies installed `btop` through that
+archive preflight without rewriting or downloading package payloads on the
+x86_64 emulator and AArch64 Samsung.
+
+A focused host contract found the remaining replacement boundary: local
+`-U --print` does not report an installed package that a conflict-accepting
+transaction would remove. Archphene's ordinary `--noconfirm` transaction fails
+that conflict closed, so it cannot silently replace a package, but reviewed
+replacement support is not implemented. The contract proves that an isolated
+`--dbonly --ask 4` transaction against a copied local database exposes the
+exact replacement while leaving live state unchanged. That authoritative plan,
+user consent, and recovery binding are explicit remaining work.
+
+Pacman commits the complete prepared archive set through one normal
+dependency-checking transaction; the former per-package `--nodeps` and
+blanket-overwrite mutations are gone. New packages enter as dependencies. A
+fresh user-requested install marks its target explicit, while an update
+preserves the target's existing explicit/dependency reason. A bounded mode-0600
+intent preserves every explicit package selected by that operation and restores
+those reasons idempotently after manager death. Startup rejects malformed, oversized,
 symlinked, or broadly writable intents, removes a stale database lock, validates
 the local database, and only then deletes the recovered intent. Cache-only
 verify/remove/reinstall and forced restart-recovery gates pass on both devices
@@ -871,8 +881,8 @@ UID, copies when SELinux rejects hard links, avoids Android app seccomp's
 blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. Real AArch64 and x86_64
-older-to-newer upgrades now pass; changed-dependency and replacement coverage
-remain open.
+older-to-newer upgrades, including changed dependency sets, now pass; reviewed
+package replacement remains open.
 Reviewed AUR lifecycle scripts are enabled under the exact capability described
 above; official-package scriptlets remain disabled, and generic hook policy is
 still open. Replacement handling, exact rollback, whole-operation AUR recovery,
@@ -914,16 +924,30 @@ official Arch Linux Archive `libsysprof-capture 50.0-2` input to the current
 50.0-3 repository package. It retains dependency reason 1, immediately
 reconciles the row, and leaves neither a database lock nor a partial payload.
 
+The gate now optionally proves dependency metadata as well as target versions.
+On x86_64, signed archived `btop` 1.4.3-3 declares `gcc-libs` and `glibc`; the
+normal manager flow updates it to 1.4.7-1, whose verified `.PKGINFO` declares
+`glibc`, `hicolor-icon-theme`, `libgcc`, and `libstdc++`. On physical AArch64,
+signed `angle-grinder` 0.19.6-2 declares `glibc` and `libgcc`; the manager
+updates it to 0.19.6-3 with a newly resolved `jemalloc` dependency. The gate
+extracts both metadata records through the exact APK-packaged `bsdtar`, requires
+every named new dependency in pacman's local database, and preserves the
+target's dependency reason. Samsung's review visibly contains the exact
+three-package `base`, `jemalloc`, and `angle-grinder` closure. Full-device
+review/completion captures, exact versions, database state, cleanup, and fatal
+logs pass on both ABIs.
+
 Clean nine-package `btop` transaction cycles pass on the x86_64 emulator and
 AArch64 Samsung. Both gates deliberately corrupt the target archive, prove
 rejection, redownload and reverify it, remove the package conservatively, prove
 its executable and database entry are gone, reinstall from the verified cache,
 and prove the durable Complete result survives manager process death. Full-
 device screenshots also verify the responsive closure view and state-driven
-actions. Physical AArch64 and emulated x86_64 older-to-newer updates now pass;
-changed-dependency/replacement handling, hooks/scriptlets, closure-wide
-rollback, orphan cleanup, and a real-storage-pressure retry-to-completion gate
-remain open, so this is not yet a complete production transaction engine.
+actions. Physical AArch64 and emulated x86_64 older-to-newer and
+changed-dependency updates now pass. Reviewed replacement handling,
+hooks/scriptlets, closure-wide rollback, orphan cleanup, and a
+real-storage-pressure retry-to-completion gate remain open, so this is not yet
+a complete production transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16

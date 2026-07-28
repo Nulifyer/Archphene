@@ -1,0 +1,23 @@
+pkgbase=archphene-replacement-fixture
+pkgname=(
+  archphene-replaced-fixture
+  archphene-replacement-fixture
+)
+pkgver=1.0
+pkgrel=1
+pkgdesc='Archphene package transaction replacement fixture'
+arch=(any)
+license=(MIT)
+
+package_archphene-replaced-fixture() {
+  install -Dm644 /dev/null \
+    "$pkgdir/usr/share/archphene-replacement-fixture/owner"
+}
+
+package_archphene-replacement-fixture() {
+  provides=('archphene-replaced-fixture=1.0')
+  conflicts=('archphene-replaced-fixture')
+  replaces=('archphene-replaced-fixture')
+  install -Dm644 /dev/null \
+    "$pkgdir/usr/share/archphene-replacement-fixture/owner"
+}
