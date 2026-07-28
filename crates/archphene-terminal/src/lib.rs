@@ -50,6 +50,7 @@ const MOUSE_TRACKING_ANY_EVENT: u8 = 4;
 const FLAG_FOCUS_REPORTING: u32 = 1 << 13;
 const FLAG_MOUSE_ENCODING_SHIFT: u32 = 14;
 const FLAG_MOUSE_ENCODING_MASK: u32 = 0x7 << FLAG_MOUSE_ENCODING_SHIFT;
+const FLAG_EIGHT_BIT_META: u32 = 1 << 17;
 const MOUSE_ENCODING_NORMAL: u8 = 0;
 const MOUSE_ENCODING_UTF8: u8 = 1;
 const MOUSE_ENCODING_SGR: u8 = 2;
@@ -530,6 +531,7 @@ pub struct Terminal {
     application_cursor: bool,
     application_keypad: bool,
     bracketed_paste: bool,
+    eight_bit_meta: bool,
     new_line_mode: bool,
     backarrow_key: bool,
     reverse_screen: bool,
@@ -618,6 +620,7 @@ impl Terminal {
             application_cursor: false,
             application_keypad: false,
             bracketed_paste: false,
+            eight_bit_meta: false,
             new_line_mode: false,
             backarrow_key: false,
             reverse_screen: false,
@@ -990,7 +993,12 @@ impl Terminal {
                 0
             }
             | ((u32::from(self.mouse_encoding) << FLAG_MOUSE_ENCODING_SHIFT)
-                & FLAG_MOUSE_ENCODING_MASK);
+                & FLAG_MOUSE_ENCODING_MASK)
+            | if self.eight_bit_meta {
+                FLAG_EIGHT_BIT_META
+            } else {
+                0
+            };
         output[20..24].copy_from_slice(&flags.to_le_bytes());
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
         output[32..36].copy_from_slice(&history_rows.to_le_bytes());
@@ -1867,6 +1875,7 @@ impl Terminal {
                 1006 => self.set_mouse_encoding(MOUSE_ENCODING_SGR, enabled),
                 1015 => self.set_mouse_encoding(MOUSE_ENCODING_URXVT, enabled),
                 1016 => self.set_mouse_encoding(MOUSE_ENCODING_SGR_PIXELS, enabled),
+                1034 => self.set_eight_bit_meta(enabled),
                 1047 | 1049 => self.set_alternate_screen(enabled, enabled),
                 1048 if enabled => {
                     self.saved_row = self.cursor_row;
@@ -2007,6 +2016,7 @@ impl Terminal {
                 1006 => mode_status(self.mouse_encoding == MOUSE_ENCODING_SGR),
                 1015 => mode_status(self.mouse_encoding == MOUSE_ENCODING_URXVT),
                 1016 => mode_status(self.mouse_encoding == MOUSE_ENCODING_SGR_PIXELS),
+                1034 => mode_status(self.eight_bit_meta),
                 2004 => mode_status(self.bracketed_paste),
                 2026 => mode_status(self.synchronized_output),
                 _ => 0,
@@ -2084,6 +2094,13 @@ impl Terminal {
     fn set_bracketed_paste(&mut self, enabled: bool) {
         if self.bracketed_paste != enabled {
             self.bracketed_paste = enabled;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_eight_bit_meta(&mut self, enabled: bool) {
+        if self.eight_bit_meta != enabled {
+            self.eight_bit_meta = enabled;
             self.mark_dirty(self.cursor_row);
         }
     }
@@ -2830,6 +2847,7 @@ impl Terminal {
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
+        self.eight_bit_meta = false;
         self.new_line_mode = false;
         self.backarrow_key = false;
         self.reverse_screen = false;
@@ -2863,6 +2881,7 @@ impl Terminal {
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
+        self.eight_bit_meta = false;
         self.new_line_mode = false;
         self.backarrow_key = false;
         self.reverse_screen = false;
@@ -3919,7 +3938,7 @@ mod tests {
         let mut output = [0_u8; 2048];
         terminal.write_damage(&mut output).unwrap();
 
-        terminal.feed(b"\x1b[?1;66;67;2004h\x1b=\x1b[20h");
+        terminal.feed(b"\x1b[?1;66;67;1034;2004h\x1b=\x1b[20h\x1b[?1034$p");
         terminal.write_damage(&mut output).unwrap();
         assert_eq!(
             u32::from_le_bytes(output[20..24].try_into().unwrap()),
@@ -3929,14 +3948,18 @@ mod tests {
                 | FLAG_BRACKETED_PASTE
                 | FLAG_NEW_LINE_MODE
                 | FLAG_BACKARROW_KEY
+                | FLAG_EIGHT_BIT_META
         );
+        assert_eq!(terminal.pending_reply(), b"\x1b[?1034;1$y");
+        terminal.consume_reply(usize::MAX);
 
-        terminal.feed(b"\x1b[?1;66;67;2004l\x1b>\x1b[20l");
+        terminal.feed(b"\x1b[?1;66;67;1034;2004l\x1b>\x1b[20l\x1b[?1034$p");
         terminal.write_damage(&mut output).unwrap();
         assert_eq!(
             u32::from_le_bytes(output[20..24].try_into().unwrap()),
             FLAG_CURSOR_VISIBLE
         );
+        assert_eq!(terminal.pending_reply(), b"\x1b[?1034;2$y");
     }
 
     #[test]
@@ -4023,7 +4046,7 @@ mod tests {
         terminal.write_damage(&mut output).unwrap();
 
         terminal.feed(
-            b"\x1b[2;3r\x1b[?1;5;6;67;69;1003;1004;1005;2004h\x1b[2;4H\x1b=\x1b[4;20h\
+            b"\x1b[2;3r\x1b[?1;5;6;67;69;1003;1004;1005;1034;2004h\x1b[2;4H\x1b=\x1b[4;20h\
               \x1b[31;44;1m\x1b(0\x1b[?25l\x1b[?5$p",
         );
         assert_eq!(terminal.pending_reply(), b"\x1b[?5;1$y");
@@ -4039,6 +4062,7 @@ mod tests {
                 | FLAG_BACKARROW_KEY
                 | FLAG_REVERSE_SCREEN
                 | FLAG_FOCUS_REPORTING
+                | FLAG_EIGHT_BIT_META
                 | (u32::from(MOUSE_TRACKING_ANY_EVENT) << FLAG_MOUSE_TRACKING_SHIFT)
                 | (u32::from(MOUSE_ENCODING_UTF8) << FLAG_MOUSE_ENCODING_SHIFT)
         );
@@ -4054,6 +4078,7 @@ mod tests {
         assert!(!terminal.application_cursor);
         assert!(!terminal.application_keypad);
         assert!(!terminal.bracketed_paste);
+        assert!(!terminal.eight_bit_meta);
         assert!(!terminal.new_line_mode);
         assert!(!terminal.backarrow_key);
         assert!(!terminal.reverse_screen);

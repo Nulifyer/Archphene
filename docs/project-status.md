@@ -1326,6 +1326,17 @@ installs, cold launches, scoped logs, and inspected full-device light/dark
 manager frames pass. Live cursor-color visual proof remains pending until a
 package-installed shell is restored.
 
+Xterm DEC private mode 1034 is now bounded, queryable, resettable, and
+published through a reserved damage flag. Android keeps the normal ESC-prefix
+Meta behavior until the mode is enabled. Under the terminal's UTF-8 locale,
+enabled ASCII and control chords set the logical high bit and encode that
+value as valid UTF-8; non-ASCII chords safely retain ESC-prefixed UTF-8. The
+parser/damage loop remains warmed-allocation-free. Exact encoder tests, full
+workspace test/clippy, Android unit/lint, exact x86_64/AArch64 builds and
+installs, cold launches, scoped logs, and inspected full-device light/dark
+manager frames pass. A real hardware-key PTY probe remains part of the
+shell-dependent consolidated terminal gate.
+
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a
 52 dp status/Stop row; normal regression input goes through the focused

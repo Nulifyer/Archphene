@@ -713,19 +713,21 @@ internal class RuntimeSurfaceView(
         if (baseCodepoint == 0) {
             return super.onKeyDown(keyCode, event)
         }
+        var inputCodepoint = baseCodepoint
         if (event.isCtrlPressed && !altGraph) {
             val control = controlCodepoint(baseCodepoint)
             if (control >= 0) {
-                terminalInputBytes[0] = control.toByte()
-                return submitTerminalInput(1, event.eventTime)
+                inputCodepoint = control
             }
         }
-        var offset = 0
-        if (event.isAltPressed && !altGraph) {
-            terminalInputBytes[offset++] = ESCAPE_BYTE
-        }
-        val encoded = encodeCodepoint(baseCodepoint, terminalInputBytes, offset)
-        return encoded != 0 && submitTerminalInput(offset + encoded, event.eventTime)
+        val encoded =
+            TerminalKeyEncoder.encodeModifiedCodepoint(
+                inputCodepoint,
+                meta = event.isAltPressed && !altGraph,
+                eightBitMeta = terminalFlags and EIGHT_BIT_META_FLAG != 0,
+                output = terminalInputBytes,
+            )
+        return encoded != 0 && submitTerminalInput(encoded, event.eventTime)
     }
 
     override fun onKeyUp(
@@ -1615,7 +1617,7 @@ internal class RuntimeSurfaceView(
             if (output + required > terminalInputBytes.size) {
                 return false
             }
-            output += encodeCodepoint(codepoint, terminalInputBytes, output)
+            output += TerminalKeyEncoder.encodeCodepoint(codepoint, terminalInputBytes, output)
         }
         return output == 0 || submitTerminalInput(output)
     }
@@ -2037,7 +2039,7 @@ internal class RuntimeSurfaceView(
             if (output + required + reserved > terminalInputBytes.size) {
                 return false
             }
-            output += encodeCodepoint(codepoint, terminalInputBytes, output)
+            output += TerminalKeyEncoder.encodeCodepoint(codepoint, terminalInputBytes, output)
         }
         if (bracketed) {
             System.arraycopy(
@@ -2117,43 +2119,6 @@ internal class RuntimeSurfaceView(
             in 0x800..0xffff -> 3
             else -> 4
         }
-
-    private fun encodeCodepoint(
-        codepoint: Int,
-        output: ByteArray,
-        offset: Int,
-    ): Int {
-        val value =
-            if (codepoint in 0..0x10ffff && codepoint !in SURROGATE_RANGE) {
-                codepoint
-            } else {
-                REPLACEMENT_CHARACTER.code
-            }
-        return when (val length = encodedLength(value)) {
-            1 -> {
-                output[offset] = value.toByte()
-                length
-            }
-            2 -> {
-                output[offset] = (0xc0 or (value shr 6)).toByte()
-                output[offset + 1] = (0x80 or (value and 0x3f)).toByte()
-                length
-            }
-            3 -> {
-                output[offset] = (0xe0 or (value shr 12)).toByte()
-                output[offset + 1] = (0x80 or (value shr 6 and 0x3f)).toByte()
-                output[offset + 2] = (0x80 or (value and 0x3f)).toByte()
-                length
-            }
-            else -> {
-                output[offset] = (0xf0 or (value shr 18)).toByte()
-                output[offset + 1] = (0x80 or (value shr 12 and 0x3f)).toByte()
-                output[offset + 2] = (0x80 or (value shr 6 and 0x3f)).toByte()
-                output[offset + 3] = (0x80 or (value and 0x3f)).toByte()
-                length
-            }
-        }
-    }
 
     private fun controlCodepoint(codepoint: Int): Int =
         when (codepoint) {
@@ -2970,6 +2935,7 @@ internal class RuntimeSurfaceView(
         private const val FOCUS_REPORTING_FLAG = 1 shl 13
         private const val MOUSE_ENCODING_SHIFT = 14
         private const val MOUSE_ENCODING_MASK = 0x7 shl MOUSE_ENCODING_SHIFT
+        private const val EIGHT_BIT_META_FLAG = 1 shl 17
         private const val CURSOR_PRESENTATION_FLAGS =
             CURSOR_VISIBLE_FLAG or CURSOR_BLINK_FLAG or CURSOR_STYLE_MASK
         private const val MOUSE_BUTTON_PRIMARY = 0
