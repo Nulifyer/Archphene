@@ -57,6 +57,16 @@ class AurBuilderService : Service() {
                             TRANSACTION_ABORT_PROVISION -> abortProvision(reply)
                             TRANSACTION_PROBE_RUNTIME -> probeRuntime(reply)
                             TRANSACTION_PREPARE_RECIPE -> prepareRecipe(data, reply)
+                            TRANSACTION_BEGIN_AUR_DEPENDENCIES ->
+                                beginAurDependencies(data, reply)
+                            TRANSACTION_STAGE_AUR_DEPENDENCY_BATCH ->
+                                stageAurDependencyBatch(data, reply)
+                            TRANSACTION_FINISH_AUR_DEPENDENCIES ->
+                                finishAurDependencies(reply)
+                            TRANSACTION_ABORT_AUR_DEPENDENCIES ->
+                                abortAurDependencies(reply)
+                            TRANSACTION_INSTALL_AUR_DEPENDENCIES ->
+                                installAurDependencies(data, reply)
                             TRANSACTION_START_BUILD -> startBuild(data, reply)
                             TRANSACTION_POLL_BUILD -> pollBuild(reply)
                             TRANSACTION_CANCEL_BUILD -> cancelBuild(reply)
@@ -445,6 +455,164 @@ class AurBuilderService : Service() {
     }
 
     @Synchronized
+    private fun beginAurDependencies(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val packageCount = data.readInt()
+        require(packageCount in 1..MAX_AUR_DEPENDENCY_PACKAGES)
+        nativeOutputBuffer.clear()
+        val result =
+            NativeBuilder.nativeBeginAurDependencyArchives(
+                filesDir.absolutePath,
+                packageCount,
+                nativeOutputBuffer,
+            )
+        check(result == 0) {
+            "Builder could not begin AUR dependency staging: " +
+                readNativeMessage(nativeOutputBuffer, result)
+        }
+        reply.writeNoException()
+    }
+
+    @Synchronized
+    private fun stageAurDependencyBatch(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val count = data.readInt()
+        require(count in 1..MAX_PACKAGE_BATCH)
+        val inputs = ArrayList<AurDependencyInput>(count)
+        try {
+            repeat(count) {
+                val input =
+                    AurDependencyInput(
+                        data.readString().orEmpty(),
+                        data.readString().orEmpty(),
+                        data.readString().orEmpty(),
+                        data.readString().orEmpty(),
+                        data.readString().orEmpty(),
+                        data.readLong(),
+                        data.readString().orEmpty(),
+                        data.readFileDescriptor()
+                            ?: throw IllegalArgumentException(
+                                "Missing AUR dependency archive descriptor",
+                            ),
+                    )
+                require(
+                    input.packageBase.matches(PACKAGE_NAME) &&
+                        input.packageName.matches(PACKAGE_NAME) &&
+                        input.version.length in 1..128 &&
+                        (
+                            input.architecture == "aarch64" ||
+                                input.architecture == "x86_64"
+                        ) &&
+                        input.filename.matches(PACKAGE_ARCHIVE_NAME) &&
+                        input.archiveBytes > 0 &&
+                        input.sha256.matches(SHA256),
+                )
+                inputs += input
+            }
+            require(inputs.map(AurDependencyInput::packageName).toSet().size == inputs.size)
+            inputs.forEach { input ->
+                nativeOutputBuffer.clear()
+                val result =
+                    NativeBuilder.nativeStageAurDependencyArchive(
+                        input.packageBase,
+                        input.packageName,
+                        input.version,
+                        input.architecture,
+                        input.filename,
+                        input.archiveBytes,
+                        input.sha256,
+                        input.descriptor.fd,
+                        nativeOutputBuffer,
+                    )
+                check(result == 0) {
+                    "Builder rejected AUR dependency ${input.packageName}: " +
+                        readNativeMessage(nativeOutputBuffer, result)
+                }
+            }
+            reply.writeNoException()
+            reply.writeInt(inputs.size)
+        } finally {
+            inputs.forEach { input -> runCatching { input.descriptor.close() } }
+        }
+    }
+
+    @Synchronized
+    private fun finishAurDependencies(reply: Parcel) {
+        nativeOutputBuffer.clear()
+        val result = NativeBuilder.nativeFinishAurDependencyArchives(nativeOutputBuffer)
+        val report =
+            readAurDependencyReport(
+                nativeOutputBuffer,
+                result,
+                "ABDS0001",
+                expectedRequirementCount = 0,
+            )
+        reply.writeNoException()
+        writeAurDependencyReport(reply, report)
+    }
+
+    @Synchronized
+    private fun abortAurDependencies(reply: Parcel) {
+        NativeBuilder.nativeAbortAurDependencyArchives()
+        reply.writeNoException()
+    }
+
+    @Synchronized
+    private fun installAurDependencies(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val manifestSha256 = data.readString().orEmpty()
+        val requirementCount = data.readInt()
+        require(manifestSha256.matches(SHA256))
+        require(requirementCount in 1..MAX_AUR_DEPENDENCY_REQUIREMENTS)
+        val requirements = ArrayList<String>(requirementCount)
+        repeat(requirementCount) {
+            val requirement = data.readString().orEmpty()
+            require(
+                requirement.length in 1..MAX_AUR_REQUIREMENT_BYTES &&
+                    requirement.matches(AUR_REQUIREMENT) &&
+                    requirement !in requirements,
+            )
+            requirements += requirement
+        }
+        requirements.sort()
+        val requirementBytes =
+            requirements.joinToString(separator = "\n", postfix = "\n")
+                .toByteArray(Charsets.US_ASCII)
+        require(requirementBytes.size <= NativeBuilder.AUR_REQUIREMENTS_MAX_BYTES)
+        val requirementsBuffer = ByteBuffer.allocateDirect(requirementBytes.size)
+        requirementsBuffer.put(requirementBytes)
+        val runtimeManifest = readRuntimeManifest()
+        val runtimeBuffer = ByteBuffer.allocateDirect(runtimeManifest.size).put(runtimeManifest)
+        nativeOutputBuffer.clear()
+        val result =
+            NativeBuilder.nativeInstallAurDependencies(
+                filesDir.absolutePath,
+                applicationInfo.nativeLibraryDir,
+                runtimeBuffer,
+                runtimeManifest.size,
+                manifestSha256,
+                requirementsBuffer,
+                requirementBytes.size,
+                nativeOutputBuffer,
+            )
+        val report =
+            readAurDependencyReport(
+                nativeOutputBuffer,
+                result,
+                "ABDI0002",
+                expectedRequirementCount = requirements.size,
+            )
+        reply.writeNoException()
+        writeAurDependencyReport(reply, report)
+    }
+
+    @Synchronized
     private fun startBuild(
         data: Parcel,
         reply: Parcel,
@@ -668,6 +836,53 @@ class AurBuilderService : Service() {
         reply.writeLong(report.expandedBytes)
     }
 
+    private fun readAurDependencyReport(
+        buffer: ByteBuffer,
+        result: Int,
+        expectedMagic: String,
+        expectedRequirementCount: Int,
+    ): AurDependencyReport {
+        check(result == NativeBuilder.AUR_DEPENDENCY_REPORT_BYTES) {
+            "Builder AUR dependency operation failed: " +
+                readNativeMessage(buffer, result)
+        }
+        val source = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        val magic = ByteArray(8)
+        source.position(0)
+        source.get(magic)
+        check(String(magic, Charsets.US_ASCII) == expectedMagic)
+        val digest = ByteArray(32)
+        source.position(32)
+        source.get(digest)
+        val report =
+            AurDependencyReport(
+                source.getInt(8),
+                source.getInt(12),
+                source.getLong(16),
+                source.getLong(24),
+                digest.toHex(),
+            )
+        check(
+            report.packageCount in 1..MAX_AUR_DEPENDENCY_PACKAGES &&
+                report.requirementCount == expectedRequirementCount &&
+                report.archiveBytes > 0 &&
+                report.installedBytes > 0 &&
+                report.manifestSha256.matches(SHA256),
+        )
+        return report
+    }
+
+    private fun writeAurDependencyReport(
+        reply: Parcel,
+        report: AurDependencyReport,
+    ) {
+        reply.writeInt(report.packageCount)
+        reply.writeInt(report.requirementCount)
+        reply.writeLong(report.archiveBytes)
+        reply.writeLong(report.installedBytes)
+        reply.writeString(report.manifestSha256)
+    }
+
     private fun enforceManagerCaller(callerUid: Int) {
         if (
             packageManager.checkSignatures(callerUid, Process.myUid()) !=
@@ -832,6 +1047,25 @@ class AurBuilderService : Service() {
         val signature: ParcelFileDescriptor,
     )
 
+    private data class AurDependencyInput(
+        val packageBase: String,
+        val packageName: String,
+        val version: String,
+        val architecture: String,
+        val filename: String,
+        val archiveBytes: Long,
+        val sha256: String,
+        val descriptor: ParcelFileDescriptor,
+    )
+
+    private data class AurDependencyReport(
+        val packageCount: Int,
+        val requirementCount: Int,
+        val archiveBytes: Long,
+        val installedBytes: Long,
+        val manifestSha256: String,
+    )
+
     private data class ExtractionReport(
         val packageCount: Int,
         val entryCount: Long,
@@ -871,15 +1105,29 @@ class AurBuilderService : Service() {
         const val TRANSACTION_CLEAR_STORAGE = IBinder.FIRST_CALL_TRANSACTION + 16
         const val TRANSACTION_SCAN_PROVISION_BATCH = IBinder.FIRST_CALL_TRANSACTION + 17
         const val TRANSACTION_PREPARE_PROVISION_ROOT = IBinder.FIRST_CALL_TRANSACTION + 18
+        const val TRANSACTION_BEGIN_AUR_DEPENDENCIES = IBinder.FIRST_CALL_TRANSACTION + 19
+        const val TRANSACTION_STAGE_AUR_DEPENDENCY_BATCH =
+            IBinder.FIRST_CALL_TRANSACTION + 20
+        const val TRANSACTION_FINISH_AUR_DEPENDENCIES = IBinder.FIRST_CALL_TRANSACTION + 21
+        const val TRANSACTION_ABORT_AUR_DEPENDENCIES = IBinder.FIRST_CALL_TRANSACTION + 22
+        const val TRANSACTION_INSTALL_AUR_DEPENDENCIES = IBinder.FIRST_CALL_TRANSACTION + 23
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65
         private const val MAX_CLOSURE_PACKAGES = 512
         private const val MAX_CLOSURE_MANIFEST_BYTES = 512 * 1024
         private const val MAX_PACKAGE_BATCH = 8
+        private const val MAX_AUR_DEPENDENCY_PACKAGES = 256
+        private const val MAX_AUR_DEPENDENCY_REQUIREMENTS = 256
+        private const val MAX_AUR_REQUIREMENT_BYTES = 4 * 1024
         private const val BUILD_ROOT_STORAGE_RESERVE_BYTES = 512L * 1024 * 1024
         private const val MAX_RUNTIME_MANIFEST_BYTES = 32 * 1024
         private const val HEX_DIGITS = "0123456789abcdef"
         private val SHA256 = Regex("[0-9a-f]{64}")
+        private val PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")
+        private val PACKAGE_ARCHIVE_NAME =
+            Regex("[A-Za-z0-9@+:._-]{1,240}\\.pkg\\.tar\\.(xz|zst)")
+        private val AUR_REQUIREMENT =
+            Regex("[A-Za-z0-9@+._-]{1,128}([<>=]{1,2}[A-Za-z0-9@+:._-]+)?")
     }
 }

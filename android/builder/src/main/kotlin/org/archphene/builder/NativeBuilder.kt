@@ -11,6 +11,8 @@ internal object NativeBuilder {
     const val RUNTIME_OUTPUT_BYTES = 16 * 1024
     const val BUILD_POLL_OUTPUT_BYTES = 16 + 64 * 1024
     const val BUILT_PACKAGE_REPORT_BYTES = 304
+    const val AUR_DEPENDENCY_REPORT_BYTES = 64
+    const val AUR_REQUIREMENTS_MAX_BYTES = 128 * 1024
 
     init {
         System.loadLibrary("archphene_builder")
@@ -79,6 +81,39 @@ internal object NativeBuilder {
     external fun nativeFinishProvision(outputBuffer: ByteBuffer): Int
 
     external fun nativeAbortProvision(): Boolean
+
+    external fun nativeBeginAurDependencyArchives(
+        filesDirectory: String,
+        expectedPackages: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+
+    external fun nativeStageAurDependencyArchive(
+        packageBase: String,
+        packageName: String,
+        version: String,
+        architecture: String,
+        filename: String,
+        expectedBytes: Long,
+        expectedSha256: String,
+        descriptor: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+
+    external fun nativeFinishAurDependencyArchives(outputBuffer: ByteBuffer): Int
+
+    external fun nativeAbortAurDependencyArchives(): Boolean
+
+    external fun nativeInstallAurDependencies(
+        filesDirectory: String,
+        nativeDirectory: String,
+        runtimeManifestBuffer: ByteBuffer,
+        runtimeManifestLength: Int,
+        dependencyManifestSha256: String,
+        requirementsBuffer: ByteBuffer,
+        requirementsLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
 
     external fun nativeProbeRuntime(
         filesDirectory: String,
