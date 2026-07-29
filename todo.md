@@ -263,7 +263,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
   - [ ] GPU acceleration, external displays, and secondary windows
     - [x] Port the pinned dual-ABI virglrenderer helper into the Rust/Kotlin manager. Bind startup to A2 registry-derived OpenGL topology, carry only one bounded socket through G5, reauthorize and verify the Unix socket in Rust, select virpipe or llvmpipe without arbitrary environment injection, and own helper/socket cleanup per session. Exact-ABI Qt 5 helper launches, readable full-device frames, clean close, fatal-log review, and bounded stale-socket recovery after manager death pass on emulator and Samsung.
-    - [ ] Repeat the real renderer, scene, helper-loss replacement, and llvmpipe fallback gates with a current shared-root OpenGL package on both devices; retained Java-wrapper GLMark2 results are migration evidence only.
+    - [x] Recover a current shared-root graphical session generically after GPU-helper loss. Killing the exact helper twice restarts Qt 5 once with a replacement virpipe helper and then once with explicit llvmpipe; both stages reconnect, publish fresh full-device frames, retain no helper in software mode, and emit no fatal logs on the emulator or Samsung.
+    - [ ] Repeat the real renderer and scene gates with a current shared-root OpenGL benchmark on both devices; retained Java-wrapper GLMark2 results are migration evidence only.
   - [ ] AUR builds and the VS Code + .NET acceptance workflow
 - [ ] Delete legacy implementation source only after every retained capability has equivalent tests and the user approves removal.
 

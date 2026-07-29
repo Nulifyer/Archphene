@@ -741,7 +741,8 @@ impl CommandEnvironment {
         } else if self.software_opengl {
             command
                 .env("EGL_PLATFORM", "wayland")
-                .env("GALLIUM_DRIVER", "llvmpipe");
+                .env("GALLIUM_DRIVER", "llvmpipe")
+                .env("LIBGL_ALWAYS_SOFTWARE", "1");
         }
         command
     }
@@ -3245,6 +3246,10 @@ mod tests {
         assert_eq!(
             software_value("GALLIUM_DRIVER"),
             Some(OsStr::new("llvmpipe")),
+        );
+        assert_eq!(
+            software_value("LIBGL_ALWAYS_SOFTWARE"),
+            Some(OsStr::new("1")),
         );
         assert_eq!(software_value("VTEST_SOCKET_NAME"), None);
         assert!(

@@ -83,6 +83,9 @@ internal class AndroidGpuBridge(
     }
 
     @Synchronized
+    fun failedUnexpectedly(): Boolean = process?.let { !it.isAlive } == true
+
+    @Synchronized
     override fun close() {
         val child = process
         process = null

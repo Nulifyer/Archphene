@@ -92,6 +92,7 @@ class LauncherSessionService : Service() {
         var terminalMessage: String? = null
         var portalBridge: LauncherPortalBridge? = null
         var gpuBridge: AndroidGpuBridge? = null
+        var gpuRecoveryStage = 0
         var nextProcessStatusMillis = 0L
         var pumpStarted = false
         var clientLogged = false
@@ -1565,6 +1566,7 @@ class LauncherSessionService : Service() {
     private fun startLinuxProcess(
         session: Session,
         attachedSurface: Surface,
+        allowGpuBridge: Boolean = true,
     ) {
         if (session.linuxHandle != 0L || session.terminalMessage != null) {
             return
@@ -1620,13 +1622,18 @@ class LauncherSessionService : Service() {
                     return
                 }
         val gpuSocket =
-            if (session.authorization.usesGraphicsBridge) {
+            if (allowGpuBridge && session.authorization.usesGraphicsBridge) {
                 val bridge =
                     session.gpuBridge
                         ?: AndroidGpuBridge(this, session.id).also {
                             session.gpuBridge = it
                         }
-                bridge.start()
+                bridge.start().also { socket ->
+                    if (socket == null) {
+                        bridge.close()
+                        session.gpuBridge = null
+                    }
+                }
             } else {
                 null
             }
@@ -2355,6 +2362,9 @@ class LauncherSessionService : Service() {
         }
         session.nextProcessStatusMillis = now + PROCESS_STATUS_DELAY_MILLIS
         val runtime = runtimeBinder ?: return
+        if (recoverFromGpuHelperLoss(session, runtime, handle)) {
+            return
+        }
         val exitStatus = runtime.launcherProcessExitStatus(handle) ?: return
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             val output = runtime.launcherProcessLog(handle).trim()
@@ -2396,6 +2406,36 @@ class LauncherSessionService : Service() {
             stopCompositor(session)
         }
         Log.i(TAG, "Linux process exited session=${session.id} status=$exitStatus")
+    }
+
+    private fun recoverFromGpuHelperLoss(
+        session: Session,
+        runtime: ArchpheneRuntimeService.LocalBinder,
+        handle: Long,
+    ): Boolean {
+        val bridge = session.gpuBridge ?: return false
+        if (!bridge.failedUnexpectedly()) return false
+        val surface = session.surface ?: return false
+        if (!runtime.closeLauncherProcess(handle)) {
+            Log.e(TAG, "Could not close Linux process after GPU helper loss session=${session.id}")
+            return false
+        }
+        session.linuxHandle = 0L
+        bridge.close()
+        session.gpuBridge = null
+        session.clientLogged = false
+        session.frameLogged = false
+        session.attachmentFramesLogged = 0
+        if (session.gpuRecoveryStage == 0) {
+            session.gpuRecoveryStage = 1
+            Log.w(TAG, "GPU helper exited; starting one replacement session=${session.id}")
+            startLinuxProcess(session, surface)
+        } else {
+            session.gpuRecoveryStage = 2
+            Log.w(TAG, "Replacement GPU helper exited; using llvmpipe session=${session.id}")
+            startLinuxProcess(session, surface, allowGpuBridge = false)
+        }
+        return true
     }
 
     private fun stopCompositorForStatus(

@@ -26,12 +26,14 @@ Only a current descriptor with verified OpenGL/EGL topology can request the
 bridge. The manager waits for the helper socket and sends its bounded path
 through launch protocol G5; Rust reauthorizes the descriptor, verifies that
 the path is an actual Unix socket, and selects Mesa `virpipe` through
-`GALLIUM_DRIVER` and `VTEST_SOCKET_NAME`. Startup failure selects `llvmpipe`.
+`GALLIUM_DRIVER` and `VTEST_SOCKET_NAME`. Startup failure selects `llvmpipe`
+with Mesa's explicit software-rendering switch.
 The session owns and reaps the helper and deletes its socket directory on
 close. Manager startup also performs a bounded, non-recursive cleanup of only
 exactly named private GPU runtime directories so process death cannot
-accumulate sockets. Replacement-helper recovery from the retained Java bridge
-has not yet been ported to the new manager.
+accumulate sockets. The existing process poll detects an unexpected helper
+exit without another monitor thread: it restarts the Linux client once with a
+replacement helper, then restarts once with llvmpipe if that helper also exits.
 
 ## Android compatibility patches
 
@@ -68,8 +70,11 @@ fallback gates. A current shared-root Qt 5 launcher starts the exact-ABI helper,
 connects, presents readable frames, and cleans up after close on both devices;
 full-device screenshots and scoped fatal logs were inspected. Deliberately
 seeded stale runtime directories are recovered after manager process death on
-both devices. A current shared-root OpenGL test client still needs to repeat
-the renderer, scene, helper-loss replacement, and llvmpipe tests.
+both devices. Killing the helper twice under that current Qt 5 launcher proves
+one replacement-helper reconnect followed by an explicit llvmpipe reconnect;
+both stages publish fresh frames on the emulator and Samsung. A current
+shared-root OpenGL benchmark still needs to repeat the renderer and scene
+tests.
 
 ## Current limits
 
