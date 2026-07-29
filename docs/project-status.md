@@ -1761,6 +1761,16 @@ Terminal APK byte-identical at
 Tests with mandatory fixture installation, exact APK restoration, or package
 publication semantics remain separate audit classes.
 
+The two older interrupted-session gates are now state-aware as well. They use
+the installed manager unless `--install-apk` is explicit, reject an existing
+active shared shell before installing permissions or stopping processes,
+restore the original notification grant and whether the manager was running,
+and remove the test session marker through the normal Stop flow. The real
+reboot path additionally rejects before ADB unless `--allow-reboot` is
+present. Current process-death and explicitly authorized emulator-reboot runs
+both pass; their full-device frames show the bounded interrupted-session
+message, shell selector, and actionable Start shell control.
+
 On July 22, 2026, a current-source x86_64 debug manager was built with the reproducible Podman toolchain, installed on the API 36 emulator, and passed the complete broad emulator regression in one sequence. The run covered package update and refresh, repository search and version selection, Android app-settings routing, authenticated runtime-pack execution and cleanup, KCalc launch/calculation/menu/rotation, native compositor input, Android PackageInstaller update, and Mousepad document, IME, touch, secondary-window, and live-theme behavior.
 
 The connected Samsung SM-S908U (Android 15, AArch64) now runs the exact current-source manager and Terminal under the maintained development signer. Because the original prototype key was unavailable, the explicitly authorized reset was preceded by verified archives of both installed APKs and their private state; 1.60 GiB of manager package/runtime data and 46 MiB of Terminal home/runtime were restored under the new UIDs. Managed Arch Bash, the ARM native catalog, and manager startup/catalog rendering pass. The old Foot, KCalc, and Mousepad wrapper APKs plus persistent Linux homes were separately archived before their deliberate signer migrations.
