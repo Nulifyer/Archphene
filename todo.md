@@ -267,6 +267,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Pass file descriptors, direct buffers, shared memory, `ANativeWindow`, and HardwareBuffer handles instead of copying payloads.
 - [ ] Preallocate bounded queues and reusable scratch buffers for input, frame metadata, logs, package progress, and bridge messages.
 - [ ] Do not allocate or free heap objects in frame, pointer-motion, touch-motion, audio-callback, or compositor dispatch hot paths after warm-up.
+  - [x] Remove temporary `Vec<WlPointer>` collection from absolute, relative, confined, button, wheel, leave, and popup-return pointer delivery. Resource filtering now streams over the retained seat list; confinement clipping uses fixed bisection state.
 - [ ] Put explicit limits on queues, strings, paths, manifests, documents, windows, processes, descriptors, and package operations; apply backpressure rather than unbounded growth.
 - [x] Confine Rust `unsafe` to reviewed FFI/syscall modules with safe wrappers, ownership documentation, null/alignment/length validation, and targeted tests.
   - [x] Enforce `unsafe_op_in_unsafe_fn` in every production crate that contains unsafe code, deny unsafe outside the existing Android JNI, Builder JNI, process-syscall, and storage-syscall modules, and keep the remaining compositor-wide confinement work explicit.

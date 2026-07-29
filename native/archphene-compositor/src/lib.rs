@@ -9513,11 +9513,11 @@ impl CompositorCore {
                         }
                     }
                 }
-                let pointers = self.pointer_resources_for_surface(&root);
-                self.state.pointer_inside = !pointers.is_empty();
-                if !pointers.is_empty() {
+                let has_pointers = self.pointer_resources_for_surface(&root).next().is_some();
+                self.state.pointer_inside = has_pointers;
+                if has_pointers {
                     let serial = self.next_input_serial();
-                    for pointer in pointers {
+                    for pointer in self.pointer_resources_for_surface(&root) {
                         pointer.enter(serial, &root, self.state.pointer_x, self.state.pointer_y);
                         if pointer.version() >= 5 {
                             pointer.frame();
@@ -10571,13 +10571,15 @@ impl CompositorCore {
         1
     }
 
-    fn pointer_resources_for_surface(&self, surface: &WlSurface) -> Vec<WlPointer> {
+    fn pointer_resources_for_surface(
+        &self,
+        surface: &WlSurface,
+    ) -> impl Iterator<Item = &WlPointer> {
+        let surface_id = surface.id();
         self.state
             .pointers
             .iter()
-            .filter(|pointer| pointer.is_alive() && pointer.id().same_client_as(&surface.id()))
-            .cloned()
-            .collect()
+            .filter(move |pointer| pointer.is_alive() && pointer.id().same_client_as(&surface_id))
     }
 
     fn popup_geometry_in_root(&self, popup: &XdgPopup) -> Option<(i32, i32, i32, i32)> {
@@ -10655,16 +10657,13 @@ impl CompositorCore {
         }
         (local_x, local_y)
     }
-    fn focused_pointer_resources(&self) -> Option<(WlSurface, Vec<WlPointer>)> {
+    fn focused_pointer_surface(&self) -> Option<WlSurface> {
         let surface = self.state.pointer_focus_surface.clone()?;
-        let pointers: Vec<_> = self
-            .state
-            .pointers
-            .iter()
-            .filter(|pointer| pointer.is_alive() && pointer.id().same_client_as(&surface.id()))
-            .cloned()
-            .collect();
-        (!pointers.is_empty()).then_some((surface, pointers))
+        let has_pointer = self
+            .pointer_resources_for_surface(&surface)
+            .next()
+            .is_some();
+        has_pointer.then_some(surface)
     }
 
     fn next_input_serial(&mut self) -> u32 {
@@ -10762,12 +10761,15 @@ impl CompositorCore {
             self.state.pointer_inside = false;
         }
 
-        let pointers = self.pointer_resources_for_surface(&surface);
-        if pointers.is_empty() {
+        if self
+            .pointer_resources_for_surface(&surface)
+            .next()
+            .is_none()
+        {
             return 0;
         }
         if self.state.pointer_inside {
-            for pointer in pointers {
+            for pointer in self.pointer_resources_for_surface(&surface) {
                 pointer.motion(time, local_x, local_y);
                 if pointer.version() >= 5 {
                     pointer.frame();
@@ -10775,7 +10777,7 @@ impl CompositorCore {
             }
         } else {
             let serial = self.next_input_serial();
-            for pointer in pointers {
+            for pointer in self.pointer_resources_for_surface(&surface) {
                 pointer.enter(serial, &surface, local_x, local_y);
                 if pointer.version() >= 5 {
                     pointer.frame();
@@ -10875,8 +10877,7 @@ impl CompositorCore {
             return delivered;
         }
         let (local_x, local_y) = self.pointer_local_coordinates(&focus, next_x, next_y);
-        let pointers = self.pointer_resources_for_surface(&focus);
-        for pointer in pointers {
+        for pointer in self.pointer_resources_for_surface(&focus) {
             pointer.motion(time_millis, local_x, local_y);
             if pointer.version() >= 5 {
                 pointer.frame();
@@ -11322,7 +11323,7 @@ impl CompositorCore {
         if !self.state.host_active || !self.state.pointer_inside || was_pressed == pressed {
             return 0;
         }
-        let Some((surface, pointers)) = self.focused_pointer_resources() else {
+        let Some(surface) = self.focused_pointer_surface() else {
             return 0;
         };
         let serial = self.next_input_serial();
@@ -11337,14 +11338,17 @@ impl CompositorCore {
                 self.state.popup_base_frame = self.state.last_frame.clone();
                 self.state.popup_base_armed = true;
             }
-            self.state.popup_grab_serial = Some(PopupGrabSerial { serial, surface });
+            self.state.popup_grab_serial = Some(PopupGrabSerial {
+                serial,
+                surface: surface.clone(),
+            });
         }
         let button_state = if pressed {
             wl_pointer::ButtonState::Pressed
         } else {
             wl_pointer::ButtonState::Released
         };
-        for pointer in pointers {
+        for pointer in self.pointer_resources_for_surface(&surface) {
             pointer.button(serial, time, button, button_state);
             if pointer.version() >= 5 {
                 pointer.frame();
@@ -11380,10 +11384,10 @@ impl CompositorCore {
         {
             return 0;
         }
-        let Some((_surface, pointers)) = self.focused_pointer_resources() else {
+        let Some(surface) = self.focused_pointer_surface() else {
             return 0;
         };
-        for pointer in pointers {
+        for pointer in self.pointer_resources_for_surface(&surface) {
             if pointer.version() >= 5 {
                 pointer.axis_source(wl_pointer::AxisSource::Wheel);
             }
@@ -11477,11 +11481,11 @@ impl CompositorCore {
         }
         deactivate_pointer_lock(&mut self.state);
         deactivate_pointer_confine(&mut self.state);
-        let Some((surface, pointers)) = self.focused_pointer_resources() else {
+        let Some(surface) = self.focused_pointer_surface() else {
             return 0;
         };
         let serial = self.next_input_serial();
-        for pointer in pointers {
+        for pointer in self.pointer_resources_for_surface(&surface) {
             pointer.leave(serial, &surface);
             if pointer.version() >= 5 {
                 pointer.frame();
