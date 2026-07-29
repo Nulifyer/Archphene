@@ -44,6 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+archphene_adb_run shell cmd uimode night no >/dev/null
 archphene_adb_run install -r "$apk" >/dev/null
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell pm clear "$package" >/dev/null
@@ -108,8 +109,9 @@ archphene_wait_ui_exact_text \
 archphene_wait_ui_exact_text \
   "Installed 2.0-1 · Not an update" \
   "available-packages-different-$serial" 15
-archphene_wait_ui_exact_text \
-  "Install · Failed · 0%" "available-packages-job-state-$serial" 15
+archphene_wait_ui \
+  'text="extra&#10;Install\ ·\ Failed\ ·\ 0%"' \
+  "available-packages-job-state-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-light.png"
 
 ui="$ARCHPHENE_UI"
