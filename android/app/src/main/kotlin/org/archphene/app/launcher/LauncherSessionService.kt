@@ -961,6 +961,7 @@ class LauncherSessionService : Service() {
                         session.inputRecords[start + 2],
                         session.inputRecords[start + 3],
                         session.inputRecords[start + 4],
+                        session.inputRecords[start + 5],
                     )
                 if (eventTime != 0) {
                     latestInputTimeMillis = expandInputEventTime(eventTime)
@@ -1393,6 +1394,15 @@ class LauncherSessionService : Service() {
                     d == 0 &&
                     e == 0
             }
+            INPUT_POINTER_RELATIVE -> {
+                (a != 0 || b != 0) &&
+                    a in -MAX_RELATIVE_FIXED..MAX_RELATIVE_FIXED &&
+                    b in -MAX_RELATIVE_FIXED..MAX_RELATIVE_FIXED &&
+                    c in -MAX_RELATIVE_FIXED..MAX_RELATIVE_FIXED &&
+                    d in -MAX_RELATIVE_FIXED..MAX_RELATIVE_FIXED
+            }
+            INPUT_POINTER_CAPTURE_LOST ->
+                a == 0 && b == 0 && c == 0 && d == 0 && e == 0
             INPUT_HOST_ACTIVE -> a in 0..1 && c == 0 && d == 0 && e == 0
             else -> false
         }
@@ -1403,6 +1413,7 @@ class LauncherSessionService : Service() {
         b: Int,
         c: Int,
         d: Int,
+        e: Int,
     ): Int =
         when (kind) {
             INPUT_TOUCH_DOWN,
@@ -1414,6 +1425,7 @@ class LauncherSessionService : Service() {
             INPUT_POINTER_BUTTON,
             INPUT_POINTER_AXIS,
             -> c
+            INPUT_POINTER_RELATIVE -> e
             INPUT_POINTER_BUTTON_LEGACY -> b
             else -> 0
         }
@@ -1990,6 +2002,9 @@ class LauncherSessionService : Service() {
             if (result and NativeLauncherCompositor.FLAG_IME_CHANGED != 0) {
                 pumpImeState(session, compositor)
             }
+            if (result and NativeLauncherCompositor.FLAG_POINTER_CAPTURE_CHANGED != 0) {
+                notifyPointerCapture(session, compositor.pointerCaptureActive())
+            }
             pollLinuxProcess(session)
             surfaceHandler.postDelayed(
                 this,
@@ -2449,6 +2464,32 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyPointerCapture(
+        session: Session,
+        active: Boolean,
+    ) {
+        if (!session.active) {
+            return
+        }
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(if (active) 1 else 0)
+            session.clientToken.transact(
+                CALLBACK_POINTER_CAPTURE,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver pointer-capture state session=${session.id}", error)
+        } finally {
+            data.recycle()
+        }
+    }
+
     private fun notifyDocumentRequest(
         session: Session,
         request: PendingDocumentRequest,
@@ -2670,7 +2711,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 4
+        private const val PROTOCOL_VERSION = 5
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2684,6 +2725,7 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
+        private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val MAX_SESSIONS = 16
         private const val MAX_SURFACE_DIMENSION = 8192
         private const val MAX_SURFACE_PIXELS = 33_554_432L
@@ -2712,6 +2754,7 @@ class LauncherSessionService : Service() {
         private const val MAX_INPUT_COORDINATE = 16384
         private const val MAX_ANDROID_KEY_CODE = 512
         private const val MAX_AXIS_FIXED = 120_000
+        private const val MAX_RELATIVE_FIXED = 16_384_000
         private const val INPUT_TOUCH_DOWN = 1
         private const val INPUT_TOUCH_MOTION = 2
         private const val INPUT_TOUCH_UP = 3
@@ -2722,6 +2765,8 @@ class LauncherSessionService : Service() {
         private const val INPUT_POINTER_BUTTON = 8
         private const val INPUT_POINTER_AXIS = 9
         private const val INPUT_HOST_ACTIVE = 10
+        private const val INPUT_POINTER_RELATIVE = 11
+        private const val INPUT_POINTER_CAPTURE_LOST = 12
         private const val KEY_RELEASED = 0
         private const val KEY_REPEATED = 2
         private const val MAX_POINTER_BUTTON = 16

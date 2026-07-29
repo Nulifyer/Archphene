@@ -13,3 +13,7 @@ jni = "0.21.1"
 libc = "0.2"
 wayland-server = "0.31.10"
 wayland-protocols = { version = "0.32", features = ["server", "staging", "unstable"] }
+
+[dev-dependencies]
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }

@@ -169,6 +169,16 @@ internal class NativeLauncherCompositor(
         return result
     }
 
+    fun pointerCaptureActive(): Boolean {
+        val current = ownerHandle()
+        if (current == 0L) {
+            return false
+        }
+        val result = nativePointerCaptureActive(current)
+        PerformanceMetrics.recordCompositorJni()
+        return result
+    }
+
     fun imeSurroundingTextLength(): Int {
         val current = ownerHandle()
         return if (current == 0L) {
@@ -396,6 +406,8 @@ internal class NativeLauncherCompositor(
 
     private external fun nativeImeActive(handle: Long): Boolean
 
+    private external fun nativePointerCaptureActive(handle: Long): Boolean
+
     private external fun nativeImeSurroundingTextLength(handle: Long): Int
 
     private external fun nativeCopyImeSurroundingText(
@@ -473,6 +485,7 @@ internal class NativeLauncherCompositor(
         const val FLAG_LINUX_COPY_PENDING = 1 shl 4
         const val FLAG_ANDROID_PASTE_PENDING = 1 shl 5
         const val FLAG_IME_CHANGED = 1 shl 6
+        const val FLAG_POINTER_CAPTURE_CHANGED = 1 shl 7
 
         init {
             System.loadLibrary("archphene_compositor")

@@ -93,6 +93,7 @@ class LauncherActivity :
     private var attachedFontScaleMillis = 0
     private var managerDeathSurfaceReset = false
     private var pointerButtonState = 0
+    private var pointerCaptureRequested = false
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
     private var softImeRequested = false
     private val showImeAfterTouch =
@@ -142,7 +143,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_DOCUMENT_REQUEST ||
+                    code !in CALLBACK_STATUS..CALLBACK_POINTER_CAPTURE ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -272,6 +273,14 @@ class LauncherActivity :
                             }
                             true
                         }
+                        CALLBACK_POINTER_CAPTURE -> {
+                            val active = data.readInt()
+                            if (active !in 0..1 || data.dataAvail() != 0) {
+                                return@runCatching false
+                            }
+                            handler.post { applyPointerCapture(active == 1) }
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -297,6 +306,7 @@ class LauncherActivity :
                 resetSurfaceAttachment()
                 recreateSurfaceView()
                 pointerButtonState = 0
+                applyPointerCapture(false)
                 softImeRequested = false
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
@@ -493,6 +503,7 @@ class LauncherActivity :
         resetSurfaceAttachment()
         recreateSurfaceView()
         pointerButtonState = 0
+        applyPointerCapture(false)
         softImeRequested = false
         hasPendingLinuxClipboard = false
         pendingLinuxClipboardText = null
@@ -551,6 +562,7 @@ class LauncherActivity :
         stopClipboardListening()
         softImeRequested = false
         hideIme()
+        applyPointerCapture(false)
         submitHostActive(false)
         detachSurface()
         super.onStop()
@@ -677,6 +689,9 @@ class LauncherActivity :
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             surfaceView.requestFocus()
+            if (pointerCaptureRequested && !surfaceView.hasPointerCapture()) {
+                surfaceView.requestPointerCapture()
+            }
             startClipboardListening()
             if (!applyPendingLinuxClipboard()) {
                 submitAndroidClipboard()
@@ -689,6 +704,18 @@ class LauncherActivity :
             hideIme()
         }
         submitHostActive(hasFocus)
+    }
+
+    private fun applyPointerCapture(active: Boolean) {
+        pointerCaptureRequested = active
+        if (active && hasWindowFocus()) {
+            surfaceView.requestFocus()
+            if (!surfaceView.hasPointerCapture()) {
+                surfaceView.requestPointerCapture()
+            }
+        } else if (!active && surfaceView.hasPointerCapture()) {
+            surfaceView.releasePointerCapture()
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -857,6 +884,103 @@ class LauncherActivity :
                 pointerButtonState = nextButtons
             }
             return submitted
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun submitCapturedPointer(event: MotionEvent): Boolean {
+        if (sessionId <= 0 || !event.isFromSource(InputDevice.SOURCE_MOUSE)) {
+            return false
+        }
+        val nextButtons = pointerButtonsAfter(event)
+        val changedButtons = pointerButtonState xor nextButtons
+        val relativeX = capturedAxis(event, MotionEvent.AXIS_RELATIVE_X, MotionEvent.AXIS_X)
+        val relativeY = capturedAxis(event, MotionEvent.AXIS_RELATIVE_Y, MotionEvent.AXIS_Y)
+        val horizontal = axisToFixed(event.getAxisValue(MotionEvent.AXIS_HSCROLL))
+        val vertical = axisToFixed(event.getAxisValue(MotionEvent.AXIS_VSCROLL))
+        val hasMotion = relativeX != 0 || relativeY != 0
+        val hasAxis =
+            event.actionMasked == MotionEvent.ACTION_SCROLL &&
+                (horizontal != 0 || vertical != 0)
+        val count =
+            (if (hasMotion) 1 else 0) +
+                Integer.bitCount(changedButtons) +
+                if (hasAxis) 1 else 0
+        if (count == 0 || count > MAX_INPUT_RECORDS) {
+            return false
+        }
+        val data = beginInputParcel(count)
+        val reply = Parcel.obtain()
+        try {
+            if (hasMotion) {
+                writeInputRecord(
+                    data,
+                    INPUT_POINTER_RELATIVE,
+                    relativeX,
+                    relativeY,
+                    relativeX,
+                    relativeY,
+                    event.eventTime.toInt(),
+                )
+            }
+            for (button in POINTER_BUTTONS) {
+                if (changedButtons and button != 0) {
+                    writeInputRecord(
+                        data,
+                        INPUT_POINTER_BUTTON_V2,
+                        button,
+                        if (nextButtons and button != 0) 1 else 0,
+                        event.eventTime.toInt(),
+                    )
+                }
+            }
+            if (hasAxis) {
+                writeInputRecord(
+                    data,
+                    INPUT_POINTER_AXIS,
+                    horizontal,
+                    vertical,
+                    event.eventTime.toInt(),
+                )
+            }
+            val submitted = sendInputParcel(data, reply)
+            if (submitted) {
+                pointerButtonState = nextButtons
+            }
+            return submitted
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun capturedAxis(
+        event: MotionEvent,
+        relativeAxis: Int,
+        fallbackAxis: Int,
+    ): Int {
+        val relative = event.getAxisValue(relativeAxis)
+        val value = if (relative != 0f) relative else event.getAxisValue(fallbackAxis)
+        if (!value.isFinite()) {
+            return 0
+        }
+        return (
+            value.coerceIn(-MAX_RELATIVE_PIXELS, MAX_RELATIVE_PIXELS) *
+                RELATIVE_FIXED_SCALE
+        ).roundToInt()
+    }
+
+    private fun submitPointerCaptureLost() {
+        if (sessionId <= 0) {
+            return
+        }
+        val data = beginInputParcel(1)
+        val reply = Parcel.obtain()
+        try {
+            writeInputRecord(data, INPUT_POINTER_CAPTURE_LOST)
+            sendInputParcel(data, reply)
         } finally {
             reply.recycle()
             data.recycle()
@@ -1246,6 +1370,17 @@ class LauncherActivity :
     private inner class LauncherSurfaceView(
         context: Context,
     ) : SurfaceView(context) {
+        override fun onCapturedPointerEvent(event: MotionEvent): Boolean =
+            submitCapturedPointer(event) || super.onCapturedPointerEvent(event)
+
+        override fun onPointerCaptureChange(hasCapture: Boolean) {
+            super.onPointerCaptureChange(hasCapture)
+            if (!hasCapture && pointerCaptureRequested && hasWindowFocus()) {
+                pointerCaptureRequested = false
+                submitPointerCaptureLost()
+            }
+        }
+
         override fun onCheckIsTextEditor(): Boolean = true
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
@@ -2486,7 +2621,7 @@ class LauncherActivity :
         private const val CAPABILITIES_V2 = "c:wayland,input,ime,clipboard,documents"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 4
+        private const val PROTOCOL_VERSION = 5
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2500,6 +2635,7 @@ class LauncherActivity :
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
+        private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120
@@ -2519,11 +2655,15 @@ class LauncherActivity :
         private const val INPUT_POINTER_BUTTON_V2 = 8
         private const val INPUT_POINTER_AXIS = 9
         private const val INPUT_HOST_ACTIVE = 10
+        private const val INPUT_POINTER_RELATIVE = 11
+        private const val INPUT_POINTER_CAPTURE_LOST = 12
         private const val KEY_RELEASED = 0
         private const val KEY_PRESSED = 1
         private const val KEY_REPEATED = 2
         private const val AXIS_FIXED_SCALE = 1000f
         private const val MAX_AXIS_STEPS = 120f
+        private const val RELATIVE_FIXED_SCALE = 1000f
+        private const val MAX_RELATIVE_PIXELS = 16_384f
         private const val MAX_CLIPBOARD_UTF16 = 16_384
         private const val MAX_IME_UTF16 = 4_096
         private const val MAX_IME_BYTES = 16_384

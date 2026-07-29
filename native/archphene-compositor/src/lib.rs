@@ -26,6 +26,15 @@ use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_man
 use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_v1::{
     self, WpFractionalScaleV1,
 };
+use wayland_protocols::wp::pointer_constraints::zv1::server::zwp_confined_pointer_v1::{
+    self, ZwpConfinedPointerV1,
+};
+use wayland_protocols::wp::pointer_constraints::zv1::server::zwp_locked_pointer_v1::{
+    self, ZwpLockedPointerV1,
+};
+use wayland_protocols::wp::pointer_constraints::zv1::server::zwp_pointer_constraints_v1::{
+    self, ZwpPointerConstraintsV1,
+};
 use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gesture_hold_v1::{
     self, ZwpPointerGestureHoldV1,
 };
@@ -37,6 +46,12 @@ use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gesture_sw
 };
 use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gestures_v1::{
     self, ZwpPointerGesturesV1,
+};
+use wayland_protocols::wp::relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::{
+    self, ZwpRelativePointerManagerV1,
+};
+use wayland_protocols::wp::relative_pointer::zv1::server::zwp_relative_pointer_v1::{
+    self, ZwpRelativePointerV1,
 };
 use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::{
     self, ZwpTextInputManagerV3,
@@ -434,6 +449,11 @@ pub struct CompositorState {
     pinch_gestures: Vec<ZwpPointerGesturePinchV1>,
     hold_gestures: Vec<ZwpPointerGestureHoldV1>,
     gesture_event_count: u32,
+    relative_pointers: Vec<ZwpRelativePointerV1>,
+    locked_pointers: Vec<ZwpLockedPointerV1>,
+    confined_pointers: Vec<ZwpConfinedPointerV1>,
+    active_locked_pointer: Option<ZwpLockedPointerV1>,
+    pointer_capture_change_serial: u32,
     host_active: bool,
     pointer_inside: bool,
     pointer_buttons: u8,
@@ -927,6 +947,19 @@ struct ActiveTouch {
 
 struct PointerGestureData {
     pointer: WlPointer,
+}
+
+struct RelativePointerData {
+    pointer: WlPointer,
+}
+
+struct PointerConstraintData {
+    surface: WlSurface,
+    pointer: WlPointer,
+    persistent: bool,
+    whole_surface: AtomicBool,
+    eligible: AtomicBool,
+    active: AtomicBool,
 }
 
 struct PopupGrabState {
@@ -2195,6 +2228,7 @@ struct LauncherSurfaceCompositor {
     last_presented_commit: u32,
     last_presentation_signature: Option<[i32; 5]>,
     last_reported_ime_serial: Option<u32>,
+    last_reported_pointer_capture_serial: Option<u32>,
 }
 
 #[cfg(target_os = "android")]
@@ -2235,6 +2269,7 @@ impl LauncherSurfaceCompositor {
         self.last_presented_commit = u32::MAX;
         self.last_presentation_signature = None;
         self.last_reported_ime_serial = None;
+        self.last_reported_pointer_capture_serial = None;
         configure_launcher_output_resolved(&mut self.core, width, height, density_dpi);
         0
     }
@@ -2278,6 +2313,11 @@ impl LauncherSurfaceCompositor {
         if self.last_reported_ime_serial != Some(ime_serial) {
             self.last_reported_ime_serial = Some(ime_serial);
             flags |= 1 << 6;
+        }
+        let pointer_capture_serial = self.core.pointer_capture_change_serial();
+        if self.last_reported_pointer_capture_serial != Some(pointer_capture_serial) {
+            self.last_reported_pointer_capture_serial = Some(pointer_capture_serial);
+            flags |= 1 << 7;
         }
         flags
     }
@@ -2583,6 +2623,7 @@ fn dispatch_launcher_input_record(core: &mut CompositorCore, record: [i32; 6]) -
     const MIN_COORDINATE: i32 = -8192;
     const MAX_COORDINATE: i32 = 16384;
     const MAX_AXIS_FIXED: i32 = 120_000;
+    const MAX_RELATIVE_FIXED: i32 = 16_384_000;
     let [kind, a, b, c, d, e] = record;
     let coordinate = |value: i32| (MIN_COORDINATE..=MAX_COORDINATE).contains(&value);
     match kind {
@@ -2639,6 +2680,21 @@ fn dispatch_launcher_input_record(core: &mut CompositorCore, record: [i32; 6]) -
         10 if (0..=1).contains(&a) && c == 0 && d == 0 && e == 0 => {
             Ok(core.set_host_active(a != 0))
         }
+        11 if (a != 0 || b != 0)
+            && (-MAX_RELATIVE_FIXED..=MAX_RELATIVE_FIXED).contains(&a)
+            && (-MAX_RELATIVE_FIXED..=MAX_RELATIVE_FIXED).contains(&b)
+            && (-MAX_RELATIVE_FIXED..=MAX_RELATIVE_FIXED).contains(&c)
+            && (-MAX_RELATIVE_FIXED..=MAX_RELATIVE_FIXED).contains(&d) =>
+        {
+            Ok(core.pointer_relative_motion(
+                f64::from(a) / 1000.0,
+                f64::from(b) / 1000.0,
+                f64::from(c) / 1000.0,
+                f64::from(d) / 1000.0,
+                e as u32,
+            ))
+        }
+        12 if a == 0 && b == 0 && c == 0 && d == 0 && e == 0 => Ok(core.cancel_pointer_capture()),
         _ => Err(()),
     }
 }
@@ -2678,6 +2734,12 @@ fn scale_launcher_input_record(
         6 => {
             record[1] = scale_launcher_coordinate(record[1], logical_width, physical_width);
             record[2] = scale_launcher_coordinate(record[2], logical_height, physical_height);
+        }
+        11 => {
+            record[1] = scale_launcher_coordinate(record[1], logical_width, physical_width);
+            record[2] = scale_launcher_coordinate(record[2], logical_height, physical_height);
+            record[3] = scale_launcher_coordinate(record[3], logical_width, physical_width);
+            record[4] = scale_launcher_coordinate(record[4], logical_height, physical_height);
         }
         _ => {}
     }
@@ -4483,6 +4545,334 @@ fn queue_linux_drag(state: &mut CompositorState, source: &WlDataSource) -> bool 
     state.linux_drag_source = Some(source.clone());
     true
 }
+
+impl GlobalDispatch<ZwpRelativePointerManagerV1, ()> for CompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ZwpRelativePointerManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<ZwpRelativePointerManagerV1, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpRelativePointerManagerV1,
+        request: zwp_relative_pointer_manager_v1::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_relative_pointer_manager_v1::Request::Destroy => {}
+            zwp_relative_pointer_manager_v1::Request::GetRelativePointer { id, pointer } => {
+                let relative = data_init.init(id, RelativePointerData { pointer });
+                state.relative_pointers.push(relative);
+            }
+            _ => unreachable!("relative-pointer manager request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<ZwpRelativePointerV1, RelativePointerData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpRelativePointerV1,
+        request: zwp_relative_pointer_v1::Request,
+        _data: &RelativePointerData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_relative_pointer_v1::Request::Destroy => {}
+            _ => unreachable!("relative-pointer request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpRelativePointerV1,
+        _data: &RelativePointerData,
+    ) {
+        state
+            .relative_pointers
+            .retain(|relative| relative.id() != resource.id());
+    }
+}
+
+fn surface_has_pointer_constraint(state: &CompositorState, surface: &WlSurface) -> bool {
+    state.locked_pointers.iter().any(|constraint| {
+        constraint.is_alive()
+            && constraint
+                .data::<PointerConstraintData>()
+                .is_some_and(|data| data.surface.id() == surface.id())
+    }) || state.confined_pointers.iter().any(|constraint| {
+        constraint.is_alive()
+            && constraint
+                .data::<PointerConstraintData>()
+                .is_some_and(|data| data.surface.id() == surface.id())
+    })
+}
+
+fn deactivate_pointer_lock(state: &mut CompositorState) {
+    let Some(active) = state.active_locked_pointer.take() else {
+        return;
+    };
+    if let Some(data) = active.data::<PointerConstraintData>() {
+        data.active.store(false, Ordering::Release);
+        if active.is_alive() {
+            active.unlocked();
+        }
+        if !data.persistent {
+            state
+                .locked_pointers
+                .retain(|constraint| constraint.id() != active.id());
+        }
+    }
+    state.pointer_capture_change_serial =
+        state.pointer_capture_change_serial.wrapping_add(1).max(1);
+}
+
+fn activate_pointer_lock(state: &mut CompositorState, constraint: &ZwpLockedPointerV1) {
+    if state.active_locked_pointer.is_some()
+        || !state.host_active
+        || !state.pointer_inside
+        || !constraint.is_alive()
+    {
+        return;
+    }
+    let Some(data) = constraint.data::<PointerConstraintData>() else {
+        return;
+    };
+    // Region-shaped constraints remain inactive until the compositor can
+    // evaluate wl_region geometry. The protocol permits a constraint to never
+    // activate, which is safer than capturing outside the requested region.
+    if !data.whole_surface.load(Ordering::Acquire) || !data.eligible.load(Ordering::Acquire) {
+        return;
+    }
+    let focused = state
+        .pointer_focus_surface
+        .as_ref()
+        .is_some_and(|surface| surface.id() == data.surface.id());
+    let known_pointer = state
+        .pointers
+        .iter()
+        .any(|pointer| pointer.is_alive() && pointer.id() == data.pointer.id());
+    if !focused || !known_pointer || data.active.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    constraint.locked();
+    state.active_locked_pointer = Some(constraint.clone());
+    state.pointer_capture_change_serial =
+        state.pointer_capture_change_serial.wrapping_add(1).max(1);
+}
+
+fn activate_pointer_lock_for_focus(state: &mut CompositorState) {
+    if state.active_locked_pointer.is_some() {
+        return;
+    }
+    let candidate = state.locked_pointers.iter().find_map(|constraint| {
+        let data = constraint.data::<PointerConstraintData>()?;
+        state
+            .pointer_focus_surface
+            .as_ref()
+            .is_some_and(|surface| surface.id() == data.surface.id())
+            .then(|| constraint.clone())
+    });
+    if let Some(candidate) = candidate {
+        activate_pointer_lock(state, &candidate);
+    }
+}
+
+fn pointer_constraint_data(
+    surface: WlSurface,
+    pointer: WlPointer,
+    lifetime: WEnum<zwp_pointer_constraints_v1::Lifetime>,
+    whole_surface: bool,
+) -> Option<PointerConstraintData> {
+    let persistent = match lifetime {
+        WEnum::Value(zwp_pointer_constraints_v1::Lifetime::Oneshot) => false,
+        WEnum::Value(zwp_pointer_constraints_v1::Lifetime::Persistent) => true,
+        WEnum::Unknown(_) => return None,
+        _ => return None,
+    };
+    Some(PointerConstraintData {
+        surface,
+        pointer,
+        persistent,
+        whole_surface: AtomicBool::new(whole_surface),
+        eligible: AtomicBool::new(true),
+        active: AtomicBool::new(false),
+    })
+}
+
+impl GlobalDispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ZwpPointerConstraintsV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &ZwpPointerConstraintsV1,
+        request: zwp_pointer_constraints_v1::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_pointer_constraints_v1::Request::Destroy => {}
+            zwp_pointer_constraints_v1::Request::LockPointer {
+                id,
+                surface,
+                pointer,
+                region,
+                lifetime,
+            } => {
+                if surface_has_pointer_constraint(state, &surface) {
+                    resource.post_error(
+                        zwp_pointer_constraints_v1::Error::AlreadyConstrained,
+                        "surface already has a pointer constraint",
+                    );
+                    return;
+                }
+                let Some(data) =
+                    pointer_constraint_data(surface, pointer, lifetime, region.is_none())
+                else {
+                    resource.post_error(0u32, "invalid pointer-constraint lifetime");
+                    return;
+                };
+                let constraint = data_init.init(id, data);
+                state.locked_pointers.push(constraint.clone());
+                activate_pointer_lock(state, &constraint);
+            }
+            zwp_pointer_constraints_v1::Request::ConfinePointer {
+                id,
+                surface,
+                pointer,
+                region,
+                lifetime,
+            } => {
+                if surface_has_pointer_constraint(state, &surface) {
+                    resource.post_error(
+                        zwp_pointer_constraints_v1::Error::AlreadyConstrained,
+                        "surface already has a pointer constraint",
+                    );
+                    return;
+                }
+                let Some(data) =
+                    pointer_constraint_data(surface, pointer, lifetime, region.is_none())
+                else {
+                    resource.post_error(0u32, "invalid pointer-constraint lifetime");
+                    return;
+                };
+                let constraint = data_init.init(id, data);
+                state.confined_pointers.push(constraint);
+            }
+            _ => unreachable!("pointer-constraints request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<ZwpLockedPointerV1, PointerConstraintData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &ZwpLockedPointerV1,
+        request: zwp_locked_pointer_v1::Request,
+        data: &PointerConstraintData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_locked_pointer_v1::Request::Destroy
+            | zwp_locked_pointer_v1::Request::SetCursorPositionHint { .. } => {}
+            zwp_locked_pointer_v1::Request::SetRegion { region } => {
+                data.whole_surface
+                    .store(region.is_none(), Ordering::Release);
+                if region.is_some()
+                    && state
+                        .active_locked_pointer
+                        .as_ref()
+                        .is_some_and(|active| active.id() == resource.id())
+                {
+                    deactivate_pointer_lock(state);
+                }
+            }
+            _ => unreachable!("locked-pointer request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpLockedPointerV1,
+        _data: &PointerConstraintData,
+    ) {
+        let was_active = state
+            .active_locked_pointer
+            .as_ref()
+            .is_some_and(|active| active.id() == resource.id());
+        state
+            .locked_pointers
+            .retain(|constraint| constraint.id() != resource.id());
+        if was_active {
+            state.active_locked_pointer = None;
+            state.pointer_capture_change_serial =
+                state.pointer_capture_change_serial.wrapping_add(1).max(1);
+        }
+    }
+}
+
+impl Dispatch<ZwpConfinedPointerV1, PointerConstraintData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpConfinedPointerV1,
+        request: zwp_confined_pointer_v1::Request,
+        data: &PointerConstraintData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_confined_pointer_v1::Request::Destroy => {}
+            zwp_confined_pointer_v1::Request::SetRegion { region } => {
+                data.whole_surface
+                    .store(region.is_none(), Ordering::Release);
+            }
+            _ => unreachable!("confined-pointer request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpConfinedPointerV1,
+        _data: &PointerConstraintData,
+    ) {
+        state
+            .confined_pointers
+            .retain(|constraint| constraint.id() != resource.id());
+    }
+}
+
 impl GlobalDispatch<ZwpPointerGesturesV1, ()> for CompositorState {
     fn bind(
         _state: &mut Self,
@@ -5625,6 +6015,24 @@ impl Dispatch<WlPointer, ()> for CompositorState {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlPointer, _data: &()) {
+        if state
+            .active_locked_pointer
+            .as_ref()
+            .and_then(|constraint| constraint.data::<PointerConstraintData>())
+            .is_some_and(|data| data.pointer.id() == resource.id())
+        {
+            deactivate_pointer_lock(state);
+        }
+        state.locked_pointers.retain(|constraint| {
+            constraint
+                .data::<PointerConstraintData>()
+                .is_none_or(|data| data.pointer.id() != resource.id())
+        });
+        state.confined_pointers.retain(|constraint| {
+            constraint
+                .data::<PointerConstraintData>()
+                .is_none_or(|data| data.pointer.id() != resource.id())
+        });
         state
             .pointers
             .retain(|pointer| pointer.id() != resource.id());
@@ -7028,6 +7436,24 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSurface, _data: &SurfaceData) {
+        if state
+            .active_locked_pointer
+            .as_ref()
+            .and_then(|constraint| constraint.data::<PointerConstraintData>())
+            .is_some_and(|data| data.surface.id() == resource.id())
+        {
+            deactivate_pointer_lock(state);
+        }
+        state.locked_pointers.retain(|constraint| {
+            constraint
+                .data::<PointerConstraintData>()
+                .is_none_or(|data| data.surface.id() != resource.id())
+        });
+        state.confined_pointers.retain(|constraint| {
+            constraint
+                .data::<PointerConstraintData>()
+                .is_none_or(|data| data.surface.id() != resource.id())
+        });
         if state
             .root_surface
             .as_ref()
@@ -8575,6 +9001,12 @@ impl CompositorCore {
             .create_global::<CompositorState, ZwpPointerGesturesV1, _>(3, ());
         display
             .handle()
+            .create_global::<CompositorState, ZwpRelativePointerManagerV1, _>(1, ());
+        display
+            .handle()
+            .create_global::<CompositorState, ZwpPointerConstraintsV1, _>(1, ());
+        display
+            .handle()
             .create_global::<CompositorState, WpViewporter, _>(1, ());
         display
             .handle()
@@ -9045,6 +9477,7 @@ impl CompositorCore {
             return 0;
         }
         if !active {
+            deactivate_pointer_lock(&mut self.state);
             let mut changed = self.touch_cancel();
             changed = changed.saturating_add(self.release_pointer_buttons(0));
             changed = changed.saturating_add(self.pointer_leave());
@@ -9960,6 +10393,13 @@ impl CompositorCore {
         if !self.state.host_active {
             return 0;
         }
+        if self.state.active_locked_pointer.is_some() {
+            let delta_x = x - self.state.pointer_x;
+            let delta_y = y - self.state.pointer_y;
+            self.state.pointer_x = x;
+            self.state.pointer_y = y;
+            return self.pointer_relative_motion(delta_x, delta_y, delta_x, delta_y, time);
+        }
         let target = if self.state.pointer_buttons != 0 {
             self.state.pointer_focus_surface.clone().map(|surface| {
                 let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
@@ -10014,6 +10454,7 @@ impl CompositorCore {
             .as_ref()
             .is_none_or(|focused| focused.id() != surface.id());
         if focus_changed {
+            deactivate_pointer_lock(&mut self.state);
             if self.state.pointer_inside {
                 let previous = self
                     .state
@@ -10057,6 +10498,81 @@ impl CompositorCore {
         self.state.pointer_x = x;
         self.state.pointer_y = y;
         self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
+        activate_pointer_lock_for_focus(&mut self.state);
+        1
+    }
+
+    pub fn pointer_relative_motion(
+        &mut self,
+        delta_x: f64,
+        delta_y: f64,
+        unaccelerated_x: f64,
+        unaccelerated_y: f64,
+        time_millis: u32,
+    ) -> u32 {
+        if !self.state.host_active
+            || !self.state.pointer_inside
+            || !delta_x.is_finite()
+            || !delta_y.is_finite()
+            || !unaccelerated_x.is_finite()
+            || !unaccelerated_y.is_finite()
+            || (delta_x == 0.0 && delta_y == 0.0)
+        {
+            return 0;
+        }
+        let Some(focus) = self.state.pointer_focus_surface.as_ref() else {
+            return 0;
+        };
+        let timestamp = u64::from(time_millis).saturating_mul(1_000);
+        let timestamp_high = (timestamp >> 32) as u32;
+        let timestamp_low = timestamp as u32;
+        let mut delivered = 0_u32;
+        for relative in &self.state.relative_pointers {
+            let Some(data) = relative.data::<RelativePointerData>() else {
+                continue;
+            };
+            if !relative.is_alive()
+                || !data.pointer.is_alive()
+                || !data.pointer.id().same_client_as(&focus.id())
+            {
+                continue;
+            }
+            relative.relative_motion(
+                timestamp_high,
+                timestamp_low,
+                delta_x,
+                delta_y,
+                unaccelerated_x,
+                unaccelerated_y,
+            );
+            delivered = delivered.saturating_add(1);
+        }
+        if delivered != 0 {
+            self.state.pointer_event_count =
+                self.state.pointer_event_count.saturating_add(delivered);
+        }
+        delivered
+    }
+
+    pub fn pointer_capture_active(&self) -> bool {
+        self.state.active_locked_pointer.is_some()
+    }
+
+    pub fn pointer_capture_change_serial(&self) -> u32 {
+        self.state.pointer_capture_change_serial
+    }
+
+    pub fn cancel_pointer_capture(&mut self) -> u32 {
+        let Some(active) = self.state.active_locked_pointer.as_ref() else {
+            return 0;
+        };
+        if let Some(data) = active.data::<PointerConstraintData>() {
+            // A user/system capture escape makes this constraint ineligible
+            // without forgetting the live protocol object. It therefore cannot
+            // recapture automatically or permit a conflicting second request.
+            data.eligible.store(false, Ordering::Release);
+        }
+        deactivate_pointer_lock(&mut self.state);
         1
     }
 
@@ -13223,6 +13739,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         last_presented_commit: u32::MAX,
         last_presentation_signature: None,
         last_reported_ime_serial: None,
+        last_reported_pointer_capture_serial: None,
     })
 }
 
@@ -13424,6 +13941,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return 0;
     };
     jboolean::from(compositor.core.ime_active() != 0)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativePointerCaptureActive(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> jboolean {
+    let Some(compositor) = launcher_compositor(handle) else {
+        return 0;
+    };
+    jboolean::from(compositor.core.pointer_capture_active())
 }
 
 #[cfg(target_os = "android")]
@@ -14617,6 +15147,206 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU8;
+    use wayland_client::globals::{GlobalListContents, registry_queue_init};
+    use wayland_client::protocol::{
+        wl_compositor as client_wl_compositor, wl_pointer as client_wl_pointer,
+        wl_registry as client_wl_registry, wl_seat as client_wl_seat,
+        wl_surface as client_wl_surface,
+    };
+    use wayland_client::{Connection, QueueHandle};
+    use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1 as client_locked_pointer;
+    use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1 as client_pointer_constraints;
+    use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_manager_v1 as client_relative_pointer_manager;
+    use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1 as client_relative_pointer;
+
+    #[derive(Default)]
+    struct PointerProtocolClient {
+        locked: bool,
+        unlocked: bool,
+        relative_motion: Option<(f64, f64)>,
+    }
+
+    impl wayland_client::Dispatch<client_wl_registry::WlRegistry, GlobalListContents>
+        for PointerProtocolClient
+    {
+        fn event(
+            _state: &mut Self,
+            _proxy: &client_wl_registry::WlRegistry,
+            _event: client_wl_registry::Event,
+            _data: &GlobalListContents,
+            _connection: &Connection,
+            _queue: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: client_wl_compositor::WlCompositor
+    );
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: ignore client_wl_surface::WlSurface
+    );
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_seat::WlSeat);
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: ignore client_wl_pointer::WlPointer
+    );
+    wayland_client::delegate_noop!(
+        PointerProtocolClient:
+        client_relative_pointer_manager::ZwpRelativePointerManagerV1
+    );
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: client_pointer_constraints::ZwpPointerConstraintsV1
+    );
+
+    impl wayland_client::Dispatch<client_locked_pointer::ZwpLockedPointerV1, ()>
+        for PointerProtocolClient
+    {
+        fn event(
+            state: &mut Self,
+            _proxy: &client_locked_pointer::ZwpLockedPointerV1,
+            event: client_locked_pointer::Event,
+            _data: &(),
+            _connection: &Connection,
+            _queue: &QueueHandle<Self>,
+        ) {
+            match event {
+                client_locked_pointer::Event::Locked => state.locked = true,
+                client_locked_pointer::Event::Unlocked => state.unlocked = true,
+                _ => {}
+            }
+        }
+    }
+
+    impl wayland_client::Dispatch<client_relative_pointer::ZwpRelativePointerV1, ()>
+        for PointerProtocolClient
+    {
+        fn event(
+            state: &mut Self,
+            _proxy: &client_relative_pointer::ZwpRelativePointerV1,
+            event: client_relative_pointer::Event,
+            _data: &(),
+            _connection: &Connection,
+            _queue: &QueueHandle<Self>,
+        ) {
+            if let client_relative_pointer::Event::RelativeMotion { dx, dy, .. } = event {
+                state.relative_motion = Some((dx, dy));
+            }
+        }
+    }
+
+    #[test]
+    fn relative_pointer_lock_round_trips_through_the_wayland_protocol() {
+        let socket =
+            std::env::temp_dir().join(format!("archphene-pointer-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            while server_stage.load(Ordering::Acquire) != 4 {
+                core.dispatch_once().expect("dispatch client");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.locked_pointers.len() == 1
+                        && core.state.relative_pointers.len() == 1
+                        && core.state.surfaces.len() == 1
+                        && core.state.pointers.len() == 1 =>
+                    {
+                        core.state.pointer_focus_surface = core.state.surfaces.first().cloned();
+                        core.state.pointer_inside = true;
+                        activate_pointer_lock_for_focus(&mut core.state);
+                        assert!(core.pointer_capture_active());
+                        assert_eq!(core.pointer_relative_motion(3.5, -2.25, 3.5, -2.25, 7), 1);
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 => {
+                        assert_eq!(core.cancel_pointer_capture(), 1);
+                        assert!(!core.pointer_capture_active());
+                        assert_eq!(core.state.locked_pointers.len(), 1);
+                        assert!(
+                            !core.state.locked_pointers[0]
+                                .data::<PointerConstraintData>()
+                                .expect("persistent lock data")
+                                .eligible
+                                .load(Ordering::Acquire)
+                        );
+                        server_stage.store(5, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connection = loop {
+            match UnixStream::connect(&socket) {
+                Ok(stream) => break Connection::from_socket(stream).expect("client connection"),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("connect client: {error}"),
+            }
+        };
+        let (globals, mut events) =
+            registry_queue_init::<PointerProtocolClient>(&connection).expect("registry");
+        let queue = events.handle();
+        let compositor = globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&queue, 1..=6, ())
+            .expect("wl_compositor");
+        let seat = globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&queue, 1..=9, ())
+            .expect("wl_seat");
+        let relative_manager = globals
+            .bind::<client_relative_pointer_manager::ZwpRelativePointerManagerV1, _, _>(
+                &queue,
+                1..=1,
+                (),
+            )
+            .expect("relative-pointer manager");
+        let constraints = globals
+            .bind::<client_pointer_constraints::ZwpPointerConstraintsV1, _, _>(
+                &queue,
+                1..=1,
+                (),
+            )
+            .expect("pointer-constraints manager");
+        let surface = compositor.create_surface(&queue, ());
+        let pointer = seat.get_pointer(&queue, ());
+        let _relative = relative_manager.get_relative_pointer(&pointer, &queue, ());
+        let _lock = constraints.lock_pointer(
+            &surface,
+            &pointer,
+            None,
+            client_pointer_constraints::Lifetime::Persistent,
+            &queue,
+            (),
+        );
+        connection.flush().expect("flush protocol requests");
+        stage.store(1, Ordering::Release);
+
+        let mut client = PointerProtocolClient::default();
+        for _ in 0..4 {
+            events.roundtrip(&mut client).expect("locked roundtrip");
+            if client.locked && client.relative_motion.is_some() {
+                break;
+            }
+        }
+        assert!(client.locked);
+        assert_eq!(client.relative_motion, Some((3.5, -2.25)));
+
+        stage.store(3, Ordering::Release);
+        for _ in 0..4 {
+            events.roundtrip(&mut client).expect("unlocked roundtrip");
+            if client.unlocked {
+                break;
+            }
+        }
+        assert!(client.unlocked);
+        stage.store(4, Ordering::Release);
+        server.join().expect("server thread");
+        assert!(!socket.exists());
+    }
 
     #[test]
     fn jni_handle_registry_is_bounded_and_rejects_stale_generations() {
@@ -15984,6 +16714,18 @@ mod tests {
             dispatch_launcher_input_record(&mut core, [5, 29, 3, 9, 0, 0]),
             Err(())
         );
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [11, 1_000, -500, 1_000, -500, 10]),
+            Ok(0)
+        );
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [11, 16_384_001, 0, 0, 0, 10]),
+            Err(())
+        );
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [12, 0, 0, 0, 0, 0]),
+            Ok(0)
+        );
     }
 
     #[test]
@@ -16009,6 +16751,16 @@ mod tests {
         assert_eq!(
             scale_launcher_input_record([6, 1080, 2316, 9, 0, 0], 432, 926, 1080, 2316),
             [6, 432, 926, 9, 0, 0],
+        );
+        assert_eq!(
+            scale_launcher_input_record(
+                [11, 10_000, -10_000, 5_000, -5_000, 9],
+                432,
+                926,
+                1080,
+                2316,
+            ),
+            [11, 4_000, -3_998, 2_000, -1_999, 9],
         );
     }
 
