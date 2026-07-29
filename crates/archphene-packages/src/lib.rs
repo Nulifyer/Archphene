@@ -3431,6 +3431,16 @@ impl PackageRuntime {
         if transaction_plan.removals != expected_replacements {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        let rollback = if mode == InstallResolutionMode::Repair {
+            match self.read_pending_mutation()? {
+                Some(PackageMutationIntent::Install {
+                    request, rollback, ..
+                }) if request == recovery_target => rollback,
+                _ => return Err(PackageRuntimeError::InvalidResolution),
+            }
+        } else {
+            self.prepare_install_rollback(&archives, expected_replacements)?
+        };
         let replacement_records = if mode == InstallResolutionMode::Repair {
             let retained = retained_replacements.ok_or(PackageRuntimeError::InvalidResolution)?;
             if retained.len() != expected_replacements.len()
@@ -3455,6 +3465,7 @@ impl PackageRuntime {
             explicit_targets,
             resolution,
             &replacement_records,
+            rollback,
         ) {
             if mode == InstallResolutionMode::Normal && !replacement_records.is_empty() {
                 let _ = self.clear_replacement_repair();
@@ -3796,6 +3807,7 @@ impl PackageRuntime {
                 explicit_targets,
                 resolution,
                 replacements,
+                rollback: _,
             } => {
                 if request != package {
                     return Err(PackageRuntimeError::Busy);
@@ -3881,6 +3893,7 @@ impl PackageRuntime {
         explicit_targets: &[&str],
         resolution: &PackageResolution,
         replacements: &[ReplacementRepairRecord],
+        rollback: Option<InstallRollbackPlan>,
     ) -> Result<(), PackageRuntimeError> {
         let intent = PackageMutationIntent::Install {
             request: request.to_owned(),
@@ -3890,6 +3903,7 @@ impl PackageRuntime {
                 .collect(),
             resolution: resolution.clone(),
             replacements: replacements.to_vec(),
+            rollback,
         };
         self.publish_mutation_intent(&intent)
     }
@@ -4557,6 +4571,127 @@ impl PackageRuntime {
             }
         }
         Ok(())
+    }
+
+    fn prepare_install_rollback(
+        &self,
+        archives: &[InstallArchive],
+        replacements: &[InstalledPackageIdentity],
+    ) -> Result<Option<InstallRollbackPlan>, PackageRuntimeError> {
+        let installed = self.installed_package_catalog()?;
+        let (_, cache) = self.scan_package_cache()?;
+        let mut rollback_archives = Vec::with_capacity(archives.len() + replacements.len());
+        let mut previously_absent = Vec::with_capacity(archives.len());
+
+        for archive in archives {
+            match installed
+                .packages
+                .binary_search_by(|package| package.name.as_str().cmp(&archive.name))
+                .ok()
+                .map(|index| &installed.packages[index])
+            {
+                None => previously_absent.push(archive.name.clone()),
+                Some(previous) if previous.version == archive.version => {}
+                Some(previous) => {
+                    let Some(record) = self.rollback_archive_from_cache(previous, &cache)? else {
+                        return Ok(None);
+                    };
+                    rollback_archives.push(record);
+                }
+            }
+        }
+        for replacement in replacements {
+            let previous = installed
+                .packages
+                .binary_search_by(|package| package.name.cmp(&replacement.name))
+                .ok()
+                .map(|index| &installed.packages[index])
+                .filter(|package| package.version == replacement.version)
+                .ok_or(PackageRuntimeError::InvalidResolution)?;
+            let Some(record) = self.rollback_archive_from_cache(previous, &cache)? else {
+                return Ok(None);
+            };
+            rollback_archives.push(record);
+        }
+        rollback_archives.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        previously_absent.sort_unstable();
+        if rollback_archives
+            .windows(2)
+            .any(|pair| pair[0].name == pair[1].name)
+            || previously_absent.windows(2).any(|pair| pair[0] == pair[1])
+            || rollback_archives
+                .iter()
+                .any(|archive| previously_absent.binary_search(&archive.name).is_ok())
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(Some(InstallRollbackPlan {
+            archives: rollback_archives,
+            previously_absent,
+        }))
+    }
+
+    fn rollback_archive_from_cache(
+        &self,
+        installed: &InstalledPackage,
+        cache: &[PackageCacheArtifact],
+    ) -> Result<Option<RollbackArchiveRecord>, PackageRuntimeError> {
+        let architecture = self.architecture.package_architecture();
+        let candidates = cache.iter().filter(|artifact| {
+            artifact.package == installed.name
+                && artifact.version == installed.version
+                && (artifact.architecture == architecture || artifact.architecture == "any")
+                && artifact
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(safe_package_filename)
+        });
+        for candidate in candidates {
+            let filename = candidate
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| PackageRuntimeError::UnsafeEntry(candidate.path.clone()))?;
+            if self
+                .verify_package(
+                    filename,
+                    &installed.name,
+                    &installed.version,
+                    candidate.bytes,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            let signature = candidate.path.with_file_name(format!("{filename}.sig"));
+            let signature_metadata = fs::symlink_metadata(&signature)?;
+            if signature_metadata.file_type().is_symlink()
+                || !signature_metadata.is_file()
+                || signature_metadata.len() == 0
+                || signature_metadata.len() > PACKAGE_SIGNATURE_LIMIT
+            {
+                continue;
+            }
+            let archive_sha256 =
+                hash_regular_file(&candidate.path, candidate.bytes, PACKAGE_ARCHIVE_LIMIT)?;
+            let signature_sha256 = hash_regular_file(
+                &signature,
+                signature_metadata.len(),
+                PACKAGE_SIGNATURE_LIMIT,
+            )?;
+            return Ok(Some(RollbackArchiveRecord {
+                name: installed.name.clone(),
+                version: installed.version.clone(),
+                filename: filename.to_owned(),
+                archive_bytes: candidate.bytes,
+                archive_sha256: hex_sha256(&archive_sha256),
+                signature_bytes: signature_metadata.len(),
+                signature_sha256: hex_sha256(&signature_sha256),
+                explicitly_installed: installed.explicitly_installed,
+            }));
+        }
+        Ok(None)
     }
 
     pub fn begin_package_download(
@@ -8606,6 +8741,24 @@ struct ReplacementRepairRecord {
     database_sha256: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RollbackArchiveRecord {
+    name: String,
+    version: String,
+    filename: String,
+    archive_bytes: u64,
+    archive_sha256: String,
+    signature_bytes: u64,
+    signature_sha256: String,
+    explicitly_installed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InstallRollbackPlan {
+    archives: Vec<RollbackArchiveRecord>,
+    previously_absent: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstallResolutionMode {
     Normal,
@@ -8626,6 +8779,7 @@ enum PackageMutationIntent {
         explicit_targets: Vec<String>,
         resolution: PackageResolution,
         replacements: Vec<ReplacementRepairRecord>,
+        rollback: Option<InstallRollbackPlan>,
     },
     Remove {
         package: String,
@@ -8647,6 +8801,7 @@ fn serialize_package_mutation_intent(
             explicit_targets,
             resolution,
             replacements,
+            rollback,
         } => {
             content.push_str("install\t");
             content.push_str(request);
@@ -8664,6 +8819,32 @@ fn serialize_package_mutation_intent(
                 content.push('\t');
                 content.push_str(&replacement.database_sha256);
                 content.push('\n');
+            }
+            match rollback {
+                Some(rollback) => {
+                    content.push_str("rollback\tready\n");
+                    for archive in &rollback.archives {
+                        writeln!(
+                            content,
+                            "rollback-archive\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            archive.name,
+                            archive.version,
+                            archive.filename,
+                            archive.archive_bytes,
+                            archive.archive_sha256,
+                            archive.signature_bytes,
+                            archive.signature_sha256,
+                            if archive.explicitly_installed { 0 } else { 1 },
+                        )
+                        .map_err(|_| PackageRuntimeError::OutputLimit)?;
+                    }
+                    for package in &rollback.previously_absent {
+                        content.push_str("rollback-absent\t");
+                        content.push_str(package);
+                        content.push('\n');
+                    }
+                }
+                None => content.push_str("rollback\tunavailable\n"),
             }
             for line in resolution.as_str()?.lines() {
                 content.push_str("archive\t");
@@ -8715,6 +8896,9 @@ fn parse_package_mutation_intent(
         }
         let mut explicit_targets = Vec::with_capacity(2);
         let mut replacements = Vec::with_capacity(2);
+        let mut rollback_archives = Vec::with_capacity(4);
+        let mut rollback_absent = Vec::with_capacity(4);
+        let mut rollback_ready = None;
         let mut resolution_text = String::with_capacity(input.len());
         let mut reading_archives = false;
         for line in lines {
@@ -8754,6 +8938,90 @@ fn parse_package_mutation_intent(
                     version: version.to_owned(),
                     database_sha256: database_sha256.to_owned(),
                 });
+            } else if let Some(state) = line.strip_prefix("rollback\t") {
+                if reading_archives || rollback_ready.is_some() {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                rollback_ready = match state {
+                    "ready" => Some(true),
+                    "unavailable" => Some(false),
+                    _ => return Err(PackageRuntimeError::InvalidResolution),
+                };
+            } else if let Some(record) = line.strip_prefix("rollback-archive\t") {
+                if reading_archives || rollback_ready != Some(true) {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                let mut fields = record.split('\t');
+                let (
+                    Some(name),
+                    Some(version),
+                    Some(filename),
+                    Some(archive_bytes),
+                    Some(archive_sha256),
+                    Some(signature_bytes),
+                    Some(signature_sha256),
+                    Some(reason),
+                    None,
+                ) = (
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                )
+                else {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                };
+                let archive_bytes = archive_bytes
+                    .parse::<u64>()
+                    .map_err(|_| PackageRuntimeError::InvalidResolution)?;
+                let signature_bytes = signature_bytes
+                    .parse::<u64>()
+                    .map_err(|_| PackageRuntimeError::InvalidResolution)?;
+                if !safe_logical_name(name)
+                    || !safe_package_version(version)
+                    || !safe_package_filename(filename)
+                    || archive_bytes == 0
+                    || archive_bytes > PACKAGE_ARCHIVE_LIMIT
+                    || !valid_sha256_hex(archive_sha256)
+                    || signature_bytes == 0
+                    || signature_bytes > PACKAGE_SIGNATURE_LIMIT
+                    || !valid_sha256_hex(signature_sha256)
+                    || !matches!(reason, "0" | "1")
+                    || rollback_archives.len() >= 256
+                    || rollback_archives
+                        .iter()
+                        .any(|entry: &RollbackArchiveRecord| entry.name == name)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                rollback_archives.push(RollbackArchiveRecord {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                    filename: filename.to_owned(),
+                    archive_bytes,
+                    archive_sha256: archive_sha256.to_owned(),
+                    signature_bytes,
+                    signature_sha256: signature_sha256.to_owned(),
+                    explicitly_installed: reason == "0",
+                });
+            } else if let Some(package) = line.strip_prefix("rollback-absent\t") {
+                if reading_archives
+                    || rollback_ready != Some(true)
+                    || !safe_logical_name(package)
+                    || rollback_absent.len() >= 256
+                    || rollback_absent.iter().any(|entry| entry == package)
+                    || rollback_archives
+                        .iter()
+                        .any(|entry: &RollbackArchiveRecord| entry.name == package)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                rollback_absent.push(package.to_owned());
             } else if let Some(archive) = line.strip_prefix("archive\t") {
                 reading_archives = true;
                 resolution_text.push_str(archive);
@@ -8771,11 +9039,30 @@ fn parse_package_mutation_intent(
             .collect::<Vec<_>>();
         let resolution = parse_resolution_output(&resolution_text, &target_refs, architecture)?;
         resolved_version(&resolution, request)?;
+        let rollback = match rollback_ready {
+            Some(true) => {
+                if rollback_archives
+                    .iter()
+                    .any(|archive| rollback_absent.iter().any(|name| name == &archive.name))
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                Some(InstallRollbackPlan {
+                    archives: rollback_archives,
+                    previously_absent: rollback_absent,
+                })
+            }
+            Some(false) | None if rollback_archives.is_empty() && rollback_absent.is_empty() => {
+                None
+            }
+            _ => return Err(PackageRuntimeError::InvalidResolution),
+        };
         Ok(PackageMutationIntent::Install {
             request: request.to_owned(),
             explicit_targets,
             resolution,
             replacements,
+            rollback,
         })
     } else if let Some(removal) = operation.strip_prefix("remove\t") {
         if lines.next().is_some() {
@@ -11437,6 +11724,19 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
                 version: "1.0-1".to_owned(),
                 database_sha256: "b".repeat(64),
             }],
+            rollback: Some(InstallRollbackPlan {
+                archives: vec![RollbackArchiveRecord {
+                    name: "btop-old".to_owned(),
+                    version: "1.0-1".to_owned(),
+                    filename: "btop-old-1.0-1-x86_64.pkg.tar.zst".to_owned(),
+                    archive_bytes: 512,
+                    archive_sha256: "c".repeat(64),
+                    signature_bytes: 128,
+                    signature_sha256: "d".repeat(64),
+                    explicitly_installed: true,
+                }],
+                previously_absent: vec!["btop".to_owned()],
+            }),
         };
         let encoded = serialize_package_mutation_intent(&install, RepositoryArchitecture::X86_64)
             .expect("serialize install");
