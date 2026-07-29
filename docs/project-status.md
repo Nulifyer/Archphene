@@ -1177,11 +1177,12 @@ only in the explicit loader variables. The path bridge maps `getcwd` and
 report `/home/archphene` instead of Android's private data path. `LOCPATH`
 points directly at the verified locale data installed by the architecture's
 official glibc package, enabling `C.UTF-8` without generating or bundling a
-second locale. Root bootstrap creates `.bashrc` and `.bash_profile` defaults
-once, rejects symlink substitution, and never overwrites user edits. It also
-creates private `~/.local/bin`; that conventional directory is first in the
-shared PATH for terminal and graphical processes, while additional PATH
-changes made in `.bashrc` intentionally affect only shells that source it.
+second locale. Root bootstrap creates `.bashrc`, `.bash_profile`, `.zshrc`,
+and Fish `~/.config/fish/config.fish` defaults once, rejects symlink
+substitution, and never overwrites user edits. It also creates private
+`~/.local/bin`; that conventional directory is first in the shared PATH for
+terminal and graphical processes, while additional startup-file PATH changes
+intentionally affect only shells that source them.
 
 Interactive lifecycle gates now pass on the x86_64 emulator and AArch64
 Samsung. Each proves the Archphene prompt, HOME, PWD, conventional PATH, and
@@ -1200,25 +1201,27 @@ clipboard, and accessibility remain open.
 Shell launch is no longer hardcoded in Kotlin. Rust reads the bounded,
 non-symlinked, non-group/world-writable shared `/etc/shells`, cross-checks each
 supported adapter against the safely resolved installed executable, and
-publishes only the reviewed Bash and POSIX-shell launch records. The Kotlin
-Service persists
-the stable shell identifier, refreshes discovery after package mutation,
-prebuilds each bounded NUL-delimited PTY request once, and keeps the selector
-disabled while a session is active. Unsupported or unsafe catalogs disable
-shell launch without making package management unavailable.
+publishes only the reviewed Bash, POSIX-shell, Zsh, and Fish launch records.
+The Kotlin Service reads and writes the stable identifier through one
+prewarmed preference path, honors the former UI preference key as a migration
+fallback, refreshes discovery after package mutation, prebuilds each bounded
+NUL-delimited PTY request once, and hides the selector while a session is
+active. Unsupported or unsafe catalogs disable shell launch without making
+package management unavailable.
 
-The readable Android selector, process-death persistence, distinct
-`archphene:~$` and `sh-5.3$` PTY prompts, stop/reap behavior, scoped fatal
-logs, and full-device screenshots pass with exact-ABI APKs on the API 36
-x86_64 emulator and AArch64 Samsung. Bash is restored as the selected default
-after each gate. Android Files now exposes a virtual **Shell startup files**
-directory containing writable `Edit .bashrc` and `Edit .bash_profile`
-documents. Rust maps only those two stable identities to no-follow opens of the
-real user-owned files; Android cannot create, rename, or delete entries there,
-and arbitrary dotfiles remain private. Host substitution tests and exact-ABI
-DocumentsUI read/write/security/full-device gates pass on both targets.
-Additional shell-specific startup adapters and the remaining production
-terminal work remain pending.
+The readable Android selector, process-death persistence, Bash/POSIX/Zsh/Fish
+PTY startup, stop/reap behavior, scoped fatal logs, and full-device screenshots
+pass with exact-ABI APKs on the API 36 x86_64 emulator and AArch64 Samsung.
+Stock Zsh and Fish were installed through Archphene's normal package UI on both
+targets; Bash is restored as the selected default after each gate. Android
+Files now exposes a virtual **Shell startup files** directory containing
+writable `Edit .bashrc`, `Edit .bash_profile`, `Edit .zshrc`, and
+`Edit Fish config` documents. Rust maps only those four stable identities
+through descriptor-relative no-follow opens of the real user-owned files;
+Android cannot create, rename, or delete entries there, and arbitrary dotfiles
+remain private. Host substitution tests and exact-ABI DocumentsUI
+read/write/security/full-device gates pass on both targets. The remaining
+production terminal work remains pending.
 
 The production terminal replacement now has a separate Rust state-core
 foundation. It bounds grids to 200 by 400 cells, parses strict streaming UTF-8
@@ -2655,7 +2658,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Rich notification actions, non-HTTP URI policies, and remaining desktop portals.
 - Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
 - GrapheneOS Pixel and sustained desktop-mode validation.
-- Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending. The replacement selects installed Bash or its POSIX-shell mode; additional shell-specific startup adapters remain pending.
+- Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending.
 - Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
 - Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild. The GTK settings bridge now has a clean checksum-pinned AArch64 GLib link sysroot.
 - Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.

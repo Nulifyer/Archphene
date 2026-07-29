@@ -35,6 +35,8 @@ const DEFAULT_BASH_PROFILE: &[u8] =
 if [[ -r ~/.bashrc ]]; then\n\
   . ~/.bashrc\n\
 fi\n";
+const DEFAULT_ZSHRC: &[u8] = b"# Created once by Archphene; this file belongs to the user.\n";
+const DEFAULT_FISH_CONFIG: &[u8] = b"# Created once by Archphene; this file belongs to the user.\n";
 const ANDROID_FONTCONFIG: &[u8] = br#"<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
@@ -75,6 +77,8 @@ const DIRECTORIES: &[(&str, u32)] = &[
     ("home/archphene", 0o700),
     ("home/archphene/.local", 0o700),
     ("home/archphene/.local/bin", 0o700),
+    ("home/archphene/.config", 0o700),
+    ("home/archphene/.config/fish", 0o700),
     ("home/archphene/Documents", 0o700),
     ("home/archphene/Downloads", 0o700),
     ("home/archphene/Media", 0o700),
@@ -167,6 +171,11 @@ impl ArchRoot {
         ensure_user_file(
             &path.join("home/archphene/.bash_profile"),
             DEFAULT_BASH_PROFILE,
+        )?;
+        ensure_user_file(&path.join("home/archphene/.zshrc"), DEFAULT_ZSHRC)?;
+        ensure_user_file(
+            &path.join("home/archphene/.config/fish/config.fish"),
+            DEFAULT_FISH_CONFIG,
         )?;
         ensure_managed_file(
             &path.join("var/lib/archphene/fontconfig/fonts.conf"),
@@ -571,6 +580,7 @@ mod tests {
         assert!(temporary.0.join("var/lib/archphene/storage").is_dir());
         assert!(temporary.0.join("var/lib/archphene/fontconfig").is_dir());
         assert!(temporary.0.join("home/archphene").is_dir());
+        assert!(temporary.0.join("home/archphene/.config/fish").is_dir());
         assert!(temporary.0.join("home/archphene/Documents").is_dir());
         assert!(temporary.0.join("home/archphene/Downloads").is_dir());
         assert!(temporary.0.join("home/archphene/Media").is_dir());
@@ -587,6 +597,15 @@ mod tests {
         assert_eq!(
             fs::read(temporary.0.join("home/archphene/.bashrc")).expect("default bashrc"),
             DEFAULT_BASHRC,
+        );
+        assert_eq!(
+            fs::read(temporary.0.join("home/archphene/.zshrc")).expect("default zshrc"),
+            DEFAULT_ZSHRC,
+        );
+        assert_eq!(
+            fs::read(temporary.0.join("home/archphene/.config/fish/config.fish"))
+                .expect("default fish config"),
+            DEFAULT_FISH_CONFIG,
         );
         assert_eq!(
             fs::read(temporary.0.join("var/lib/archphene/fontconfig/fonts.conf"))
@@ -634,6 +653,17 @@ mod tests {
         assert_eq!(
             fs::read(temporary.0.join("home/archphene/.bashrc")).expect("custom bashrc"),
             b"# user customization\n",
+        );
+        fs::write(
+            temporary.0.join("home/archphene/.config/fish/config.fish"),
+            b"# user fish customization\n",
+        )
+        .expect("custom fish config");
+        ArchRoot::bootstrap(&temporary.0).expect("preserve fish config");
+        assert_eq!(
+            fs::read(temporary.0.join("home/archphene/.config/fish/config.fish"))
+                .expect("custom fish config"),
+            b"# user fish customization\n",
         );
         fs::write(
             temporary.0.join("var/lib/archphene/fontconfig/fonts.conf"),

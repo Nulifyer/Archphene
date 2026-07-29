@@ -1236,6 +1236,14 @@ impl PackageRuntime {
                 "--noprofile\t--noediting",
                 ["/bin/sh", "/usr/bin/sh"],
             ),
+            ("zsh", "Zsh", "zsh", "-i", ["/bin/zsh", "/usr/bin/zsh"]),
+            (
+                "fish",
+                "Fish",
+                "fish",
+                "--interactive",
+                ["/bin/fish", "/usr/bin/fish"],
+            ),
         ] {
             let declared = source.lines().any(|line| {
                 let line = line.trim();
@@ -12764,10 +12772,12 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
         tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
         tree.command("bash");
+        tree.command("zsh");
+        tree.command("fish");
         std::os::unix::fs::symlink("bash", tree.root.join("usr/bin/sh")).expect("sh alias");
         fs::write(
             tree.root.join(SHELLS_FILE),
-            b"# valid shells\n/bin/sh\n/usr/bin/bash\n/usr/bin/zsh\n",
+            b"# valid shells\n/bin/sh\n/usr/bin/bash\n/usr/bin/zsh\n/usr/bin/fish\n",
         )
         .expect("shells file");
         let manifest = b"# org.archphene.package-runtime.v1\n\
@@ -12790,7 +12800,9 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                 .as_str()
                 .expect("utf-8"),
             "bash\tBash\tbash\t--noprofile\t--noediting\n\
-sh\tPOSIX shell\tsh\t--noprofile\t--noediting\n"
+sh\tPOSIX shell\tsh\t--noprofile\t--noediting\n\
+zsh\tZsh\tzsh\t-i\n\
+fish\tFish\tfish\t--interactive\n"
         );
 
         fs::set_permissions(

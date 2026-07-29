@@ -5,13 +5,15 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=
 apk=
 skip_install=false
+require_extended_shells=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --skip-install) skip_install=true; shift ;;
+    --require-extended-shells) require_extended_shells=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL [--apk PATH] [--skip-install]"
+      echo "usage: $0 --serial SERIAL [--apk PATH] [--skip-install] [--require-extended-shells]"
       exit 0 ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
@@ -48,6 +50,16 @@ archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/bash |
   archphene_die "shell-selection regression requires installed bash"
 archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/sh ||
   archphene_die "shell-selection regression requires installed sh"
+extended_shells=true
+for shell in zsh fish; do
+  if ! archphene_adb_run shell run-as "$package" test -x \
+      "files/arch-root/usr/bin/$shell"; then
+    extended_shells=false
+  fi
+done
+if [[ "$require_extended_shells" == true && "$extended_shells" == false ]]; then
+  archphene_die "extended shell regression requires installed zsh and fish"
+fi
 original_shells_mode="$(
   archphene_adb_run shell run-as "$package" stat -c %a files/arch-root/etc/shells |
     tr -d '\r'
@@ -99,9 +111,10 @@ archphene_wait_ui 'text="Shared shell ready"' "archphene-posix-ready-$serial" 20
 archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
   "archphene-posix-terminal-$serial" 20
 archphene_wait_ui 'sh-[0-9][^"]*\$' "archphene-posix-prompt-$serial" 20
-archphene_wait_ui \
-  'class="android.widget.Spinner"[^>]*enabled="false"[^>]*>.*text="POSIX shell"' \
-  "archphene-posix-locked-$serial" 10
+if archphene_regex_contains "$ARCHPHENE_UI" \
+  'class="android.widget.Spinner"[^>]*content-desc="Shell"'; then
+  archphene_die "shell selector remained visible while the POSIX shell was running"
+fi
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-posix.png"
 archphene_wait_ui 'text="Stop shell"' "archphene-posix-stop-$serial" 10
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Stop shell"' 'stop POSIX shell'
@@ -123,6 +136,33 @@ archphene_wait_ui 'text="Stop shell"' "archphene-bash-stop-$serial" 10
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Stop shell"' 'stop Bash'
 archphene_wait_log 'Shared Bash session finished with status stopped' 20 >/dev/null
 archphene_wait_ui 'Shared shell stopped' "archphene-bash-stopped-$serial" 20
+
+exercise_extended_shell() {
+  local label="$1" id="$2" prompt_pattern="$3"
+  select_shell "$label" "archphene-$id-$serial"
+  start_manager "archphene-$id-restart-$serial"
+  assert_selected_shell "$label" "archphene-$id-restart-$serial"
+  archphene_wait_ui 'text="Start shell"' "archphene-$id-start-$serial" 15
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' "start $label"
+  archphene_wait_log "Shared $label session started" 20 >/dev/null
+  archphene_wait_ui 'text="Shared shell ready"' "archphene-$id-ready-$serial" 20
+  archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
+    "archphene-$id-terminal-$serial" 20
+  archphene_wait_ui "$prompt_pattern" "archphene-$id-prompt-$serial" 20
+  archphene_adb_run exec-out screencap -p >"$output_dir/$serial-$id.png"
+  archphene_wait_ui 'text="Stop shell"' "archphene-$id-stop-$serial" 10
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Stop shell"' "stop $label"
+  archphene_wait_log "Shared $label session finished with status stopped" 20 >/dev/null
+  archphene_wait_ui 'Shared shell stopped' "archphene-$id-stopped-$serial" 20
+}
+
+if [[ "$extended_shells" == true ]]; then
+  exercise_extended_shell Zsh zsh 'localhost%'
+  exercise_extended_shell Fish fish 'archphene@localhost'
+  select_shell Bash "archphene-bash-restore-$serial"
+  start_manager "archphene-bash-restored-$serial"
+  assert_selected_shell Bash "archphene-bash-restored-$serial"
+fi
 
 # A same-UID Linux process can damage user-owned configuration. Shell
 # discovery must fail closed without taking the package manager down, and must
@@ -146,7 +186,14 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "shell-selection regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene installed-shell selection regression passed on $serial"
-archphene_note "  POSIX shell and Bash launch, lock, stop, and process persistence passed"
+archphene_note "  POSIX shell and Bash launch, hide, stop, and process persistence passed"
+if [[ "$extended_shells" == true ]]; then
+  archphene_note "  Zsh and Fish discovery, persistence, launch, and stop passed"
+fi
 archphene_note "  Full-device screenshots: $output_dir/$serial-posix.png"
 archphene_note "                           $output_dir/$serial-bash.png"
+if [[ "$extended_shells" == true ]]; then
+  archphene_note "                           $output_dir/$serial-zsh.png"
+  archphene_note "                           $output_dir/$serial-fish.png"
+fi
 archphene_note "                           $output_dir/$serial-unsafe-catalog.png"

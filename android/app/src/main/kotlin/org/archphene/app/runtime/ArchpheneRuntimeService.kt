@@ -2392,8 +2392,6 @@ class ArchpheneRuntimeService : Service() {
         private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
         private const val AUR_GRAPH_TOTAL_SOURCE_MAX_BYTES =
             32L * AUR_TOTAL_SOURCE_MAX_BYTES
-        private const val SHELL_PREFERENCES = "terminal"
-        private const val SHELL_PREFERENCE_ID = "shared_shell_id"
         private const val PACKAGE_RECOVERY_PREFERENCES = "package_recovery"
         private const val PACKAGE_RECOVERY_JOB_ID = "job_id"
         private const val PACKAGE_RECOVERY_PACKAGE = "package"
@@ -11560,9 +11558,7 @@ class ArchpheneRuntimeService : Service() {
 
     @Synchronized
     private fun publishShellChoices(choices: List<ShellChoice>) {
-        val preferredId =
-            getSharedPreferences(SHELL_PREFERENCES, MODE_PRIVATE)
-                .getString(SHELL_PREFERENCE_ID, "bash")
+        val preferredId = ArchphenePreferences.shellId(this)
         shellChoices = choices
         selectedShellIndex =
             if (choices.isEmpty()) {

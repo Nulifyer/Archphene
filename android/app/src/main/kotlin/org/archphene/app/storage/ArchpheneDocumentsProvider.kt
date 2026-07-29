@@ -371,8 +371,15 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             )
         }
         SHELL_STARTUP_FILES[documentId]?.let { startup ->
+            var file = homeDirectory()
+            startup.pathSegments.forEach { segment ->
+                file = File(file, segment)
+                if (Files.isSymbolicLink(file.toPath())) {
+                    throw missing("Shell startup path is unavailable: ${startup.displayName}")
+                }
+            }
             return resolvePhysicalDocument(
-                File(homeDirectory(), startup.fileName),
+                file,
                 startup.displayName,
                 DocumentKind.SHELL_STARTUP_FILE,
                 startup.id,
@@ -694,9 +701,9 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             get() = attributes?.isRegularFile == true
     }
 
-    private data class ShellStartupFile(
+    private class ShellStartupFile(
         val id: String,
-        val fileName: String,
+        val pathSegments: Array<String>,
         val displayName: String,
     )
 
@@ -707,6 +714,8 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         private const val SHELL_STARTUP_ID = "shell-startup"
         private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/bashrc"
         private const val BASH_PROFILE_DOCUMENT_ID = "$SHELL_STARTUP_ID/bash-profile"
+        private const val ZSHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/zshrc"
+        private const val FISH_CONFIG_DOCUMENT_ID = "$SHELL_STARTUP_ID/fish-config"
         private const val HOME_RELATIVE_PATH = "arch-root/home/archphene"
         private const val MAX_DOCUMENT_ID_BYTES = 1024
         private const val MAX_DOCUMENT_NAME_BYTES = 255
@@ -730,18 +739,35 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
                 BASHRC_DOCUMENT_ID to
                     ShellStartupFile(
                         id = "bashrc",
-                        fileName = ".bashrc",
+                        pathSegments = arrayOf(".bashrc"),
                         displayName = "Edit .bashrc",
                     ),
                 BASH_PROFILE_DOCUMENT_ID to
                     ShellStartupFile(
                         id = "bash-profile",
-                        fileName = ".bash_profile",
+                        pathSegments = arrayOf(".bash_profile"),
                         displayName = "Edit .bash_profile",
+                    ),
+                ZSHRC_DOCUMENT_ID to
+                    ShellStartupFile(
+                        id = "zshrc",
+                        pathSegments = arrayOf(".zshrc"),
+                        displayName = "Edit .zshrc",
+                    ),
+                FISH_CONFIG_DOCUMENT_ID to
+                    ShellStartupFile(
+                        id = "fish-config",
+                        pathSegments = arrayOf(".config", "fish", "config.fish"),
+                        displayName = "Edit Fish config",
                     ),
             )
         private val SHELL_STARTUP_DOCUMENT_IDS =
-            arrayOf(BASHRC_DOCUMENT_ID, BASH_PROFILE_DOCUMENT_ID)
+            arrayOf(
+                BASHRC_DOCUMENT_ID,
+                BASH_PROFILE_DOCUMENT_ID,
+                ZSHRC_DOCUMENT_ID,
+                FISH_CONFIG_DOCUMENT_ID,
+            )
 
         private val DEFAULT_ROOT_PROJECTION =
             arrayOf(

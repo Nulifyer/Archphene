@@ -83,6 +83,8 @@ archphene_wait_ui 'text="Shell startup files"' "documents-startup-folder-$serial
 home_ui="$ARCHPHENE_UI"
 [[ "$home_ui" != *'text=".bashrc"'* &&
     "$home_ui" != *'text=".bash_profile"'* &&
+    "$home_ui" != *'text=".zshrc"'* &&
+    "$home_ui" != *'text=".config"'* &&
     "$home_ui" != *'text="private-link"'* ]] ||
   archphene_die "DocumentsUI exposed a private or symbolic-link entry"
 archphene_tap_text "$home_ui" "Shell startup files"
@@ -90,6 +92,10 @@ archphene_wait_ui 'text="Edit .bashrc"' \
   "documents-bashrc-$serial" 15
 archphene_wait_ui 'text="Edit .bash_profile"' \
   "documents-bash-profile-$serial" 15
+archphene_wait_ui 'text="Edit .zshrc"' \
+  "documents-zshrc-$serial" 15
+archphene_wait_ui 'text="Edit Fish config"' \
+  "documents-fish-config-$serial" 15
 startup_ui="$ARCHPHENE_UI"
 [[ "$startup_ui" != *'text=".secret"'* &&
     "$startup_ui" != *'text="private-link"'* ]] ||
@@ -121,7 +127,7 @@ trap - EXIT
 cleanup
 archphene_note "Archphene DocumentsProvider passed on $serial"
 archphene_note "  Exact create/read/write/rename/delete and collision behavior passed"
-archphene_note "  Only .bashrc/.bash_profile are exposed through the reviewed startup folder"
+archphene_note "  Only Bash, Zsh, and Fish startup files are exposed through the reviewed folder"
 archphene_note "  Hidden, traversal, bidi-spoof, and symlink access were rejected"
 archphene_note \
   "  Full-device screenshots: $output_dir/$serial{,-shell-startup}.png"

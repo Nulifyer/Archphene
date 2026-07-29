@@ -92,6 +92,12 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
             DocumentsContract.buildDocumentUri(authority, SHELL_STARTUP_ID)
         val bashrc =
             DocumentsContract.buildDocumentUri(authority, BASHRC_DOCUMENT_ID)
+        val bashProfile =
+            DocumentsContract.buildDocumentUri(authority, BASH_PROFILE_DOCUMENT_ID)
+        val zshrc =
+            DocumentsContract.buildDocumentUri(authority, ZSHRC_DOCUMENT_ID)
+        val fishConfig =
+            DocumentsContract.buildDocumentUri(authority, FISH_CONFIG_DOCUMENT_ID)
         val directoryName = "$PROBE_PREFIX$token"
         check(DocumentsContract.isChildDocument(resolver, root, shellStartup)) {
             "shell startup directory is not a child of Archphene Home"
@@ -118,20 +124,31 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
                 setOf(
                     "Edit .bashrc",
                     "Edit .bash_profile",
+                    "Edit .zshrc",
+                    "Edit Fish config",
                 ),
         ) {
             "provider exposed an unexpected shell startup set: $startupNames"
         }
-        val directBashrc =
-            File(context.filesDir, "$HOME_RELATIVE_PATH/.bashrc").readBytes()
-        check(
-            resolver.openInputStream(bashrc)!!.use { stream ->
-                stream.readBytes().contentEquals(directBashrc)
-            },
+        for (
+            (label, uri, path) in
+                arrayOf(
+                    Triple(".bashrc", bashrc, ".bashrc"),
+                    Triple(".bash_profile", bashProfile, ".bash_profile"),
+                    Triple(".zshrc", zshrc, ".zshrc"),
+                    Triple("Fish config", fishConfig, ".config/fish/config.fish"),
+                )
         ) {
-            "reviewed .bashrc content does not match the Linux home"
+            val direct = File(context.filesDir, "$HOME_RELATIVE_PATH/$path").readBytes()
+            check(
+                resolver.openInputStream(uri)!!.use { stream ->
+                    stream.readBytes().contentEquals(direct)
+                },
+            ) {
+                "reviewed $label content does not match the Linux home"
+            }
+            resolver.openFileDescriptor(uri, "rw")!!.close()
         }
-        resolver.openFileDescriptor(bashrc, "rw")!!.close()
         expectNoDocument("startup create") {
             DocumentsContract.createDocument(resolver, shellStartup, "text/plain", "extra")
         }
@@ -552,6 +569,9 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private const val HOME_ID = "home"
         private const val SHELL_STARTUP_ID = "shell-startup"
         private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/bashrc"
+        private const val BASH_PROFILE_DOCUMENT_ID = "$SHELL_STARTUP_ID/bash-profile"
+        private const val ZSHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/zshrc"
+        private const val FISH_CONFIG_DOCUMENT_ID = "$SHELL_STARTUP_ID/fish-config"
         private const val HOME_RELATIVE_PATH = "arch-root/home/archphene"
         private const val PROBE_PREFIX = "Archphene-Documents-"
         private const val SOURCE_NAME = "source.txt"

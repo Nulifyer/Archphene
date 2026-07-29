@@ -24,8 +24,10 @@ internal object ArchphenePreferences {
     private const val MANAGER_SECTION = "selected_section"
     private const val TERMINAL_PREFERENCES = "terminal_display"
     private const val TERMINAL_TEXT_SP = "text_sp"
-    private const val SHELL_PREFERENCES = "terminal_shell"
-    private const val SHELL_ID = "selected_shell_id"
+    private const val SHELL_PREFERENCES = "terminal"
+    private const val SHELL_ID = "shared_shell_id"
+    private const val LEGACY_SHELL_PREFERENCES = "terminal_shell"
+    private const val LEGACY_SHELL_ID = "selected_shell_id"
     private const val STORAGE_PREFERENCES = "storage"
     private const val STORAGE_ONBOARDING_SEEN = "folder_onboarding_seen"
     private const val COMPATIBILITY_PREFERENCES = "linux_compatibility"
@@ -64,6 +66,7 @@ internal object ArchphenePreferences {
         io.execute {
             val manager = readInt(appContext, MANAGER_PREFERENCES, MANAGER_SECTION)
             val terminal = readInt(appContext, TERMINAL_PREFERENCES, TERMINAL_TEXT_SP)
+            shellId(appContext)
             val reducedIsolationElectron =
                 readBoolean(
                     appContext,
@@ -185,18 +188,30 @@ internal object ArchphenePreferences {
 
     fun setShellId(shellId: String) {
         val context = initializedContext()
-        io.execute {
-            val saved =
-                context
-                    .getSharedPreferences(SHELL_PREFERENCES, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(SHELL_ID, shellId)
-                    .commit()
-            if (!saved) {
-                android.util.Log.e(TAG, "Could not persist $SHELL_PREFERENCES/$SHELL_ID")
-            }
-        }
+        context
+            .getSharedPreferences(SHELL_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putString(SHELL_ID, shellId)
+            .apply()
     }
+
+    fun shellId(context: Context): String =
+        try {
+            context
+                .getSharedPreferences(SHELL_PREFERENCES, Context.MODE_PRIVATE)
+                .getString(SHELL_ID, null)
+                .orEmpty()
+                .ifEmpty {
+                    context
+                        .getSharedPreferences(LEGACY_SHELL_PREFERENCES, Context.MODE_PRIVATE)
+                        .getString(LEGACY_SHELL_ID, "bash")
+                        .orEmpty()
+                }
+                .ifEmpty { "bash" }
+        } catch (error: RuntimeException) {
+            android.util.Log.e(TAG, "Could not read the selected shell", error)
+            "bash"
+        }
 
     fun setStorageOnboardingSeen() {
         val context = initializedContext()

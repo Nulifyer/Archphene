@@ -73,16 +73,17 @@ The first production bridge is now active: visible regular files and
 directories under shared `/home/archphene` appear as
 **Archphene Home** through one manager-owned `DocumentsProvider`. Dotfiles
 remain private except for a virtual **Shell startup files** folder that maps
-only `Edit .bashrc` and `Edit .bash_profile` to the two real user-owned files.
-Those reviewed documents are writable but cannot be created, renamed, or
-deleted through Android. Symlinks, special files, package state, runtime state,
-and every other dotfile remain private.
+only `Edit .bashrc`, `Edit .bash_profile`, `Edit .zshrc`, and
+`Edit Fish config` to the four real user-owned files. Those reviewed documents
+are writable but cannot be created, renamed, or deleted through Android.
+Symlinks, special files, package state, runtime state, and every other dotfile
+remain private.
 Android's `MANAGE_DOCUMENTS` contract and per-URI grants gate other apps.
 Kotlin implements the Android provider surface; Rust performs bounded
 directory-descriptor traversal and mutation without following symlinks or
 replacing an existing rename target.
 
-Create/read/write/rename/delete, collision preservation, the two reviewed
+Create/read/write/rename/delete, collision preservation, the four reviewed
 startup-file opens, hidden/traversal/symlink rejection, cleanup, and real
 DocumentsUI browsing pass on the x86_64 emulator and physical AArch64 Samsung.
 

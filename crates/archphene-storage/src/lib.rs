@@ -208,6 +208,8 @@ mod sys {
 pub const HOME_DOCUMENT_ID: &str = "home";
 pub const BASHRC_STARTUP_ID: &str = "bashrc";
 pub const BASH_PROFILE_STARTUP_ID: &str = "bash-profile";
+pub const ZSHRC_STARTUP_ID: &str = "zshrc";
+pub const FISH_CONFIG_STARTUP_ID: &str = "fish-config";
 pub const MAX_DOCUMENT_ID_BYTES: usize = 1024;
 pub const MAX_DOCUMENT_DEPTH: usize = 32;
 pub const MAX_DOCUMENT_NAME_BYTES: usize = 255;
@@ -2232,13 +2234,15 @@ pub fn open_shell_startup_document(
     mode: OpenMode,
 ) -> Result<File, StorageError> {
     validate_open_mode(mode)?;
-    let name = match startup_id {
-        BASHRC_STARTUP_ID => c_string(OsStr::new(".bashrc"))?,
-        BASH_PROFILE_STARTUP_ID => c_string(OsStr::new(".bash_profile"))?,
+    let segments: &[&str] = match startup_id {
+        BASHRC_STARTUP_ID => &[".bashrc"],
+        BASH_PROFILE_STARTUP_ID => &[".bash_profile"],
+        ZSHRC_STARTUP_ID => &[".zshrc"],
+        FISH_CONFIG_STARTUP_ID => &[".config", "fish", "config.fish"],
         _ => return Err(StorageError::InvalidDocument),
     };
-    let home = open_directory(root, &[])?;
-    open_regular_file(&home, &name, mode)
+    let (parent, leaf) = open_parent(root, segments)?;
+    open_regular_file(&parent, &leaf, mode)
 }
 
 fn validate_open_mode(mode: OpenMode) -> Result<(), StorageError> {
@@ -2955,6 +2959,9 @@ mod tests {
             b"if [[ -r ~/.bashrc ]]; then . ~/.bashrc; fi\n",
         )
         .expect("bash profile");
+        fs::write(home.0.join(".zshrc"), b"# zsh\n").expect("zshrc");
+        fs::create_dir_all(home.0.join(".config/fish")).expect("fish config directory");
+        fs::write(home.0.join(".config/fish/config.fish"), b"# fish\n").expect("fish config");
         fs::write(home.0.join(".secret"), b"secret").expect("private file");
 
         let mut bashrc = open_shell_startup_document(&home.0, BASHRC_STARTUP_ID, read_write_mode())
@@ -2979,6 +2986,10 @@ mod tests {
             )
             .is_ok()
         );
+        assert!(open_shell_startup_document(&home.0, ZSHRC_STARTUP_ID, read_write_mode()).is_ok());
+        assert!(
+            open_shell_startup_document(&home.0, FISH_CONFIG_STARTUP_ID, read_write_mode()).is_ok()
+        );
         assert!(open_shell_startup_document(&home.0, "secret", read_write_mode()).is_err());
         assert!(open_document(&home.0, "home/.secret", read_write_mode()).is_err());
 
@@ -2986,6 +2997,14 @@ mod tests {
         symlink("/tmp/host-bashrc", home.0.join(".bashrc")).expect("bashrc symlink");
         assert!(
             open_shell_startup_document(&home.0, BASHRC_STARTUP_ID, read_write_mode()).is_err()
+        );
+
+        fs::remove_file(home.0.join(".config/fish/config.fish")).expect("remove fish config");
+        fs::remove_dir(home.0.join(".config/fish")).expect("remove fish directory");
+        symlink("/tmp", home.0.join(".config/fish")).expect("fish directory symlink");
+        assert!(
+            open_shell_startup_document(&home.0, FISH_CONFIG_STARTUP_ID, read_write_mode())
+                .is_err()
         );
     }
 

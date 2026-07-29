@@ -4158,7 +4158,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             ).show()
             return null
         }
-        if (displayName == ".bashrc" || displayName == ".bash_profile") {
+        if (
+            displayName == ".bashrc" ||
+            displayName == ".bash_profile" ||
+            displayName == ".zshrc" ||
+            displayName == "config.fish"
+        ) {
             return "text/plain"
         }
         val extension = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
@@ -4189,6 +4194,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             when (documentId) {
                 BASHRC_DOCUMENT_ID -> ".bashrc"
                 BASH_PROFILE_DOCUMENT_ID -> ".bash_profile"
+                ZSHRC_DOCUMENT_ID -> ".zshrc"
+                FISH_CONFIG_DOCUMENT_ID -> "config.fish"
                 else -> documentId.substringAfterLast('/')
             }
         return name.takeIf { candidate ->
@@ -4502,6 +4509,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_DOCUMENT_ID/bashrc"
         private const val BASH_PROFILE_DOCUMENT_ID =
             "$SHELL_STARTUP_DOCUMENT_ID/bash-profile"
+        private const val ZSHRC_DOCUMENT_ID = "$SHELL_STARTUP_DOCUMENT_ID/zshrc"
+        private const val FISH_CONFIG_DOCUMENT_ID =
+            "$SHELL_STARTUP_DOCUMENT_ID/fish-config"
         private const val EXTERNAL_STORAGE_DOCUMENTS_AUTHORITY =
             "com.android.externalstorage.documents"
         private const val PRIMARY_STORAGE_ROOT_ID = "primary"
