@@ -26,7 +26,8 @@ use archphene_packages::{
 };
 use archphene_process::{
     GuiAppearance, GuiRegistry, MAX_COMMAND_ARGUMENTS, MAX_GUI_SESSIONS, ProcessError, PtyRegistry,
-    PtyWaiter, integration::IntegrationObservation,
+    PtyWaiter,
+    integration::{IntegrationObservation, TOPOLOGY_CHROMIUM},
 };
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 use archphene_storage::{
@@ -110,6 +111,12 @@ pub struct LauncherRegistrySummary {
     pub cancelled: u16,
     pub dismissed: u16,
     pub needs_review: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LauncherProcessOptions<'a> {
+    pub portal_bus_address: Option<&'a str>,
+    pub reduced_isolation_electron: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,6 +268,21 @@ impl From<JobError> for RuntimeBootstrapError {
 impl From<io::Error> for RuntimeBootstrapError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+fn apply_electron_compatibility_arguments(
+    arguments: &mut Vec<String>,
+    integration_topology: u16,
+    reduced_isolation_allowed: bool,
+) {
+    if !reduced_isolation_allowed || integration_topology & TOPOLOGY_CHROMIUM == 0 {
+        return;
+    }
+    for required in ["--no-sandbox", "--disable-dev-shm-usage"] {
+        if !arguments.iter().any(|argument| argument == required) {
+            arguments.push(required.to_owned());
+        }
     }
 }
 
@@ -1072,9 +1094,9 @@ impl RuntimeHost {
         generation: u64,
         wayland_display: &str,
         appearance: GuiAppearance,
-        portal_bus_address: Option<&str>,
+        options: LauncherProcessOptions<'_>,
     ) -> Result<u64, LauncherProcessError> {
-        let (command, arguments, descriptor_id) = {
+        let (command, mut arguments, descriptor_id, integration_topology) = {
             let descriptor = self
                 .launcher_registry
                 .as_ref()
@@ -1091,7 +1113,7 @@ impl RuntimeHost {
                 .filter(|command| !command.is_empty() && !command.contains('/'))
                 .ok_or(LauncherProcessError::InvalidDescriptor)?
                 .to_owned();
-            let mut arguments = Vec::with_capacity(descriptor.arguments.len().saturating_add(1));
+            let mut arguments = Vec::with_capacity(descriptor.arguments.len().saturating_add(3));
             for argument in &descriptor.arguments {
                 match argument {
                     ExecArgument::Literal(value) => arguments.push(value.clone()),
@@ -1110,13 +1132,42 @@ impl RuntimeHost {
                     | ExecArgument::MultipleUrls => {}
                 }
             }
-            (command, arguments, descriptor.descriptor_id)
+            let static_topology = self
+                .desktop_entries
+                .as_ref()
+                .and_then(|catalog| {
+                    catalog
+                        .entries
+                        .iter()
+                        .find(|entry| entry.desktop_id == descriptor.desktop_id)
+                })
+                .filter(|entry| {
+                    entry.source_package == descriptor.source_package
+                        && entry.executable_package == descriptor.executable_package
+                })
+                .map_or(0, |entry| entry.integration_topology);
+            let observed_topology = if descriptor.integration_observed {
+                descriptor.observed_topology
+            } else {
+                0
+            };
+            (
+                command,
+                arguments,
+                descriptor.descriptor_id,
+                static_topology | observed_topology,
+            )
         };
+        apply_electron_compatibility_arguments(
+            &mut arguments,
+            integration_topology,
+            options.reduced_isolation_electron,
+        );
         let package_runtime = self
             .package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?;
-        let environment = match portal_bus_address {
+        let environment = match options.portal_bus_address {
             Some(address) => {
                 package_runtime.command_environment_with_gui_and_portal(appearance, address)?
             }
@@ -2235,6 +2286,36 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn electron_compatibility_requires_both_verified_topology_and_consent() {
+        let mut unrelated = vec!["--existing".to_owned()];
+        apply_electron_compatibility_arguments(&mut unrelated, TOPOLOGY_CHROMIUM, false);
+        assert_eq!(unrelated, ["--existing"]);
+
+        apply_electron_compatibility_arguments(&mut unrelated, 0, true);
+        assert_eq!(unrelated, ["--existing"]);
+
+        apply_electron_compatibility_arguments(
+            &mut unrelated,
+            TOPOLOGY_CHROMIUM | archphene_process::integration::TOPOLOGY_WAYLAND,
+            true,
+        );
+        assert_eq!(
+            unrelated,
+            ["--existing", "--no-sandbox", "--disable-dev-shm-usage"],
+        );
+    }
+
+    #[test]
+    fn electron_compatibility_does_not_duplicate_desktop_flags() {
+        let mut arguments = vec![
+            "--no-sandbox".to_owned(),
+            "--disable-dev-shm-usage".to_owned(),
+        ];
+        apply_electron_compatibility_arguments(&mut arguments, TOPOLOGY_CHROMIUM, true);
+        assert_eq!(arguments, ["--no-sandbox", "--disable-dev-shm-usage"],);
+    }
 
     #[test]
     fn aur_dependency_names_are_bounded_and_drop_version_constraints() {

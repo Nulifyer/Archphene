@@ -1590,6 +1590,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             LinuxAppearanceSettingsView(
                 this,
                 initialPreferences.appearance,
+                initialPreferences.reducedIsolationElectron,
             )
         terminalEmptyPanel =
             LinearLayout(this).apply {
@@ -1840,7 +1841,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 )
             }
             runtimeSurface.applyPersistedTextSize(preferences.terminalTextSp)
-            settingsPanel.applyPreferences(preferences.appearance)
+            settingsPanel.applyPreferences(
+                preferences.appearance,
+                preferences.reducedIsolationElectron,
+            )
         }
         showDebugAurReview(intent)
         showDebugTerminalIme(intent)

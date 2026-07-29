@@ -25,6 +25,27 @@ The outer Android sandbox still blocks other Android applications and host
 resources. Files, camera, microphone, location, notifications, USB, and similar
 capabilities cross explicit Android-side brokers.
 
+### Electron reduced-isolation compatibility
+
+Chromium normally creates an additional Linux sandbox between its browser and
+renderer processes. Stock Android devices do not expose the namespace
+operations that Chromium needs to create that inner sandbox from Archphene.
+Archphene therefore provides a default-off compatibility setting that may add
+`--no-sandbox` and `--disable-dev-shm-usage` on the next launch.
+
+Enabling the setting requires an explicit warning and confirmation. The policy
+is generic: it is applied only when the exact launcher has static installed-ELF
+or retained supervised-process evidence of Chromium topology. Package names and
+application labels are not used, unrelated Linux applications receive no
+flags, and existing flags are not duplicated. Consent is captured once for a
+launcher session so a settings change does not alter an already running
+process tree.
+
+The Linux application remains inside Archphene's Android UID and SELinux
+sandbox, but its Chromium renderer processes are not separately isolated from
+the rest of that shared Archphene trust domain. This is a compatibility
+tradeoff, not equivalent Chromium sandboxing.
+
 ## Package and update trust
 
 Before an APK installation, the manager verifies:

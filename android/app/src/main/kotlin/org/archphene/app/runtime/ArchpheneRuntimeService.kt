@@ -354,6 +354,7 @@ class ArchpheneRuntimeService : Service() {
             background: Int,
             foreground: Int,
             portalBusAddress: String,
+            reducedIsolationElectron: Boolean,
         ): Long =
             this@ArchpheneRuntimeService.openLauncherProcess(
                 androidPackage,
@@ -368,6 +369,7 @@ class ArchpheneRuntimeService : Service() {
                 background,
                 foreground,
                 portalBusAddress,
+                reducedIsolationElectron,
             )
 
         internal fun updateGuiColors(
@@ -1867,6 +1869,7 @@ class ArchpheneRuntimeService : Service() {
         background: Int,
         foreground: Int,
         portalBusAddress: String,
+        reducedIsolationElectron: Boolean,
     ): Long {
         val activeHandle = readyHandle
         if (
@@ -1900,10 +1903,10 @@ class ArchpheneRuntimeService : Service() {
             return 0L
         }
         val request =
-            "G3\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
+            "G4\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
                 "${if (dark) 1 else 0}\t$fontPercent\t$controlVisualDp\t$controlTargetDp\t" +
                 "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\t" +
-                "$portalBusAddress\n"
+                "$portalBusAddress\t${if (reducedIsolationElectron) 1 else 0}\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return 0L

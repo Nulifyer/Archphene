@@ -78,6 +78,21 @@ fn decode_handle(handle: u64) -> Option<(usize, u32)> {
     Some((usize::try_from(encoded_index - 1).ok()?, generation))
 }
 
+#[cfg(any(target_os = "android", test))]
+fn parse_launcher_reduced_isolation(
+    version: &str,
+    fields: &mut std::str::Split<'_, char>,
+) -> Result<bool, ()> {
+    if version != "G4" {
+        return Ok(false);
+    }
+    match fields.next() {
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(()),
+    }
+}
+
 #[cfg(target_os = "android")]
 mod android {
     #![allow(unsafe_code)]
@@ -114,7 +129,7 @@ mod android {
         MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_CLIPBOARD_BYTES, MAX_TERMINAL_DAMAGE_BYTES,
         MAX_TERMINAL_SELECTION_BYTES, ProcessError,
     };
-    use archphene_runtime::PackageLauncherReviewStatus;
+    use archphene_runtime::{LauncherProcessOptions, PackageLauncherReviewStatus};
     use archphene_storage::{
         MirrorCancellation, OpenMode, StorageError, SyncAction, SyncEntryKind, SyncFingerprint,
         arch_storage_usage, fingerprint_file_from_fd,
@@ -5113,12 +5128,12 @@ mod android {
         else {
             return i64::from(ERROR_INVALID_ARGUMENT);
         };
-        let (appearance, portal_bus_address) = if version == "G1" {
+        let (appearance, portal_bus_address, reduced_isolation_electron) = if version == "G1" {
             if fields.next().is_some() {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             }
-            (GuiAppearance::default(), None)
-        } else if version == "G2" || version == "G3" {
+            (GuiAppearance::default(), None, false)
+        } else if version == "G2" || version == "G3" || version == "G4" {
             let (
                 Some(dark),
                 Some(font_percent),
@@ -5139,7 +5154,7 @@ mod android {
             else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
-            let portal_bus_address = if version == "G3" {
+            let portal_bus_address = if version == "G3" || version == "G4" {
                 let Some(address) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5154,6 +5169,11 @@ mod android {
                 Some(address)
             } else {
                 None
+            };
+            let Ok(reduced_isolation_electron) =
+                super::parse_launcher_reduced_isolation(version, &mut fields)
+            else {
+                return i64::from(ERROR_INVALID_ARGUMENT);
             };
             if fields.next().is_some() {
                 return i64::from(ERROR_INVALID_ARGUMENT);
@@ -5186,7 +5206,7 @@ mod android {
                 background,
                 foreground,
             ) {
-                Ok(appearance) => (appearance, portal_bus_address),
+                Ok(appearance) => (appearance, portal_bus_address, reduced_isolation_electron),
                 Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
             }
         } else {
@@ -5226,7 +5246,10 @@ mod android {
                 generation,
                 wayland_display,
                 appearance,
-                portal_bus_address,
+                LauncherProcessOptions {
+                    portal_bus_address,
+                    reduced_isolation_electron,
+                },
             )
         };
         match result {
@@ -7084,5 +7107,41 @@ mod tests {
             assert!(registry.create().is_some());
         }
         assert!(registry.create().is_none());
+    }
+
+    #[test]
+    fn launcher_compatibility_wire_is_explicit_and_backwards_compatible() {
+        let mut enabled = "1".split('\t');
+        assert_eq!(
+            parse_launcher_reduced_isolation("G4", &mut enabled),
+            Ok(true),
+        );
+        assert!(enabled.next().is_none());
+
+        let mut disabled = "0".split('\t');
+        assert_eq!(
+            parse_launcher_reduced_isolation("G4", &mut disabled),
+            Ok(false),
+        );
+        assert!(disabled.next().is_none());
+
+        for invalid in ["", "true", "2"] {
+            let mut fields = invalid.split('\t');
+            assert_eq!(parse_launcher_reduced_isolation("G4", &mut fields), Err(()),);
+        }
+
+        let mut trailing = "1\tunexpected".split('\t');
+        assert_eq!(
+            parse_launcher_reduced_isolation("G4", &mut trailing),
+            Ok(true),
+        );
+        assert_eq!(trailing.next(), Some("unexpected"));
+
+        let mut legacy_fields = "legacy-extra".split('\t');
+        assert_eq!(
+            parse_launcher_reduced_isolation("G3", &mut legacy_fields),
+            Ok(false),
+        );
+        assert_eq!(legacy_fields.next(), Some("legacy-extra"));
     }
 }

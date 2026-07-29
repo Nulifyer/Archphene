@@ -2099,16 +2099,25 @@ policy elsewhere. Stock Code opens a warning-free integrated Bash with working
 job control on Samsung. Force-stopping its Android launcher removes both Code
 and the terminal shell while the manager remains alive.
 
-This is still a partial Electron claim. Both device lanes use temporary
-supported flags containing `--no-sandbox` and `--disable-dev-shm-usage`.
-The diagnostic `--disable-gpu` flag has now been removed on both: full-device
-rendering and normal close remain stable, and Samsung creates a Chromium GPU
-process. That process still reports `--use-gl=disabled`, so this is not an
-accelerated-rendering claim. Android blocks
-Chromium's normal namespace sandbox; Archphene needs a reviewed generic
-Electron policy and clear reduced-isolation disclosure before automating that
-flag. Accelerated rendering, broader editor/IME/clipboard behavior, the C#
-debugger, and sustained lifecycle remain open.
+This is still a partial Electron claim. The temporary device tests established
+that Code requires `--no-sandbox` and `--disable-dev-shm-usage`; the manager now
+has a reviewed generic replacement for user `code-flags.conf`. It is
+default-off, requires an explicit reduced-isolation warning, is captured once
+per launcher session, and appends the two flags only when the exact desktop
+entry or retained supervised-process observation contains Chromium topology.
+Unit tests prove that consent or topology alone is insufficient and that
+existing flags are not duplicated. Exact-ABI emulator/Samsung gates prove
+Cancel, explicit Enable, process-restart persistence, state restoration, and
+visually inspected full-device light/dark presentation. The current cleaned
+device roots no longer contain Code, so a fresh real Code process-tree pass
+without user flags remains open before the replacement todo can close.
+
+The diagnostic `--disable-gpu` flag was previously removed on both device
+lanes: full-device rendering and normal close remained stable, and Samsung
+created a Chromium GPU process. That process still reported
+`--use-gl=disabled`, so this is not an accelerated-rendering claim. Accelerated
+rendering, broader editor/IME/clipboard behavior, the C# debugger, and
+sustained lifecycle remain open.
 
 Current x86_64 Code-OSS now also reaches its full Ozone/Wayland workbench with
 the shared process, Node workers, extension host, file watcher, and integrated

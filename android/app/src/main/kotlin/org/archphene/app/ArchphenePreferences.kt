@@ -12,6 +12,7 @@ internal data class ArchphenePreferenceSnapshot(
     val managerSection: Int = 0,
     val terminalTextSp: Int = 0,
     val appearance: LinuxAppearanceOverrides = LinuxAppearanceOverrides(0, 0, 0),
+    val reducedIsolationElectron: Boolean = false,
 )
 
 /**
@@ -27,12 +28,15 @@ internal object ArchphenePreferences {
     private const val SHELL_ID = "selected_shell_id"
     private const val STORAGE_PREFERENCES = "storage"
     private const val STORAGE_ONBOARDING_SEEN = "folder_onboarding_seen"
+    private const val COMPATIBILITY_PREFERENCES = "linux_compatibility"
+    private const val REDUCED_ISOLATION_ELECTRON = "reduced_isolation_electron"
 
     private const val DIRTY_MANAGER = 1
     private const val DIRTY_TERMINAL = 1 shl 1
     private const val DIRTY_GEOMETRY = 1 shl 2
     private const val DIRTY_FONT = 1 shl 3
     private const val DIRTY_CONTROLS = 1 shl 4
+    private const val DIRTY_ELECTRON = 1 shl 5
 
     private val lock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -60,6 +64,12 @@ internal object ArchphenePreferences {
         io.execute {
             val manager = readInt(appContext, MANAGER_PREFERENCES, MANAGER_SECTION)
             val terminal = readInt(appContext, TERMINAL_PREFERENCES, TERMINAL_TEXT_SP)
+            val reducedIsolationElectron =
+                readBoolean(
+                    appContext,
+                    COMPATIBILITY_PREFERENCES,
+                    REDUCED_ISOLATION_ELECTRON,
+                )
             val appearance =
                 try {
                     LinuxAppearancePreferences.read(appContext)
@@ -92,6 +102,11 @@ internal object ArchphenePreferences {
                                 prior.appearance.controlVisualDp
                             },
                         ),
+                        if (dirty and DIRTY_ELECTRON == 0) {
+                            reducedIsolationElectron
+                        } else {
+                            prior.reducedIsolationElectron
+                        },
                     )
                 current = loaded
                 ready = true
@@ -201,6 +216,18 @@ internal object ArchphenePreferences {
         }
     }
 
+    fun setReducedIsolationElectron(enabled: Boolean) {
+        synchronized(lock) {
+            current = current.copy(reducedIsolationElectron = enabled)
+            dirty = dirty or DIRTY_ELECTRON
+        }
+        writeBooleanPreference(
+            COMPATIBILITY_PREFERENCES,
+            REDUCED_ISOLATION_ELECTRON,
+            enabled,
+        )
+    }
+
     private fun writePreference(
         preferences: String,
         key: String,
@@ -223,6 +250,25 @@ internal object ArchphenePreferences {
         }
     }
 
+    private fun writeBooleanPreference(
+        preferences: String,
+        key: String,
+        value: Boolean,
+    ) {
+        val context = initializedContext()
+        io.execute {
+            if (
+                !context
+                    .getSharedPreferences(preferences, Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(key, value)
+                    .commit()
+            ) {
+                android.util.Log.e(TAG, "Could not persist $preferences/$key")
+            }
+        }
+    }
+
     private fun initializedContext(): Context =
         synchronized(lock) {
             checkNotNull(applicationContext) { "Preferences are not initialized" }
@@ -240,6 +286,20 @@ internal object ArchphenePreferences {
         } catch (error: RuntimeException) {
             android.util.Log.e(TAG, "Could not read $preferences/$key", error)
             0
+        }
+
+    private fun readBoolean(
+        context: Context,
+        preferences: String,
+        key: String,
+    ): Boolean =
+        try {
+            context
+                .getSharedPreferences(preferences, Context.MODE_PRIVATE)
+                .getBoolean(key, false)
+        } catch (error: RuntimeException) {
+            android.util.Log.e(TAG, "Could not read $preferences/$key", error)
+            false
         }
 
     private const val TAG = "ArchphenePreferences"

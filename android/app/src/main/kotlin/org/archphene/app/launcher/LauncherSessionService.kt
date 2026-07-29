@@ -81,6 +81,7 @@ class LauncherSessionService : Service() {
         val clientToken: IBinder,
         val authorization: LauncherAuthorization,
         val appearanceOverrides: LinuxAppearanceOverrides,
+        val reducedIsolationElectron: Boolean,
     ) {
         var surface: Surface? = null
         @Volatile var active = true
@@ -822,6 +823,7 @@ class LauncherSessionService : Service() {
         if (sessionId <= 0 || sessions.containsKey(sessionId)) {
             return OpenResult(RESULT_BUSY, 0, null)
         }
+        val preferences = ArchphenePreferences.snapshot()
         val session =
             Session(
                 sessionId,
@@ -829,7 +831,8 @@ class LauncherSessionService : Service() {
                 identity,
                 clientToken,
                 authorization,
-                ArchphenePreferences.snapshot().appearance,
+                preferences.appearance,
+                preferences.reducedIsolationElectron,
             )
         session.inputDrain = Runnable { drainInput(session) }
         session.imeDrain = Runnable { drainIme(session) }
@@ -1612,6 +1615,7 @@ class LauncherSessionService : Service() {
                 appearance.background,
                 appearance.foreground,
                 portalBridge.busAddress,
+                session.reducedIsolationElectron,
             )
         if (linuxHandle == 0L) {
             session.portalBridge?.close()

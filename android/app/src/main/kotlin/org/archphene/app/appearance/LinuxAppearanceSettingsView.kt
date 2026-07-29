@@ -1,5 +1,6 @@
 package org.archphene.app.appearance
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.drawable.GradientDrawable
@@ -9,6 +10,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import org.archphene.app.ArchphenePreferences
 import org.archphene.app.R
@@ -16,8 +18,10 @@ import org.archphene.app.R
 internal class LinuxAppearanceSettingsView(
     context: Context,
     initialOverrides: LinuxAppearanceOverrides,
+    initialReducedIsolationElectron: Boolean,
 ) : ScrollView(context) {
     private val preferenceControls = arrayOfNulls<SeekBar>(3)
+    private val reducedIsolationElectron = Switch(context)
 
     init {
         isFillViewport = true
@@ -86,6 +90,74 @@ internal class LinuxAppearanceSettingsView(
                         setTextColor(context.getColor(R.color.archphene_on_surface_muted))
                         textSize = 14f
                         setPadding(dp(4), dp(16), dp(4), 0)
+                    },
+                )
+                addView(
+                    heading(R.string.compatibility_heading),
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(56),
+                    ).apply {
+                        topMargin = dp(12)
+                    },
+                )
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(16), dp(12), dp(16), dp(12))
+                        background =
+                            GradientDrawable().apply {
+                                cornerRadius = dp(20).toFloat()
+                                setColor(context.getColor(R.color.archphene_surface))
+                            }
+                        addView(
+                            reducedIsolationElectron.apply {
+                                setText(R.string.electron_compatibility)
+                                setTextColor(context.getColor(R.color.archphene_on_surface))
+                                textSize = 17f
+                                isChecked = initialReducedIsolationElectron
+                                setOnClickListener {
+                                    if (isChecked) {
+                                        isChecked = false
+                                        AlertDialog.Builder(context)
+                                            .setTitle(
+                                                R.string.electron_compatibility_confirm_title,
+                                            )
+                                            .setMessage(R.string.electron_compatibility_warning)
+                                            .setNegativeButton(android.R.string.cancel, null)
+                                            .setPositiveButton(R.string.enable) { _, _ ->
+                                                isChecked = true
+                                                ArchphenePreferences
+                                                    .setReducedIsolationElectron(true)
+                                            }
+                                            .show()
+                                    } else {
+                                        ArchphenePreferences
+                                            .setReducedIsolationElectron(false)
+                                    }
+                                }
+                            },
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                dp(48),
+                            ),
+                        )
+                        addView(
+                            TextView(context).apply {
+                                setText(R.string.electron_compatibility_description)
+                                setTextColor(
+                                    context.getColor(R.color.archphene_on_surface_muted),
+                                )
+                                textSize = 14f
+                                setPadding(0, dp(4), 0, 0)
+                            },
+                        )
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        topMargin = dp(10)
                     },
                 )
             },
@@ -254,7 +326,10 @@ internal class LinuxAppearanceSettingsView(
         )
     }
 
-    internal fun applyPreferences(overrides: LinuxAppearanceOverrides) {
+    internal fun applyPreferences(
+        overrides: LinuxAppearanceOverrides,
+        reducedIsolationElectron: Boolean,
+    ) {
         updateControl(
             preferenceControls[0],
             LinuxAppearancePreferences.geometryValues,
@@ -270,6 +345,9 @@ internal class LinuxAppearanceSettingsView(
             LinuxAppearancePreferences.controlValues,
             overrides.controlVisualDp,
         )
+        if (this.reducedIsolationElectron.isChecked != reducedIsolationElectron) {
+            this.reducedIsolationElectron.isChecked = reducedIsolationElectron
+        }
     }
 
     private fun updateControl(

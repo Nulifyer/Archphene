@@ -35,6 +35,12 @@
     <string name="appearance_percent">%1$d%%</string>
     <string name="appearance_dp">%1$ddp</string>
     <string name="appearance_relaunch_notice">Changes apply the next time a Linux app launches. Apps already running keep a consistent appearance until closed and reopened.</string>
+    <string name="compatibility_heading">Compatibility</string>
+    <string name="electron_compatibility">Reduced-isolation Electron mode</string>
+    <string name="electron_compatibility_description">On the next launch, add the required compatibility flags only to apps verified as Electron or Chromium.</string>
+    <string name="electron_compatibility_confirm_title">Use reduced Electron isolation?</string>
+    <string name="electron_compatibility_warning">Electron and Chromium normally isolate renderer processes with a second Linux sandbox. Android does not allow that sandbox inside Archphene on this device. This mode adds --no-sandbox and --disable-dev-shm-usage only to verified Electron/Chromium launchers. The app remains inside Archphene’s Android sandbox, but its renderer processes are not separately isolated.</string>
+    <string name="enable">Enable</string>
     <string name="appearance_slider_accessibility">%1$s, %2$s</string>
     <string name="package_catalog_unavailable">Package catalog unavailable</string>
     <string name="package_search_unavailable">Package search unavailable</string>
