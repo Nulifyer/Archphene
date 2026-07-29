@@ -53,7 +53,11 @@ max_java_heap_kb="${ARCHPHENE_MAX_ACTIVE_JAVA_HEAP_KB:-65536}"
 max_native_heap_kb="${ARCHPHENE_MAX_ACTIVE_NATIVE_HEAP_KB:-98304}"
 max_threads="${ARCHPHENE_MAX_ACTIVE_THREADS:-64}"
 max_fds="${ARCHPHENE_MAX_ACTIVE_FDS:-256}"
-max_uid_processes="${ARCHPHENE_MAX_ACTIVE_UID_PROCESSES:-4}"
+# The active Wayland session owns exactly the manager, shared D-Bus daemon,
+# private portal service, graphical client, and its shell child. Keep the
+# override for constrained regression fixtures, but budget the production
+# process topology instead of the older pre-portal four-process shape.
+max_uid_processes="${ARCHPHENE_MAX_ACTIVE_UID_PROCESSES:-5}"
 max_frame_p95_ms="${ARCHPHENE_MAX_ACTIVE_FRAME_P95_MS:-250}"
 
 cleanup() {

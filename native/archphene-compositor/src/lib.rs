@@ -1096,6 +1096,49 @@ impl BufferTransform {
             (bottom - top) as i32,
         )
     }
+
+    fn surface_damage_to_buffer(
+        self,
+        damage: RegionRectangle,
+        buffer_width: u32,
+        buffer_height: u32,
+        scale: i32,
+    ) -> Option<RegionRectangle> {
+        let scale = u32::try_from(scale).ok().filter(|scale| *scale > 0)?;
+        let (physical_width, physical_height) = self.surface_size(buffer_width, buffer_height);
+        if physical_width % scale != 0 || physical_height % scale != 0 {
+            return None;
+        }
+        let surface_width = physical_width / scale;
+        let surface_height = physical_height / scale;
+        let damage = damage.clip(surface_width, surface_height)?;
+        let left = u32::try_from(damage.x).ok()?.checked_mul(scale)?;
+        let top = u32::try_from(damage.y).ok()?.checked_mul(scale)?;
+        let right = u32::try_from(damage.right())
+            .ok()?
+            .checked_mul(scale)?
+            .checked_sub(1)?;
+        let bottom = u32::try_from(damage.bottom())
+            .ok()?
+            .checked_mul(scale)?
+            .checked_sub(1)?;
+        let corners = [
+            self.buffer_coordinates(left, top, physical_width, physical_height),
+            self.buffer_coordinates(right, top, physical_width, physical_height),
+            self.buffer_coordinates(left, bottom, physical_width, physical_height),
+            self.buffer_coordinates(right, bottom, physical_width, physical_height),
+        ];
+        let min_x = corners.iter().map(|point| point.0).min()?;
+        let min_y = corners.iter().map(|point| point.1).min()?;
+        let max_x = corners.iter().map(|point| point.0).max()?;
+        let max_y = corners.iter().map(|point| point.1).max()?;
+        RegionRectangle::new(
+            min_x as i32,
+            min_y as i32,
+            max_x.checked_sub(min_x)?.checked_add(1)? as i32,
+            max_y.checked_sub(min_y)?.checked_add(1)? as i32,
+        )
+    }
 }
 
 fn damage_for_commit(
@@ -3027,8 +3070,23 @@ pub struct ShmBufferData {
     inner: Arc<ShmBufferInner>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShmReadDamage {
+    Full,
+    Unchanged,
+    Region(RegionRectangle),
+}
+
 impl ShmBufferInner {
-    fn snapshot(&self) -> io::Result<CommittedFrame> {
+    fn snapshot(
+        &self,
+        previous: Option<&Arc<CommittedFrame>>,
+        surface_damage: &[RegionRectangle],
+        buffer_damage: &[RegionRectangle],
+        transform: BufferTransform,
+        scale: i32,
+        viewport_active: bool,
+    ) -> io::Result<CommittedFrame> {
         const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
         let row_bytes = self
             .width
@@ -3040,17 +3098,73 @@ impl ShmBufferInner {
         if frame_bytes > MAX_FRAME_BYTES {
             return Err(io::Error::other("SHM frame exceeds the bridge limit"));
         }
-        let mut pixels = vec![0u8; frame_bytes];
+
+        let previous = previous.map(|frame| {
+            let mut frame = frame.as_ref();
+            while let Some(source) = frame.source.as_deref() {
+                frame = source;
+            }
+            frame
+        });
+        let compatible_previous = previous.filter(|frame| {
+            frame.width == self.width as u32
+                && frame.height == self.height as u32
+                && frame.format == self.format
+                && frame.pixels.len() == frame_bytes
+        });
+        let damage = self.read_damage(
+            compatible_previous.is_some(),
+            surface_damage,
+            buffer_damage,
+            transform,
+            scale,
+            viewport_active,
+        );
+        let mut pixels = match (compatible_previous, damage) {
+            (Some(previous), ShmReadDamage::Unchanged | ShmReadDamage::Region(_)) => {
+                previous.pixels.clone()
+            }
+            _ => vec![0u8; frame_bytes],
+        };
         let pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
-        for (row, destination) in pixels.chunks_exact_mut(row_bytes).enumerate() {
-            let source_offset = self
-                .offset
-                .checked_add(
-                    row.checked_mul(self.stride)
-                        .ok_or_else(|| io::Error::other("SHM source offset overflow"))?,
-                )
-                .ok_or_else(|| io::Error::other("SHM source offset overflow"))?;
-            pool.file.read_exact_at(destination, source_offset as u64)?;
+        match damage {
+            ShmReadDamage::Full => {
+                for (row, destination) in pixels.chunks_exact_mut(row_bytes).enumerate() {
+                    let source_offset = self.source_offset(row, 0)?;
+                    pool.file.read_exact_at(destination, source_offset as u64)?;
+                }
+            }
+            ShmReadDamage::Unchanged => {}
+            ShmReadDamage::Region(region) => {
+                let left = usize::try_from(region.x)
+                    .map_err(|_| io::Error::other("negative SHM damage origin"))?;
+                let top = usize::try_from(region.y)
+                    .map_err(|_| io::Error::other("negative SHM damage origin"))?;
+                let width = usize::try_from(region.width)
+                    .map_err(|_| io::Error::other("negative SHM damage width"))?;
+                let height = usize::try_from(region.height)
+                    .map_err(|_| io::Error::other("negative SHM damage height"))?;
+                let destination_left = left
+                    .checked_mul(4)
+                    .ok_or_else(|| io::Error::other("SHM damage offset overflow"))?;
+                let damage_bytes = width
+                    .checked_mul(4)
+                    .ok_or_else(|| io::Error::other("SHM damage size overflow"))?;
+                for row in top..top + height {
+                    let destination_start = row
+                        .checked_mul(row_bytes)
+                        .and_then(|offset| offset.checked_add(destination_left))
+                        .ok_or_else(|| io::Error::other("SHM damage offset overflow"))?;
+                    let destination_end = destination_start
+                        .checked_add(damage_bytes)
+                        .ok_or_else(|| io::Error::other("SHM damage size overflow"))?;
+                    let source_offset = self.source_offset(row, destination_left)?;
+                    pool.file.read_exact_at(
+                        &mut pixels[destination_start..destination_end],
+                        source_offset as u64,
+                    )?;
+                }
+            }
         }
         Ok(CommittedFrame {
             width: self.width as u32,
@@ -3059,6 +3173,68 @@ impl ShmBufferInner {
             pixels,
             source: None,
         })
+    }
+
+    fn source_offset(&self, row: usize, byte_offset: usize) -> io::Result<usize> {
+        self.offset
+            .checked_add(
+                row.checked_mul(self.stride)
+                    .ok_or_else(|| io::Error::other("SHM source offset overflow"))?,
+            )
+            .and_then(|offset| offset.checked_add(byte_offset))
+            .ok_or_else(|| io::Error::other("SHM source offset overflow"))
+    }
+
+    fn read_damage(
+        &self,
+        has_compatible_previous: bool,
+        surface_damage: &[RegionRectangle],
+        buffer_damage: &[RegionRectangle],
+        transform: BufferTransform,
+        scale: i32,
+        viewport_active: bool,
+    ) -> ShmReadDamage {
+        if !has_compatible_previous || (surface_damage.is_empty() && buffer_damage.is_empty()) {
+            return ShmReadDamage::Full;
+        }
+        if viewport_active && !surface_damage.is_empty() {
+            return ShmReadDamage::Full;
+        }
+        let mut combined: Option<RegionRectangle> = None;
+        for damage in buffer_damage {
+            if let Some(damage) = damage.clip(self.width as u32, self.height as u32) {
+                combined = Some(match combined {
+                    Some(current) => current.union(damage),
+                    None => damage,
+                });
+            }
+        }
+        for damage in surface_damage {
+            let Some(damage) = transform.surface_damage_to_buffer(
+                *damage,
+                self.width as u32,
+                self.height as u32,
+                scale,
+            ) else {
+                let (physical_width, physical_height) =
+                    transform.surface_size(self.width as u32, self.height as u32);
+                let valid_scale = u32::try_from(scale)
+                    .ok()
+                    .filter(|scale| *scale > 0)
+                    .is_some_and(|scale| {
+                        physical_width % scale == 0 && physical_height % scale == 0
+                    });
+                if !valid_scale {
+                    return ShmReadDamage::Full;
+                }
+                continue;
+            };
+            combined = Some(match combined {
+                Some(current) => current.union(damage),
+                None => damage,
+            });
+        }
+        combined.map_or(ShmReadDamage::Unchanged, ShmReadDamage::Region)
     }
 }
 
@@ -6369,28 +6545,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let buffer_transform_update = surface.pending_buffer_transform.take();
                 let viewport_source_update = surface.pending_viewport_source.take();
                 let viewport_destination_update = surface.pending_viewport_destination.take();
-                let frame_update = if let Some(assignment) = surface.pending_buffer.take() {
-                    Some(match assignment {
-                        Some(buffer) => match buffer.inner.snapshot() {
-                            Ok(frame) => {
-                                if buffer.resource.is_alive() {
-                                    buffer.resource.release();
-                                }
-                                Some(Arc::new(frame))
-                            }
-                            Err(error) => {
-                                resource.post_error(
-                                    wl_surface::Error::InvalidSize,
-                                    format!("could not snapshot SHM frame: {error}"),
-                                );
-                                return;
-                            }
-                        },
-                        None => None,
-                    })
-                } else {
-                    None
-                };
+                let buffer_assignment = surface.pending_buffer.take();
                 let mut callbacks = std::mem::take(&mut surface.pending_callbacks);
                 let role = surface.role;
                 let xdg_surface = surface.xdg_surface.clone();
@@ -6446,6 +6601,37 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     viewport_destination_update.unwrap_or(base_viewport_destination);
                 let viewport_state_changed =
                     viewport_source_update.is_some() || viewport_destination_update.is_some();
+                let viewport_active =
+                    next_viewport_source.is_some() || next_viewport_destination.is_some();
+                let frame_update = if let Some(assignment) = buffer_assignment {
+                    Some(match assignment {
+                        Some(buffer) => match buffer.inner.snapshot(
+                            base_frame.as_ref(),
+                            &surface_damage,
+                            &buffer_damage,
+                            next_transform,
+                            next_scale,
+                            viewport_active,
+                        ) {
+                            Ok(frame) => {
+                                if buffer.resource.is_alive() {
+                                    buffer.resource.release();
+                                }
+                                Some(Arc::new(frame))
+                            }
+                            Err(error) => {
+                                resource.post_error(
+                                    wl_surface::Error::InvalidSize,
+                                    format!("could not snapshot SHM frame: {error}"),
+                                );
+                                return;
+                            }
+                        },
+                        None => None,
+                    })
+                } else {
+                    None
+                };
                 let buffer_state_changed = frame_update.is_some()
                     || buffer_scale_update.is_some()
                     || buffer_transform_update.is_some()
@@ -6500,8 +6686,6 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 } else {
                     base_frame
                 };
-                let viewport_active =
-                    next_viewport_source.is_some() || next_viewport_destination.is_some();
                 let force_full_damage = buffer_scale_update.is_some()
                     || buffer_transform_update.is_some()
                     || viewport_state_changed
@@ -14774,6 +14958,108 @@ mod tests {
         assert_eq!(
             damage,
             RegionRectangle::new(0, 0, 1, 1).expect("expected damage")
+        );
+        assert_eq!(
+            BufferTransform::Rotate90.surface_damage_to_buffer(damage, 4, 2, 2),
+            RegionRectangle::new(2, 0, 2, 2)
+        );
+    }
+
+    #[test]
+    fn retains_undamaged_shm_pixels_and_reads_only_the_damage_bounds() {
+        let path = std::env::temp_dir().join(format!(
+            "archphene-shm-damage-{}.bin",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("create SHM fixture");
+        let next_pixels = [
+            10, 0, 0, 0, 20, 0, 0, 0, 30, 0, 0, 0, 40, 0, 0, 0,
+        ];
+        file.write_all_at(&next_pixels, 0).expect("write SHM fixture");
+        let buffer = ShmBufferInner {
+            pool: Arc::new(Mutex::new(ShmPoolInner { file, size: 16 })),
+            offset: 0,
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: wl_shm::Format::Xrgb8888,
+        };
+        let previous = test_frame(2, 2, &[1, 2, 3, 4]);
+        let frame = buffer
+            .snapshot(
+                Some(&previous),
+                &[],
+                &[RegionRectangle::new(1, 0, 1, 1).expect("damage")],
+                BufferTransform::Normal,
+                1,
+                false,
+            )
+            .expect("partial SHM snapshot");
+        assert_eq!(
+            frame
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [1, 20, 3, 4]
+        );
+        std::fs::remove_file(path).expect("remove SHM fixture");
+    }
+
+    #[test]
+    fn shm_damage_falls_back_when_retention_cannot_preserve_semantics() {
+        let file = File::open("/dev/null").expect("open harmless fixture");
+        let buffer = ShmBufferInner {
+            pool: Arc::new(Mutex::new(ShmPoolInner { file, size: 16 })),
+            offset: 0,
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: wl_shm::Format::Xrgb8888,
+        };
+        let damage = [RegionRectangle::new(0, 0, 1, 1).expect("damage")];
+        assert_eq!(
+            buffer.read_damage(
+                false,
+                &damage,
+                &[],
+                BufferTransform::Normal,
+                1,
+                false
+            ),
+            ShmReadDamage::Full
+        );
+        assert_eq!(
+            buffer.read_damage(
+                true,
+                &damage,
+                &[],
+                BufferTransform::Normal,
+                1,
+                true
+            ),
+            ShmReadDamage::Full
+        );
+        assert_eq!(
+            buffer.read_damage(true, &[], &[], BufferTransform::Normal, 1, false),
+            ShmReadDamage::Full
+        );
+        assert_eq!(
+            buffer.read_damage(
+                true,
+                &[RegionRectangle::new(4, 4, 1, 1).expect("outside")],
+                &[],
+                BufferTransform::Normal,
+                1,
+                false
+            ),
+            ShmReadDamage::Unchanged
         );
     }
 
