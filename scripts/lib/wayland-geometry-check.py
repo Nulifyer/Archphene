@@ -14,6 +14,15 @@ WINDOW = re.compile(
     r"title=(.*?) appId="
 )
 POPUP = re.compile(r"(\d+):(-?\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)")
+PRESENTED = re.compile(
+    r"Presented Linux frame .*?"
+    r"selected=(\d+)x(\d+) surface=(\d+)x(\d+) "
+    r"original=(\d+)x(\d+) logical=(\d+)x(\d+).*?"
+    r"output=(\d+)x(\d+) mode=(\d+)x(\d+).*?"
+    r"geometry=(-?\d+),(-?\d+) (\d+)x(\d+) "
+    r"root=(-?\d+),(-?\d+) (\d+)x(\d+) "
+    r"content=(-?\d+),(-?\d+) (\d+)x(\d+)"
+)
 
 
 def contained(label: str, x: int, y: int, width: int, height: int,
@@ -36,7 +45,8 @@ def main() -> None:
     text = args.log.read_text(errors="replace")
     outputs = OUTPUT.findall(text)
     if not outputs:
-        raise SystemExit("no compositor output frame found")
+        validate_presented_frames(text, args.require_title, args.require_popup)
+        return
     output_width, output_height = map(int, outputs[-1])
 
     # A client can map once at the previous output size and immediately commit
@@ -83,6 +93,62 @@ def main() -> None:
     print(
         f"output={output_width}x{output_height} mapped_frames={windows} "
         f"finalized_popups={finalized_popups}"
+    )
+
+
+def validate_presented_frames(
+    text: str, require_title: str | None, require_popup: bool
+) -> None:
+    """Validate the current manager's bounded presentation diagnostic."""
+    matches = list(PRESENTED.finditer(text))
+    if not matches:
+        raise SystemExit("no compositor output frame found")
+    if require_title is not None:
+        raise SystemExit("current presentation diagnostic does not include a title")
+    if require_popup:
+        raise SystemExit("current presentation diagnostic does not include popup state")
+
+    values = list(map(int, matches[-1].groups()))
+    (
+        selected_width, selected_height,
+        surface_width, surface_height,
+        original_width, original_height,
+        logical_width, logical_height,
+        output_width, output_height,
+        mode_width, mode_height,
+        geometry_x, geometry_y, geometry_width, geometry_height,
+        root_x, root_y, root_width, root_height,
+        content_x, content_y, content_width, content_height,
+    ) = values
+    dimensions = [
+        selected_width, selected_height, surface_width, surface_height,
+        original_width, original_height, logical_width, logical_height,
+        output_width, output_height, mode_width, mode_height,
+    ]
+    if any(value <= 0 for value in dimensions):
+        raise SystemExit("presentation diagnostic contains an empty dimension")
+    if (selected_width, selected_height) != (original_width, original_height):
+        raise SystemExit("selected presentation buffer does not match its source")
+    if (surface_width, surface_height) != (mode_width, mode_height):
+        raise SystemExit("Android surface does not match the advertised output mode")
+    if (logical_width, logical_height) != (output_width, output_height):
+        raise SystemExit("logical client size does not match the Wayland output")
+
+    contained(
+        "window geometry", geometry_x, geometry_y, geometry_width, geometry_height,
+        logical_width, logical_height,
+    )
+    contained(
+        "root frame", root_x, root_y, root_width, root_height,
+        logical_width, logical_height,
+    )
+    contained(
+        "content frame", content_x, content_y, content_width, content_height,
+        logical_width, logical_height,
+    )
+    print(
+        f"output={logical_width}x{logical_height} mapped_frames=1 "
+        "finalized_popups=0"
     )
 
 

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=GLMark2
+Comment=Archphene production OpenGL regression
+Exec=glmark2-es2-wayland
+TryExec=glmark2-es2-wayland
+Terminal=false

@@ -35,6 +35,15 @@ accumulate sockets. The existing process poll detects an unexpected helper
 exit without another monitor thread: it restarts the Linux client once with a
 replacement helper, then restarts once with llvmpipe if that helper also exits.
 
+Static profiling follows bounded ELF `DT_NEEDED` graphs. Some applications,
+including GLMark2, load EGL/GLES with `dlopen` instead. For executables no
+larger than 8 MiB, the profiler also streams the file through fixed buffers and
+recognizes only exact NUL-terminated library SONAMEs; it neither allocates a
+file-sized buffer nor treats prose or partial names as capabilities. A shared
+32 MiB catalog budget bounds total hint I/O. The existing bounded process-map
+observation remains the fallback for larger executables, exhausted scan
+budgets, and names constructed at runtime.
+
 ## Android compatibility patches
 
 The build applies narrowly scoped patches for Android NDK compilation and Android EGL:
@@ -52,29 +61,28 @@ Android-NDK container and stage only the selected ABI into an exact-device APK.
 
 ## Validation
 
-The retained Java bridge was validated on the Android 16 x86_64 emulator and
-physical AArch64 Samsung with an unmodified GLMark2 package. That evidence
-reported:
+The current Rust/Kotlin manager was validated on the Android 16 x86_64
+emulator and physical AArch64 Samsung with the official unmodified Arch
+GLMark2 package. A clean generated descriptor identifies GLMark2's literal
+`dlopen` EGL/GLES names and starts virgl on the first launch, without a
+learn-once software run.
 
-- `GL_RENDERER: virgl (Android Emulator OpenGL ES Translator (NVIDIA ...))`;
-- `GL_VERSION: OpenGL ES 3.0 Mesa 26.1.4-arch1.1`;
-- `Surface Size: 1080x2205 windowed`;
-- completion of every default GLMark2 scene with final score 12.
+- The emulator reports the Android Emulator OpenGL ES translator through
+  virgl, OpenGL ES 3.0 / Mesa 26.1.5, 32 logged default scene variants, score
+  14, and exit 0.
+- Samsung reports virgl on Adreno 730, OpenGL ES 3.2 / Mesa 26.1.5, 33 logged
+  default scene variants, score 12, and exit 0.
+- Both runs retain the same Android host, fit the 432-dp Wayland output to the
+  complete app Surface, and pass two distinct nonblank full-device frames,
+  bounded geometry, software-fallback rejection, and scoped fatal-log checks.
 
-The old helper remained alive through repeated scene transitions, and bounded
-replacement-helper recovery passed on both devices. This evidence is retained
-as the migration target; it is not yet a support claim for the Rust/Kotlin
-manager. The new manager currently passes dual-ABI packaging, authorization,
-real-socket validation, helper readiness, process ownership, and software
-fallback gates. A current shared-root Qt 5 launcher starts the exact-ABI helper,
-connects, presents readable frames, and cleans up after close on both devices;
-full-device screenshots and scoped fatal logs were inspected. Deliberately
-seeded stale runtime directories are recovered after manager process death on
-both devices. Killing the helper twice under that current Qt 5 launcher proves
-one replacement-helper reconnect followed by an explicit llvmpipe reconnect;
-both stages publish fresh frames on the emulator and Samsung. A current
-shared-root OpenGL benchmark still needs to repeat the renderer and scene
-tests.
+The manager also passes dual-ABI packaging, authorization, real-socket
+validation, helper readiness, process ownership, and software fallback gates.
+Deliberately seeded stale runtime directories are recovered after manager
+process death on both devices. Killing the helper twice under a current Qt 5
+launcher proves one replacement-helper reconnect followed by an explicit
+llvmpipe reconnect; both stages publish fresh frames on the emulator and
+Samsung.
 
 ## Current limits
 

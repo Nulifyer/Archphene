@@ -344,7 +344,16 @@ fn read_bounded(file: &mut File, output: &mut [u8]) -> io::Result<usize> {
 fn soname_family(name: &str, family: &str) -> bool {
     name.strip_prefix(family)
         .and_then(|suffix| suffix.find(".so").map(|index| &suffix[index + 3..]))
-        .is_some_and(|version| version.is_empty() || version.starts_with('.'))
+        .is_some_and(|version| {
+            version.is_empty()
+                || version.strip_prefix('.').is_some_and(|components| {
+                    !components.is_empty()
+                        && components.split('.').all(|component| {
+                            !component.is_empty()
+                                && component.bytes().all(|byte| byte.is_ascii_digit())
+                        })
+                })
+        })
 }
 
 fn parse_u32(bytes: &[u8]) -> Option<u32> {
@@ -373,6 +382,8 @@ mod tests {
         assert_eq!(classify_library("libcef.so"), TOPOLOGY_CHROMIUM);
         assert_eq!(classify_library("libwayland-client.so.0"), TOPOLOGY_WAYLAND);
         assert_eq!(classify_library("libwayland-client.soevil"), 0);
+        assert_eq!(classify_library("libQt6Core.so.6 is unavailable"), 0);
+        assert_eq!(classify_library("libEGL.so.1.debug"), 0);
     }
 
     #[test]

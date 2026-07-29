@@ -25,6 +25,9 @@ const MAX_SCRIPT_PROFILE_BYTES: u64 = 256 * 1024;
 const SCRIPT_PROFILE_CHUNK_BYTES: usize = 8192;
 const MAX_SCRIPT_PROFILE_LINE_BYTES: usize = 4096;
 const MAX_SCRIPT_DELEGATES: usize = 8;
+const MAX_RUNTIME_HINT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RUNTIME_HINT_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const RUNTIME_HINT_CHUNK_BYTES: usize = 8192;
 const ELECTRON_NODE_MARKER: &[u8] = b"ELECTRON_RUN_AS_NODE=1";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -58,6 +61,8 @@ struct LoadSegment {
 pub struct IntegrationProfiler<'a> {
     root: &'a Path,
     objects: BTreeMap<String, ObjectProfile>,
+    runtime_hints: BTreeMap<String, u16>,
+    runtime_hint_bytes_remaining: u64,
 }
 
 impl<'a> IntegrationProfiler<'a> {
@@ -65,6 +70,8 @@ impl<'a> IntegrationProfiler<'a> {
         Self {
             root,
             objects: BTreeMap::new(),
+            runtime_hints: BTreeMap::new(),
+            runtime_hint_bytes_remaining: MAX_RUNTIME_HINT_TOTAL_BYTES,
         }
     }
 
@@ -95,6 +102,10 @@ impl<'a> IntegrationProfiler<'a> {
                 ObjectProfile::Elf(needed) => {
                     if visited.len() == 1 {
                         root_profiled = true;
+                        match self.runtime_hint_topology(&logical_path) {
+                            Ok(hints) => topology |= hints,
+                            Err(_) => complete = false,
+                        }
                     }
                     needed
                 }
@@ -180,6 +191,21 @@ impl<'a> IntegrationProfiler<'a> {
         ]
         .into_iter()
         .find_map(|candidate| desktop::resolve_root_regular_file(self.root, &candidate, false))
+    }
+
+    fn runtime_hint_topology(&mut self, logical_path: &str) -> io::Result<u16> {
+        if let Some(topology) = self.runtime_hints.get(logical_path) {
+            return Ok(*topology);
+        }
+        let path = self.root.join(logical_path.trim_start_matches('/'));
+        let (topology, bytes_scanned) =
+            scan_runtime_library_hints(&path, self.runtime_hint_bytes_remaining)?;
+        self.runtime_hint_bytes_remaining = self
+            .runtime_hint_bytes_remaining
+            .checked_sub(bytes_scanned)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        self.runtime_hints.insert(logical_path.to_owned(), topology);
+        Ok(topology)
     }
 }
 
@@ -315,6 +341,65 @@ fn valid_library_name(name: &str) -> bool {
         && !name
             .bytes()
             .any(|byte| byte == 0 || byte.is_ascii_control())
+}
+
+fn scan_runtime_library_hints(path: &Path, available_bytes: u64) -> io::Result<(u16, u64)> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_RUNTIME_HINT_BYTES
+        || metadata.len() > available_bytes
+    {
+        return Ok((0, 0));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+
+    let mut topology = 0_u16;
+    let mut chunk = [0_u8; RUNTIME_HINT_CHUNK_BYTES];
+    let mut token = [0_u8; MAX_NEEDED_NAME_BYTES];
+    let mut token_length = 0_usize;
+    let mut token_oversized = false;
+    let mut total = 0_u64;
+    loop {
+        let length = file.read(&mut chunk)?;
+        if length == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(length).map_err(|_| io::ErrorKind::InvalidData)?)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        if total > metadata.len() || total > MAX_RUNTIME_HINT_BYTES {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        for byte in &chunk[..length] {
+            if *byte == 0 {
+                if !token_oversized
+                    && let Ok(name) = std::str::from_utf8(&token[..token_length])
+                    && valid_library_name(name)
+                {
+                    topology |= classify_library(name);
+                }
+                token_length = 0;
+                token_oversized = false;
+            } else if token_length == token.len() {
+                token_oversized = true;
+            } else if !token_oversized {
+                token[token_length] = *byte;
+                token_length += 1;
+            }
+        }
+    }
+    if total != metadata.len() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    Ok((topology, total))
 }
 
 fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
@@ -610,6 +695,52 @@ mod tests {
         assert!(profile.profiled);
         assert!(profile.complete);
         assert_eq!(profile.topology, TOPOLOGY_QT6 | TOPOLOGY_WAYLAND);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn profiles_exact_null_terminated_runtime_library_hints() {
+        let root = test_root();
+        let executable = root.join("usr/bin/runtime-loader");
+        fs::create_dir_all(executable.parent().expect("binary parent")).expect("binary directory");
+        let mut image = elf_fixture(&[]);
+        image.extend_from_slice(
+            b"\0libEGL.so.1\0libGLESv2.so.2\0prefixlibvulkan.so.1\0\
+              libQt6Core.so.6 is unavailable\0",
+        );
+        fs::write(&executable, image).expect("runtime-loading ELF");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("executable permissions");
+
+        let profile = IntegrationProfiler::new(&root).profile("/usr/bin/runtime-loader");
+        assert!(profile.profiled);
+        assert!(profile.complete);
+        assert_eq!(profile.topology, TOPOLOGY_OPENGL);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runtime_hint_scan_carries_a_token_across_fixed_chunks() {
+        let root = test_root();
+        let executable = root.join("runtime-loader");
+        let mut image = vec![b'x'; RUNTIME_HINT_CHUNK_BYTES - 1];
+        image.push(0);
+        image.extend_from_slice(b"libvulkan.so.1\0");
+        fs::write(&executable, image).expect("runtime-loading image");
+        assert_eq!(
+            scan_runtime_library_hints(&executable, MAX_RUNTIME_HINT_TOTAL_BYTES)
+                .expect("runtime hints")
+                .0,
+            TOPOLOGY_VULKAN,
+        );
+        assert_eq!(
+            scan_runtime_library_hints(
+                &executable,
+                u64::try_from(RUNTIME_HINT_CHUNK_BYTES).expect("chunk size"),
+            )
+            .expect("bounded runtime hints"),
+            (0, 0),
+        );
         fs::remove_dir_all(root).expect("cleanup");
     }
 
