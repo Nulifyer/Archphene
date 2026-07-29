@@ -4,22 +4,29 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
+allow_reboot=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
+    --allow-reboot) allow_reboot=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL --allow-reboot [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+[[ "$allow_reboot" == true ]] ||
+  archphene_die "--allow-reboot is required because this gate reboots the device"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.PackagePhaseTestReceiver"
@@ -30,6 +37,17 @@ fixture="reboot-$serial_slug"
 output_dir="$ARCHPHENE_ROOT/tooling/build/package-reboot"
 output="$output_dir/$serial.png"
 mkdir -p "$output_dir"
+backup_root="files/test-fixtures/package-reboot-$serial_slug-$$"
+job_store="files/arch-root/var/lib/archphene/package-jobs.v1"
+job_backup="$backup_root/package-jobs.v1"
+recovery_preferences="shared_prefs/package_recovery.xml"
+recovery_backup="$backup_root/package-recovery.xml"
+job_existed=false
+recovery_existed=false
+backup_ready=false
+was_running=false
+job_hash_before=
+recovery_hash_before=
 
 wait_for_boot() {
   local deadline=$((SECONDS + 180))
@@ -102,11 +120,102 @@ select_package() {
 
 cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  if [[ "$backup_ready" == true ]]; then
+    if [[ "$job_existed" == true ]]; then
+      archphene_adb_run shell run-as "$package" cp -p \
+        "$job_backup" "$job_store" >/dev/null 2>&1 || true
+    else
+      archphene_adb_run shell run-as "$package" rm -f \
+        "$job_store" >/dev/null 2>&1 || true
+    fi
+    if [[ "$recovery_existed" == true ]]; then
+      archphene_adb_run shell run-as "$package" cp -p \
+        "$recovery_backup" "$recovery_preferences" >/dev/null 2>&1 || true
+    else
+      archphene_adb_run shell run-as "$package" rm -f \
+        "$recovery_preferences" >/dev/null 2>&1 || true
+    fi
+    archphene_adb_run shell run-as "$package" rm -rf \
+      "$backup_root" >/dev/null 2>&1 || true
+  fi
+  if [[ "$was_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+  fi
+}
+assert_restored() {
+  local actual
+  if [[ "$job_existed" == true ]]; then
+    actual="$(
+      archphene_adb_run shell run-as "$package" sha256sum "$job_store" |
+        awk '{print $1}' |
+        tr -d '\r'
+    )"
+    [[ "$actual" == "$job_hash_before" ]] ||
+      archphene_die "durable package jobs were not restored exactly"
+  else
+    ! archphene_adb_run shell run-as "$package" test -e "$job_store" ||
+      archphene_die "the package reboot fixture left a durable job store"
+  fi
+  if [[ "$recovery_existed" == true ]]; then
+    actual="$(
+      archphene_adb_run shell run-as "$package" \
+        sha256sum "$recovery_preferences" |
+        awk '{print $1}' |
+        tr -d '\r'
+    )"
+    [[ "$actual" == "$recovery_hash_before" ]] ||
+      archphene_die "package recovery preferences were not restored exactly"
+  else
+    ! archphene_adb_run shell run-as "$package" \
+      test -e "$recovery_preferences" ||
+      archphene_die "the package reboot fixture left recovery preferences"
+  fi
+  ! archphene_adb_run shell run-as "$package" test -e "$backup_root" ||
+    archphene_die "package reboot backup residue remains"
+  if [[ "$was_running" == true ]]; then
+    archphene_android_pid "$package" >/dev/null ||
+      archphene_die "manager running state was not restored"
+  else
+    ! archphene_android_pid "$package" >/dev/null 2>&1 ||
+      archphene_die "manager was left running after the package reboot gate"
+  fi
 }
 trap cleanup EXIT
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  was_running=true
+fi
 archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run shell run-as "$package" test ! -e "$backup_root" ||
+  archphene_die "package reboot backup path already exists: $backup_root"
+archphene_adb_run shell run-as "$package" mkdir -p "$backup_root"
+if archphene_adb_run shell run-as "$package" test -f "$job_store"; then
+  job_existed=true
+  job_hash_before="$(
+    archphene_adb_run shell run-as "$package" sha256sum "$job_store" |
+      awk '{print $1}' |
+      tr -d '\r'
+  )"
+  archphene_adb_run shell run-as "$package" cp -p "$job_store" "$job_backup"
+fi
+if archphene_adb_run shell run-as "$package" test -f "$recovery_preferences"; then
+  recovery_existed=true
+  recovery_hash_before="$(
+    archphene_adb_run shell run-as "$package" \
+      sha256sum "$recovery_preferences" |
+      awk '{print $1}' |
+      tr -d '\r'
+  )"
+  archphene_adb_run shell run-as "$package" cp -p \
+    "$recovery_preferences" "$recovery_backup"
+fi
+backup_ready=true
 dismiss_usb_access_prompt_if_present "package-reboot-initial-usb-prompt-$serial"
 archphene_adb_run logcat -c
 start_manager
@@ -186,8 +295,9 @@ fatal_log="$(
 [[ "$fatal_log" != *"FATAL EXCEPTION"* && "$fatal_log" != *"Fatal signal"* ]] ||
   archphene_die "package reboot recovery emitted a fatal runtime error: $fatal_log"
 
-trap - EXIT
 cleanup
+assert_restored
+trap - EXIT
 archphene_note "Archphene package reboot recovery passed on $serial"
 archphene_note "  Active work became durable Failed/Review without package or cache mutation"
 archphene_note "  Full-device screenshot: $output"

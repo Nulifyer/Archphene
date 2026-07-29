@@ -2,13 +2,26 @@
 set -euo pipefail
 source "$(dirname "$0")/lib/android-test.sh"
 
-serial="${1:?usage: $0 SERIAL APK [--reboot]}"
-apk="${2:?usage: $0 SERIAL APK [--reboot]}"
+serial=
+apk=
+skip_install=true
 reboot_target=false
-if [[ "${3:-}" == --reboot ]]; then
-  reboot_target=true
-elif (($# > 2)); then
-  archphene_die "usage: $0 SERIAL APK [--reboot]"
+while (($#)); do
+  case "$1" in
+    --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
+    --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
+    --allow-reboot) reboot_target=true; shift ;;
+    -h|--help)
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk] [--allow-reboot]"
+      exit 0
+      ;;
+    *) archphene_die "unknown argument: $1" ;;
+  esac
+done
+[[ -n "$serial" ]] || archphene_die "--serial is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
 fi
 archphene_test_init "$serial"
 package=org.archphene.app.debug
@@ -59,7 +72,24 @@ wait_for_boot() {
   archphene_die "device did not finish booting"
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
+was_running=false
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  was_running=true
+fi
+cleanup() {
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  if [[ "$was_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
 # The trust directory is derived data. Removing only its identity marker forces
 # one controlled rebuild without touching packages, catalogs, or user files.
 archphene_adb_run shell run-as "$package" rm -f "$trust/source-v1"
@@ -109,6 +139,8 @@ fatal_log="$(
   archphene_die "startup emitted a fatal runtime error: $fatal_log"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 
+cleanup
+trap - EXIT
 archphene_note "Cached package-runtime startup passed on $serial"
 archphene_note "  Trust rebuild: ${rebuild_ms} ms; unchanged-source reuse: ${reuse_ms} ms"
 if [[ -n "$boot_ms" ]]; then

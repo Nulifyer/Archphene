@@ -1771,6 +1771,20 @@ present. Current process-death and explicitly authorized emulator-reboot runs
 both pass; their full-device frames show the bounded interrupted-session
 message, shell selector, and actionable Start shell control.
 
+The standalone script mutation rules are now executable rather than review
+convention. `test-script-device-mutation-policy.sh` currently covers 19
+app-data-reset scripts, 31 optional APK-install scripts, three reboot scripts,
+and 31 permission/settings writers; each must fail closed behind its named
+action or expose a restoration path. The first run found implicit reboot paths
+in startup and package recovery. Startup now uses the installed manager by
+default and restores prior running state; its emulator trust-cache rebuild and
+reuse pass at 1,846 ms and 427 ms respectively with a clean full-device frame.
+Package reboot requires `--allow-reboot`, optionally installs only through
+`--install-apk`, restores exact pre-test durable job and recovery-file hashes,
+restores manager running state, and leaves the 288-package database and cache
+unchanged. Its explicitly authorized emulator run passes with a readable
+Failed/Review recovery card and no retained synthetic job.
+
 On July 22, 2026, a current-source x86_64 debug manager was built with the reproducible Podman toolchain, installed on the API 36 emulator, and passed the complete broad emulator regression in one sequence. The run covered package update and refresh, repository search and version selection, Android app-settings routing, authenticated runtime-pack execution and cleanup, KCalc launch/calculation/menu/rotation, native compositor input, Android PackageInstaller update, and Mousepad document, IME, touch, secondary-window, and live-theme behavior.
 
 The connected Samsung SM-S908U (Android 15, AArch64) now runs the exact current-source manager and Terminal under the maintained development signer. Because the original prototype key was unavailable, the explicitly authorized reset was preceded by verified archives of both installed APKs and their private state; 1.60 GiB of manager package/runtime data and 46 MiB of Terminal home/runtime were restored under the new UIDs. Managed Arch Bash, the ARM native catalog, and manager startup/catalog rendering pass. The old Foot, KCalc, and Mousepad wrapper APKs plus persistent Linux homes were separately archived before their deliberate signer migrations.
