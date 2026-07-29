@@ -1,0 +1,20 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+result=/home/archphene/.archphene-code-git-probe-result
+workspace=/home/archphene/.archphene-code-git-probe-work
+
+[[ ! -e "$result" && ! -e "$workspace" ]]
+mkdir "$workspace"
+cleanup() {
+  rm -rf "$workspace"
+}
+trap cleanup EXIT
+
+version="$(git --version)"
+cd "$workspace"
+git init --quiet
+printf 'Archphene Code Git probe\n' >sample.txt
+git add sample.txt
+status="$(git status --porcelain)"
+printf '%s\n%s\n' "$version" "$status" >"$result"

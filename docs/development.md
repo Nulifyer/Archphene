@@ -401,6 +401,24 @@ system-mode regressions with:
 ./scripts/test-kate-live-theme.sh --serial emulator-5554
 ```
 
+Validate Git from a current generated Code launcher's real integrated Bash
+with:
+
+```bash
+./scripts/test-archphene-code-git.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk \
+  --code-package <generated-code-package>
+```
+
+The gate refuses to replace its fixed private test paths, creates a disposable
+repository, requires the exact staged-file result, removes every fixture, checks
+fatal Android logs, and captures the full device under
+`tooling/build/code-git/`. Git must normally be installed first through the
+public Packages UI. `--install-if-missing` deliberately performs that same
+mutating UI workflow and therefore must be used only after installation has
+been approved.
+
 Run the outbound Android document gates with each matching exact-ABI manager
 APK:
 

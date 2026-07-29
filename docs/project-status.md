@@ -2151,9 +2151,10 @@ entry or retained supervised-process observation contains Chromium topology.
 Unit tests prove that consent or topology alone is insufficient and that
 existing flags are not duplicated. Exact-ABI emulator/Samsung gates prove
 Cancel, explicit Enable, process-restart persistence, state restoration, and
-visually inspected full-device light/dark presentation. The current cleaned
-device roots no longer contain Code, so a fresh real Code process-tree pass
-without user flags remains open before the replacement todo can close.
+visually inspected full-device light/dark presentation. Current Code
+installations on both roots also pass the real supervised-process gate without
+a user `code-flags.conf`; the generic policy supplies both required flags while
+a current Foot launcher remains unaffected.
 
 The diagnostic `--disable-gpu` flag was previously removed on both device
 lanes: full-device rendering and normal close remained stable, and Samsung
@@ -2347,6 +2348,19 @@ The same x86_64 project is available inside Code's integrated terminal:
 `dotnet --info`, `dotnet new mvc`, restore, build, and run complete through the
 generic runtime, and the browser reaches the running service. C# language
 service installation, debugging, and breakpoints remain open.
+
+With user approval, the normal Archphene package UI has now installed stock Git
+2.55.0 into both shared roots. The executable is immediately visible from the
+manager Terminal and each existing Code integrated Bash. A bounded device gate
+opens the current generated Code launcher, invokes an alphanumeric user command
+through the real integrated terminal, and verifies an actual `git init`,
+`git add`, and `git status --porcelain` transaction reports `A  sample.txt`.
+The gate removes its private command, result, and work tree, rejects fatal
+Android logs, and passes with inspected full-device captures on the exact
+x86_64 emulator and AArch64 Samsung. The Samsung capture also confirms the
+remaining phone-layout issue: the stock Welcome and Copilot panes leave a
+needlessly narrow workspace and terminal, so Git readiness does not close the
+phone-first Code UX task.
 
 Physical AArch64 now passes the corresponding generic package and runtime
 boundary. On Samsung, the six-output AUR transaction installs SDK 10.0.302 and
