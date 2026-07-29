@@ -1,0 +1,16 @@
+# Keep the Android entry path compiled without turning the complete manager
+# into a broad always-compile profile. AGP rewrites these rules after R8.
+Lorg/archphene/app/ArchpheneApplication;
+HSPLorg/archphene/app/ArchpheneApplication;-><init>()V
+HSPLorg/archphene/app/ArchpheneApplication;->onCreate()V
+Lorg/archphene/app/MainActivity;
+HSPLorg/archphene/app/MainActivity;-><init>()V
+HSPLorg/archphene/app/MainActivity;->onCreate(Landroid/os/Bundle;)V
+Lorg/archphene/app/runtime/ArchpheneRuntimeService;
+HSPLorg/archphene/app/runtime/ArchpheneRuntimeService;-><init>()V
+HSPLorg/archphene/app/runtime/ArchpheneRuntimeService;->onCreate()V
+HSPLorg/archphene/app/runtime/ArchpheneRuntimeService;->onBind(Landroid/content/Intent;)Landroid/os/IBinder;
+Lorg/archphene/app/launcher/LauncherSessionService;
+HSPLorg/archphene/app/launcher/LauncherSessionService;-><init>()V
+HSPLorg/archphene/app/launcher/LauncherSessionService;->onCreate()V
+HSPLorg/archphene/app/launcher/LauncherSessionService;->onBind(Landroid/content/Intent;)Landroid/os/IBinder;

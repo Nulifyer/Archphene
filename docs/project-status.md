@@ -16,6 +16,16 @@ and both exact-ABI APK builds pass. The APK contains one Kotlin Activity, one
 Service-owned native runtime, reusable direct buffers for batched input and
 status snapshots, and generation-checked bounded native handles.
 
+Release optimization is now an executable artifact gate rather than build-file
+intent. The manager, isolated Builder, and generated launcher each carry a
+small startup-only ART baseline profile; all three pass R8 and emit compiled
+`baseline.prof` plus `baseline.profm` payloads. The gate inspects the packaged
+x86_64 and arm64-v8a Rust libraries and requires them to be stripped, while the
+workspace release profile requires one code-generation unit, ThinLTO,
+panic-abort, and symbol stripping. Broad package, compositor, and Builder paths
+remain outside the baseline profiles and continue to be governed by the
+existing debug allocation, JNI, latency, memory, lifecycle, and soak gates.
+
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
 SM-S908U. They prove cold launch, full-device insets and screenshots, touch
 batching, Activity recreation, HOME/resume continuity, Back shutdown, private

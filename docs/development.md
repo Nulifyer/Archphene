@@ -32,6 +32,28 @@ though Gradle itself is intentionally run on the pinned JDK 26.0.1.
 
 Build outputs, SDKs, downloaded packages, signing files, screenshots, and test artifacts are ignored.
 
+## Release optimization gate
+
+The manager, isolated Builder, and generated launcher carry small startup-only
+ART baseline profiles. Release builds use R8, while Rust release libraries use
+one code-generation unit, ThinLTO, panic-abort, and symbol stripping. Build all
+three release APKs and inspect the actual packaged profiles and dual-ABI native
+libraries:
+
+```bash
+ANDROID_SDK_ROOT=/opt/android-sdk \
+GRADLE_USER_HOME="$PWD/tooling/gradle" \
+gradle --no-daemon \
+  :android:app:assembleRelease \
+  :android:builder:assembleRelease \
+  :android:launcher-template:assembleRelease
+./scripts/test-release-optimization.sh
+```
+
+The baseline profiles intentionally cover Android entry paths, not the full
+manager. Package, compositor, and Builder work remains governed by measured
+runtime behavior rather than being indiscriminately ahead-of-time compiled.
+
 ## Device performance baseline
 
 Run the state-preserving idle-manager gate against each maintained target:

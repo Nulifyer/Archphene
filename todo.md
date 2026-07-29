@@ -304,7 +304,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Fail one-second active Terminal and Foot transactions on ART allocation/object, JNI-call, input-latency, PSS/RSS, Java/native heap, thread, descriptor, process, and Android-frame ceilings on both exact ABIs.
   - [x] Add a default repeated-window protocol with four 30-second hardware-key and four 30-second idle windows for each of Terminal and Foot. Every window independently gates ART bytes/objects/GC, JNI/copies, latency, memory, frames, threads, descriptors, UID processes, fatal logs, battery, and thermal state; aggregate JSON rejects peak and final drift. The exact Samsung/emulator runs pass all 16 windows with zero GC and zero peak descriptor/thread growth, 30/154 ms and 18/84 ms Terminal/Foot latency p95, maximum thermal status zero, and visually inspected full-device captures.
   - [ ] Run the exact device soak automatically in a maintained CI/device-farm lane; the executable gate is currently local because no physical-device CI runner is configured.
-- [ ] Use release builds, R8, baseline profiles, stripped native libraries, panic-abort, and LTO only after debug diagnostics and tests remain adequate.
+- [x] Use release builds, R8, baseline profiles, stripped native libraries, panic-abort, and LTO only after debug diagnostics and tests remain adequate.
+  - [x] Keep ART profiles startup-only for the manager, isolated Builder, and generated launcher rather than compiling broad application graphs. The release gate builds all three through R8, requires compiled `baseline.prof`/`baseline.profm` payloads, verifies stripped Rust libraries for both Android ABIs, and binds Cargo release output to one codegen unit, ThinLTO, panic-abort, and symbol stripping.
 
 ### Architecture gates
 

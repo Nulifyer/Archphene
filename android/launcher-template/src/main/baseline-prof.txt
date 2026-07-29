@@ -1,0 +1,7 @@
+# Generated launchers are deliberately tiny. Compile only the Activity entry
+# path; compositor and input callbacks remain selected by normal ART behavior.
+Lorg/archphene/launcher/LauncherActivity;
+HSPLorg/archphene/launcher/LauncherActivity;-><init>()V
+HSPLorg/archphene/launcher/LauncherActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLorg/archphene/launcher/LauncherActivity;->onStart()V
+HSPLorg/archphene/launcher/LauncherActivity;->onResume()V

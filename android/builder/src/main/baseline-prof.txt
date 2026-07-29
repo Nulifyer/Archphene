@@ -1,0 +1,7 @@
+# The isolated Builder has one Android entry point. Package-build methods stay
+# demand compiled because they are long-running native and I/O work, not
+# latency-sensitive startup code.
+Lorg/archphene/builder/AurBuilderService;
+HSPLorg/archphene/builder/AurBuilderService;-><init>()V
+HSPLorg/archphene/builder/AurBuilderService;->onCreate()V
+HSPLorg/archphene/builder/AurBuilderService;->onBind(Landroid/content/Intent;)Landroid/os/IBinder;
