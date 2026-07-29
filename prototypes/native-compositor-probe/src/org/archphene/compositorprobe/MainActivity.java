@@ -68,6 +68,7 @@ public final class MainActivity extends Activity {
     static { System.loadLibrary("archphene_compositor"); }
 
     private static native int nativeProtocolVersion();
+    private static native boolean nativeCompoundConfinementProbe();
     private static native long nativeCreateCore();
     private static native int nativeAdoptClient(long handle, int fd);
     private static native int nativeSendShmPoolRequest(
@@ -400,6 +401,9 @@ public final class MainActivity extends Activity {
         long core = 0;
         try {
             if (nativeProtocolVersion() != 1) throw new IllegalStateException("protocol version");
+            if (!nativeCompoundConfinementProbe()) {
+                throw new IllegalStateException("compound pointer confinement");
+            }
             org.archphene.app.launcher.NativeLauncherCompositor.verifyHandleRegistry(
                     getCacheDir());
             core = nativeCreateCore();
@@ -1488,7 +1492,7 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "generation-checked JNI handles, registry, runtime fork/exec, Android bitmap, xdg toplevel, keyboard input, "
-                    + "damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, "
+                    + "damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, compound pointer confinement, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();

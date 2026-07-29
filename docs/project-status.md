@@ -552,6 +552,14 @@ ownership error: explicitly recycling the prior cursor bitmap could crash
 deferred pointer-icon updates, so accepted cursors now remain framework-owned
 until Android can reclaim them.
 
+Pointer confinement now accepts bounded compound `wl_region` add/subtract
+operations rather than disabling every non-rectangular request. Each region is
+capped at 64 ordered operations; relative motion partitions the segment in a
+fixed 516-edge stack buffer and stops at the first outside interval without
+heap allocation, including a subtracted hole followed by a second allowed
+island. A real host Wayland client proves that discontinuous case, and the
+exact x86_64/AArch64 native probes publish visible full-device success.
+
 Package resolution now treats Qt's Wayland platform modules as dependency-owned
 Archphene runtime companions. A closure containing, or an existing shared root
 owning, `qt5-base` or `qt6-base` adds the matching signed `qt5-wayland` or

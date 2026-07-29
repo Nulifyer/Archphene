@@ -96,6 +96,8 @@ use wayland_server::{
 const MAX_TOPLEVELS: usize = 32;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
+const MAX_REGION_OPERATIONS: usize = 64;
+const MAX_CONFINEMENT_BOUNDARIES: usize = MAX_REGION_OPERATIONS * 8 + 4;
 #[cfg(target_os = "android")]
 const MAX_CLIPBOARD_BYTES: usize = 65_536;
 
@@ -4700,20 +4702,7 @@ fn pointer_constraint_contains(
     x: f64,
     y: f64,
 ) -> bool {
-    let (origin_x, origin_y) = surface_origin_in_root(state, &data.surface, 0).unwrap_or((0, 0));
-    let mut local_x = x - f64::from(origin_x);
-    let mut local_y = y - f64::from(origin_y);
-    if state
-        .root_surface
-        .as_ref()
-        .is_some_and(|root| root.id() == data.surface.id())
-    {
-        if let Some(frame) = surface_frame(&data.surface) {
-            let (target_width, target_height) = root_input_dimensions(state);
-            local_x = scale_input_coordinate(local_x, target_width, frame.width);
-            local_y = scale_input_coordinate(local_y, target_height, frame.height);
-        }
-    }
+    let (local_x, local_y) = pointer_constraint_local_coordinates(state, data, x, y);
     let requested_contains = data
         .region
         .lock()
@@ -4739,8 +4728,31 @@ fn pointer_constraint_contains(
     requested_contains && input_contains && surface_contains
 }
 
-fn simple_confinement_region(region: Option<&RegionState>) -> bool {
-    region.is_none_or(|region| matches!(region.operations.as_slice(), [RegionOperation::Add(_)]))
+fn pointer_constraint_local_coordinates(
+    state: &CompositorState,
+    data: &PointerConstraintData,
+    x: f64,
+    y: f64,
+) -> (f64, f64) {
+    let (origin_x, origin_y) = surface_origin_in_root(state, &data.surface, 0).unwrap_or((0, 0));
+    let mut local_x = x - f64::from(origin_x);
+    let mut local_y = y - f64::from(origin_y);
+    if state
+        .root_surface
+        .as_ref()
+        .is_some_and(|root| root.id() == data.surface.id())
+    {
+        if let Some(frame) = surface_frame(&data.surface) {
+            let (target_width, target_height) = root_input_dimensions(state);
+            local_x = scale_input_coordinate(local_x, target_width, frame.width);
+            local_y = scale_input_coordinate(local_y, target_height, frame.height);
+        }
+    }
+    (local_x, local_y)
+}
+
+fn bounded_confinement_region(region: Option<&RegionState>) -> bool {
+    region.is_none_or(|region| region.operations.len() <= MAX_REGION_OPERATIONS)
 }
 
 fn pointer_constraint_supports_confinement(data: &PointerConstraintData) -> bool {
@@ -4748,7 +4760,7 @@ fn pointer_constraint_supports_confinement(data: &PointerConstraintData) -> bool
         .region
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if !simple_confinement_region(requested.committed.as_ref()) {
+    if !bounded_confinement_region(requested.committed.as_ref()) {
         return false;
     }
     data.surface.data::<SurfaceData>().is_none_or(|surface| {
@@ -4756,8 +4768,173 @@ fn pointer_constraint_supports_confinement(data: &PointerConstraintData) -> bool
             .inner
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        simple_confinement_region(surface.committed_input_region.as_ref())
+        bounded_confinement_region(surface.committed_input_region.as_ref())
     })
+}
+
+fn append_rectangle_boundaries(
+    boundaries: &mut [f64; MAX_CONFINEMENT_BOUNDARIES],
+    count: &mut usize,
+    rectangle: RegionRectangle,
+    start_x: f64,
+    start_y: f64,
+    delta_x: f64,
+    delta_y: f64,
+) {
+    let mut append = |boundary: f64, start: f64, delta: f64| {
+        if delta == 0.0 || *count == boundaries.len() {
+            return;
+        }
+        let fraction = (boundary - start) / delta;
+        if fraction.is_finite() && fraction > 0.0 && fraction < 1.0 {
+            boundaries[*count] = fraction;
+            *count += 1;
+        }
+    };
+    append(f64::from(rectangle.x), start_x, delta_x);
+    append(rectangle.right() as f64, start_x, delta_x);
+    append(f64::from(rectangle.y), start_y, delta_y);
+    append(rectangle.bottom() as f64, start_y, delta_y);
+}
+
+fn append_region_boundaries(
+    boundaries: &mut [f64; MAX_CONFINEMENT_BOUNDARIES],
+    count: &mut usize,
+    region: Option<&RegionState>,
+    start_x: f64,
+    start_y: f64,
+    delta_x: f64,
+    delta_y: f64,
+) {
+    let Some(region) = region else {
+        return;
+    };
+    for operation in &region.operations {
+        let rectangle = match operation {
+            RegionOperation::Add(rectangle) | RegionOperation::Subtract(rectangle) => *rectangle,
+        };
+        append_rectangle_boundaries(
+            boundaries, count, rectangle, start_x, start_y, delta_x, delta_y,
+        );
+    }
+}
+
+fn first_outside_partition<F>(
+    boundaries: &mut [f64; MAX_CONFINEMENT_BOUNDARIES],
+    boundary_count: usize,
+    contains_fraction: F,
+) -> f64
+where
+    F: Fn(f64) -> bool,
+{
+    if !contains_fraction(0.0) {
+        return 0.0;
+    }
+    boundaries[..boundary_count].sort_unstable_by(f64::total_cmp);
+    let bisect_boundary = |mut inside: f64, mut outside: f64| {
+        for _ in 0..24 {
+            let candidate = (inside + outside) * 0.5;
+            if contains_fraction(candidate) {
+                inside = candidate;
+            } else {
+                outside = candidate;
+            }
+        }
+        inside
+    };
+
+    let mut previous_boundary = 0.0;
+    let mut last_inside = 0.0;
+    for boundary in boundaries[..boundary_count]
+        .iter()
+        .copied()
+        .chain(std::iter::once(1.0))
+    {
+        if boundary <= previous_boundary {
+            continue;
+        }
+        let interval = (previous_boundary + boundary) * 0.5;
+        if !contains_fraction(interval) {
+            return bisect_boundary(last_inside, interval);
+        }
+        last_inside = interval;
+        previous_boundary = boundary;
+    }
+    if contains_fraction(1.0) {
+        1.0
+    } else {
+        bisect_boundary(last_inside, 1.0)
+    }
+}
+
+fn first_confinement_boundary(
+    state: &CompositorState,
+    data: &PointerConstraintData,
+    start_x: f64,
+    start_y: f64,
+    delta_x: f64,
+    delta_y: f64,
+) -> f64 {
+    let (local_start_x, local_start_y) =
+        pointer_constraint_local_coordinates(state, data, start_x, start_y);
+    let (local_end_x, local_end_y) =
+        pointer_constraint_local_coordinates(state, data, start_x + delta_x, start_y + delta_y);
+    let local_delta_x = local_end_x - local_start_x;
+    let local_delta_y = local_end_y - local_start_y;
+    let mut boundaries = [0.0; MAX_CONFINEMENT_BOUNDARIES];
+    let mut boundary_count = 0_usize;
+    {
+        let requested = data
+            .region
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        append_region_boundaries(
+            &mut boundaries,
+            &mut boundary_count,
+            requested.committed.as_ref(),
+            local_start_x,
+            local_start_y,
+            local_delta_x,
+            local_delta_y,
+        );
+    }
+    if let Some(surface) = data.surface.data::<SurfaceData>() {
+        let surface = surface
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        append_region_boundaries(
+            &mut boundaries,
+            &mut boundary_count,
+            surface.committed_input_region.as_ref(),
+            local_start_x,
+            local_start_y,
+            local_delta_x,
+            local_delta_y,
+        );
+    }
+    if let Some(frame) = surface_frame(&data.surface) {
+        if let Some(bounds) = RegionRectangle::new(0, 0, frame.width as i32, frame.height as i32) {
+            append_rectangle_boundaries(
+                &mut boundaries,
+                &mut boundary_count,
+                bounds,
+                local_start_x,
+                local_start_y,
+                local_delta_x,
+                local_delta_y,
+            );
+        }
+    }
+    let contains_fraction = |fraction: f64| {
+        pointer_constraint_contains(
+            state,
+            data,
+            start_x + delta_x * fraction,
+            start_y + delta_y * fraction,
+        )
+    };
+    first_outside_partition(&mut boundaries, boundary_count, contains_fraction)
 }
 
 fn activate_pointer_lock(state: &mut CompositorState, constraint: &ZwpLockedPointerV1) {
@@ -8004,7 +8181,7 @@ impl Dispatch<WlRegion, RegionData> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
-        _resource: &WlRegion,
+        resource: &WlRegion,
         request: wl_region::Request,
         data: &RegionData,
         _handle: &DisplayHandle,
@@ -8038,11 +8215,12 @@ impl Dispatch<WlRegion, RegionData> for CompositorState {
             _ => unreachable!("wl_region request added without an implementation"),
         };
         if let Some(operation) = operation {
-            data.inner
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .operations
-                .push(operation);
+            let mut region = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+            if region.operations.len() >= MAX_REGION_OPERATIONS {
+                resource.post_error(0u32, "region operation limit exceeded");
+                return;
+            }
+            region.operations.push(operation);
         }
     }
 }
@@ -11058,29 +11236,14 @@ impl CompositorCore {
         };
         let start_x = self.state.pointer_x;
         let start_y = self.state.pointer_y;
-        let end_x = start_x + delta_x;
-        let end_y = start_y + delta_y;
-        let (next_x, next_y) = if pointer_constraint_contains(&self.state, data, end_x, end_y) {
-            (end_x, end_y)
-        } else {
-            // Supported confinement regions are convex rectangles (possibly
-            // intersected with one rectangular input region and surface
-            // bounds), so a fixed bisection reaches the first boundary without
-            // allocation or coordinate drift.
-            let mut inside = 0.0;
-            let mut outside = 1.0;
-            for _ in 0..24 {
-                let candidate = (inside + outside) * 0.5;
-                let x = start_x + delta_x * candidate;
-                let y = start_y + delta_y * candidate;
-                if pointer_constraint_contains(&self.state, data, x, y) {
-                    inside = candidate;
-                } else {
-                    outside = candidate;
-                }
-            }
-            (start_x + delta_x * inside, start_y + delta_y * inside)
-        };
+        // Region operations can create holes and disconnected islands. Walk
+        // the segment's bounded rectangle-edge partitions and stop at the
+        // first outside interval, even when the final point is inside again.
+        // The fixed boundary array and bisection perform no heap allocation.
+        let fraction =
+            first_confinement_boundary(&self.state, data, start_x, start_y, delta_x, delta_y);
+        let next_x = start_x + delta_x * fraction;
+        let next_y = start_y + delta_y * fraction;
         if next_x == start_x && next_y == start_y {
             return delivered;
         }
@@ -12257,6 +12420,44 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePro
     _activity: *mut std::ffi::c_void,
 ) -> i32 {
     archphene_compositor_protocol_version() as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCompoundConfinementProbe(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+) -> jni::sys::jboolean {
+    let requested = RegionState {
+        operations: vec![
+            RegionOperation::Add(RegionRectangle {
+                x: 0,
+                y: 0,
+                width: 30,
+                height: 10,
+            }),
+            RegionOperation::Subtract(RegionRectangle {
+                x: 10,
+                y: 0,
+                width: 10,
+                height: 10,
+            }),
+        ],
+    };
+    let mut boundaries = [0.0; MAX_CONFINEMENT_BOUNDARIES];
+    let mut boundary_count = 0;
+    append_region_boundaries(
+        &mut boundaries,
+        &mut boundary_count,
+        Some(&requested),
+        5.0,
+        5.0,
+        20.0,
+        0.0,
+    );
+    let fraction = first_outside_partition(&mut boundaries, boundary_count, |fraction| {
+        requested.contains(5.0 + 20.0 * fraction, 5.0)
+    });
+    jni::sys::jboolean::from((9.99..10.0).contains(&(5.0 + 20.0 * fraction)))
 }
 
 #[unsafe(no_mangle)]
@@ -16332,7 +16533,10 @@ mod tests {
         let pointer = seat.get_pointer(&queue, ());
         let _relative = relative_manager.get_relative_pointer(&pointer, &queue, ());
         let region = compositor.create_region(&queue, ());
-        region.add(0, 0, 10, 10);
+        // The endpoint at x=25 is inside the second island, but confinement
+        // must stop at the first edge of the subtracted hole.
+        region.add(0, 0, 30, 10);
+        region.subtract(10, 0, 10, 10);
         let _confine = constraints.confine_pointer(
             &surface,
             &pointer,
