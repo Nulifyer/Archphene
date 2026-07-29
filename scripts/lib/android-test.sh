@@ -140,6 +140,25 @@ archphene_wait_ui_unwrapped() {
   archphene_die "timed out waiting for unwrapped UI pattern: $pattern"
 }
 
+archphene_wait_android_chooser_ui() {
+  local name="$1"
+  local seconds="${2:-20}"
+  local deadline=$((SECONDS + seconds))
+  local ui
+
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$name" 2>/dev/null || true)"
+    if archphene_regex_contains "$ui" \
+      'package="(?:com\.android\.intentresolver|com\.(?:google\.)?android\.permissioncontroller)"' &&
+      archphene_regex_contains "$ui" 'clickable="true"[^>]*enabled="true"'; then
+      ARCHPHENE_UI="$ui"
+      return 0
+    fi
+    sleep 0.5
+  done
+  archphene_die "timed out waiting for a visible Android chooser"
+}
+
 archphene_tap_text() {
   local escaped
   escaped="$(python3 -c 'import re,sys;print(re.escape(sys.argv[1]))' "$2")"

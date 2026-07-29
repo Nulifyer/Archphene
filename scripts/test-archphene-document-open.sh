@@ -4,22 +4,25 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 token="$(printf '%08x' "$((RANDOM * 65536 + RANDOM))")"
@@ -41,7 +44,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 printf 'Archphene outbound open proof %s\n' "$token" |
   archphene_adb_run shell run-as "$package" tee "$fixture_path" >/dev/null
 archphene_adb_run logcat -c
@@ -103,6 +111,7 @@ for line in lines:
   archphene_die "open chooser did not receive a read URI grant"
 [[ "$chooser_record" != *"writeUriPermissions"* ]] ||
   archphene_die "open chooser unexpectedly received a write URI grant"
+archphene_wait_android_chooser_ui "document-open-chooser-$serial" 20
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-chooser.png"
 archphene_wait_log 'Android document handoff persisted' 15 >/dev/null
 

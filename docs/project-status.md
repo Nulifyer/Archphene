@@ -1748,7 +1748,7 @@ no test alias, private mirror/state directory, or Android folder remained.
 Mandatory APK fixtures and the remaining non-`pm clear` mutation classes still
 need the same explicit-default audit.
 
-All 27 tests that already had an optional APK-install path are now
+All 33 tests that already had an optional APK-install path are now
 non-installing by default. `--install-apk` is the explicit action that permits
 `adb install -r`; the old `--skip-install` option remains accepted for command
 compatibility, and development examples that intentionally replace a build
@@ -1760,6 +1760,15 @@ Terminal APK byte-identical at
 `35565acb0286b5b0a3577a067192233c40a7c073ea1bfa87fe1dc35821909a9a`.
 Tests with mandatory fixture installation, exact APK restoration, or package
 publication semantics remain separate audit classes.
+
+The latest six conversions cover Linux-to-Android Open, Share, multi-share,
+Export, export recovery, and authenticated launcher Save. Representative
+installed-manager runs pass on the physical Samsung and x86_64 emulator with
+no retained document fixture. Open/Share now also wait for an actionable
+Android system chooser accessibility tree before taking their full-device
+evidence. This exposed prior captures of the still-visible picker or an
+unrendered black transition; the replacement Samsung and emulator frames show
+the populated platform open/share sheets.
 
 The two older interrupted-session gates are now state-aware as well. They use
 the installed manager unless `--install-apk` is explicit, reject an existing
@@ -1773,7 +1782,7 @@ message, shell selector, and actionable Start shell control.
 
 The standalone script mutation rules are now executable rather than review
 convention. `test-script-device-mutation-policy.sh` currently covers 19
-app-data-reset scripts, 31 optional APK-install scripts, three reboot scripts,
+app-data-reset scripts, 37 optional APK-install scripts, three reboot scripts,
 and 31 permission/settings writers; each must fail closed behind its named
 action or expose a restoration path. The first run found implicit reboot paths
 in startup and package recovery. Startup now uses the installed manager by

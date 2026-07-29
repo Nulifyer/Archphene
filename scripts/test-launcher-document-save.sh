@@ -7,14 +7,16 @@ serial=
 apk=
 launcher=
 artifact_dir=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     --launcher) launcher="${2:?missing value for --launcher}"; shift 2 ;;
     --artifact-dir) artifact_dir="${2:?missing value for --artifact-dir}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk MANAGER_APK --launcher CURRENT_LAUNCHER [--artifact-dir PATH]"
+      echo "usage: $0 --serial SERIAL --launcher CURRENT_LAUNCHER [--apk MANAGER_APK --install-apk] [--artifact-dir PATH]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -22,12 +24,13 @@ while (($#)); do
 done
 
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 [[ "$launcher" =~ ^org\.archphene\.linux\.p[0-9a-f]{32}$ ]] ||
   archphene_die "--launcher must be a current generated Archphene launcher"
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 manager=org.archphene.app.debug
 manager_activity="$manager/org.archphene.app.MainActivity"
 launcher_activity="$(archphene_launcher "$launcher")"
@@ -68,7 +71,12 @@ request_save() {
 }
 
 archphene_adb_run shell rm -f "$target" >/dev/null
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "$manager is not installed; pass --install-apk with --apk"
 archphene_adb_run shell am force-stop "$manager" >/dev/null
 archphene_adb_run shell am force-stop "$launcher" >/dev/null
 archphene_adb_run logcat -c
