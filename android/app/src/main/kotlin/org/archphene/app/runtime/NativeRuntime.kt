@@ -374,6 +374,7 @@ internal object NativeRuntime {
         version: String,
         architecture: String,
         closureSha256: String,
+        commit: Boolean,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeInstallAurGraphBuiltPackages(
@@ -383,6 +384,7 @@ internal object NativeRuntime {
         graphManifestLength: Int,
         selectedPackage: String,
         closureSha256: String,
+        commit: Boolean,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeReviewAur(

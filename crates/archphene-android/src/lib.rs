@@ -3712,6 +3712,7 @@ mod android {
         version: JString,
         architecture: JString,
         closure_sha256: JString,
+        commit: jboolean,
         output_buffer: JByteBuffer,
     ) -> jint {
         let (Ok(handle), Ok(filename_manifest_length)) = (
@@ -3732,6 +3733,9 @@ mod android {
         let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
             return ERROR_INVALID_ARGUMENT;
         };
+        if !matches!(commit, JNI_FALSE | JNI_TRUE) {
+            return ERROR_INVALID_ARGUMENT;
+        }
         let (Ok(manifest_capacity), Ok(manifest_address)) = (
             environment.get_direct_buffer_capacity(&filename_manifest),
             environment.get_direct_buffer_address(&filename_manifest),
@@ -3853,10 +3857,6 @@ mod android {
                 expected_install_script.map(|script| script.sha256),
             ));
         }
-        let dependency_names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
-        if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
-            return copy_package_error(&error, output);
-        }
         let mut install_inputs: Vec<VerifiedAurArchive<'_>> = verified
             .iter_mut()
             .zip(&required_packages)
@@ -3872,10 +3872,21 @@ mod android {
                 },
             )
             .collect();
-        copy_aur_install_result(
-            package_runtime.install_verified_aur_archives(&mut install_inputs, &package_name),
-            output,
-        )
+        if commit == JNI_FALSE {
+            copy_aur_install_result(
+                package_runtime.plan_verified_aur_archives(&mut install_inputs, &package_name),
+                output,
+            )
+        } else {
+            let dependency_names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
+            if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+                return copy_package_error(&error, output);
+            }
+            copy_aur_install_result(
+                package_runtime.install_verified_aur_archives(&mut install_inputs, &package_name),
+                output,
+            )
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -3888,6 +3899,7 @@ mod android {
         graph_manifest_length: jint,
         selected_package: JString,
         closure_sha256: JString,
+        commit: jboolean,
         output_buffer: JByteBuffer,
     ) -> jint {
         let (Ok(handle), Ok(graph_manifest_length)) = (
@@ -3905,6 +3917,9 @@ mod android {
         let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
             return ERROR_INVALID_ARGUMENT;
         };
+        if !matches!(commit, JNI_FALSE | JNI_TRUE) {
+            return ERROR_INVALID_ARGUMENT;
+        }
         let (Ok(manifest_capacity), Ok(manifest_address), Ok(output_capacity), Ok(output_address)) = (
             environment.get_direct_buffer_capacity(&graph_manifest),
             environment.get_direct_buffer_address(&graph_manifest),
@@ -3997,10 +4012,6 @@ mod android {
             Ok(verified) => verified,
             Err(error) => return copy_aur_graph_verification_error(error, output),
         };
-        let dependency_names: Vec<&str> = runtime_dependencies.iter().map(String::as_str).collect();
-        if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
-            return copy_package_error(&error, output);
-        }
         let mut install_inputs: Vec<VerifiedAurArchive<'_>> = verified
             .iter_mut()
             .map(|verified| VerifiedAurArchive {
@@ -4013,10 +4024,23 @@ mod android {
                 install_script_sha256: verified.install_script_sha256,
             })
             .collect();
-        copy_aur_install_result(
-            package_runtime.install_verified_aur_archives(&mut install_inputs, &selected_package),
-            output,
-        )
+        if commit == JNI_FALSE {
+            copy_aur_install_result(
+                package_runtime.plan_verified_aur_archives(&mut install_inputs, &selected_package),
+                output,
+            )
+        } else {
+            let dependency_names: Vec<&str> =
+                runtime_dependencies.iter().map(String::as_str).collect();
+            if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+                return copy_package_error(&error, output);
+            }
+            copy_aur_install_result(
+                package_runtime
+                    .install_verified_aur_archives(&mut install_inputs, &selected_package),
+                output,
+            )
+        }
     }
 
     #[unsafe(no_mangle)]

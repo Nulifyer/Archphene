@@ -127,6 +127,19 @@ internal object PackageInstallPlanCodec {
         PackageRemovalListCodec.decode(bytes, "org.archphene.package-install-plan.v1")
 }
 
+internal object AurPackageInstallPlanCodec {
+    private const val HEADER = "org.archphene.aur-install-plan.v1"
+    private val headerBytes = HEADER.toByteArray(StandardCharsets.US_ASCII)
+
+    fun isPlan(bytes: ByteArray): Boolean =
+        bytes.size > headerBytes.size &&
+            headerBytes.indices.all { index -> bytes[index] == headerBytes[index] } &&
+            bytes[headerBytes.size] == '\n'.code.toByte()
+
+    fun decode(bytes: ByteArray): List<PlannedPackageRemoval> =
+        PackageRemovalListCodec.decode(bytes, HEADER)
+}
+
 internal object PackageRemovalPlanCodec {
     fun decode(bytes: ByteArray): List<PlannedPackageRemoval> =
         PackageRemovalListCodec.decode(bytes, "org.archphene.package-removal-plan.v1")

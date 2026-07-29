@@ -31,6 +31,24 @@ class PackageInstallPlanCodecTest {
                 ).toByteArray(),
             ),
         )
+
+        val aurPlan =
+            (
+                "org.archphene.aur-install-plan.v1\n" +
+                    "removals\t1\n" +
+                    "remove\tdotnet-runtime\t10.0.4.sdk104-1\n"
+            ).toByteArray()
+        assertEquals(true, AurPackageInstallPlanCodec.isPlan(aurPlan))
+        assertEquals(
+            listOf(PlannedPackageRemoval("dotnet-runtime", "10.0.4.sdk104-1")),
+            AurPackageInstallPlanCodec.decode(aurPlan),
+        )
+        assertEquals(
+            false,
+            AurPackageInstallPlanCodec.isPlan(
+                "org.archphene.package-install-plan.v1\nremovals\t0\n".toByteArray(),
+            ),
+        )
     }
 
     @Test

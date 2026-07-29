@@ -11697,14 +11697,11 @@ class ArchpheneRuntimeService : Service() {
                             15,
                             "Reverifying built package and signed dependency closure",
                         )
-                        if (!enterPackageCommit()) {
-                            throw InterruptedException("Package operation cancelled")
-                        }
                         record(
-                            NativeRuntime.JOB_INSTALLING,
-                            3,
-                            35,
-                            "Installing verified dependencies and AUR package",
+                            NativeRuntime.JOB_VERIFYING,
+                            2,
+                            30,
+                            "Planning verified AUR package transaction",
                         )
                         val nativeOutput =
                             ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
@@ -11725,53 +11722,109 @@ class ArchpheneRuntimeService : Service() {
                             try {
                                 val descriptorValues =
                                     descriptors.map { descriptor -> descriptor.fd }.toIntArray()
-                                val length =
-                                    if (graphInstall) {
-                                        val graphManifest =
-                                            aurGraphInstallManifest(
-                                                checkNotNull(graph),
-                                                review,
-                                                graphBuiltPackages,
+                                fun invokeInstall(commit: Boolean): ByteArray {
+                                    nativeOutput.clear()
+                                    val length =
+                                        if (graphInstall) {
+                                            val graphManifest =
+                                                aurGraphInstallManifest(
+                                                    checkNotNull(graph),
+                                                    review,
+                                                    graphBuiltPackages,
+                                                )
+                                            NativeRuntime.nativeInstallAurGraphBuiltPackages(
+                                                activeHandle,
+                                                descriptorValues,
+                                                graphManifest,
+                                                graphManifest.capacity(),
+                                                review.packageName,
+                                                closureManifestSha256,
+                                                commit,
+                                                nativeOutput,
                                             )
-                                        NativeRuntime.nativeInstallAurGraphBuiltPackages(
-                                            activeHandle,
-                                            descriptorValues,
-                                            graphManifest,
-                                            graphManifest.capacity(),
-                                            review.packageName,
-                                            closureManifestSha256,
-                                            nativeOutput,
-                                        )
-                                    } else {
-                                        val filenameManifest =
-                                            aurInstallFilenameManifest(builtPackages)
-                                        NativeRuntime.nativeInstallAurBuiltPackages(
-                                            activeHandle,
-                                            descriptorValues,
-                                            filenameManifest,
-                                            filenameManifest.capacity(),
-                                            review.packageBase,
-                                            review.packageName,
-                                            review.version,
-                                            architecture,
-                                            closureManifestSha256,
-                                            nativeOutput,
+                                        } else {
+                                            val filenameManifest =
+                                                aurInstallFilenameManifest(builtPackages)
+                                            NativeRuntime.nativeInstallAurBuiltPackages(
+                                                activeHandle,
+                                                descriptorValues,
+                                                filenameManifest,
+                                                filenameManifest.capacity(),
+                                                review.packageBase,
+                                                review.packageName,
+                                                review.version,
+                                                architecture,
+                                                closureManifestSha256,
+                                                commit,
+                                                nativeOutput,
+                                            )
+                                        }
+                                    if (length == NativeRuntime.ERROR_PACKAGE_FILE_CONFLICT) {
+                                        throw PackageFileConflictException(
+                                            readNativeMessage(nativeOutput, length),
                                         )
                                     }
-                                if (length == NativeRuntime.ERROR_PACKAGE_FILE_CONFLICT) {
-                                    throw PackageFileConflictException(
-                                        readNativeMessage(nativeOutput, length),
+                                    if (
+                                        length <= 0 ||
+                                        length > NativeRuntime.PACKAGE_OUTPUT_SIZE
+                                    ) {
+                                        throw IllegalStateException(
+                                            readNativeMessage(nativeOutput, length),
+                                        )
+                                    }
+                                    return ByteArray(length).also { bytes ->
+                                        nativeOutput.position(0)
+                                        nativeOutput.get(bytes)
+                                    }
+                                }
+                                var response = invokeInstall(commit = false)
+                                check(AurPackageInstallPlanCodec.isPlan(response)) {
+                                    "AUR transaction did not return its preflight plan"
+                                }
+                                val installPlan = AurPackageInstallPlanCodec.decode(response)
+                                if (installPlan.isNotEmpty()) {
+                                    pendingPackageReplacements = installPlan
+                                    record(
+                                        NativeRuntime.JOB_AWAITING_CONFIRMATION,
+                                        2,
+                                        30,
+                                        "Review ${installPlan.size} package removal" +
+                                            if (installPlan.size == 1) "" else "s",
+                                    )
+                                    synchronized(packageReplacementLock) {
+                                        while (
+                                            !packageReplacementAuthorized &&
+                                            !packageCancellationRequested
+                                        ) {
+                                            packageReplacementLock.wait()
+                                        }
+                                    }
+                                    throwIfPackageCancelled()
+                                    runPackageCommand(
+                                        activeHandle,
+                                        NativeRuntime.PACKAGE_COMMAND_AUTHORIZE_INSTALL_PLAN,
+                                        normalized,
+                                        scratch,
                                     )
                                 }
-                                if (length <= 0 || length > NativeRuntime.PACKAGE_OUTPUT_SIZE) {
-                                    throw IllegalStateException(
-                                        readNativeMessage(nativeOutput, length),
-                                    )
+                                if (!enterPackageCommit()) {
+                                    throw InterruptedException("Package operation cancelled")
                                 }
-                                val bytes = ByteArray(length)
-                                nativeOutput.position(0)
-                                nativeOutput.get(bytes)
-                                String(bytes, StandardCharsets.UTF_8)
+                                record(
+                                    NativeRuntime.JOB_INSTALLING,
+                                    3,
+                                    35,
+                                    if (installPlan.isEmpty()) {
+                                        "Installing verified dependencies and AUR package"
+                                    } else {
+                                        "Revalidating authorized AUR replacement"
+                                    },
+                                )
+                                response = invokeInstall(commit = true)
+                                check(!AurPackageInstallPlanCodec.isPlan(response)) {
+                                    "AUR replacement authorization was not consumed"
+                                }
+                                String(response, StandardCharsets.UTF_8)
                             } finally {
                                 descriptors.forEach(ParcelFileDescriptor::close)
                             }
@@ -11874,6 +11927,8 @@ class ArchpheneRuntimeService : Service() {
                     } finally {
                         packageOperationCancelable = false
                         packageCancellationRequested = false
+                        pendingPackageReplacements = emptyList()
+                        packageReplacementAuthorized = false
                         packageOperationActive = false
                         packageThread = null
                         stopWhenUnobservedAndIdle()
