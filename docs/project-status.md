@@ -2357,10 +2357,22 @@ through the real integrated terminal, and verifies an actual `git init`,
 `git add`, and `git status --porcelain` transaction reports `A  sample.txt`.
 The gate removes its private command, result, and work tree, rejects fatal
 Android logs, and passes with inspected full-device captures on the exact
-x86_64 emulator and AArch64 Samsung. The Samsung capture also confirms the
-remaining phone-layout issue: the stock Welcome and Copilot panes leave a
-needlessly narrow workspace and terminal, so Git readiness does not close the
+x86_64 emulator and AArch64 Samsung. The initial Samsung capture also confirmed
+the phone-layout issue: the stock Welcome and Copilot panes left a needlessly
+narrow workspace and terminal, so Git readiness alone did not close the
 phone-first Code UX task.
+
+The generic phone-workspace path now closes that UX gap without changing Code
+configuration or adding an application exception. Settings explicitly tells
+users that Auto prioritizes readable phone content and that 75% fits more
+desktop panes. The retained choice expands the normal 432-logical-pixel phone
+canvas to 576 pixels while Code continues to submit an exact physical frame;
+Code's own standard pane controls remain the authority for Explorer and Chat
+visibility. A state-preserving gate selects 75% through the public Settings UI,
+recreates the manager, starts the current generated Code launcher, opens its
+integrated terminal, checks resolved appearance and frame geometry, rejects
+fatal logs, and restores the prior preference. It passes with inspected
+full-device light/dark captures on the x86_64 emulator and AArch64 Samsung.
 
 Physical AArch64 now passes the corresponding generic package and runtime
 boundary. On Samsung, the six-output AUR transaction installs SDK 10.0.302 and

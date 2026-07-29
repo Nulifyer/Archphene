@@ -44,9 +44,12 @@ GTK 3, GTK 4/libadwaita, or adapted Foot app set to follow Android changes betwe
 light and dark palettes without restarting its Linux process. An explicit Linux
 light or dark choice overrides the opposite Android mode. Material You keeps the
 same resolved light/dark policy while substituting Android semantic colors.
-Automatic geometry scale is 150% on phones, 125% on tablets, and 100% on
-desktop-sized displays. Automatic text uses Android's current font scale at the
-16 sp baseline; explicit choices multiply it from 100% through 200%.
+Automatic geometry follows Android density while preserving at least a
+432-logical-pixel desktop short edge on phones. The explicit 75% choice expands
+that phone workspace to 576 logical pixels without changing the exact physical
+frame, which is useful for multi-pane desktop applications such as Code.
+Automatic text uses Android's current font scale at the 16 sp baseline;
+explicit choices multiply it from 100% through 200%.
 Automatic visible controls are 20 dp on phones and tablets and 18 dp on
 desktop-sized or external displays. Interaction targets remain independent:
 48 dp on phones, 40 dp on tablets, and 32 dp on desktop-sized displays. Users

@@ -25,7 +25,7 @@
     <string name="appearance_heading">Linux app appearance</string>
     <string name="appearance_description">Tune unmodified Linux apps for a phone, tablet, or connected display. Each setting starts in Auto.</string>
     <string name="linux_geometry_scale">App scale</string>
-    <string name="linux_geometry_scale_description">Changes the Linux workspace geometry. Lower values fit more content; higher values make the whole interface larger.</string>
+    <string name="linux_geometry_scale_description" formatted="false">Changes the Linux workspace geometry. Auto prioritizes readable phone content; 75% fits more desktop panes. Text and controls stay separate where supported.</string>
     <string name="linux_text_scale">App text</string>
     <string name="linux_text_scale_description">Scales toolkit text independently from window geometry and visible control size.</string>
     <string name="linux_control_size">App controls</string>

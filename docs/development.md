@@ -419,6 +419,20 @@ public Packages UI. `--install-if-missing` deliberately performs that same
 mutating UI workflow and therefore must be used only after installation has
 been approved.
 
+Validate the generic 75% phone workspace with:
+
+```bash
+./scripts/test-archphene-code-phone-workspace.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk \
+  --code-package <generated-code-package>
+```
+
+The gate uses the public Settings slider, proves the choice survives manager
+restart, requires Code to publish a 576-logical-pixel-wide exact frame, opens
+the integrated terminal, captures the complete Android display, checks fatal
+logs, and restores the user's original App scale even when the test fails.
+
 Run the outbound Android document gates with each matching exact-ABI manager
 APK:
 
