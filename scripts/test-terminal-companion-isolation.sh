@@ -5,14 +5,15 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=emulator-5554
 skip_build=false
-skip_install=false
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?}"; shift 2 ;;
     --skip-build) skip_build=true; shift ;;
+    --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
     -h|--help)
-      echo "usage: $0 [--serial SERIAL] [--skip-build] [--skip-install]"
+      echo "usage: $0 [--serial SERIAL] [--skip-build] [--install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;

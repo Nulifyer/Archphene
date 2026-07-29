@@ -4,16 +4,17 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
-skip_install=false
+skip_install=true
 install_bash=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
     --install-bash) install_bash=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL [--apk PATH] [--skip-install] [--install-bash]"
+      echo "usage: $0 --serial SERIAL [--apk PATH] [--install-apk] [--install-bash]"
       exit 0 ;;
     *) archphene_die "unknown argument: $1" ;;
   esac

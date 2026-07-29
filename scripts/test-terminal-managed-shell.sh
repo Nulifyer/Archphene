@@ -7,7 +7,7 @@ serial=emulator-5554
 expected_architecture=
 expect_page_size_rejection=false
 reset_app_data=false
-skip_install=false
+skip_install=true
 refresh_runtime=false
 install_timeout=240
 while (($#)); do
@@ -16,11 +16,12 @@ while (($#)); do
     --expected-architecture) expected_architecture="${2:?}"; shift 2 ;;
     --expect-page-size-rejection) expect_page_size_rejection=true; shift ;;
     --reset-app-data) reset_app_data=true; shift ;;
+    --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
     --refresh-runtime) refresh_runtime=true; shift ;;
     --install-timeout-seconds) install_timeout="${2:?}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 [--serial SERIAL] [--expected-architecture TRIPLE] [--expect-page-size-rejection] [--reset-app-data] [--skip-install] [--refresh-runtime] [--install-timeout-seconds N]"
+      echo "usage: $0 [--serial SERIAL] [--expected-architecture TRIPLE] [--expect-page-size-rejection] [--reset-app-data] [--install-apk] [--refresh-runtime] [--install-timeout-seconds N]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;

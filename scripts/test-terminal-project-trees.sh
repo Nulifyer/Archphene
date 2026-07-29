@@ -7,7 +7,7 @@ serial=emulator-5554
 terminal_apk=
 alias_name="archphene-test-$$"
 folder="archphene-project-tree-test-$$"
-skip_install=false
+skip_install=true
 preserve_app_data=true
 fixture_owned=false
 while (($#)); do
@@ -16,12 +16,13 @@ while (($#)); do
     --terminal-apk) terminal_apk="${2:?}"; shift 2 ;;
     --alias) alias_name="${2:?}"; shift 2 ;;
     --folder) folder="${2:?}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
     --clean-data) preserve_app_data=false; shift ;;
     # Retained as a compatibility alias now that preservation is the default.
     --preserve-app-data) preserve_app_data=true; shift ;;
     -h|--help)
-      echo "usage: $0 [--serial SERIAL] [--skip-install] [--clean-data] [--alias NAME] [--folder NAME]"
+      echo "usage: $0 [--serial SERIAL] [--install-apk] [--clean-data] [--alias NAME] [--folder NAME]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;

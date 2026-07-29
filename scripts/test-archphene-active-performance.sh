@@ -7,7 +7,7 @@ source "$(dirname "$0")/lib/performance-probe.sh"
 serial=
 apk=
 launcher_package=
-skip_install=false
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
@@ -16,9 +16,10 @@ while (($#)); do
       launcher_package="${2:?missing value for --launcher-package}"
       shift 2
       ;;
+    --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --launcher-package PACKAGE [--skip-install]"
+      echo "usage: $0 --serial SERIAL --apk PATH --launcher-package PACKAGE [--install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;

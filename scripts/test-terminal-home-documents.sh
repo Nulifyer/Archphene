@@ -4,11 +4,16 @@ set -euo pipefail
 source "$(dirname "$0")/lib/android-test.sh"
 
 serial=emulator-5554
-skip_install=false
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
+    -h|--help)
+      echo "usage: $0 [--serial SERIAL] [--install-apk]"
+      exit 0
+      ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
@@ -22,7 +27,7 @@ if [[ "$skip_install" == false ]]; then
   archphene_adb_run install -r "$apk" >/dev/null
 fi
 archphene_adb_run shell pm path "$package" >/dev/null 2>&1 \
-  || archphene_die 'Terminal is not installed; omit --skip-install or provide the build artifact'
+  || archphene_die 'Terminal is not installed; pass --install-apk with the build artifact available'
 
 dump="$(archphene_adb_run shell dumpsys package "$package")"
 [[ "$dump" == *"$authority"* && "$dump" == *android.content.action.DOCUMENTS_PROVIDER* ]] \

@@ -85,10 +85,12 @@ manager APK and the currently installed manager-generated Foot launcher:
 ./scripts/test-archphene-active-performance.sh \
   --serial emulator-5554 \
   --apk tooling/build/apk/app-debug-x86_64.apk \
+  --install-apk \
   --launcher-package <generated-foot-package>
 ./scripts/test-archphene-active-performance.sh \
   --serial <adb-serial> \
   --apk tooling/build/apk/app-debug-arm64-v8a.apk \
+  --install-apk \
   --launcher-package <generated-foot-package>
 ```
 
@@ -123,10 +125,12 @@ Run the repeated-window sustained gate with the same exact-ABI inputs:
 ./scripts/test-archphene-performance-soak.sh \
   --serial emulator-5554 \
   --apk tooling/build/apk/app-debug-x86_64.apk \
+  --install-apk \
   --launcher-package <generated-foot-package>
 ./scripts/test-archphene-performance-soak.sh \
   --serial <adb-serial> \
   --apk tooling/build/apk/app-debug-arm64-v8a.apk \
+  --install-apk \
   --launcher-package <generated-foot-package>
 ```
 

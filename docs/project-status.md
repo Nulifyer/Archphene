@@ -1745,8 +1745,21 @@ only the fixture it successfully claimed. Its physical Samsung run passed SAF
 selection, nested bidirectional synchronization, conflict idempotence, deferred
 deletion, symlink rejection, restart persistence, grant removal, and cleanup;
 no test alias, private mirror/state directory, or Android folder remained.
-APK replacement and the remaining non-`pm clear` mutation classes still need
-the same explicit-default audit.
+Mandatory APK fixtures and the remaining non-`pm clear` mutation classes still
+need the same explicit-default audit.
+
+All 27 tests that already had an optional APK-install path are now
+non-installing by default. `--install-apk` is the explicit action that permits
+`adb install -r`; the old `--skip-install` option remains accepted for command
+compatibility, and development examples that intentionally replace a build
+now show the action. The default current-manager base gate passes on the
+emulator with its existing 288-package shared system and inspected full-device
+frame. The default physical Samsung project-tree gate also passes without an
+install argument, removes its complete fixture, and leaves the installed
+Terminal APK byte-identical at
+`35565acb0286b5b0a3577a067192233c40a7c073ea1bfa87fe1dc35821909a9a`.
+Tests with mandatory fixture installation, exact APK restoration, or package
+publication semantics remain separate audit classes.
 
 On July 22, 2026, a current-source x86_64 debug manager was built with the reproducible Podman toolchain, installed on the API 36 emulator, and passed the complete broad emulator regression in one sequence. The run covered package update and refresh, repository search and version selection, Android app-settings routing, authenticated runtime-pack execution and cleanup, KCalc launch/calculation/menu/rotation, native compositor input, Android PackageInstaller update, and Mousepad document, IME, touch, secondary-window, and live-theme behavior.
 

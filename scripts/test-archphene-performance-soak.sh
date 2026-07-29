@@ -7,7 +7,7 @@ source "$(dirname "$0")/lib/performance-probe.sh"
 serial=
 apk=
 launcher_package=
-skip_install=false
+skip_install=true
 window_seconds=30
 active_windows=4
 idle_windows=4
@@ -31,9 +31,10 @@ while (($#)); do
       idle_windows="${2:?missing value for --idle-windows}"
       shift 2
       ;;
+    --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --launcher-package PACKAGE [--skip-install] [--window-seconds N] [--active-windows N] [--idle-windows N]"
+      echo "usage: $0 --serial SERIAL --apk PATH --launcher-package PACKAGE [--install-apk] [--window-seconds N] [--active-windows N] [--idle-windows N]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
