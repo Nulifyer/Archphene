@@ -4,30 +4,42 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 manager=org.archphene.app.debug
 wrapper=org.archphene.linux.p9527868ff38b4f4ea2dd06c0af905874
-activity="$(archphene_launcher "$wrapper")"
 output_dir="$ARCHPHENE_ROOT/tooling/build/foot-crash"
+device_screenshot="/sdcard/archphene-foot-crash-${serial//[^a-zA-Z0-9]/-}-$$.png"
 mkdir -p "$output_dir"
+
+manager_initially_running=false
+if archphene_android_pid "$manager" >/dev/null 2>&1; then
+  manager_initially_running=true
+fi
 
 cleanup() {
   archphene_adb_run shell am force-stop "$wrapper" >/dev/null 2>&1 || true
+  archphene_adb_run shell rm -f "$device_screenshot" >/dev/null 2>&1 || true
+  if [[ "$manager_initially_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -46,7 +58,24 @@ wait_process_absent() {
   archphene_die "Linux process $pid survived the Foot crash"
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "manager $manager is not installed"
+archphene_adb_run shell pm path "$wrapper" >/dev/null ||
+  archphene_die "$wrapper is not installed; pass --install-apk with --apk"
+archphene_adb_run shell run-as "$manager" test -x files/arch-root/usr/bin/foot ||
+  archphene_die "Foot is not installed in the shared Arch root"
+if archphene_android_pid "$wrapper" >/dev/null 2>&1; then
+  archphene_die "the Foot wrapper is already running; close it before this gate"
+fi
+preflight_tree="$(process_tree)"
+if grep -qE -- '--argv0 (foot|bash) ' <<<"$preflight_tree"; then
+  archphene_die "a Linux Foot or Bash session already exists; close it before this gate"
+fi
+activity="$(archphene_launcher "$wrapper")"
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$wrapper" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
@@ -105,10 +134,10 @@ if grep -qE -- '--argv0 (foot|bash) ' <<<"$stopped_tree"; then
   archphene_die "a Surface change relaunched the stopped Linux client"
 fi
 
-archphene_adb_run shell screencap -p /sdcard/archphene-foot-crash.png
-archphene_adb_run pull /sdcard/archphene-foot-crash.png \
+archphene_adb_run shell screencap -p "$device_screenshot"
+archphene_adb_run pull "$device_screenshot" \
   "$output_dir/$serial.png" >/dev/null
-archphene_adb_run shell rm /sdcard/archphene-foot-crash.png
+archphene_adb_run shell rm "$device_screenshot"
 
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 archphene_adb_run logcat -c
