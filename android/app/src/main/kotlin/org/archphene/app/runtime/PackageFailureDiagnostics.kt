@@ -32,9 +32,22 @@ internal data class PlannedPackageRemoval(
 )
 
 internal object PackageInstallPlanCodec {
+    fun decode(bytes: ByteArray): List<PlannedPackageRemoval> =
+        PackageRemovalListCodec.decode(bytes, "org.archphene.package-install-plan.v1")
+}
+
+internal object PackageRemovalPlanCodec {
+    fun decode(bytes: ByteArray): List<PlannedPackageRemoval> =
+        PackageRemovalListCodec.decode(bytes, "org.archphene.package-removal-plan.v1")
+}
+
+private object PackageRemovalListCodec {
     private val packageName = Regex("[A-Za-z0-9@+._-]{1,128}")
 
-    fun decode(bytes: ByteArray): List<PlannedPackageRemoval> {
+    fun decode(
+        bytes: ByteArray,
+        expectedHeader: String,
+    ): List<PlannedPackageRemoval> {
         require(bytes.isNotEmpty() && bytes.size <= 16 * 1024)
         val text =
             StandardCharsets.UTF_8
@@ -45,7 +58,7 @@ internal object PackageInstallPlanCodec {
                 .toString()
         require(text.endsWith('\n'))
         val lines = text.dropLast(1).split('\n')
-        require(lines.firstOrNull() == "org.archphene.package-install-plan.v1")
+        require(lines.firstOrNull() == expectedHeader)
         val summary = lines.getOrNull(1)?.split('\t').orEmpty()
         val count = summary.getOrNull(1)?.toIntOrNull()
         require(

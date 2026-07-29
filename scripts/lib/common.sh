@@ -131,9 +131,20 @@ archphene_init_adb() {
 }
 
 archphene_capture_ui() {
-  local name="$1"
-  archphene_adb_run shell uiautomator dump --compressed "/sdcard/$name.xml" >/dev/null
-  archphene_adb_run shell cat "/sdcard/$name.xml"
+  local name="$1" path output
+  path="/sdcard/$name.xml"
+  archphene_adb_run shell rm -f "$path" >/dev/null 2>&1 || true
+  if archphene_adb_run shell uiautomator dump --compressed "$path" >/dev/null 2>&1; then
+    output="$(archphene_adb_run exec-out cat "$path" 2>/dev/null || true)"
+    if [[ "$output" == *"<hierarchy"* ]]; then
+      printf '%s' "$output"
+      return 0
+    fi
+  fi
+  # Some current Android builds visibly settle the window but intermittently
+  # fail publication through /sdcard. The direct stream has no stale-file
+  # failure mode and preserves the same accessibility hierarchy.
+  archphene_adb_run exec-out uiautomator dump --compressed /dev/tty 2>/dev/null
 }
 
 archphene_regex_contains() {
@@ -175,6 +186,20 @@ archphene_wait_ui() {
     fi
   done
   archphene_die "timed out waiting for UI pattern: $pattern"
+}
+
+archphene_wait_ui_optional() {
+  local pattern="$1" name="$2" seconds="${3:-5}" deadline
+  deadline=$((SECONDS + seconds))
+  ARCHPHENE_UI=
+  while ((SECONDS < deadline)); do
+    sleep 0.7
+    ARCHPHENE_UI="$(archphene_capture_ui "$name" 2>/dev/null || true)"
+    if archphene_regex_contains "$ARCHPHENE_UI" "$pattern"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 archphene_podman_image_exists() {

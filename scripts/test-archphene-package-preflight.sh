@@ -95,6 +95,11 @@ temporary="$(archphene_adb_run exec-out run-as "$package" find "$cache" \
 
 archphene_adb_run logcat -c
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="REMOVE"' 'remove package'
+if archphene_wait_ui_optional 'text="Remove unused dependencies\?"' \
+  "package-preflight-remove-review-$serial" 30; then
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+    'text="Keep dependencies"' 'Keep dependencies'
+fi
 archphene_wait_ui 'text="btop · Complete · 100%.*Removed btop [^"]+"' \
   "package-preflight-remove-$serial" 90
 archphene_adb_run shell run-as "$package" test ! -e files/arch-root/usr/bin/btop ||

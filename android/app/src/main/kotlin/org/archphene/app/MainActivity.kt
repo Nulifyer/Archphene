@@ -145,6 +145,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var launcherCancellationDialog: AlertDialog? = null
     private var launcherReviewDialog: AlertDialog? = null
     private var packageReplacementDialog: AlertDialog? = null
+    private var packageRemovalDialog: AlertDialog? = null
     private var packageCacheDialog: AlertDialog? = null
     private var packageCacheDialogRequested = false
     private var packageCacheRequestedRevision = Int.MIN_VALUE
@@ -1959,6 +1960,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         packageReplacementDialog?.setOnDismissListener(null)
         packageReplacementDialog?.dismiss()
         packageReplacementDialog = null
+        packageRemovalDialog?.setOnDismissListener(null)
+        packageRemovalDialog?.dismiss()
+        packageRemovalDialog = null
         packageCacheDialog?.setOnDismissListener(null)
         packageCacheDialog?.dismiss()
         packageCacheDialog = null
@@ -2261,6 +2265,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         updatePackageActivity()
         updatePackageActions()
         maybeShowPackageReplacementReview()
+        maybeShowPackageRemovalReview()
         maybeShowPackageCache()
         maybeShowStorageOnboarding()
         maybeShowLauncherCancellation()
@@ -2306,6 +2311,46 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         }
         packageReplacementDialog = dialog
+        dialog.show()
+    }
+
+    private fun maybeShowPackageRemovalReview() {
+        val binder = runtimeBinder ?: return
+        if (!binder.packageRemovalReviewAvailable) {
+            packageRemovalDialog?.dismiss()
+            return
+        }
+        if (packageRemovalDialog != null || isFinishing || isDestroyed) {
+            return
+        }
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.package_removal_title)
+                .setMessage(
+                    getString(
+                        R.string.package_removal_message,
+                        binder.packageJobName,
+                        binder.packageRemovalReviewText,
+                    ),
+                )
+                .setNegativeButton(android.R.string.cancel) { _, _ ->
+                    binder.cancelPackageOperation()
+                }
+                .setNeutralButton(R.string.package_removal_keep_dependencies) { _, _ ->
+                    binder.authorizePackageRemovalCleanup(false)
+                }
+                .setPositiveButton(R.string.package_removal_cleanup) { _, _ ->
+                    binder.authorizePackageRemovalCleanup(true)
+                }
+                .create()
+        dialog.setCancelable(false)
+        dialog.setOnDismissListener {
+            if (packageRemovalDialog === dialog) {
+                packageRemovalDialog = null
+            }
+        }
+        packageRemovalDialog = dialog
         dialog.show()
     }
 

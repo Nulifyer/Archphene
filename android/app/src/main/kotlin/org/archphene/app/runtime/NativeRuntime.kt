@@ -58,6 +58,8 @@ internal object NativeRuntime {
     const val PACKAGE_COMMAND_INSTALL_PLAN = 11
     const val PACKAGE_COMMAND_AUTHORIZE_INSTALL_PLAN = 12
     const val PACKAGE_COMMAND_ROLLBACK_MUTATION = 13
+    const val PACKAGE_COMMAND_REMOVAL_PLAN = 14
+    const val PACKAGE_COMMAND_AUTHORIZE_REMOVAL_PLAN = 15
     const val JOB_QUEUED = 1
     const val JOB_RESOLVING = 2
     const val JOB_DOWNLOADING = 3

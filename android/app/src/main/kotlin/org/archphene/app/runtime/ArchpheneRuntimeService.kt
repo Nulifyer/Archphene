@@ -461,6 +461,25 @@ class ArchpheneRuntimeService : Service() {
                     )
                 }
 
+        val packageRemovalReviewAvailable: Boolean
+            get() =
+                packageOperationActive &&
+                    jobState == NativeRuntime.JOB_AWAITING_CONFIRMATION &&
+                    pendingPackageRemovalPlan.size > 1 &&
+                    packageRemovalCleanupDecision == null
+
+        val packageRemovalReviewText: String
+            get() =
+                pendingPackageRemovalPlan
+                    .drop(1)
+                    .joinToString(separator = "\n") { removal ->
+                        getString(
+                            R.string.package_removal_dependency_item,
+                            removal.name,
+                            removal.version,
+                        )
+                    }
+
         val packageRecoveryAvailable: Boolean
             get() =
                 jobPackage.isNotEmpty() &&
@@ -677,6 +696,9 @@ class ArchpheneRuntimeService : Service() {
         fun cancelPackageOperation(): Boolean = requestPackageCancellation()
 
         fun authorizePackageReplacement(): Boolean = requestPackageReplacementAuthorization()
+
+        fun authorizePackageRemovalCleanup(cleanUnusedDependencies: Boolean): Boolean =
+            requestPackageRemovalAuthorization(cleanUnusedDependencies)
 
         fun repairPackageMutation(): Boolean = requestPackageMutationRepair()
 
@@ -1172,6 +1194,9 @@ class ArchpheneRuntimeService : Service() {
     private val packageReplacementLock = Object()
     @Volatile private var pendingPackageReplacements: List<PlannedPackageRemoval> = emptyList()
     @Volatile private var packageReplacementAuthorized = false
+    private val packageRemovalReviewLock = Object()
+    @Volatile private var pendingPackageRemovalPlan: List<PlannedPackageRemoval> = emptyList()
+    @Volatile private var packageRemovalCleanupDecision: Boolean? = null
     @Volatile private var activePackageConnection: HttpsURLConnection? = null
     @Volatile private var commandActive = false
     @Volatile private var storageDocumentActive = false
@@ -12687,6 +12712,47 @@ class ArchpheneRuntimeService : Service() {
         return PackageInstallPlanCodec.decode(output)
     }
 
+    private fun packageRemovalPlan(
+        activeHandle: Long,
+        packageName: String,
+        scratch: PackageIoScratch,
+    ): List<PlannedPackageRemoval> {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        scratch.requestBuffer.clear()
+        scratch.requestBuffer.put(packageBytes)
+        scratch.outputBuffer.clear()
+        val outputLength =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_REMOVAL_PLAN,
+                scratch.requestBuffer,
+                packageBytes.size,
+                scratch.outputBuffer,
+            )
+        if (outputLength < 0) {
+            throw IllegalStateException(readNativeMessage(scratch.outputBuffer, outputLength))
+        }
+        val output = ByteArray(outputLength)
+        scratch.outputBuffer.position(0)
+        scratch.outputBuffer.get(output)
+        return PackageRemovalPlanCodec.decode(output)
+    }
+
+    private fun authorizePackageRemovalPlan(
+        activeHandle: Long,
+        packageName: String,
+        cleanUnusedDependencies: Boolean,
+        scratch: PackageIoScratch,
+    ) {
+        val request = "$packageName\t${if (cleanUnusedDependencies) 1 else 0}"
+        runPackageCommand(
+            activeHandle,
+            NativeRuntime.PACKAGE_COMMAND_AUTHORIZE_REMOVAL_PLAN,
+            request,
+            scratch,
+        )
+    }
+
     private fun refreshPendingPackageMutation(activeHandle: Long) {
         val packageName = jobPackage
         if (packageName.isEmpty()) {
@@ -12960,6 +13026,8 @@ class ArchpheneRuntimeService : Service() {
         }
         jobPersistentId = 0L
         packageCancellationRequested = false
+        pendingPackageRemovalPlan = emptyList()
+        packageRemovalCleanupDecision = null
         packageOperationCancelable = true
         packageOperationActive = true
         publishPackageJob(
@@ -13030,8 +13098,55 @@ class ArchpheneRuntimeService : Service() {
                         record(
                             NativeRuntime.JOB_VERIFYING,
                             2,
-                            60,
-                            "Validating conservative removal plan",
+                            40,
+                            "Resolving package-only and unused-dependency removal plans",
+                        )
+                        val removalPlan =
+                            packageRemovalPlan(activeHandle, normalized, scratch)
+                        val selected =
+                            removalPlan.firstOrNull { removal -> removal.name == normalized }
+                                ?: throw IllegalStateException(
+                                    "Removal plan omits the selected package",
+                                )
+                        if (selected.version != installedVersion) {
+                            throw IllegalStateException(
+                                "Installed state changed; open Details again",
+                            )
+                        }
+                        pendingPackageRemovalPlan =
+                            listOf(selected) +
+                                removalPlan
+                                    .filterNot { removal -> removal.name == normalized }
+                                    .sortedBy(PlannedPackageRemoval::name)
+                        if (pendingPackageRemovalPlan.size > 1) {
+                            record(
+                                NativeRuntime.JOB_AWAITING_CONFIRMATION,
+                                2,
+                                60,
+                                "Review ${pendingPackageRemovalPlan.size - 1} unused " +
+                                    "dependenc" +
+                                    if (pendingPackageRemovalPlan.size == 2) "y" else "ies",
+                            )
+                            synchronized(packageRemovalReviewLock) {
+                                while (
+                                    packageRemovalCleanupDecision == null &&
+                                    !packageCancellationRequested
+                                ) {
+                                    packageRemovalReviewLock.wait()
+                                }
+                            }
+                            throwIfPackageCancelled()
+                        } else {
+                            packageRemovalCleanupDecision = false
+                        }
+                        val cleanUnusedDependencies =
+                            packageRemovalCleanupDecision
+                                ?: throw InterruptedException("Package operation cancelled")
+                        authorizePackageRemovalPlan(
+                            activeHandle,
+                            normalized,
+                            cleanUnusedDependencies,
+                            scratch,
                         )
                         if (!enterPackageCommit()) {
                             throw InterruptedException("Package operation cancelled")
@@ -13040,7 +13155,11 @@ class ArchpheneRuntimeService : Service() {
                             NativeRuntime.JOB_INSTALLING,
                             3,
                             80,
-                            "Removing $normalized $installedVersion",
+                            if (cleanUnusedDependencies) {
+                                "Removing $normalized and unused dependencies"
+                            } else {
+                                "Removing $normalized $installedVersion"
+                            },
                         )
                         runPackageCommand(
                             activeHandle,
@@ -13056,13 +13175,31 @@ class ArchpheneRuntimeService : Service() {
                         removeAvailable = false
                         searchStatus = withInstalledStatus(searchStatus, "")
                         publishAvailablePackageInstalledVersion(normalized, "")
+                        val removedDependencyCount =
+                            if (cleanUnusedDependencies) {
+                                pendingPackageRemovalPlan.size - 1
+                            } else {
+                                0
+                            }
+                        val completionMessage =
+                            if (removedDependencyCount == 0) {
+                                "Removed $normalized $installedVersion"
+                            } else {
+                                "Removed $normalized $installedVersion and " +
+                                    "$removedDependencyCount unused " +
+                                    if (removedDependencyCount == 1) {
+                                        "dependency"
+                                    } else {
+                                        "dependencies"
+                                    }
+                            }
                         record(
                             NativeRuntime.JOB_COMPLETE,
                             4,
                             100,
-                            "Removed $normalized $installedVersion",
+                            completionMessage,
                         )
-                        Log.i(TAG, "Removed $normalized $installedVersion")
+                        Log.i(TAG, completionMessage)
                     } catch (error: Exception) {
                         val cancelled =
                             error is InterruptedException || packageCancellationRequested
@@ -13143,6 +13280,8 @@ class ArchpheneRuntimeService : Service() {
                     } finally {
                         packageOperationCancelable = false
                         packageCancellationRequested = false
+                        pendingPackageRemovalPlan = emptyList()
+                        packageRemovalCleanupDecision = null
                         packageOperationActive = false
                         packageThread = null
                         stopWhenUnobservedAndIdle()
@@ -14608,6 +14747,22 @@ class ArchpheneRuntimeService : Service() {
             }
             packageReplacementAuthorized = true
             packageReplacementLock.notifyAll()
+            return true
+        }
+    }
+
+    private fun requestPackageRemovalAuthorization(cleanUnusedDependencies: Boolean): Boolean {
+        synchronized(packageRemovalReviewLock) {
+            if (
+                !packageOperationActive ||
+                jobState != NativeRuntime.JOB_AWAITING_CONFIRMATION ||
+                pendingPackageRemovalPlan.size <= 1 ||
+                packageRemovalCleanupDecision != null
+            ) {
+                return false
+            }
+            packageRemovalCleanupDecision = cleanUnusedDependencies
+            packageRemovalReviewLock.notifyAll()
             return true
         }
     }

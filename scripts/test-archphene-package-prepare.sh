@@ -219,6 +219,11 @@ archphene_wait_ui 'text="Verified btop [^"]+"' \
   "archphene-prepare-tamper-recovered-$serial" 15
 
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:REMOVE|Remove)"' 'remove package'
+if archphene_wait_ui_optional 'text="Remove unused dependencies\?"' \
+  "archphene-remove-review-$serial" 30; then
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+    'text="Keep dependencies"' 'Keep dependencies'
+fi
 wait_for_btop_removal "archphene-remove-complete-$serial"
 archphene_wait_log 'Removed btop [^ ]+' 15 >/dev/null
 if archphene_adb_run shell run-as "$package" test -e files/arch-root/usr/bin/btop; then

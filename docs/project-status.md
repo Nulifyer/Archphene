@@ -918,8 +918,8 @@ after their exact snapshot and durable mutation intent are published but before
 pacman begins. Restart exposes Repair at the retained commit boundary; repair
 restores the old record, revalidates the authorized plan, completes signed
 official `curl`, and clears all transaction residue on both exact ABIs. Exact
-rollback, whole-operation AUR recovery, dependency-orphan cleanup, and
-retry-to-completion under real storage pressure remain open.
+rollback and reviewed dependency-orphan cleanup now also pass; whole-operation
+AUR recovery and retry-to-completion under real storage pressure remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -936,10 +936,15 @@ both targets. Cancellation during a deliberately slow live network transfer
 and cancellation after actual process death remain broader failure-matrix work.
 
 Exact installed-version queries now drive state-specific Install, Update,
-Verify, and Remove actions. Removal first asks pacman for a non-cascading plan,
-fails if dependents make that unsafe, removes only the requested target, then
-proves both its executable and local database record are absent. Dependencies
-remain installed for the pending orphan-cleanup policy.
+Verify, and Remove actions. Removal derives both package-only and recursive
+pacman plans. A blocking phone-sized review identifies every unused dependency
+by exact name/version, explains the shared Arch environment, and offers Cancel,
+Keep dependencies, or Remove all. Rust retains the single-use choice,
+independently rejects explicit packages from the cleanup tail, re-simulates
+before mutation, and snapshots every authorized local ownership record.
+`angle-grinder`/`jemalloc` gates prove package-only preservation on the
+emulator, cleanup on Samsung, and complete multi-package repair after
+deterministic manager death on the emulator.
 
 The update command now has a distinct Rust/JNI path instead of reusing fresh
 installation semantics. On July 27, a signed cached AArch64
@@ -981,9 +986,8 @@ Accepted replacement interruption and forward Repair also pass from a durable
 pre-pacman boundary on both devices. A separate post-pacman gate proves exact
 signed rollback on both ABIs, including removal of AArch64's newly introduced
 `jemalloc` dependency and restoration of the prior dependency reason.
-Hooks/scriptlets, orphan cleanup, and a real-storage-pressure
-retry-to-completion gate remain open, so this is not yet a complete production
-transaction engine.
+Hooks/scriptlets and a real-storage-pressure retry-to-completion gate remain
+open, so this is not yet a complete production transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16

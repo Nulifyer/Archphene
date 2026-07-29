@@ -169,6 +169,11 @@
     <string name="package_replacement_item">Remove %1$s %2$s</string>
     <string name="package_replacement_message">Installing %1$s requires these removals:\n\n%2$s\n\nThe apps share one Arch environment. Continue only if these changes are expected.</string>
     <string name="package_replacement_confirm">Replace</string>
+    <string name="package_removal_title">Remove unused dependencies?</string>
+    <string name="package_removal_dependency_item">Remove %1$s %2$s</string>
+    <string name="package_removal_message">Removing %1$s can also remove these packages that no installed app needs:\n\n%2$s\n\nAll Linux apps share one Arch environment. Keep them if you use them directly.</string>
+    <string name="package_removal_keep_dependencies">Keep dependencies</string>
+    <string name="package_removal_cleanup">Remove all</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>
     <string name="package_search_official">Official</string>
     <string name="package_search_installed">Installed</string>

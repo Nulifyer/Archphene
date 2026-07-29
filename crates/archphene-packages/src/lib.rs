@@ -431,6 +431,7 @@ pub struct PackageRuntime {
     compatibility_analysis: Arc<Mutex<()>>,
     compatibility_review: Arc<Mutex<Option<PackageCompatibilityReview>>>,
     replacement_review: Arc<Mutex<Option<PackageReplacementReview>>>,
+    removal_review: Arc<Mutex<Option<PackageRemovalReview>>>,
     debug_pre_transaction_hold_millis: Arc<AtomicU64>,
     debug_post_transaction_hold_millis: Arc<AtomicU64>,
 }
@@ -633,6 +634,13 @@ struct PackageReplacementReview {
     resolution_sha256: [u8; 32],
     removals: Vec<InstalledPackageIdentity>,
     authorized: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PackageRemovalReview {
+    package: String,
+    removals: Vec<InstalledPackageIdentity>,
+    cleanup_authorized: Option<bool>,
 }
 
 struct InstalledPackage {
@@ -1140,6 +1148,7 @@ impl PackageRuntime {
             compatibility_analysis: Arc::new(Mutex::new(())),
             compatibility_review: Arc::new(Mutex::new(None)),
             replacement_review: Arc::new(Mutex::new(None)),
+            removal_review: Arc::new(Mutex::new(None)),
             debug_pre_transaction_hold_millis: Arc::new(AtomicU64::new(0)),
             debug_post_transaction_hold_millis: Arc::new(AtomicU64::new(0)),
         };
@@ -1905,6 +1914,75 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         Ok(review.removals)
+    }
+
+    fn publish_package_removal_review(
+        &self,
+        package: &str,
+        removals: &[InstalledPackageIdentity],
+    ) -> Result<(), PackageRuntimeError> {
+        if removals.is_empty()
+            || removals.len() > MAX_INSTALL_PLAN_REMOVALS
+            || !removals.iter().any(|removal| removal.name == package)
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        self.removal_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?
+            .replace(PackageRemovalReview {
+                package: package.to_owned(),
+                removals: removals.to_vec(),
+                cleanup_authorized: None,
+            });
+        Ok(())
+    }
+
+    pub fn authorize_removal_plan(&self, request: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        let Some((package, cleanup)) = request.split_once('\t') else {
+            return Err(PackageRuntimeError::InvalidQuery);
+        };
+        if !safe_logical_name(package) || !matches!(cleanup, "0" | "1") {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let mut review = self
+            .removal_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+        let review = review
+            .as_mut()
+            .filter(|review| review.package == package && review.cleanup_authorized.is_none())
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        review.cleanup_authorized = Some(cleanup == "1");
+        Ok(empty_tool_output())
+    }
+
+    fn consume_package_removal_review(
+        &self,
+        package: &str,
+    ) -> Result<(Vec<InstalledPackageIdentity>, bool), PackageRuntimeError> {
+        let review = self
+            .removal_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?
+            .take()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let cleanup = review
+            .cleanup_authorized
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if review.package != package {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        if cleanup {
+            Ok((review.removals, true))
+        } else {
+            let target = review
+                .removals
+                .into_iter()
+                .find(|removal| removal.name == package)
+                .ok_or(PackageRuntimeError::InvalidResolution)?;
+            Ok((vec![target], false))
+        }
     }
 
     fn prepare_fresh_resolution_database(&self) -> Result<PathBuf, PackageRuntimeError> {
@@ -3000,6 +3078,28 @@ impl PackageRuntime {
         }))
     }
 
+    fn installed_package_has_scriptlet(
+        &self,
+        package: &str,
+        version: &str,
+    ) -> Result<bool, PackageRuntimeError> {
+        let local_entry = find_local_database_entry(&self.arch_root, package, version)?;
+        let install_script = local_entry.join("install");
+        match fs::symlink_metadata(&install_script) {
+            Ok(metadata)
+                if !metadata.file_type().is_symlink()
+                    && metadata.is_file()
+                    && metadata.len() > 0
+                    && metadata.len() <= LOCAL_DATABASE_PACKAGE_FILE_LIMIT =>
+            {
+                Ok(true)
+            }
+            Ok(_) => Err(PackageRuntimeError::UnsafeEntry(install_script)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(PackageRuntimeError::Io(error)),
+        }
+    }
+
     pub fn install_verified_aur_archive(
         &self,
         input: &mut VerifiedAurArchive<'_>,
@@ -3701,7 +3801,44 @@ impl PackageRuntime {
         }
     }
 
-    pub fn remove(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+    pub fn removal_plan(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let removals = self.preview_removal(package, true)?;
+        let installed = self.installed_package_catalog()?;
+        for removal in &removals {
+            let index = installed
+                .packages
+                .binary_search_by(|candidate| candidate.name.cmp(&removal.name))
+                .map_err(|_| PackageRuntimeError::InvalidResolution)?;
+            let candidate = &installed.packages[index];
+            if candidate.version != removal.version
+                || (candidate.name != package && candidate.explicitly_installed)
+            {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        self.publish_package_removal_review(package, &removals)?;
+        let mut output = empty_tool_output();
+        output.push(b"org.archphene.package-removal-plan.v1\nremovals\t")?;
+        output.push(removals.len().to_string().as_bytes())?;
+        output.push(b"\n")?;
+        for removal in removals {
+            output.push(b"remove\t")?;
+            output.push(removal.name.as_bytes())?;
+            output.push(b"\t")?;
+            output.push(removal.version.as_bytes())?;
+            output.push(b"\n")?;
+        }
+        Ok(output)
+    }
+
+    fn preview_removal(
+        &self,
+        package: &str,
+        cleanup: bool,
+    ) -> Result<Vec<InstalledPackageIdentity>, PackageRuntimeError> {
         if self.installed_version(package)?.as_bytes().is_empty() {
             return Err(PackageRuntimeError::NotInstalled);
         }
@@ -3717,6 +3854,7 @@ impl PackageRuntime {
         let database = database_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
+        let operation = if cleanup { "-Rs" } else { "-R" };
         let plan = self.run_with_timeout(
             PackageTool::Pacman,
             &[
@@ -3728,29 +3866,54 @@ impl PackageRuntime {
                 database,
                 "--print",
                 "--print-format",
-                "%n",
-                "-R",
+                "%n\t%v",
+                operation,
                 package,
             ],
             COMMAND_TIMEOUT,
         )?;
-        if plan.as_str()?.trim() != package {
+        parse_removal_plan(plan.as_str()?, package)
+    }
+
+    pub fn remove(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        let (expected_removals, cleanup) = self.consume_package_removal_review(package)?;
+        let plan = self.preview_removal(package, cleanup)?;
+        if plan != expected_removals {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        let installed_version = self.installed_version(package)?;
-        let aur_package = self.installed_origin(package)?.as_str()? == "aur";
-        let run_scriptlets = aur_package
-            && self.aur_removal_scriptlets_authorized(package, installed_version.as_str()?)?;
-        if aur_package && !run_scriptlets {
+        let mut run_scriptlets = false;
+        let mut official_scriptlets = false;
+        for removal in &expected_removals {
+            let has_scriptlet =
+                self.installed_package_has_scriptlet(&removal.name, &removal.version)?;
+            if self.installed_origin(&removal.name)?.as_str()? == "aur" {
+                if has_scriptlet
+                    && !self.aur_removal_scriptlets_authorized(&removal.name, &removal.version)?
+                {
+                    return Err(PackageRuntimeError::UnreviewedInstallScript);
+                }
+                run_scriptlets |= has_scriptlet;
+            } else {
+                official_scriptlets |= has_scriptlet;
+            }
+        }
+        if run_scriptlets && official_scriptlets {
             return Err(PackageRuntimeError::UnreviewedInstallScript);
         }
-        let removal_database_sha256 =
-            self.prepare_removal_repair(package, installed_version.as_str()?)?;
-        self.publish_remove_mutation_intent(
-            package,
-            installed_version.as_str()?,
-            Some(removal_database_sha256),
-        )?;
+        let removal_records = self.prepare_replacement_repair(&expected_removals)?;
+        self.publish_remove_mutation_intent(package, &removal_records)?;
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
         let mut arguments = vec![
             "--config",
             config,
@@ -3764,17 +3927,187 @@ impl PackageRuntime {
         if !run_scriptlets {
             arguments.push("--noscriptlet");
         }
-        arguments.extend(["-R", package]);
+        arguments.extend([if cleanup { "-Rs" } else { "-R" }, package]);
+        self.hold_debug_before_transaction();
         let result = self.run_with_timeout(PackageTool::Pacman, &arguments, TRANSACTION_TIMEOUT);
         if let Err(error) = result {
             self.recover_database_lock()?;
             return Err(error);
         }
         self.validate_local_database()?;
-        if !self.installed_version(package)?.as_bytes().is_empty() {
+        for removal in &expected_removals {
+            if !self.installed_version(&removal.name)?.as_bytes().is_empty() {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        self.clear_replacement_repair()?;
+        self.clear_pending_mutation()?;
+        self.reconcile_aur_lifecycle_capabilities()?;
+        Ok(empty_tool_output())
+    }
+
+    fn repair_removal_transaction(
+        &self,
+        package: &str,
+        removals: &[ReplacementRepairRecord],
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if removals.is_empty()
+            || removals.len() > MAX_INSTALL_PLAN_REMOVALS
+            || !removals.iter().any(|removal| removal.name == package)
+        {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        self.clear_removal_repair()?;
+        let mut repair_records = removals.to_vec();
+        let replacement_snapshot = self.arch_root.join(PACKAGE_REPLACEMENT_REPAIR_DIRECTORY);
+        let replacement_snapshot_present = match fs::symlink_metadata(&replacement_snapshot) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(PackageRuntimeError::UnsafeEntry(replacement_snapshot));
+                }
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        let mut legacy_snapshot = repair_records.len() == 1 && self.removal_repair_exists()?;
+        if !replacement_snapshot_present
+            && !legacy_snapshot
+            && repair_records.len() == 1
+            && repair_records[0].database_sha256.is_empty()
+        {
+            let record = &mut repair_records[0];
+            if self.installed_version(&record.name)?.as_str()? != record.version {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            record.database_sha256 = self.prepare_removal_repair(&record.name, &record.version)?;
+            self.clear_pending_mutation()?;
+            self.publish_remove_mutation_intent(package, &repair_records)?;
+            legacy_snapshot = true;
+        }
+        if replacement_snapshot_present {
+            self.restore_replacement_repair(&repair_records)?;
+        } else if legacy_snapshot {
+            let removal = &repair_records[0];
+            if removal.database_sha256.is_empty() {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            self.restore_removal_repair(&removal.name, &removal.version, &removal.database_sha256)?;
+        } else if repair_records.iter().all(|removal| {
+            self.installed_version(&removal.name)
+                .is_ok_and(|version| version.as_bytes().is_empty())
+        }) {
+            self.validate_local_database()?;
+            self.clear_pending_mutation()?;
+            return Ok(empty_tool_output());
+        } else {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+
+        let expected = repair_records
+            .iter()
+            .map(|removal| InstalledPackageIdentity {
+                name: removal.name.clone(),
+                version: removal.version.clone(),
+            })
+            .collect::<Vec<_>>();
+        for removal in &expected {
+            if self.installed_version(&removal.name)?.as_str()? != removal.version {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let mut canonical_expected = expected;
+        canonical_expected.sort_unstable_by(|left, right| {
+            (left.name != package)
+                .cmp(&(right.name != package))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let names = canonical_expected
+            .iter()
+            .map(|removal| removal.name.as_str())
+            .collect::<Vec<_>>();
+        let mut plan_arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--print",
+            "--print-format",
+            "%n\t%v",
+            "-R",
+        ];
+        plan_arguments.extend(names.iter().copied());
+        let plan = self.run_with_timeout(PackageTool::Pacman, &plan_arguments, COMMAND_TIMEOUT)?;
+        let planned = parse_removal_plan(plan.as_str()?, package)?;
+        if planned != canonical_expected {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+
+        let mut run_scriptlets = false;
+        let mut official_scriptlets = false;
+        for removal in &canonical_expected {
+            let has_scriptlet =
+                self.installed_package_has_scriptlet(&removal.name, &removal.version)?;
+            if self.installed_origin(&removal.name)?.as_str()? == "aur" {
+                if has_scriptlet
+                    && !self.aur_removal_scriptlets_authorized(&removal.name, &removal.version)?
+                {
+                    return Err(PackageRuntimeError::UnreviewedInstallScript);
+                }
+                run_scriptlets |= has_scriptlet;
+            } else {
+                official_scriptlets |= has_scriptlet;
+            }
+        }
+        if run_scriptlets && official_scriptlets {
+            return Err(PackageRuntimeError::UnreviewedInstallScript);
+        }
+        let mut arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--noconfirm",
+            "--noprogressbar",
+        ];
+        if !run_scriptlets {
+            arguments.push("--noscriptlet");
+        }
+        arguments.push("-R");
+        arguments.extend(names.iter().copied());
+        if let Err(error) =
+            self.run_with_timeout(PackageTool::Pacman, &arguments, TRANSACTION_TIMEOUT)
+        {
+            self.recover_database_lock()?;
+            return Err(error);
+        }
+        self.validate_local_database()?;
+        for removal in &canonical_expected {
+            if !self.installed_version(&removal.name)?.as_bytes().is_empty() {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        if legacy_snapshot {
+            self.clear_removal_repair()?;
+        } else {
+            self.clear_replacement_repair()?;
+        }
         self.clear_pending_mutation()?;
         self.reconcile_aur_lifecycle_capabilities()?;
         Ok(empty_tool_output())
@@ -3804,9 +4137,14 @@ impl PackageRuntime {
             }
             PackageMutationIntent::Remove {
                 package: target,
-                version,
-                ..
+                removals,
             } if target == package => {
+                let version = removals
+                    .iter()
+                    .find(|removal| removal.name == target)
+                    .ok_or(PackageRuntimeError::InvalidResolution)?
+                    .version
+                    .as_str();
                 output.push(b"remove\t")?;
                 output.push(version.as_bytes())?;
             }
@@ -4058,48 +4396,12 @@ impl PackageRuntime {
             }
             PackageMutationIntent::Remove {
                 package: target,
-                version,
-                database_sha256,
+                removals,
             } => {
                 if target != package {
                     return Err(PackageRuntimeError::Busy);
                 }
-                if let Some(expected_sha256) = database_sha256.as_deref() {
-                    if self.removal_repair_exists()? {
-                        self.restore_removal_repair(&target, &version, expected_sha256)?;
-                    } else {
-                        let installed = self.installed_version(&target)?;
-                        if installed.as_bytes().is_empty() {
-                            self.validate_local_database()?;
-                            self.clear_removal_repair()?;
-                            self.clear_pending_mutation()?;
-                            return Ok(empty_tool_output());
-                        }
-                        if installed.as_str()? != version {
-                            return Err(PackageRuntimeError::InvalidResolution);
-                        }
-                        let actual_sha256 = self.prepare_removal_repair(&target, &version)?;
-                        if actual_sha256 != expected_sha256 {
-                            return Err(PackageRuntimeError::InvalidResolution);
-                        }
-                    }
-                }
-                let installed = self.installed_version(&target)?;
-                if installed.as_bytes().is_empty() {
-                    self.validate_local_database()?;
-                    self.clear_removal_repair()?;
-                    self.clear_pending_mutation()?;
-                    return Ok(empty_tool_output());
-                }
-                if installed.as_str()? != version {
-                    return Err(PackageRuntimeError::InvalidResolution);
-                }
-                if database_sha256.is_none() {
-                    let sha256 = self.prepare_removal_repair(&target, &version)?;
-                    self.clear_pending_mutation()?;
-                    self.publish_remove_mutation_intent(&target, &version, Some(sha256))?;
-                }
-                self.remove(&target)
+                self.repair_removal_transaction(&target, &removals)
             }
         }
     }
@@ -4128,13 +4430,11 @@ impl PackageRuntime {
     fn publish_remove_mutation_intent(
         &self,
         package: &str,
-        version: &str,
-        database_sha256: Option<String>,
+        removals: &[ReplacementRepairRecord],
     ) -> Result<(), PackageRuntimeError> {
         self.publish_mutation_intent(&PackageMutationIntent::Remove {
             package: package.to_owned(),
-            version: version.to_owned(),
-            database_sha256,
+            removals: removals.to_vec(),
         })
     }
 
@@ -9031,8 +9331,7 @@ enum PackageMutationIntent {
     },
     Remove {
         package: String,
-        version: String,
-        database_sha256: Option<String>,
+        removals: Vec<ReplacementRepairRecord>,
     },
 }
 
@@ -9100,20 +9399,19 @@ fn serialize_package_mutation_intent(
                 content.push('\n');
             }
         }
-        PackageMutationIntent::Remove {
-            package,
-            version,
-            database_sha256,
-        } => {
+        PackageMutationIntent::Remove { package, removals } => {
             content.push_str("remove\t");
             content.push_str(package);
-            content.push('\t');
-            content.push_str(version);
-            if let Some(database_sha256) = database_sha256 {
-                content.push('\t');
-                content.push_str(database_sha256);
-            }
             content.push('\n');
+            for removal in removals {
+                content.push_str("remove-record\t");
+                content.push_str(&removal.name);
+                content.push('\t');
+                content.push_str(&removal.version);
+                content.push('\t');
+                content.push_str(&removal.database_sha256);
+                content.push('\n');
+            }
         }
     }
     if content.len() as u64 > PACKAGE_MUTATION_INTENT_LIMIT {
@@ -9313,32 +9611,66 @@ fn parse_package_mutation_intent(
             rollback,
         })
     } else if let Some(removal) = operation.strip_prefix("remove\t") {
-        if lines.next().is_some() {
+        let fields = removal.split('\t').collect::<Vec<_>>();
+        let package = fields
+            .first()
+            .copied()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if !safe_logical_name(package) {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        let mut fields = removal.split('\t');
-        let package = fields
-            .next()
-            .ok_or(PackageRuntimeError::InvalidResolution)?;
-        let version = fields
-            .next()
-            .ok_or(PackageRuntimeError::InvalidResolution)?;
-        let database_sha256 = fields.next();
-        if fields.next().is_some()
-            || !safe_logical_name(package)
-            || version.is_empty()
-            || version.len() > 128
-            || version
-                .bytes()
-                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
-            || database_sha256.is_some_and(|value| !valid_sha256_hex(value))
-        {
+        // Accept the original single-record form so an app upgrade can still
+        // repair a transaction journal written by an older Manager.
+        let removals = if fields.len() == 2 || fields.len() == 3 {
+            if lines.next().is_some()
+                || !safe_package_version(fields[1])
+                || fields.get(2).is_some_and(|value| !valid_sha256_hex(value))
+            {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            vec![ReplacementRepairRecord {
+                name: package.to_owned(),
+                version: fields[1].to_owned(),
+                database_sha256: fields.get(2).copied().unwrap_or_default().to_owned(),
+            }]
+        } else if fields.len() == 1 {
+            let mut removals = Vec::with_capacity(4);
+            for line in lines {
+                let Some(record) = line.strip_prefix("remove-record\t") else {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                };
+                let mut fields = record.split('\t');
+                let (Some(name), Some(version), Some(database_sha256), None) =
+                    (fields.next(), fields.next(), fields.next(), fields.next())
+                else {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                };
+                if !safe_logical_name(name)
+                    || !safe_package_version(version)
+                    || !valid_sha256_hex(database_sha256)
+                    || removals.len() >= MAX_INSTALL_PLAN_REMOVALS
+                    || removals
+                        .iter()
+                        .any(|entry: &ReplacementRepairRecord| entry.name == name)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                removals.push(ReplacementRepairRecord {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                    database_sha256: database_sha256.to_owned(),
+                });
+            }
+            removals
+        } else {
+            return Err(PackageRuntimeError::InvalidResolution);
+        };
+        if removals.is_empty() || !removals.iter().any(|entry| entry.name == package) {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         Ok(PackageMutationIntent::Remove {
             package: package.to_owned(),
-            version: version.to_owned(),
-            database_sha256: database_sha256.map(str::to_owned),
+            removals,
         })
     } else {
         Err(PackageRuntimeError::InvalidResolution)
@@ -9427,6 +9759,45 @@ fn validate_install_plan(
     } else {
         Err(PackageRuntimeError::InvalidResolution)
     }
+}
+
+fn parse_removal_plan(
+    input: &str,
+    target: &str,
+) -> Result<Vec<InstalledPackageIdentity>, PackageRuntimeError> {
+    if !safe_logical_name(target) || input.is_empty() || !input.ends_with('\n') {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let mut removals = Vec::with_capacity(4);
+    for line in input.lines() {
+        let mut fields = line.split('\t');
+        let (Some(name), Some(version), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(PackageRuntimeError::InvalidResolution);
+        };
+        if !safe_logical_name(name)
+            || !safe_package_version(version)
+            || removals.len() >= MAX_INSTALL_PLAN_REMOVALS
+            || removals
+                .iter()
+                .any(|removal: &InstalledPackageIdentity| removal.name == name)
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        removals.push(InstalledPackageIdentity {
+            name: name.to_owned(),
+            version: version.to_owned(),
+        });
+    }
+    if removals.is_empty() || !removals.iter().any(|removal| removal.name == target) {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    removals.sort_unstable_by(|left, right| {
+        (left.name != target)
+            .cmp(&(right.name != target))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(removals)
 }
 
 fn parse_resolved_payload(line: &str) -> Result<ResolvedPayload<'_>, PackageRuntimeError> {
@@ -11459,6 +11830,85 @@ https://geo.mirror.pkgbuild.com/core/os/x86_64/pacman-7.1.0-2-x86_64.pkg.tar.zst
     }
 
     #[test]
+    fn removal_review_distinguishes_package_only_from_dependency_cleanup() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let removals = vec![
+            InstalledPackageIdentity {
+                name: "tool".to_owned(),
+                version: "2.0-1".to_owned(),
+            },
+            InstalledPackageIdentity {
+                name: "unused-library".to_owned(),
+                version: "1.0-3".to_owned(),
+            },
+        ];
+        runtime
+            .publish_package_removal_review("tool", &removals)
+            .expect("publish removal review");
+        assert!(runtime.authorize_removal_plan("other\t1").is_err());
+        runtime
+            .clone()
+            .authorize_removal_plan("tool\t0")
+            .expect("keep dependencies");
+        assert_eq!(
+            runtime
+                .consume_package_removal_review("tool")
+                .expect("consume package-only review"),
+            (vec![removals[0].clone()], false),
+        );
+        assert!(runtime.consume_package_removal_review("tool").is_err());
+
+        runtime
+            .publish_package_removal_review("tool", &removals)
+            .expect("republish removal review");
+        runtime
+            .authorize_removal_plan("tool\t1")
+            .expect("authorize cleanup");
+        assert_eq!(
+            runtime
+                .consume_package_removal_review("tool")
+                .expect("consume cleanup review"),
+            (removals, true),
+        );
+    }
+
+    #[test]
+    fn removal_plan_parser_is_exact_bounded_and_canonical() {
+        assert_eq!(
+            parse_removal_plan("unused-b\t2.0-1\ntool\t1.0-1\nunused-a\t3:4.0-2\n", "tool",)
+                .expect("removal plan"),
+            vec![
+                InstalledPackageIdentity {
+                    name: "tool".to_owned(),
+                    version: "1.0-1".to_owned(),
+                },
+                InstalledPackageIdentity {
+                    name: "unused-a".to_owned(),
+                    version: "3:4.0-2".to_owned(),
+                },
+                InstalledPackageIdentity {
+                    name: "unused-b".to_owned(),
+                    version: "2.0-1".to_owned(),
+                },
+            ],
+        );
+        for invalid in [
+            "",
+            "tool\t1.0-1",
+            "other\t1.0-1\n",
+            "tool\t1.0-1\ntool\t2.0-1\n",
+            "../tool\t1.0-1\n",
+            "tool 1.0-1\n",
+        ] {
+            assert!(matches!(
+                parse_removal_plan(invalid, "tool"),
+                Err(PackageRuntimeError::InvalidResolution),
+            ));
+        }
+    }
+
+    #[test]
     fn package_resolution_supports_large_bounded_closures() {
         let mut input = String::new();
         for index in 0..200 {
@@ -12000,8 +12450,18 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
 
         let removal = PackageMutationIntent::Remove {
             package: "btop".to_owned(),
-            version: "1.4.7-1".to_owned(),
-            database_sha256: Some("a".repeat(64)),
+            removals: vec![
+                ReplacementRepairRecord {
+                    name: "btop".to_owned(),
+                    version: "1.4.7-1".to_owned(),
+                    database_sha256: "a".repeat(64),
+                },
+                ReplacementRepairRecord {
+                    name: "fmt".to_owned(),
+                    version: "11.2.0-1".to_owned(),
+                    database_sha256: "b".repeat(64),
+                },
+            ],
         };
         let encoded = serialize_package_mutation_intent(&removal, RepositoryArchitecture::X86_64)
             .expect("serialize removal");
@@ -12018,8 +12478,11 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
             .expect("parse legacy removal"),
             PackageMutationIntent::Remove {
                 package: "btop".to_owned(),
-                version: "1.4.7-1".to_owned(),
-                database_sha256: None,
+                removals: vec![ReplacementRepairRecord {
+                    name: "btop".to_owned(),
+                    version: "1.4.7-1".to_owned(),
+                    database_sha256: String::new(),
+                }],
             },
         );
 
