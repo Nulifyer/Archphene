@@ -83,7 +83,7 @@ fn parse_launcher_reduced_isolation(
     version: &str,
     fields: &mut std::str::Split<'_, char>,
 ) -> Result<bool, ()> {
-    if version != "G4" {
+    if version != "G4" && version != "G5" {
         return Ok(false);
     }
     match fields.next() {
@@ -5064,13 +5064,20 @@ mod android {
             return ERROR_INVALID_ARGUMENT;
         };
         let mut fields = request.split('\t');
-        let (Some("A1"), Some(android_package), Some(descriptor_id), Some(generation), None) = (
+        let (
+            Some(version @ ("A1" | "A2")),
+            Some(android_package),
+            Some(descriptor_id),
+            Some(generation),
+            None,
+        ) = (
             fields.next(),
             fields.next(),
             fields.next(),
             fields.next(),
             fields.next(),
-        ) else {
+        )
+        else {
             return ERROR_INVALID_ARGUMENT;
         };
         if android_package.len() != 53
@@ -5104,11 +5111,20 @@ mod android {
         if authorization.label.contains(['\t', '\n', '\r', '\0']) {
             return ERROR_INTERNAL;
         }
-        let encoded = format!(
-            "A1\t{}\t{}\n",
-            u8::from(authorization.terminal),
-            authorization.label,
-        );
+        let encoded = if version == "A2" {
+            format!(
+                "A2\t{}\t{}\t{}\n",
+                u8::from(authorization.terminal),
+                authorization.integration_topology,
+                authorization.label,
+            )
+        } else {
+            format!(
+                "A1\t{}\t{}\n",
+                u8::from(authorization.terminal),
+                authorization.label,
+            )
+        };
         if encoded.len() > output_capacity {
             return ERROR_INTERNAL;
         }
@@ -5170,90 +5186,115 @@ mod android {
         else {
             return i64::from(ERROR_INVALID_ARGUMENT);
         };
-        let (appearance, portal_bus_address, reduced_isolation_electron) = if version == "G1" {
-            if fields.next().is_some() {
-                return i64::from(ERROR_INVALID_ARGUMENT);
-            }
-            (GuiAppearance::default(), None, false)
-        } else if version == "G2" || version == "G3" || version == "G4" {
-            let (
-                Some(dark),
-                Some(font_percent),
-                Some(control_visual_dp),
-                Some(control_target_dp),
-                Some(accent),
-                Some(background),
-                Some(foreground),
-            ) = (
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-            )
-            else {
-                return i64::from(ERROR_INVALID_ARGUMENT);
-            };
-            let portal_bus_address = if version == "G3" || version == "G4" {
-                let Some(address) = fields.next() else {
-                    return i64::from(ERROR_INVALID_ARGUMENT);
-                };
-                if address.len() > 256
-                    || !address.starts_with("unix:path=/data/")
-                    || address
-                        .bytes()
-                        .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
-                {
+        let (appearance, portal_bus_address, reduced_isolation_electron, virgl_socket_path) =
+            if version == "G1" {
+                if fields.next().is_some() {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 }
-                Some(address)
+                (GuiAppearance::default(), None, false, None)
+            } else if version == "G2" || version == "G3" || version == "G4" || version == "G5" {
+                let (
+                    Some(dark),
+                    Some(font_percent),
+                    Some(control_visual_dp),
+                    Some(control_target_dp),
+                    Some(accent),
+                    Some(background),
+                    Some(foreground),
+                ) = (
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                    fields.next(),
+                )
+                else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                let portal_bus_address = if version == "G3" || version == "G4" || version == "G5" {
+                    let Some(address) = fields.next() else {
+                        return i64::from(ERROR_INVALID_ARGUMENT);
+                    };
+                    if address.len() > 256
+                        || !address.starts_with("unix:path=/data/")
+                        || address
+                            .bytes()
+                            .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+                    {
+                        return i64::from(ERROR_INVALID_ARGUMENT);
+                    }
+                    Some(address)
+                } else {
+                    None
+                };
+                let Ok(reduced_isolation_electron) =
+                    super::parse_launcher_reduced_isolation(version, &mut fields)
+                else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                let virgl_socket_path = if version == "G5" {
+                    let Some(socket) = fields.next() else {
+                        return i64::from(ERROR_INVALID_ARGUMENT);
+                    };
+                    if socket == "-" {
+                        None
+                    } else if socket.len() >= 104
+                        || !socket.starts_with("/data/")
+                        || socket
+                            .bytes()
+                            .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+                    {
+                        return i64::from(ERROR_INVALID_ARGUMENT);
+                    } else {
+                        Some(socket)
+                    }
+                } else {
+                    None
+                };
+                if fields.next().is_some() {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                }
+                let dark = match dark {
+                    "0" => false,
+                    "1" => true,
+                    _ => return i64::from(ERROR_INVALID_ARGUMENT),
+                };
+                let (Ok(font_percent), Ok(control_visual_dp), Ok(control_target_dp)) = (
+                    font_percent.parse::<u16>(),
+                    control_visual_dp.parse::<u16>(),
+                    control_target_dp.parse::<u16>(),
+                ) else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                let (Some(accent), Some(background), Some(foreground)) = (
+                    parse_rgb_hex(accent),
+                    parse_rgb_hex(background),
+                    parse_rgb_hex(foreground),
+                ) else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                match GuiAppearance::new(
+                    dark,
+                    font_percent,
+                    control_visual_dp,
+                    control_target_dp,
+                    accent,
+                    background,
+                    foreground,
+                ) {
+                    Ok(appearance) => (
+                        appearance,
+                        portal_bus_address,
+                        reduced_isolation_electron,
+                        virgl_socket_path,
+                    ),
+                    Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
+                }
             } else {
-                None
-            };
-            let Ok(reduced_isolation_electron) =
-                super::parse_launcher_reduced_isolation(version, &mut fields)
-            else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
-            if fields.next().is_some() {
-                return i64::from(ERROR_INVALID_ARGUMENT);
-            }
-            let dark = match dark {
-                "0" => false,
-                "1" => true,
-                _ => return i64::from(ERROR_INVALID_ARGUMENT),
-            };
-            let (Ok(font_percent), Ok(control_visual_dp), Ok(control_target_dp)) = (
-                font_percent.parse::<u16>(),
-                control_visual_dp.parse::<u16>(),
-                control_target_dp.parse::<u16>(),
-            ) else {
-                return i64::from(ERROR_INVALID_ARGUMENT);
-            };
-            let (Some(accent), Some(background), Some(foreground)) = (
-                parse_rgb_hex(accent),
-                parse_rgb_hex(background),
-                parse_rgb_hex(foreground),
-            ) else {
-                return i64::from(ERROR_INVALID_ARGUMENT);
-            };
-            match GuiAppearance::new(
-                dark,
-                font_percent,
-                control_visual_dp,
-                control_target_dp,
-                accent,
-                background,
-                foreground,
-            ) {
-                Ok(appearance) => (appearance, portal_bus_address, reduced_isolation_electron),
-                Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
-            }
-        } else {
-            return i64::from(ERROR_INVALID_ARGUMENT);
-        };
         if android_package.len() != 53
             || !android_package.starts_with("org.archphene.linux.p")
             || !android_package
@@ -5291,6 +5332,7 @@ mod android {
                 LauncherProcessOptions {
                     portal_bus_address,
                     reduced_isolation_electron,
+                    virgl_socket_path: virgl_socket_path.map(Path::new),
                 },
             )
         };
@@ -7185,5 +7227,15 @@ mod tests {
             Ok(false),
         );
         assert_eq!(legacy_fields.next(), Some("legacy-extra"));
+
+        let mut current = "1\t/data/user/0/org.archphene.app/cache/gpu/.vg".split('\t');
+        assert_eq!(
+            parse_launcher_reduced_isolation("G5", &mut current),
+            Ok(true),
+        );
+        assert_eq!(
+            current.next(),
+            Some("/data/user/0/org.archphene.app/cache/gpu/.vg"),
+        );
     }
 }

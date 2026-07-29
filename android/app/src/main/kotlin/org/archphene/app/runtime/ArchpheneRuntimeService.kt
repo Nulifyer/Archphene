@@ -156,7 +156,16 @@ internal class StorageUsageSnapshot(
 internal data class LauncherAuthorization(
     val label: String,
     val terminal: Boolean,
-)
+    val integrationTopology: Int,
+) {
+    val usesGraphicsBridge: Boolean
+        get() = integrationTopology and GRAPHICS_BRIDGE_TOPOLOGY != 0
+
+    private companion object {
+        private const val INTEGRATION_OPENGL = 1 shl 10
+        private const val GRAPHICS_BRIDGE_TOPOLOGY = INTEGRATION_OPENGL
+    }
+}
 
 private data class LauncherRegistryRow(
     val androidPackage: String,
@@ -355,6 +364,7 @@ class ArchpheneRuntimeService : Service() {
             foreground: Int,
             portalBusAddress: String,
             reducedIsolationElectron: Boolean,
+            virglSocketPath: String?,
         ): Long =
             this@ArchpheneRuntimeService.openLauncherProcess(
                 androidPackage,
@@ -370,6 +380,7 @@ class ArchpheneRuntimeService : Service() {
                 foreground,
                 portalBusAddress,
                 reducedIsolationElectron,
+                virglSocketPath,
             )
 
         internal fun updateGuiColors(
@@ -1327,7 +1338,7 @@ class ArchpheneRuntimeService : Service() {
             .order(ByteOrder.LITTLE_ENDIAN)
     }
     private val aurTransferBuffer = ByteArray(64 * 1024)
-    private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(256)
+    private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(512)
     private val launcherAuthorizationOutputBuffer = ByteBuffer.allocateDirect(512)
     private val launcherAuthorizationOutputBytes = ByteArray(512)
     private val launcherProcessLogBuffer =
@@ -1815,7 +1826,7 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return null
         }
-        val request = "A1\t$androidPackage\t$descriptorIdHex\t$generation\n"
+        val request = "A2\t$androidPackage\t$descriptorIdHex\t$generation\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return null
@@ -1842,17 +1853,22 @@ class ArchpheneRuntimeService : Service() {
                 length,
                 StandardCharsets.UTF_8,
             )
-        val fields = response.removeSuffix("\n").split('\t', limit = 3)
+        val fields = response.removeSuffix("\n").split('\t', limit = 4)
         if (
-            fields.size != 3 ||
-            fields[0] != "A1" ||
+            fields.size != 4 ||
+            fields[0] != "A2" ||
             fields[1] !in setOf("0", "1") ||
-            fields[2].isEmpty() ||
-            fields[2].length > 256
+            fields[2].toIntOrNull() !in 0..UShort.MAX_VALUE.toInt() ||
+            fields[3].isEmpty() ||
+            fields[3].length > 256
         ) {
             return null
         }
-        return LauncherAuthorization(fields[2], fields[1] == "1")
+        return LauncherAuthorization(
+            fields[3],
+            fields[1] == "1",
+            fields[2].toInt(),
+        )
     }
 
     @Synchronized
@@ -1870,6 +1886,7 @@ class ArchpheneRuntimeService : Service() {
         foreground: Int,
         portalBusAddress: String,
         reducedIsolationElectron: Boolean,
+        virglSocketPath: String?,
     ): Long {
         val activeHandle = readyHandle
         if (
@@ -1889,6 +1906,16 @@ class ArchpheneRuntimeService : Service() {
                     character == '\r' ||
                     character == '\u0000'
             } ||
+            virglSocketPath?.let { socket ->
+                socket.length >= 104 ||
+                    !socket.startsWith("/data/") ||
+                    socket.any { character ->
+                        character == '\t' ||
+                            character == '\n' ||
+                            character == '\r' ||
+                            character == '\u0000'
+                    }
+            } == true ||
             waylandDisplay.isEmpty() ||
             waylandDisplay.length > 64 ||
             !waylandDisplay.all { character ->
@@ -1903,10 +1930,11 @@ class ArchpheneRuntimeService : Service() {
             return 0L
         }
         val request =
-            "G4\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
+            "G5\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
                 "${if (dark) 1 else 0}\t$fontPercent\t$controlVisualDp\t$controlTargetDp\t" +
                 "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\t" +
-                "$portalBusAddress\t${if (reducedIsolationElectron) 1 else 0}\n"
+                "$portalBusAddress\t${if (reducedIsolationElectron) 1 else 0}\t" +
+                "${virglSocketPath ?: "-"}\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return 0L

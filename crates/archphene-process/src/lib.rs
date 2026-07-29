@@ -9,7 +9,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
@@ -227,6 +227,8 @@ pub struct CommandEnvironment {
     qt_plugin_root: Option<PathBuf>,
     appearance: GuiAppearance,
     portal_bus_address: Option<OsString>,
+    virgl_socket_path: Option<PathBuf>,
+    software_opengl: bool,
     build_jobs: OsString,
     makeflags: OsString,
 }
@@ -298,6 +300,8 @@ impl CommandEnvironment {
             qt_plugin_root: None,
             appearance: GuiAppearance::default(),
             portal_bus_address: None,
+            virgl_socket_path: None,
+            software_opengl: false,
             build_jobs: OsString::from("2"),
             makeflags: OsString::from("-j2"),
         })
@@ -336,6 +340,28 @@ impl CommandEnvironment {
             return Err(ProcessError::InvalidEnvironment);
         }
         self.portal_bus_address = Some(OsString::from(address));
+        Ok(self)
+    }
+
+    pub fn with_opengl_bridge(mut self, socket_path: Option<&Path>) -> Result<Self, ProcessError> {
+        self.virgl_socket_path = match socket_path {
+            Some(path) => {
+                if !path.is_absolute()
+                    || path.as_os_str().as_encoded_bytes().len() >= 104
+                    || path.as_os_str().as_encoded_bytes().contains(&0)
+                {
+                    return Err(ProcessError::InvalidEnvironment);
+                }
+                let metadata = fs::symlink_metadata(path)?;
+                let root_metadata = fs::symlink_metadata(&self.arch_root)?;
+                if !metadata.file_type().is_socket() || metadata.uid() != root_metadata.uid() {
+                    return Err(ProcessError::InvalidEnvironment);
+                }
+                Some(path.to_path_buf())
+            }
+            None => None,
+        };
+        self.software_opengl = self.virgl_socket_path.is_none();
         Ok(self)
     }
 
@@ -706,6 +732,16 @@ impl CommandEnvironment {
         }
         if let Some(root) = self.qt_plugin_root.as_ref() {
             command.env("QT_PLUGIN_PATH", root);
+        }
+        if let Some(socket_path) = self.virgl_socket_path.as_ref() {
+            command
+                .env("EGL_PLATFORM", "wayland")
+                .env("GALLIUM_DRIVER", "virpipe")
+                .env("VTEST_SOCKET_NAME", socket_path);
+        } else if self.software_opengl {
+            command
+                .env("EGL_PLATFORM", "wayland")
+                .env("GALLIUM_DRIVER", "llvmpipe");
         }
         command
     }
@@ -2864,6 +2900,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -3175,6 +3212,47 @@ mod tests {
         assert_eq!(gui_value("GDK_BACKEND"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("QT_QPA_PLATFORM"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("SDL_VIDEODRIVER"), Some(OsStr::new("wayland")));
+        let virgl_socket = root.0.join(".vg");
+        let _virgl_listener = UnixListener::bind(&virgl_socket).expect("virgl socket");
+        let accelerated = environment
+            .clone()
+            .with_opengl_bridge(Some(&virgl_socket))
+            .expect("verified OpenGL bridge")
+            .build_gui_command(&launch, &[], "launcher-8.sock");
+        let accelerated_value = |name: &str| {
+            accelerated
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(
+            accelerated_value("GALLIUM_DRIVER"),
+            Some(OsStr::new("virpipe")),
+        );
+        assert_eq!(
+            accelerated_value("VTEST_SOCKET_NAME"),
+            Some(virgl_socket.as_os_str()),
+        );
+        let software = environment
+            .clone()
+            .with_opengl_bridge(None)
+            .expect("software OpenGL fallback")
+            .build_gui_command(&launch, &[], "launcher-9.sock");
+        let software_value = |name: &str| {
+            software
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(
+            software_value("GALLIUM_DRIVER"),
+            Some(OsStr::new("llvmpipe")),
+        );
+        assert_eq!(software_value("VTEST_SOCKET_NAME"), None);
+        assert!(
+            environment
+                .clone()
+                .with_opengl_bridge(Some(&bridge))
+                .is_err(),
+        );
         let adaptive = environment
             .clone()
             .with_build_jobs(4)

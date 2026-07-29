@@ -85,6 +85,38 @@ tasks.register<Sync>("stageArchpheneAndroidDbus") {
     into("android/app/build/generated/portalJniLibs")
 }
 
+val buildArchpheneAndroidGpu =
+    tasks.register<Exec>("buildArchpheneAndroidGpu") {
+        workingDir(rootDir)
+        commandLine("bash", "scripts/build-android-gpu-all-podman.sh")
+        inputs.files(
+            fileTree("native/android-gpu-helper") {
+                include("patches/*.patch")
+            },
+            file("scripts/build-android-gpu-helper.sh"),
+            file("scripts/build-android-gpu-helper-podman.sh"),
+            file("scripts/build-android-gpu-all-podman.sh"),
+            file("containers/android-native.Containerfile"),
+        )
+        outputs.files(
+            "tooling/build/android-gpu/x86_64/virgl_test_server_android",
+            "tooling/build/android-gpu/aarch64/virgl_test_server_android",
+        )
+    }
+
+tasks.register<Sync>("stageArchpheneAndroidGpu") {
+    dependsOn(buildArchpheneAndroidGpu)
+    from("tooling/build/android-gpu/x86_64/virgl_test_server_android") {
+        into("x86_64")
+        rename { "libarchphene_virgl_server.so" }
+    }
+    from("tooling/build/android-gpu/aarch64/virgl_test_server_android") {
+        into("arm64-v8a")
+        rename { "libarchphene_virgl_server.so" }
+    }
+    into("android/app/build/generated/gpuJniLibs")
+}
+
 val verifyArchpheneTerminalFont =
     tasks.register<Exec>("verifyArchpheneTerminalFont") {
         workingDir("third_party/jetbrains-mono-nerd-font")

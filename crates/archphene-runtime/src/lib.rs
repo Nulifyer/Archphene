@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_launcher::{
-    LAUNCHER_CAPABILITIES_V2, LauncherRegistry, LauncherRegistryError, LauncherReviewDecision,
-    ReconcileReport, WrapperStatus,
+    LAUNCHER_CAPABILITIES_V2, LauncherDescriptor, LauncherRegistry, LauncherRegistryError,
+    LauncherReviewDecision, ReconcileReport, WrapperStatus,
 };
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackageCacheCatalog, PackagePayloadDownload,
@@ -27,7 +27,7 @@ use archphene_packages::{
 use archphene_process::{
     GuiAppearance, GuiRegistry, MAX_COMMAND_ARGUMENTS, MAX_GUI_SESSIONS, ProcessError, PtyRegistry,
     PtyWaiter,
-    integration::{IntegrationObservation, TOPOLOGY_CHROMIUM},
+    integration::{IntegrationObservation, TOPOLOGY_CHROMIUM, TOPOLOGY_OPENGL},
 };
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 use archphene_storage::{
@@ -117,6 +117,7 @@ pub struct LauncherRegistrySummary {
 pub struct LauncherProcessOptions<'a> {
     pub portal_bus_address: Option<&'a str>,
     pub reduced_isolation_electron: bool,
+    pub virgl_socket_path: Option<&'a Path>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,6 +171,7 @@ pub struct LauncherRemovalWork {
 pub struct LauncherAuthorization {
     pub label: String,
     pub terminal: bool,
+    pub integration_topology: u16,
 }
 
 #[derive(Debug)]
@@ -1084,7 +1086,31 @@ impl RuntimeHost {
         Some(LauncherAuthorization {
             label: descriptor.name.clone(),
             terminal: descriptor.terminal,
+            integration_topology: self.launcher_integration_topology(descriptor),
         })
+    }
+
+    fn launcher_integration_topology(&self, descriptor: &LauncherDescriptor) -> u16 {
+        let static_topology = self
+            .desktop_entries
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .entries
+                    .iter()
+                    .find(|entry| entry.desktop_id == descriptor.desktop_id)
+            })
+            .filter(|entry| {
+                entry.source_package == descriptor.source_package
+                    && entry.executable_package == descriptor.executable_package
+            })
+            .map_or(0, |entry| entry.integration_topology);
+        let observed_topology = if descriptor.integration_observed {
+            descriptor.observed_topology
+        } else {
+            0
+        };
+        static_topology | observed_topology
     }
 
     pub fn open_launcher_process(
@@ -1132,30 +1158,11 @@ impl RuntimeHost {
                     | ExecArgument::MultipleUrls => {}
                 }
             }
-            let static_topology = self
-                .desktop_entries
-                .as_ref()
-                .and_then(|catalog| {
-                    catalog
-                        .entries
-                        .iter()
-                        .find(|entry| entry.desktop_id == descriptor.desktop_id)
-                })
-                .filter(|entry| {
-                    entry.source_package == descriptor.source_package
-                        && entry.executable_package == descriptor.executable_package
-                })
-                .map_or(0, |entry| entry.integration_topology);
-            let observed_topology = if descriptor.integration_observed {
-                descriptor.observed_topology
-            } else {
-                0
-            };
             (
                 command,
                 arguments,
                 descriptor.descriptor_id,
-                static_topology | observed_topology,
+                self.launcher_integration_topology(descriptor),
             )
         };
         apply_electron_compatibility_arguments(
@@ -1172,6 +1179,15 @@ impl RuntimeHost {
                 package_runtime.command_environment_with_gui_and_portal(appearance, address)?
             }
             None => package_runtime.command_environment_with_gui(appearance)?,
+        };
+        let environment = if integration_topology & TOPOLOGY_OPENGL != 0 {
+            environment.with_opengl_bridge(options.virgl_socket_path)?
+        } else if options.virgl_socket_path.is_some() {
+            return Err(LauncherProcessError::Process(
+                ProcessError::InvalidEnvironment,
+            ));
+        } else {
+            environment
         };
         if arguments.len() > MAX_COMMAND_ARGUMENTS {
             return Err(LauncherProcessError::Process(ProcessError::InvalidArgument));

@@ -91,6 +91,7 @@ class LauncherSessionService : Service() {
         var linuxHandle = 0L
         var terminalMessage: String? = null
         var portalBridge: LauncherPortalBridge? = null
+        var gpuBridge: AndroidGpuBridge? = null
         var nextProcessStatusMillis = 0L
         var pumpStarted = false
         var clientLogged = false
@@ -184,6 +185,7 @@ class LauncherSessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        AndroidGpuBridge.cleanupStaleRuntimeDirectories(this)
         if (stalePortalSavesRecovered.compareAndSet(false, true)) {
             runCatching {
                 LauncherPortalBridge.recoverStaleRuntime(cacheDir)
@@ -309,6 +311,8 @@ class LauncherSessionService : Service() {
                 }
                 session.portalBridge?.close()
                 session.portalBridge = null
+                session.gpuBridge?.close()
+                session.gpuBridge = null
                 compositor?.close()
                 session.compositor = null
                 val socket = session.compositorSocket
@@ -1615,6 +1619,17 @@ class LauncherSessionService : Service() {
                     )
                     return
                 }
+        val gpuSocket =
+            if (session.authorization.usesGraphicsBridge) {
+                val bridge =
+                    session.gpuBridge
+                        ?: AndroidGpuBridge(this, session.id).also {
+                            session.gpuBridge = it
+                        }
+                bridge.start()
+            } else {
+                null
+            }
         val linuxHandle =
             runtime.openLauncherProcess(
                 session.identity.androidPackage,
@@ -1630,10 +1645,13 @@ class LauncherSessionService : Service() {
                 appearance.foreground,
                 portalBridge.busAddress,
                 session.reducedIsolationElectron,
+                gpuSocket?.absolutePath,
             )
         if (linuxHandle == 0L) {
             session.portalBridge?.close()
             session.portalBridge = null
+            session.gpuBridge?.close()
+            session.gpuBridge = null
             Log.e(TAG, "Could not start descriptor process session=${session.id}")
             stopCompositorForStatus(
                 session,
@@ -2358,6 +2376,8 @@ class LauncherSessionService : Service() {
         }
         runtime.closeLauncherProcess(handle)
         session.linuxHandle = 0L
+        session.gpuBridge?.close()
+        session.gpuBridge = null
         val message =
             if (exitStatus == 0) {
                 "${session.authorization.label} closed."
