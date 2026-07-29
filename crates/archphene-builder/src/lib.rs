@@ -1964,7 +1964,7 @@ fn inspect_aur_dependency_tar(
     }
     let package_info = package_info.ok_or(BuilderError::InvalidArchive)?;
     let build_info = build_info.ok_or(BuilderError::InvalidArchive)?;
-    let (name, installed_bytes) = validate_built_package_info(
+    let (name, installed_bytes, package_architecture) = validate_built_package_info(
         &package_info,
         filename,
         expected_base,
@@ -1976,7 +1976,7 @@ fn inspect_aur_dependency_tar(
         &name,
         expected_base,
         expected_version,
-        expected_architecture,
+        &package_architecture,
     )?;
     Ok(BuiltPackageMetadata {
         name,
@@ -2110,7 +2110,7 @@ fn inspect_built_package_tar(
     }
     let package_info = package_info.ok_or(BuilderError::InvalidArchive)?;
     let build_info = build_info.ok_or(BuilderError::InvalidArchive)?;
-    let (name, installed_bytes) = validate_built_package_info(
+    let (name, installed_bytes, package_architecture) = validate_built_package_info(
         &package_info,
         filename,
         expected_base,
@@ -2122,7 +2122,7 @@ fn inspect_built_package_tar(
         &name,
         expected_base,
         expected_version,
-        expected_architecture,
+        &package_architecture,
         expected_installed,
     )?;
     Ok(BuiltPackageMetadata {
@@ -2142,7 +2142,7 @@ fn validate_built_package_info(
     expected_base: &str,
     expected_version: &str,
     expected_architecture: &str,
-) -> Result<(String, u64), BuilderError> {
+) -> Result<(String, u64, String), BuilderError> {
     let text = std::str::from_utf8(package_info).map_err(|_| BuilderError::InvalidArchive)?;
     let mut name = None;
     let mut base = None;
@@ -2182,10 +2182,11 @@ fn validate_built_package_info(
     }
     let name = name.ok_or(BuilderError::InvalidArchive)?;
     let installed_bytes = installed_bytes.ok_or(BuilderError::InvalidArchive)?;
+    let architecture = architecture.ok_or(BuilderError::InvalidArchive)?;
     if !safe_name(name)
         || base != Some(expected_base)
         || version != Some(expected_version)
-        || architecture != Some(expected_architecture)
+        || !package_architecture_matches(architecture, expected_architecture)
         || installed_bytes == 0
         || installed_bytes > MAX_EXPANDED_BYTES
     {
@@ -2199,11 +2200,15 @@ fn validate_built_package_info(
         return Err(BuilderError::InvalidArchive);
     };
     if filename.strip_suffix(suffix)
-        != Some(format!("{name}-{expected_version}-{expected_architecture}").as_str())
+        != Some(format!("{name}-{expected_version}-{architecture}").as_str())
     {
         return Err(BuilderError::InvalidArchive);
     }
-    Ok((name.to_owned(), installed_bytes))
+    Ok((name.to_owned(), installed_bytes, architecture.to_owned()))
+}
+
+fn package_architecture_matches(actual: &str, requested: &str) -> bool {
+    actual == requested || actual == "any" && matches!(requested, "aarch64" | "x86_64")
 }
 
 fn validate_built_build_info(
@@ -5576,6 +5581,14 @@ summary\t1\t{}\n",
         installed: &str,
         install_script: Option<&[u8]>,
     ) -> Vec<u8> {
+        built_package_archive_for_architecture(installed, install_script, "aarch64")
+    }
+
+    fn built_package_archive_for_architecture(
+        installed: &str,
+        install_script: Option<&[u8]>,
+        architecture: &str,
+    ) -> Vec<u8> {
         let encoder = XzEncoder::new(Vec::new(), 6);
         let mut builder = tar::Builder::new(encoder);
         builder.mode(tar::HeaderMode::Deterministic);
@@ -5588,7 +5601,7 @@ summary\t1\t{}\n",
                  pkgname = example-bin\n\
                  pkgbase = example-bin\n\
                  pkgver = 1.2.3-1\n\
-                 pkgarch = aarch64\n\
+                 pkgarch = {architecture}\n\
                  installed = {installed}\n",
             )
             .as_bytes(),
@@ -5597,11 +5610,14 @@ summary\t1\t{}\n",
             &mut builder,
             ".PKGINFO",
             0o644,
-            b"pkgname = example-bin\n\
-              pkgbase = example-bin\n\
-              pkgver = 1.2.3-1\n\
-              size = 7\n\
-              arch = aarch64\n",
+            format!(
+                "pkgname = example-bin\n\
+                 pkgbase = example-bin\n\
+                 pkgver = 1.2.3-1\n\
+                 size = 7\n\
+                 arch = {architecture}\n",
+            )
+            .as_bytes(),
         );
         if let Some(install_script) = install_script {
             append_file(&mut builder, ".INSTALL", 0o644, install_script);
@@ -5612,6 +5628,14 @@ summary\t1\t{}\n",
     }
 
     fn built_output_fixture(directory: &Path, archive: &[u8]) -> [u8; 32] {
+        built_output_fixture_for_architecture(directory, archive, "aarch64")
+    }
+
+    fn built_output_fixture_for_architecture(
+        directory: &Path,
+        archive: &[u8],
+        architecture: &str,
+    ) -> [u8; 32] {
         let closure_archive = package_archive(|builder| {
             append_file(builder, "usr/bin/build-tool", 0o755, b"tool\n");
         });
@@ -5624,7 +5648,7 @@ summary\t1\t{}\n",
             .join("example-bin");
         fs::create_dir_all(&recipe).expect("recipe directory");
         fs::write(
-            recipe.join("example-bin-1.2.3-1-aarch64.pkg.tar.xz"),
+            recipe.join(format!("example-bin-1.2.3-1-{architecture}.pkg.tar.xz")),
             archive,
         )
         .expect("built package");
@@ -6283,6 +6307,71 @@ summary\t1\t{}\n",
             ),
             Err(BuilderError::InvalidArchive),
         ));
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn verifies_arch_any_output_against_the_requested_device_architecture() {
+        let directory = test_directory();
+        let archive = built_package_archive_for_architecture("base-devel-1-1-any", None, "any");
+        let closure = built_output_fixture_for_architecture(&directory, &archive, "any");
+        let destination = directory.join("manager-output");
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&destination)
+            .expect("manager output");
+        let report = verify_and_copy_built_package(
+            &directory,
+            "example-bin",
+            "example-bin",
+            "1.2.3-1",
+            "aarch64",
+            closure,
+            None,
+            &mut output,
+        )
+        .expect("verified architecture-independent output");
+        assert_eq!(report.filename, "example-bin-1.2.3-1-any.pkg.tar.xz");
+
+        let manifest = fs::read(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(CLOSURE_NAME)
+                .join(PUBLISHED_MANIFEST_NAME),
+        )
+        .expect("retained closure");
+        verify_copied_built_package(
+            &mut output,
+            &report.filename,
+            "example-bin",
+            "example-bin",
+            "1.2.3-1",
+            "aarch64",
+            &manifest,
+            closure,
+            None,
+            None,
+            None,
+        )
+        .expect("manager reverified architecture-independent output");
+        assert!(
+            verify_copied_built_package(
+                &mut output,
+                &report.filename,
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "unsupported",
+                &manifest,
+                closure,
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
         fs::remove_dir_all(directory).expect("cleanup");
     }
 

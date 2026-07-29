@@ -7206,6 +7206,59 @@ class ArchpheneRuntimeService : Service() {
             searchStatus = "Enter one exact official package name"
             return false
         }
+        val recoveryOperation =
+            if (
+                normalized == jobPackage &&
+                (
+                    jobState == NativeRuntime.JOB_FAILED ||
+                        jobState == NativeRuntime.JOB_CANCELLED
+                )
+            ) {
+                jobOperation
+            } else {
+                0
+            }
+        val aurReview = retainedAurReview
+        if (
+            aurReview?.packageName == normalized &&
+            retainedAurBuiltPackage != null &&
+            retainedAurBuildEnvironment?.verified == true &&
+            (
+                recoveryOperation == NativeRuntime.JOB_OPERATION_INSTALL ||
+                recoveryOperation == NativeRuntime.JOB_OPERATION_UPDATE
+            )
+        ) {
+            val candidate =
+                try {
+                    reviewedAurCandidateState(activeHandle, aurReview)
+                } catch (error: Exception) {
+                    Log.e(TAG, "Could not restore the failed AUR candidate state", error)
+                    searchStatus = "Could not recheck the installed AUR package state"
+                    return false
+                }
+            if (
+                (recoveryOperation == NativeRuntime.JOB_OPERATION_INSTALL) !=
+                candidate.installedVersion.isEmpty()
+            ) {
+                searchStatus = "The installed AUR package state changed; review it again"
+                return false
+            }
+            packageCancellationRequested = false
+            lastResolvedPackage = normalized
+            lastResolvedRepository = "aur"
+            lastResolvedInstalledVersion = candidate.installedVersion
+            lastResolvedAvailableVersion = aurReview.version
+            primaryActionLabel = "Retry"
+            primaryActionPermitted = true
+            removeAvailable = candidate.installedVersion.isNotEmpty()
+            removeActionLabel = "Remove"
+            recoveryReviewedJobRevision = jobRevision
+            searchStatus =
+                "aur/$normalized ${aurReview.version}\n" +
+                    "Restored locally verified AUR build\n" +
+                    "Ready to retry the failed ${jobOperationName(recoveryOperation).lowercase()}"
+            return true
+        }
         packageCancellationRequested = false
         searchActive = true
         lastResolvedPackage = ""
@@ -7264,7 +7317,7 @@ class ArchpheneRuntimeService : Service() {
                     lastResolvedRepository = resolvedTarget.repository
                     lastResolvedInstalledVersion = installedVersion
                     lastResolvedAvailableVersion = resolvedTarget.version
-                    val recoveryOperation =
+                    val resolvedRecoveryOperation =
                         if (
                             normalized == jobPackage &&
                             (
@@ -7279,8 +7332,9 @@ class ArchpheneRuntimeService : Service() {
                     primaryActionLabel =
                         when {
                             availableVersionState == "different" -> "Keep installed"
-                            recoveryOperation == NativeRuntime.JOB_OPERATION_INSTALL ||
-                                recoveryOperation == NativeRuntime.JOB_OPERATION_UPDATE -> "Retry"
+                            resolvedRecoveryOperation == NativeRuntime.JOB_OPERATION_INSTALL ||
+                                resolvedRecoveryOperation == NativeRuntime.JOB_OPERATION_UPDATE ->
+                                "Retry"
                             installedVersion.isEmpty() -> "Install"
                             installedVersion == resolvedTarget.version -> "Verify"
                             else -> "Update"
@@ -7290,13 +7344,13 @@ class ArchpheneRuntimeService : Service() {
                     removeActionLabel =
                         if (
                             removeAvailable &&
-                            recoveryOperation == NativeRuntime.JOB_OPERATION_REMOVE
+                            resolvedRecoveryOperation == NativeRuntime.JOB_OPERATION_REMOVE
                         ) {
                             "Retry"
                         } else {
                             "Remove"
                         }
-                    if (recoveryOperation != 0) {
+                    if (resolvedRecoveryOperation != 0) {
                         recoveryReviewedJobRevision = jobRevision
                     }
                     val mebibytes = (totalBytes + (1024 * 1024 - 1)) / (1024 * 1024)
@@ -11711,6 +11765,23 @@ class ArchpheneRuntimeService : Service() {
                             } else {
                                 builtPackages.asList()
                             }
+                        val installedBytes =
+                            installOutputs.fold(0L) { total, output ->
+                                Math.addExact(total, output.installedBytes)
+                            }
+                        val availableBytes = StatFs(filesDir.absolutePath).availableBytes
+                        val reserveBytes =
+                            maxOf(
+                                64L * 1024L * 1024L,
+                                installedBytes / 10L,
+                            )
+                        val requiredBytes = Math.addExact(installedBytes, reserveBytes)
+                        if (availableBytes < requiredBytes) {
+                            throw InsufficientPackageStorageException(
+                                requiredBytes,
+                                availableBytes,
+                            )
+                        }
                         val descriptors =
                             installOutputs.map { output ->
                                 ParcelFileDescriptor.open(
@@ -14120,6 +14191,20 @@ class ArchpheneRuntimeService : Service() {
         packageCancellationRequested = false
         packageRecoveryMessageRevision = recoveryRevision
         packageRecoveryMessage = "Clearing downloaded package cache…"
+        val aurReview = retainedAurReview
+        val aurBuilt =
+            retainedAurBuiltPackage != null ||
+                retainedAurBuiltPackages.isNotEmpty() ||
+                retainedAurGraphBuiltPackages.isNotEmpty()
+        val verifiedAurBuildClosure =
+            retainedAurBuildEnvironment
+                ?.takeIf { environment ->
+                    aurReview?.packageName == recoveryPackage &&
+                        aurBuilt &&
+                        environment.verified
+                }
+                ?.verifiedPackages
+                ?.map(VerifiedBuildPackage::name)
         val worker =
             Thread(
                 {
@@ -14127,19 +14212,29 @@ class ArchpheneRuntimeService : Service() {
                     try {
                         holdDebugPackageCacheCleanup()
                         val cache = loadPackageCacheSnapshot(activeHandle)
-                        val protectedPackages =
-                            try {
-                                resolvePayloads(activeHandle, recoveryPackage)
-                                    .mapTo(HashSet()) { payload -> payload.name }
-                            } catch (error: Exception) {
-                                Log.w(
-                                    TAG,
-                                    "Could not resolve the failed closure during cache recovery; " +
-                                        "retaining all cached packages",
-                                    error,
-                                )
-                                cache.names.toHashSet()
+                        val officialClosure =
+                            if (verifiedAurBuildClosure != null) {
+                                null
+                            } else {
+                                try {
+                                    resolvePayloads(activeHandle, recoveryPackage)
+                                        .map(ResolvedPayload::name)
+                                } catch (error: Exception) {
+                                    Log.w(
+                                        TAG,
+                                        "Could not resolve the failed official closure during " +
+                                            "cache recovery",
+                                        error,
+                                    )
+                                    null
+                                }
                             }
+                        val protectedPackages =
+                            PackageCacheRecoveryPolicy.protectedPackages(
+                                cache.names,
+                                officialClosure,
+                                verifiedAurBuildClosure,
+                            )
                         if (consumeDebugPackageCachePreservationFixture()) {
                             cache.names
                                 .filterTo(protectedPackages) { packageName ->

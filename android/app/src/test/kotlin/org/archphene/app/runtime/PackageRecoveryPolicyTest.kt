@@ -102,4 +102,34 @@ class PackageRecoveryPolicyTest {
             )
         }
     }
+
+    @Test
+    fun verified_aur_closure_takes_precedence_during_cache_recovery() {
+        val cached = arrayOf("base", "cmake", "pressure", "systemd")
+
+        assertEquals(
+            setOf("base", "systemd"),
+            PackageCacheRecoveryPolicy.protectedPackages(
+                cached,
+                officialClosure = listOf("pressure"),
+                verifiedAurBuildClosure = listOf("base", "systemd"),
+            ),
+        )
+        assertEquals(
+            setOf("pressure"),
+            PackageCacheRecoveryPolicy.protectedPackages(
+                cached,
+                officialClosure = listOf("pressure"),
+                verifiedAurBuildClosure = null,
+            ),
+        )
+        assertEquals(
+            cached.toSet(),
+            PackageCacheRecoveryPolicy.protectedPackages(
+                cached,
+                officialClosure = null,
+                verifiedAurBuildClosure = null,
+            ),
+        )
+    }
 }

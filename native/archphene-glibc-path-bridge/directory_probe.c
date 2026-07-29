@@ -66,14 +66,21 @@ int main(void) {
         fputs("utimensat did not update the logical file\n", stderr);
         return 6;
     }
+    struct stat64 metadata64;
+    if (fstatat64(AT_FDCWD, value, &metadata64, 0) != 0
+            || metadata64.st_atim.tv_sec != times[0].tv_sec
+            || metadata64.st_mtim.tv_sec != times[1].tv_sec) {
+        fputs("fstatat64 did not expose the logical file\n", stderr);
+        return 7;
+    }
     if (chmod(value, 0600) != 0) {
         perror("chmod");
-        return 7;
+        return 8;
     }
     if (stat(value, &metadata) != 0
             || (metadata.st_mode & 0777) != 0600) {
         fputs("chmod did not update the logical file\n", stderr);
-        return 8;
+        return 9;
     }
     puts("directory-apis-ok");
     return 0;

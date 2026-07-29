@@ -17,6 +17,29 @@ internal object PackageCacheRecoveryPolicy {
         return cachedPackages.filterNot(protectedPackages::contains)
     }
 
+    fun protectedPackages(
+        cachedPackages: Array<String>,
+        officialClosure: Collection<String>?,
+        verifiedAurBuildClosure: Collection<String>?,
+    ): HashSet<String> {
+        require(cachedPackages.size <= MAX_CACHE_PACKAGES)
+        require(strictlyOrdered(cachedPackages) && cachedPackages.all(::safePackageName))
+        require(validClosure(officialClosure))
+        require(validClosure(verifiedAurBuildClosure))
+        return (
+            verifiedAurBuildClosure
+                ?: officialClosure
+                ?: cachedPackages.asList()
+        ).toHashSet()
+    }
+
+    private fun validClosure(values: Collection<String>?): Boolean =
+        values == null ||
+            (
+                values.size <= MAX_CACHE_PACKAGES &&
+                    values.all(::safePackageName)
+            )
+
     private fun strictlyOrdered(values: Array<String>): Boolean {
         for (index in 1 until values.size) {
             if (values[index - 1] >= values[index]) {

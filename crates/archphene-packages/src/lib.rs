@@ -3654,6 +3654,11 @@ impl PackageRuntime {
         let cache = cache_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
+        let rollback = self
+            .prepare_aur_install_rollback(&archives, &replacements)
+            .map_err(|error| {
+                PackageRuntimeError::Operation("preparing AUR package rollback", Box::new(error))
+            })?;
         self.publish_aur_lifecycle_capabilities(&lifecycle_capabilities)
             .map_err(|error| {
                 PackageRuntimeError::Operation(
@@ -3674,6 +3679,7 @@ impl PackageRuntime {
             &archives,
             &lifecycle_capabilities,
             &replacement_records,
+            rollback,
         ) {
             if !replacement_records.is_empty() {
                 let _ = self.clear_replacement_repair();
@@ -4776,7 +4782,10 @@ impl PackageRuntime {
                 }
             }
             PackageMutationIntent::AurInstall {
-                request, archives, ..
+                request,
+                archives,
+                rollback,
+                ..
             } if request == package => {
                 let version = archives
                     .iter()
@@ -4786,6 +4795,9 @@ impl PackageRuntime {
                     .as_str();
                 output.push(b"install\t")?;
                 output.push(version.as_bytes())?;
+                if rollback.is_some() {
+                    output.push(b"\trollback")?;
+                }
             }
             PackageMutationIntent::Remove {
                 package: target,
@@ -4826,7 +4838,10 @@ impl PackageRuntime {
                 }
             }
             PackageMutationIntent::AurInstall {
-                request, archives, ..
+                request,
+                archives,
+                rollback,
+                ..
             } => {
                 let version = archives
                     .iter()
@@ -4837,6 +4852,9 @@ impl PackageRuntime {
                 output.push(request.as_bytes())?;
                 output.push(b"\tinstall\t")?;
                 output.push(version.as_bytes())?;
+                if rollback.is_some() {
+                    output.push(b"\trollback")?;
+                }
             }
             PackageMutationIntent::Remove { package, removals } => {
                 let version = removals
@@ -4864,6 +4882,23 @@ impl PackageRuntime {
         let intent = self
             .read_pending_mutation()?
             .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if let PackageMutationIntent::AurInstall {
+            request,
+            archives,
+            replacements,
+            rollback: Some(rollback),
+        } = &intent
+        {
+            if request != package {
+                return Err(PackageRuntimeError::Busy);
+            }
+            return self.rollback_aur_install_transaction(
+                request,
+                archives,
+                replacements,
+                rollback,
+            );
+        }
         let PackageMutationIntent::Install {
             request,
             resolution,
@@ -5043,6 +5078,182 @@ impl PackageRuntime {
         self.installed_version(package)
     }
 
+    fn rollback_aur_install_transaction(
+        &self,
+        request: &str,
+        forward_records: &[AurInstallArchiveRecord],
+        replacements: &[ReplacementRepairRecord],
+        rollback: &AurInstallRollbackPlan,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        self.recover_database_lock()?;
+        self.restore_replacement_repair(replacements)?;
+        let retained = if rollback.archives.is_empty() {
+            Vec::new()
+        } else {
+            let (retained, lifecycle_capabilities) =
+                self.restore_aur_install_archives(&rollback.archives)?;
+            self.publish_aur_lifecycle_capabilities(&lifecycle_capabilities)?;
+            retained
+        };
+
+        let config_path = self.arch_root.join(AUR_PACMAN_CONFIG_FILE);
+        let config = config_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let cache_path = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+        let cache = cache_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+
+        if !retained.is_empty() {
+            let has_explicit = retained.iter().any(|archive| archive.explicitly_installed);
+            if has_explicit {
+                self.publish_install_reason_intent(&retained)?;
+            }
+            let mut arguments = vec![
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--cachedir",
+                cache,
+                "--noconfirm",
+                "--noprogressbar",
+                "--ask",
+                "4",
+                "--asdeps",
+                "-U",
+            ];
+            arguments.extend(retained.iter().map(|archive| archive.path.as_str()));
+            if let Err(error) = self.run_bytes_with_timeout(
+                PackageTool::Pacman,
+                &arguments,
+                TRANSACTION_TIMEOUT,
+                MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+                false,
+            ) {
+                let _ = self.recover_database_lock();
+                if has_explicit {
+                    let _ = self.recover_pending_install_reasons();
+                }
+                return Err(error);
+            }
+            if has_explicit {
+                self.recover_pending_install_reasons()?;
+            }
+        }
+
+        let installed = self.installed_package_catalog()?;
+        let additions = rollback
+            .previously_absent
+            .iter()
+            .filter(|name| {
+                installed
+                    .packages
+                    .iter()
+                    .any(|package| package.name == name.as_str())
+            })
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if !additions.is_empty() {
+            let mut plan_arguments = vec![
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--print",
+                "--print-format",
+                "%n",
+                "-R",
+            ];
+            plan_arguments.extend(additions.iter().copied());
+            let plan =
+                self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
+            let mut planned = plan.as_str()?.lines().collect::<Vec<_>>();
+            planned.sort_unstable();
+            let mut expected = additions.clone();
+            expected.sort_unstable();
+            if planned != expected {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            let mut arguments = vec![
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--noconfirm",
+                "--noprogressbar",
+                "-R",
+            ];
+            arguments.extend(additions.iter().copied());
+            if let Err(error) = self.run_bytes_with_timeout(
+                PackageTool::Pacman,
+                &arguments,
+                TRANSACTION_TIMEOUT,
+                MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+                false,
+            ) {
+                let _ = self.recover_database_lock();
+                return Err(error);
+            }
+        }
+
+        self.validate_local_database()?;
+        let installed = self.installed_package_catalog()?;
+        for archive in &rollback.archives {
+            if !installed
+                .packages
+                .iter()
+                .any(|package| package.name == archive.name && package.version == archive.version)
+            {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        for name in &rollback.previously_absent {
+            if installed
+                .packages
+                .iter()
+                .any(|package| package.name == *name)
+            {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        self.refresh_system_trust()?;
+        self.refresh_desktop_caches()?;
+        self.reconcile_aur_lifecycle_capabilities()?;
+        self.clear_replacement_repair()?;
+        self.clear_pending_mutation()?;
+        let previous = rollback
+            .archives
+            .iter()
+            .find(|archive| archive.name == request)
+            .map(|archive| archive.version.as_bytes());
+        let mut output = empty_tool_output();
+        if let Some(version) = previous {
+            output.push(version)?;
+        } else if !forward_records
+            .iter()
+            .any(|archive| archive.name == request)
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(output)
+    }
+
     pub fn repair_pending_mutation(
         &self,
         package: &str,
@@ -5096,6 +5307,7 @@ impl PackageRuntime {
                 request,
                 archives,
                 replacements,
+                ..
             } => {
                 if request != package {
                     return Err(PackageRuntimeError::Busy);
@@ -5244,11 +5456,13 @@ impl PackageRuntime {
         archives: &[InstallArchive],
         lifecycle_capabilities: &[AurLifecycleCapability],
         replacements: &[ReplacementRepairRecord],
+        rollback: Option<AurInstallRollbackPlan>,
     ) -> Result<(), PackageRuntimeError> {
         self.publish_mutation_intent(&PackageMutationIntent::AurInstall {
             request: request.to_owned(),
             archives: self.aur_install_archive_records(archives, lifecycle_capabilities)?,
             replacements: replacements.to_vec(),
+            rollback,
         })
     }
 
@@ -5971,6 +6185,133 @@ impl PackageRuntime {
             archives: rollback_archives,
             previously_absent,
         }))
+    }
+
+    fn prepare_aur_install_rollback(
+        &self,
+        archives: &[InstallArchive],
+        replacements: &[InstalledPackageIdentity],
+    ) -> Result<Option<AurInstallRollbackPlan>, PackageRuntimeError> {
+        let installed = self.installed_package_catalog()?;
+        let state_root = aur_lifecycle_state_root(&self.arch_root)?;
+        let capabilities = read_aur_lifecycle_capabilities(&state_root)?;
+        let mut rollback_archives = Vec::with_capacity(archives.len() + replacements.len());
+        let mut previously_absent = Vec::with_capacity(archives.len());
+
+        for archive in archives {
+            match installed
+                .packages
+                .binary_search_by(|package| package.name.as_str().cmp(&archive.name))
+                .ok()
+                .map(|index| &installed.packages[index])
+            {
+                None => previously_absent.push(archive.name.clone()),
+                Some(previous) if previous.version == archive.version => {}
+                Some(previous) => {
+                    let Some(record) =
+                        self.aur_rollback_archive_from_cache(previous, &capabilities)?
+                    else {
+                        return Ok(None);
+                    };
+                    rollback_archives.push(record);
+                }
+            }
+        }
+        for replacement in replacements {
+            let previous = installed
+                .packages
+                .binary_search_by(|package| package.name.cmp(&replacement.name))
+                .ok()
+                .map(|index| &installed.packages[index])
+                .filter(|package| package.version == replacement.version)
+                .ok_or(PackageRuntimeError::InvalidResolution)?;
+            let Some(record) = self.aur_rollback_archive_from_cache(previous, &capabilities)?
+            else {
+                return Ok(None);
+            };
+            rollback_archives.push(record);
+        }
+        rollback_archives.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        previously_absent.sort_unstable();
+        if rollback_archives
+            .windows(2)
+            .any(|pair| pair[0].name == pair[1].name)
+            || previously_absent.windows(2).any(|pair| pair[0] == pair[1])
+            || rollback_archives
+                .iter()
+                .any(|archive| previously_absent.binary_search(&archive.name).is_ok())
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        if rollback_archives.is_empty() && previously_absent.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(AurInstallRollbackPlan {
+            archives: rollback_archives,
+            previously_absent,
+        }))
+    }
+
+    fn aur_rollback_archive_from_cache(
+        &self,
+        installed: &InstalledPackage,
+        capabilities: &[AurLifecycleCapability],
+    ) -> Result<Option<AurInstallArchiveRecord>, PackageRuntimeError> {
+        let Some(capability) = capabilities.iter().find(|capability| {
+            capability.package == installed.name && capability.version == installed.version
+        }) else {
+            return Ok(None);
+        };
+        let digest = hex_sha256(&capability.archive_sha256);
+        let prefix = format!("{digest}-");
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        let metadata = fs::symlink_metadata(&directory)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(directory));
+        }
+        let mut matched = None;
+        let mut count = 0_usize;
+        for entry in fs::read_dir(&directory)? {
+            count = count.saturating_add(1);
+            if count > LOCAL_DATABASE_ENTRY_LIMIT {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| PackageRuntimeError::UnsafeEntry(path.clone()))?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(PackageRuntimeError::UnsafeEntry(path));
+            }
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            if !safe_package_filename(&name)
+                || metadata.len() == 0
+                || metadata.len() > PACKAGE_ARCHIVE_LIMIT
+                || hex_sha256(&hash_regular_file(
+                    &path,
+                    metadata.len(),
+                    PACKAGE_ARCHIVE_LIMIT,
+                )?) != digest
+                || matched.is_some()
+            {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            matched = Some(AurInstallArchiveRecord {
+                name: installed.name.clone(),
+                version: installed.version.clone(),
+                filename: name,
+                archive_bytes: metadata.len(),
+                archive_sha256: digest.clone(),
+                install_script_sha256: capability.install_script_sha256.map(|sha| hex_sha256(&sha)),
+                explicitly_installed: installed.explicitly_installed,
+            });
+        }
+        Ok(matched)
     }
 
     fn rollback_archive_from_cache(
@@ -10487,6 +10828,12 @@ struct AurInstallArchiveRecord {
     explicitly_installed: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AurInstallRollbackPlan {
+    archives: Vec<AurInstallArchiveRecord>,
+    previously_absent: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstallResolutionMode {
     Normal,
@@ -10513,6 +10860,7 @@ enum PackageMutationIntent {
         request: String,
         archives: Vec<AurInstallArchiveRecord>,
         replacements: Vec<ReplacementRepairRecord>,
+        rollback: Option<AurInstallRollbackPlan>,
     },
     Remove {
         package: String,
@@ -10588,6 +10936,7 @@ fn serialize_package_mutation_intent(
             request,
             archives,
             replacements,
+            rollback,
         } => {
             content.push_str("aur-install\t");
             content.push_str(request);
@@ -10600,6 +10949,31 @@ fn serialize_package_mutation_intent(
                 content.push('\t');
                 content.push_str(&replacement.database_sha256);
                 content.push('\n');
+            }
+            match rollback {
+                Some(rollback) => {
+                    content.push_str("aur-rollback\tready\n");
+                    for archive in &rollback.archives {
+                        writeln!(
+                            content,
+                            "aur-rollback-archive\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            archive.name,
+                            archive.version,
+                            archive.filename,
+                            archive.archive_bytes,
+                            archive.archive_sha256,
+                            archive.install_script_sha256.as_deref().unwrap_or("-"),
+                            if archive.explicitly_installed { 0 } else { 1 },
+                        )
+                        .map_err(|_| PackageRuntimeError::OutputLimit)?;
+                    }
+                    for package in &rollback.previously_absent {
+                        content.push_str("aur-rollback-absent\t");
+                        content.push_str(package);
+                        content.push('\n');
+                    }
+                }
+                None => content.push_str("aur-rollback\tunavailable\n"),
             }
             for archive in archives {
                 writeln!(
@@ -10833,6 +11207,9 @@ fn parse_package_mutation_intent(
         }
         let mut archives = Vec::with_capacity(4);
         let mut replacements = Vec::with_capacity(2);
+        let mut rollback_archives = Vec::with_capacity(4);
+        let mut rollback_absent = Vec::with_capacity(4);
+        let mut rollback_ready = None;
         let mut reading_archives = false;
         for line in lines {
             if let Some(replacement) = line.strip_prefix("replace\t") {
@@ -10858,62 +11235,54 @@ fn parse_package_mutation_intent(
                     version: version.to_owned(),
                     database_sha256: database_sha256.to_owned(),
                 });
-            } else if let Some(record) = line.strip_prefix("aur-archive\t") {
-                reading_archives = true;
-                let mut fields = record.split('\t');
-                let (
-                    Some(name),
-                    Some(version),
-                    Some(filename),
-                    Some(archive_bytes),
-                    Some(archive_sha256),
-                    Some(install_script_sha256),
-                    Some(reason),
-                    None,
-                ) = (
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                )
-                else {
+            } else if let Some(state) = line.strip_prefix("aur-rollback\t") {
+                if reading_archives || rollback_ready.is_some() {
                     return Err(PackageRuntimeError::InvalidResolution);
-                };
-                let archive_bytes = archive_bytes
-                    .parse::<u64>()
-                    .map_err(|_| PackageRuntimeError::InvalidResolution)?;
-                let install_script_sha256 = match install_script_sha256 {
-                    "-" => None,
-                    value if valid_sha256_hex(value) => Some(value.to_owned()),
+                }
+                rollback_ready = match state {
+                    "ready" => Some(true),
+                    "unavailable" => Some(false),
                     _ => return Err(PackageRuntimeError::InvalidResolution),
                 };
-                if !safe_logical_name(name)
-                    || !safe_package_version(version)
-                    || !safe_package_filename(filename)
-                    || archive_bytes == 0
-                    || archive_bytes > PACKAGE_ARCHIVE_LIMIT
-                    || !valid_sha256_hex(archive_sha256)
-                    || !matches!(reason, "0" | "1")
-                    || archives.len() >= aur::MAX_AUR_DEPENDENCIES
-                    || archives
-                        .iter()
-                        .any(|entry: &AurInstallArchiveRecord| entry.name == name)
+            } else if let Some(record) = line.strip_prefix("aur-rollback-archive\t") {
+                if reading_archives
+                    || rollback_ready != Some(true)
+                    || rollback_archives.len() >= aur::MAX_AUR_DEPENDENCIES
                 {
                     return Err(PackageRuntimeError::InvalidResolution);
                 }
-                archives.push(AurInstallArchiveRecord {
-                    name: name.to_owned(),
-                    version: version.to_owned(),
-                    filename: filename.to_owned(),
-                    archive_bytes,
-                    archive_sha256: archive_sha256.to_owned(),
-                    install_script_sha256,
-                    explicitly_installed: reason == "0",
-                });
+                let archive = parse_aur_install_archive_record(record)?;
+                if rollback_archives
+                    .iter()
+                    .any(|entry: &AurInstallArchiveRecord| entry.name == archive.name)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                rollback_archives.push(archive);
+            } else if let Some(package) = line.strip_prefix("aur-rollback-absent\t") {
+                if reading_archives
+                    || rollback_ready != Some(true)
+                    || !safe_logical_name(package)
+                    || rollback_absent.len() >= aur::MAX_AUR_DEPENDENCIES
+                    || rollback_absent.iter().any(|entry| entry == package)
+                    || rollback_archives.iter().any(|entry| entry.name == package)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                rollback_absent.push(package.to_owned());
+            } else if let Some(record) = line.strip_prefix("aur-archive\t") {
+                reading_archives = true;
+                if archives.len() >= aur::MAX_AUR_DEPENDENCIES {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                let archive = parse_aur_install_archive_record(record)?;
+                if archives
+                    .iter()
+                    .any(|entry: &AurInstallArchiveRecord| entry.name == archive.name)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                archives.push(archive);
             } else {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
@@ -10925,10 +11294,50 @@ fn parse_package_mutation_intent(
         {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        let rollback = match rollback_ready {
+            Some(true) => {
+                if rollback_archives.is_empty() && rollback_absent.is_empty()
+                    || rollback_archives
+                        .len()
+                        .saturating_add(rollback_absent.len())
+                        > aur::MAX_AUR_DEPENDENCIES
+                    || rollback_archives
+                        .iter()
+                        .any(|archive| rollback_absent.iter().any(|name| name == &archive.name))
+                    || rollback_archives.iter().any(|archive| {
+                        !archives.iter().any(|forward| forward.name == archive.name)
+                            && !replacements.iter().any(|replacement| {
+                                replacement.name == archive.name
+                                    && replacement.version == archive.version
+                            })
+                    })
+                    || rollback_absent
+                        .iter()
+                        .any(|name| !archives.iter().any(|archive| archive.name == *name))
+                    || replacements.iter().any(|replacement| {
+                        !rollback_archives.iter().any(|archive| {
+                            archive.name == replacement.name
+                                && archive.version == replacement.version
+                        })
+                    })
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                Some(AurInstallRollbackPlan {
+                    archives: rollback_archives,
+                    previously_absent: rollback_absent,
+                })
+            }
+            Some(false) | None if rollback_archives.is_empty() && rollback_absent.is_empty() => {
+                None
+            }
+            _ => return Err(PackageRuntimeError::InvalidResolution),
+        };
         Ok(PackageMutationIntent::AurInstall {
             request: request.to_owned(),
             archives,
             replacements,
+            rollback,
         })
     } else if let Some(removal) = operation.strip_prefix("remove\t") {
         let fields = removal.split('\t').collect::<Vec<_>>();
@@ -10995,6 +11404,61 @@ fn parse_package_mutation_intent(
     } else {
         Err(PackageRuntimeError::InvalidResolution)
     }
+}
+
+fn parse_aur_install_archive_record(
+    record: &str,
+) -> Result<AurInstallArchiveRecord, PackageRuntimeError> {
+    let mut fields = record.split('\t');
+    let (
+        Some(name),
+        Some(version),
+        Some(filename),
+        Some(archive_bytes),
+        Some(archive_sha256),
+        Some(install_script_sha256),
+        Some(reason),
+        None,
+    ) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    )
+    else {
+        return Err(PackageRuntimeError::InvalidResolution);
+    };
+    let archive_bytes = archive_bytes
+        .parse::<u64>()
+        .map_err(|_| PackageRuntimeError::InvalidResolution)?;
+    let install_script_sha256 = match install_script_sha256 {
+        "-" => None,
+        value if valid_sha256_hex(value) => Some(value.to_owned()),
+        _ => return Err(PackageRuntimeError::InvalidResolution),
+    };
+    if !safe_logical_name(name)
+        || !safe_package_version(version)
+        || !safe_package_filename(filename)
+        || archive_bytes == 0
+        || archive_bytes > PACKAGE_ARCHIVE_LIMIT
+        || !valid_sha256_hex(archive_sha256)
+        || !matches!(reason, "0" | "1")
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(AurInstallArchiveRecord {
+        name: name.to_owned(),
+        version: version.to_owned(),
+        filename: filename.to_owned(),
+        archive_bytes,
+        archive_sha256: archive_sha256.to_owned(),
+        install_script_sha256,
+        explicitly_installed: reason == "0",
+    })
 }
 
 fn resolved_version<'a>(
@@ -11648,6 +12112,59 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                 .aur_install_transaction_applied(&archives, &replacements)
                 .expect("retained replacement is not applied")
         );
+    }
+
+    #[test]
+    fn aur_rollback_retains_only_the_lifecycle_bound_prior_archive() {
+        let tree = TestTree::new();
+        tree.local_package("sample-1.0-1", "sample", b"%FILES%\n");
+        let runtime = tree.package_runtime();
+        let bytes = b"reviewed prior AUR archive";
+        let sha256: [u8; 32] = Sha256::digest(bytes).into();
+        let filename = format!("{}-sample-1.0-1-x86_64.pkg.tar.zst", hex_sha256(&sha256));
+        let cache = tree.root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        fs::create_dir_all(&cache).expect("AUR package cache");
+        let path = cache.join(&filename);
+        fs::write(&path, bytes).expect("prior AUR cache archive");
+        runtime
+            .publish_aur_lifecycle_capabilities(&[AurLifecycleCapability {
+                package: "sample".to_owned(),
+                version: "1.0-1".to_owned(),
+                archive_sha256: sha256,
+                install_script_sha256: None,
+            }])
+            .expect("prior AUR lifecycle capability");
+        let incoming = [InstallArchive {
+            path: "/cache/sample-2.0-1.pkg.tar.zst".to_owned(),
+            name: "sample".to_owned(),
+            version: "2.0-1".to_owned(),
+            explicitly_installed: true,
+        }];
+        let rollback = runtime
+            .prepare_aur_install_rollback(&incoming, &[])
+            .expect("prepare AUR rollback")
+            .expect("available AUR rollback");
+        assert_eq!(
+            rollback,
+            AurInstallRollbackPlan {
+                archives: vec![AurInstallArchiveRecord {
+                    name: "sample".to_owned(),
+                    version: "1.0-1".to_owned(),
+                    filename,
+                    archive_bytes: bytes.len() as u64,
+                    archive_sha256: hex_sha256(&sha256),
+                    install_script_sha256: None,
+                    explicitly_installed: true,
+                }],
+                previously_absent: Vec::new(),
+            },
+        );
+
+        fs::write(path, b"tampered prior AUR archive").expect("tamper prior AUR archive");
+        assert!(matches!(
+            runtime.prepare_aur_install_rollback(&incoming, &[]),
+            Err(PackageRuntimeError::InvalidPayload)
+        ));
     }
 
     #[test]
@@ -14034,6 +14551,21 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
                 version: "10.0.10-1".to_owned(),
                 database_sha256: "d".repeat(64),
             }],
+            rollback: Some(AurInstallRollbackPlan {
+                archives: vec![AurInstallArchiveRecord {
+                    name: "dotnet-runtime".to_owned(),
+                    version: "10.0.10-1".to_owned(),
+                    filename: format!("{}-dotnet-runtime.pkg.tar.xz", "e".repeat(64)),
+                    archive_bytes: 2048,
+                    archive_sha256: "e".repeat(64),
+                    install_script_sha256: None,
+                    explicitly_installed: true,
+                }],
+                previously_absent: vec![
+                    "dotnet-runtime-bin".to_owned(),
+                    "dotnet-sdk-bin".to_owned(),
+                ],
+            }),
         };
         let encoded =
             serialize_package_mutation_intent(&aur_install, RepositoryArchitecture::X86_64)
@@ -14043,6 +14575,38 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
                 .expect("parse AUR install"),
             aur_install,
         );
+        for rollback in [
+            AurInstallRollbackPlan {
+                archives: Vec::new(),
+                previously_absent: vec!["unrelated".to_owned()],
+            },
+            AurInstallRollbackPlan {
+                archives: vec![AurInstallArchiveRecord {
+                    name: "unrelated".to_owned(),
+                    version: "1-1".to_owned(),
+                    filename: format!("{}-unrelated.pkg.tar.xz", "f".repeat(64)),
+                    archive_bytes: 1024,
+                    archive_sha256: "f".repeat(64),
+                    install_script_sha256: None,
+                    explicitly_installed: true,
+                }],
+                previously_absent: Vec::new(),
+            },
+        ] {
+            let mut invalid = aur_install.clone();
+            let PackageMutationIntent::AurInstall {
+                rollback: candidate,
+                ..
+            } = &mut invalid
+            else {
+                unreachable!();
+            };
+            *candidate = Some(rollback);
+            assert!(matches!(
+                serialize_package_mutation_intent(&invalid, RepositoryArchitecture::X86_64),
+                Err(PackageRuntimeError::InvalidResolution)
+            ));
+        }
 
         let removal = PackageMutationIntent::Remove {
             package: "btop".to_owned(),
@@ -14153,6 +14717,10 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/libgcc-16.1.1-1-x86_64.pkg.tar.z
                     explicitly_installed: true,
                 }],
                 replacements: Vec::new(),
+                rollback: Some(AurInstallRollbackPlan {
+                    archives: Vec::new(),
+                    previously_absent: vec!["dotnet-sdk-bin".to_owned()],
+                }),
             })
             .expect("publish interrupted AUR transaction");
         assert_eq!(
@@ -14160,7 +14728,7 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/libgcc-16.1.1-1-x86_64.pkg.tar.z
                 .pending_mutation_any()
                 .expect("discover pending AUR transaction")
                 .as_bytes(),
-            b"dotnet-sdk-bin\tinstall\t10.0.10.sdk302-1",
+            b"dotnet-sdk-bin\tinstall\t10.0.10.sdk302-1\trollback",
         );
     }
 

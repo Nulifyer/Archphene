@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <linux/capability.h>
 #include <linux/filter.h>
+#include <linux/openat2.h>
 #include <linux/seccomp.h>
 #include <linux/stat.h>
 #include <link.h>
@@ -356,6 +357,29 @@ long archphene_syscall_capset(const void *header, const void *data) {
 }
 #endif
 
+#ifdef __NR_openat2
+/*
+ * Android may reject openat2 with EUNATCH instead of the ENOSYS expected by
+ * portable Linux fallback paths. The fake-root policy cannot safely honor
+ * openat2's resolve semantics, so consistently report it unavailable.
+ */
+int openat2(int directory, const char *path,
+        const struct open_how *how, size_t size) {
+    (void)directory;
+    (void)path;
+    (void)how;
+    (void)size;
+    errno = ENOSYS;
+    return -1;
+}
+
+__attribute__((used, visibility("hidden")))
+long archphene_syscall_openat2_unavailable(void) {
+    errno = ENOSYS;
+    return -1;
+}
+#endif
+
 struct archphene_linux_dirent64 {
     uint64_t inode;
     int64_t offset;
@@ -466,6 +490,10 @@ __asm__(
     "cmp x0, #" ARCHPHENE_STRINGIFY(__NR_capset) "\n"
     "b.eq 5f\n"
 #endif
+#ifdef __NR_openat2
+    "cmp x0, #" ARCHPHENE_STRINGIFY(__NR_openat2) "\n"
+    "b.eq 6f\n"
+#endif
     "adrp x16, archphene_real_syscall_function\n"
     "ldr x16, [x16, #:lo12:archphene_real_syscall_function]\n"
     "cbz x16, 2f\n"
@@ -495,6 +523,10 @@ __asm__(
     "mov x1, x2\n"
     "b archphene_syscall_capset\n"
 #endif
+#ifdef __NR_openat2
+    "6:\n"
+    "b archphene_syscall_openat2_unavailable\n"
+#endif
     "2:\n"
     "mov x0, #-" ARCHPHENE_STRINGIFY(ENOSYS) "\n"
     "ret\n"
@@ -520,6 +552,10 @@ __asm__(
 #ifdef __NR_capset
     "cmpq $" ARCHPHENE_STRINGIFY(__NR_capset) ", %rdi\n"
     "je 7f\n"
+#endif
+#ifdef __NR_openat2
+    "cmpq $" ARCHPHENE_STRINGIFY(__NR_openat2) ", %rdi\n"
+    "je 8f\n"
 #endif
     "movq archphene_real_syscall_function(%rip), %rax\n"
     "testq %rax, %rax\n"
@@ -558,6 +594,10 @@ __asm__(
     "movq %rsi, %rdi\n"
     "movq %rdx, %rsi\n"
     "jmp archphene_syscall_capset\n"
+#endif
+#ifdef __NR_openat2
+    "8:\n"
+    "jmp archphene_syscall_openat2_unavailable\n"
 #endif
     "2:\n"
     "movq $-" ARCHPHENE_STRINGIFY(ENOSYS) ", %rax\n"
@@ -671,6 +711,9 @@ static bool reject_optional_sandbox_syscall(siginfo_t *information, void *contex
      * so callers use their fstatat/stat fallback, which is translated.
      */
     optional = optional || information->si_syscall == __NR_statx;
+#endif
+#ifdef __NR_openat2
+    optional = optional || information->si_syscall == __NR_openat2;
 #endif
 #ifdef __NR_get_mempolicy
     /*
@@ -4782,6 +4825,100 @@ int fstatat(int directory, const char *path, struct stat *value, int flags) {
     return result;
 }
 
+int fstatat64(
+        int directory, const char *path, struct stat64 *value, int flags) {
+    typedef int (*function_type)(
+            int, const char *, struct stat64 *, int);
+    function_type real = RESOLVE(function_type, "fstatat64");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_at_path(directory, path, buffer, &translated,
+            (flags & AT_SYMLINK_NOFOLLOW) == 0);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    int result = real(directory, target, value, flags);
+    if (result == 0) normalize_stat64_identity(value);
+    return result;
+}
+
+static bool descriptor_mount_id(int descriptor, uint64_t *mount_id) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = RESOLVE(open_type, "open");
+    if (descriptor < 0 || mount_id == NULL || real_open == NULL) return false;
+
+    char path[64];
+    int written = snprintf(
+            path, sizeof(path), "/proc/self/fdinfo/%d", descriptor);
+    if (written <= 0 || (size_t)written >= sizeof(path)) return false;
+    int fd = real_open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+
+    char contents[512];
+    size_t length = 0;
+    while (length < sizeof(contents) - 1) {
+        ssize_t count = read(fd, contents + length,
+                sizeof(contents) - 1 - length);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return false;
+        }
+        if (count == 0) break;
+        length += (size_t)count;
+    }
+    close(fd);
+    contents[length] = '\0';
+
+    static const char prefix[] = "mnt_id:";
+    const char *line = contents;
+    while (line < contents + length) {
+        const char *end = memchr(line, '\n',
+                (size_t)(contents + length - line));
+        if (end == NULL) end = contents + length;
+        if ((size_t)(end - line) > sizeof(prefix) - 1
+                && memcmp(line, prefix, sizeof(prefix) - 1) == 0) {
+            const char *cursor = line + sizeof(prefix) - 1;
+            while (cursor < end && (*cursor == ' ' || *cursor == '\t')) {
+                cursor++;
+            }
+            uint64_t value = 0;
+            bool has_digit = false;
+            while (cursor < end && *cursor >= '0' && *cursor <= '9') {
+                unsigned int digit = (unsigned int)(*cursor - '0');
+                if (value > (UINT64_MAX - digit) / 10) return false;
+                value = value * 10 + digit;
+                has_digit = true;
+                cursor++;
+            }
+            if (has_digit && value > 0 && cursor == end) {
+                *mount_id = value;
+                return true;
+            }
+            return false;
+        }
+        line = end < contents + length ? end + 1 : end;
+    }
+    return false;
+}
+
+static bool translated_mount_id(int directory, const char *target, int flags,
+        uint64_t *mount_id) {
+    if (target[0] == '\0' && (flags & AT_EMPTY_PATH) != 0 && directory >= 0) {
+        return descriptor_mount_id(directory, mount_id);
+    }
+
+    typedef int (*openat_type)(int, const char *, int, ...);
+    openat_type real_openat = RESOLVE(openat_type, "openat");
+    if (real_openat == NULL) return false;
+    int open_flags = O_PATH | O_CLOEXEC;
+    if ((flags & AT_SYMLINK_NOFOLLOW) != 0) open_flags |= O_NOFOLLOW;
+    int descriptor = real_openat(directory, target, open_flags);
+    if (descriptor < 0) return false;
+    bool found = descriptor_mount_id(descriptor, mount_id);
+    close(descriptor);
+    return found;
+}
+
 int statx(int directory, const char *path, int flags, unsigned int mask,
         struct statx *value) {
     typedef int (*function_type)(int, const char *, int, unsigned int, struct statx *);
@@ -4854,6 +4991,25 @@ int statx(int directory, const char *path, int flags, unsigned int mask,
     value->stx_rdev_minor = minor(metadata.st_rdev);
     value->stx_dev_major = major(metadata.st_dev);
     value->stx_dev_minor = minor(metadata.st_dev);
+#ifdef STATX_MNT_ID
+    /*
+     * Android may block statx for app processes even though modern callers
+     * require a mount identity to chase paths safely. Recover the kernel's
+     * real mount ID from the descriptor metadata instead of inventing one.
+     * This is the legacy mount ID, not STATX_MNT_ID_UNIQUE, so callers that
+     * strictly require the newer identity continue to fail closed.
+     */
+    unsigned int mount_mask = STATX_MNT_ID;
+#ifdef STATX_MNT_ID_UNIQUE
+    mount_mask |= STATX_MNT_ID_UNIQUE;
+#endif
+    uint64_t mount_id;
+    if ((mask & mount_mask) != 0
+            && translated_mount_id(directory, target, flags, &mount_id)) {
+        value->stx_mnt_id = mount_id;
+        value->stx_mask |= STATX_MNT_ID;
+    }
+#endif
     return 0;
 }
 
