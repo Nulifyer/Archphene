@@ -820,8 +820,21 @@ transaction would remove. Archphene's ordinary `--noconfirm` transaction fails
 that conflict closed, so it cannot silently replace a package, but reviewed
 replacement support is not implemented. The contract proves that an isolated
 `--dbonly --ask 4` transaction against a copied local database exposes the
-exact replacement while leaving live state unchanged. That authoritative plan,
-user consent, and recovery binding are explicit remaining work.
+exact replacement while leaving live state unchanged.
+
+Rust now performs that authoritative simulation against a bounded mode-0700
+private copy of pacman's local database after re-verifying every archive. It
+accepts only unchanged installed records plus additions/upgrades matching the
+exact archive set, derives every removed name/version, limits the returned plan
+to 48 removals, and deletes the preview database on every success, failure, or
+runtime restart.
+Kotlin parses a versioned strict plan and, while consent/recovery is unfinished,
+blocks any nonempty removal plan before the package commit boundary with an
+explicit “replacement confirmation is required” result. Normal
+changed-dependency updates pass this new preflight on both exact ABIs and leave
+no preview state. Presenting the removal plan for user consent, snapshotting the
+removed ownership records, binding the plan into durable recovery, and enabling
+conflict acceptance in the live transaction remain open.
 
 Pacman commits the complete prepared archive set through one normal
 dependency-checking transaction; the former per-package `--nodeps` and

@@ -4658,6 +4658,7 @@ mod android {
                 }
                 _ => return ERROR_INVALID_ARGUMENT,
             },
+            11 => package_runtime.install_plan(package),
             _ => return ERROR_INVALID_ARGUMENT,
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };

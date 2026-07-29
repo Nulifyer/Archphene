@@ -12415,6 +12415,11 @@ class ArchpheneRuntimeService : Service() {
                                 availableBytes,
                             )
                         }
+                        val installPlan =
+                            packageInstallPlan(activeHandle, normalized, scratch)
+                        if (installPlan.isNotEmpty()) {
+                            throw PackageReplacementReviewRequiredException(installPlan)
+                        }
                         if (!enterPackageCommit()) {
                             throw InterruptedException("Package operation cancelled")
                         }
@@ -12583,6 +12588,32 @@ class ArchpheneRuntimeService : Service() {
         if (outputLength < 0) {
             throw IllegalStateException(readNativeMessage(scratch.outputBuffer, outputLength))
         }
+    }
+
+    private fun packageInstallPlan(
+        activeHandle: Long,
+        packageName: String,
+        scratch: PackageIoScratch,
+    ): List<PlannedPackageRemoval> {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        scratch.requestBuffer.clear()
+        scratch.requestBuffer.put(packageBytes)
+        scratch.outputBuffer.clear()
+        val outputLength =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_INSTALL_PLAN,
+                scratch.requestBuffer,
+                packageBytes.size,
+                scratch.outputBuffer,
+            )
+        if (outputLength < 0) {
+            throw IllegalStateException(readNativeMessage(scratch.outputBuffer, outputLength))
+        }
+        val output = ByteArray(outputLength)
+        scratch.outputBuffer.position(0)
+        scratch.outputBuffer.get(output)
+        return PackageInstallPlanCodec.decode(output)
     }
 
     private fun refreshPendingPackageMutation(activeHandle: Long) {

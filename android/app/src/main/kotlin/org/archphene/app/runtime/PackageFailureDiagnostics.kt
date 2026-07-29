@@ -4,6 +4,9 @@ import java.net.ConnectException
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import javax.net.ssl.SSLException
 
 internal class InsufficientPackageStorageException(
@@ -22,6 +25,67 @@ internal class InsufficientPackageStorageException(
 internal class UnsupportedPackageCompatibilityException(
     detail: String,
 ) : IllegalStateException(detail)
+
+internal data class PlannedPackageRemoval(
+    val name: String,
+    val version: String,
+)
+
+internal class PackageReplacementReviewRequiredException(
+    val removals: List<PlannedPackageRemoval>,
+) : IllegalStateException(
+        removals.joinToString(
+            prefix = "would remove ",
+            separator = ", ",
+        ) { removal -> "${removal.name} ${removal.version}" },
+) {
+    init {
+        require(removals.isNotEmpty() && removals.size <= 48)
+    }
+}
+
+internal object PackageInstallPlanCodec {
+    private val packageName = Regex("[A-Za-z0-9@+._-]{1,128}")
+
+    fun decode(bytes: ByteArray): List<PlannedPackageRemoval> {
+        require(bytes.isNotEmpty() && bytes.size <= 16 * 1024)
+        val text =
+            StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString()
+        require(text.endsWith('\n'))
+        val lines = text.dropLast(1).split('\n')
+        require(lines.firstOrNull() == "org.archphene.package-install-plan.v1")
+        val summary = lines.getOrNull(1)?.split('\t').orEmpty()
+        val count = summary.getOrNull(1)?.toIntOrNull()
+        require(
+            summary.size == 2 &&
+                summary[0] == "removals" &&
+                count != null &&
+                count in 0..48 &&
+                lines.size == count + 2,
+        )
+        val removals = ArrayList<PlannedPackageRemoval>(count)
+        lines.drop(2).forEach { line ->
+            val fields = line.split('\t')
+            require(
+                fields.size == 3 &&
+                    fields[0] == "remove" &&
+                    packageName.matches(fields[1]) &&
+                    fields[2].length in 1..128 &&
+                    fields[2].none { character ->
+                        character.isWhitespace() || character == '\u0000'
+                    } &&
+                    removals.none { removal -> removal.name == fields[1] },
+            )
+            removals += PlannedPackageRemoval(fields[1], fields[2])
+        }
+        return removals
+    }
+}
 
 internal object PackageFailureDiagnostics {
     fun install(
@@ -72,6 +136,9 @@ internal object PackageFailureDiagnostics {
         return when {
             error is UnsupportedPackageCompatibilityException ->
                 "Unsupported on this device: $detail. No Linux packages were changed."
+            error is PackageReplacementReviewRequiredException ->
+                "Replacement confirmation is required: $detail. " +
+                    "No Linux packages were changed."
             error is InsufficientPackageStorageException ->
                 "Not enough Linux storage: " +
                     "${formatStorageBytes(error.requiredBytes)} is required and " +

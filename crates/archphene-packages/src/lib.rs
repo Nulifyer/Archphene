@@ -38,6 +38,7 @@ const MANIFEST_HEADER: &str = "# org.archphene.package-runtime.v1";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_INSTALL_PLAN_REMOVALS: usize = 48;
 const ALIAS_DIRECTORY: &str = "run/package-runtime-v1";
 const GDK_PIXBUF_MODULE_FILE: &str = "run/gdk-pixbuf-loaders-v1.cache";
 const GDK_PIXBUF_MODULE_TEMP_FILE: &str = "run/.gdk-pixbuf-loaders-v1.tmp";
@@ -59,6 +60,7 @@ const PACKAGE_MUTATION_INTENT_TEMP_FILE: &str = "run/package-mutation-v1.tmp";
 const PACKAGE_MUTATION_INTENT_HEADER: &str = "org.archphene.package-mutation.v1";
 const PACKAGE_MUTATION_INTENT_LIMIT: u64 = 384 * 1024;
 const PACKAGE_DATABASE_REPAIR_DIRECTORY: &str = "run/package-database-repair-v1";
+const PACKAGE_TRANSACTION_PREVIEW_DIRECTORY: &str = "run/package-transaction-preview-v1";
 const PACKAGE_REMOVAL_REPAIR_DIRECTORY: &str = "run/package-removal-repair-v1";
 const PACKAGE_REMOVAL_REPAIR_TEMP_DIRECTORY: &str = "run/package-removal-repair-v1.tmp";
 const PACKAGE_REMOVAL_LOCAL_TEMP_DIRECTORY: &str =
@@ -1087,6 +1089,7 @@ impl PackageRuntime {
             compatibility_analysis: Arc::new(Mutex::new(())),
             compatibility_review: Arc::new(Mutex::new(None)),
         };
+        runtime.clear_transaction_preview_database()?;
         if runtime.read_pending_mutation()?.is_none() {
             runtime.clear_orphaned_removal_repair()?;
             runtime.recover_pending_install_reasons()?;
@@ -2347,6 +2350,53 @@ impl PackageRuntime {
         Ok(installed)
     }
 
+    pub fn install_plan(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        let resolution = self.resolve(package)?;
+        let package_count = resolution.as_str()?.lines().count();
+        let mut archives = Vec::with_capacity(package_count);
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            self.verify_package(
+                payload.filename,
+                payload.name,
+                payload.version,
+                payload.size,
+            )?;
+            let archive = self
+                .arch_root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(payload.filename);
+            archives.push(InstallArchive {
+                path: archive
+                    .to_str()
+                    .ok_or(PackageRuntimeError::InvalidPath)?
+                    .to_owned(),
+                name: payload.name.to_owned(),
+                version: payload.version.to_owned(),
+                explicitly_installed: false,
+            });
+        }
+        if archives.is_empty() || archives.len() > 256 {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let plan = self.preview_install_transaction(&archives)?;
+        if plan.removals.len() > MAX_INSTALL_PLAN_REMOVALS {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let mut output = empty_tool_output();
+        output.push(b"org.archphene.package-install-plan.v1\nremovals\t")?;
+        output.push(plan.removals.len().to_string().as_bytes())?;
+        output.push(b"\n")?;
+        for removal in plan.removals {
+            output.push(b"remove\t")?;
+            output.push(removal.name.as_bytes())?;
+            output.push(b"\t")?;
+            output.push(removal.version.as_bytes())?;
+            output.push(b"\n")?;
+        }
+        Ok(output)
+    }
+
     pub fn update(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         if self.installed_version(package)?.as_bytes().is_empty() {
             return Err(PackageRuntimeError::NotInstalled);
@@ -3325,6 +3375,147 @@ impl PackageRuntime {
         self.clear_pending_mutation()?;
         self.refresh_system_trust()?;
         Ok(())
+    }
+
+    fn preview_install_transaction(
+        &self,
+        archives: &[InstallArchive],
+    ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
+        let live_local = self.arch_root.join("var/lib/pacman/local");
+        let before = read_local_package_identities(&live_local)?;
+        let preview_database = self.prepare_transaction_preview_database()?;
+        let result = (|| {
+            let config = self
+                .pacman_config
+                .to_str()
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let root = self
+                .arch_root
+                .to_str()
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let database = preview_database
+                .to_str()
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let trust_directory = self
+                .keyring
+                .parent()
+                .and_then(Path::to_str)
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let cache_path = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+            let cache = cache_path
+                .to_str()
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let mut arguments = vec![
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--gpgdir",
+                trust_directory,
+                "--cachedir",
+                cache,
+                "--noconfirm",
+                "--noprogressbar",
+                "--noscriptlet",
+                "--dbonly",
+                "--ask",
+                "4",
+            ];
+            append_install_transaction_mode(&mut arguments, InstallResolutionMode::Normal);
+            arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
+            self.run_bytes_with_timeout(
+                PackageTool::Pacman,
+                &arguments,
+                TRANSACTION_TIMEOUT,
+                MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+                false,
+            )?;
+            let after = read_local_package_identities(&preview_database.join("local"))?;
+            derive_install_transaction_plan(&before, &after, archives)
+        })();
+        let cleanup = self.clear_transaction_preview_database();
+        match (result, cleanup) {
+            (Ok(plan), Ok(())) => Ok(plan),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn prepare_transaction_preview_database(&self) -> Result<PathBuf, PackageRuntimeError> {
+        self.clear_transaction_preview_database()?;
+        let preview = self.arch_root.join(PACKAGE_TRANSACTION_PREVIEW_DIRECTORY);
+        let preview_local = preview.join("local");
+        fs::create_dir(&preview)?;
+        fs::set_permissions(&preview, fs::Permissions::from_mode(0o700))?;
+        fs::create_dir(&preview_local)?;
+        fs::set_permissions(&preview_local, fs::Permissions::from_mode(0o700))?;
+        let live_local = self.arch_root.join("var/lib/pacman/local");
+        let live_metadata = match fs::symlink_metadata(&live_local) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                File::open(&preview_local)?.sync_all()?;
+                File::open(&preview)?.sync_all()?;
+                return Ok(preview);
+            }
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if live_metadata.file_type().is_symlink() || !live_metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(live_local));
+        }
+        let result = (|| {
+            let mut count = 0_usize;
+            for entry in fs::read_dir(&live_local)? {
+                count = count.saturating_add(1);
+                if count > LOCAL_DATABASE_ENTRY_LIMIT {
+                    return Err(PackageRuntimeError::OutputLimit);
+                }
+                let entry = entry?;
+                let source = entry.path();
+                let destination = preview_local.join(entry.file_name());
+                let metadata = fs::symlink_metadata(&source)?;
+                if entry.file_name() == "ALPM_DB_VERSION" {
+                    copy_bounded_regular_file(&source, &destination, 64)?;
+                    continue;
+                }
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(PackageRuntimeError::UnsafeEntry(source));
+                }
+                validate_database_repair_entry(&source)?;
+                let identity = read_local_package_identity(&source)?;
+                let expected_entry = format!("{}-{}", identity.name, identity.version);
+                if entry.file_name().to_str() != Some(expected_entry.as_str()) {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                copy_database_repair_entry(&source, &destination)?;
+            }
+            File::open(&preview_local)?.sync_all()?;
+            File::open(&preview)?.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = self.clear_transaction_preview_database();
+            return Err(error);
+        }
+        Ok(preview)
+    }
+
+    fn clear_transaction_preview_database(&self) -> Result<(), PackageRuntimeError> {
+        let preview = self.arch_root.join(PACKAGE_TRANSACTION_PREVIEW_DIRECTORY);
+        match fs::symlink_metadata(&preview) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                Err(PackageRuntimeError::UnsafeEntry(preview))
+            }
+            Ok(_) => {
+                fs::remove_dir_all(&preview)?;
+                File::open(preview.parent().ok_or(PackageRuntimeError::InvalidPath)?)?
+                    .sync_all()?;
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(PackageRuntimeError::Io(error)),
+        }
     }
 
     pub fn remove(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
@@ -7391,6 +7582,148 @@ fn local_database_entry_matches(
     ))
 }
 
+fn read_local_package_identity(
+    entry: &Path,
+) -> Result<InstalledPackageIdentity, PackageRuntimeError> {
+    validate_database_repair_entry(entry)?;
+    let description = entry.join("desc");
+    let metadata = fs::symlink_metadata(&description)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > LOCAL_DESCRIPTION_LIMIT
+    {
+        return Err(PackageRuntimeError::UnsafeEntry(description));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(&description)?;
+    if file.metadata()?.len() != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    let mut content = String::with_capacity(
+        usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
+    );
+    file.read_to_string(&mut content)?;
+    if content.len() as u64 != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    let name = local_description_field(&content, "%NAME%")?
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    let version = local_description_field(&content, "%VERSION%")?
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    if !safe_logical_name(name)
+        || version.is_empty()
+        || version.len() > 128
+        || version
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(InstalledPackageIdentity {
+        name: name.to_owned(),
+        version: version.to_owned(),
+    })
+}
+
+fn read_local_package_identities(
+    local: &Path,
+) -> Result<Vec<InstalledPackageIdentity>, PackageRuntimeError> {
+    let metadata = match fs::symlink_metadata(local) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(local.to_path_buf()));
+    }
+    let mut packages = Vec::with_capacity(128);
+    let mut count = 0_usize;
+    for entry in fs::read_dir(local)? {
+        count = count.saturating_add(1);
+        if count > LOCAL_DATABASE_ENTRY_LIMIT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if entry.file_name() == "ALPM_DB_VERSION" {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > 64
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(path));
+            }
+            continue;
+        }
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        let identity = read_local_package_identity(&path)?;
+        let expected_entry = format!("{}-{}", identity.name, identity.version);
+        if entry.file_name().to_str() != Some(expected_entry.as_str()) {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        packages.push(identity);
+    }
+    packages.sort_unstable();
+    if packages.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(packages)
+}
+
+fn derive_install_transaction_plan(
+    before: &[InstalledPackageIdentity],
+    after: &[InstalledPackageIdentity],
+    archives: &[InstallArchive],
+) -> Result<InstallTransactionPlan, PackageRuntimeError> {
+    if archives.is_empty()
+        || archives.len() > 256
+        || before.windows(2).any(|pair| pair[0].name >= pair[1].name)
+        || after.windows(2).any(|pair| pair[0].name >= pair[1].name)
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    for (index, archive) in archives.iter().enumerate() {
+        if archives[..index]
+            .iter()
+            .any(|prior| prior.name == archive.name)
+            || !after
+                .iter()
+                .any(|package| package.name == archive.name && package.version == archive.version)
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+    }
+    for package in after {
+        match before
+            .binary_search_by(|candidate| candidate.name.cmp(&package.name))
+            .ok()
+            .map(|index| &before[index])
+        {
+            Some(previous) if previous.version == package.version => {}
+            _ if archives.iter().any(|archive| {
+                archive.name == package.name && archive.version == package.version
+            }) => {}
+            _ => return Err(PackageRuntimeError::InvalidResolution),
+        }
+    }
+    let removals = before
+        .iter()
+        .filter(|package| {
+            after
+                .binary_search_by(|candidate| candidate.name.cmp(&package.name))
+                .is_err()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(InstallTransactionPlan { removals })
+}
+
 fn validate_database_repair_entry_if_present(path: &Path) -> Result<(), PackageRuntimeError> {
     match fs::symlink_metadata(path) {
         Ok(_) => validate_database_repair_entry(path),
@@ -7430,6 +7763,39 @@ fn validate_database_repair_entry(path: &Path) -> Result<(), PackageRuntimeError
             return Err(PackageRuntimeError::UnsafeEntry(entry_path));
         }
     }
+    Ok(())
+}
+
+fn copy_bounded_regular_file(
+    source: &Path,
+    destination: &Path,
+    maximum_size: u64,
+) -> Result<(), PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > maximum_size
+    {
+        return Err(PackageRuntimeError::UnsafeEntry(source.to_path_buf()));
+    }
+    let mut input = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(source)?;
+    if input.metadata()?.len() != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(destination)?;
+    if io::copy(&mut input, &mut output)? != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    output.sync_all()?;
     Ok(())
 }
 
@@ -7843,6 +8209,17 @@ struct InstallArchive {
     name: String,
     version: String,
     explicitly_installed: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct InstalledPackageIdentity {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct InstallTransactionPlan {
+    removals: Vec<InstalledPackageIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10136,6 +10513,108 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
         assert!(matches!(
             validate_install_plan("btop 1.4.7-1\n", &archives),
             Err(PackageRuntimeError::InvalidResolution)
+        ));
+    }
+
+    #[test]
+    fn copied_database_plan_derives_exact_replacements_and_dependency_changes() {
+        let package = |name: &str, version: &str| InstalledPackageIdentity {
+            name: name.to_owned(),
+            version: version.to_owned(),
+        };
+        let archive = |name: &str, version: &str| InstallArchive {
+            path: format!("/cache/{name}.pkg.tar.zst"),
+            name: name.to_owned(),
+            version: version.to_owned(),
+            explicitly_installed: false,
+        };
+        let before = vec![
+            package("base", "3-2"),
+            package("old-tool", "1.0-1"),
+            package("stable-library", "4.0-1"),
+        ];
+        let after = vec![
+            package("base", "3-2"),
+            package("new-tool", "2.0-1"),
+            package("stable-library", "4.0-1"),
+        ];
+        let plan = derive_install_transaction_plan(
+            &before,
+            &after,
+            &[archive("base", "3-2"), archive("new-tool", "2.0-1")],
+        )
+        .expect("replacement plan");
+        assert_eq!(plan.removals, [package("old-tool", "1.0-1")]);
+
+        let dependency_after = vec![
+            package("base", "3-2"),
+            package("new-dependency", "1.0-1"),
+            package("target", "2.0-1"),
+        ];
+        let dependency_plan = derive_install_transaction_plan(
+            &[package("base", "3-2"), package("target", "1.0-1")],
+            &dependency_after,
+            &[
+                archive("base", "3-2"),
+                archive("new-dependency", "1.0-1"),
+                archive("target", "2.0-1"),
+            ],
+        )
+        .expect("changed dependency plan");
+        assert!(dependency_plan.removals.is_empty());
+    }
+
+    #[test]
+    fn copied_database_plan_rejects_unverified_or_ambiguous_results() {
+        let package = |name: &str, version: &str| InstalledPackageIdentity {
+            name: name.to_owned(),
+            version: version.to_owned(),
+        };
+        let archive = |name: &str, version: &str| InstallArchive {
+            path: format!("/cache/{name}.pkg.tar.zst"),
+            name: name.to_owned(),
+            version: version.to_owned(),
+            explicitly_installed: false,
+        };
+        let before = [package("base", "3-2")];
+        for (after, archives) in [
+            (
+                vec![package("base", "3-2"), package("unknown", "1.0-1")],
+                vec![archive("base", "3-2")],
+            ),
+            (
+                vec![package("base", "3-2")],
+                vec![archive("base", "3-2"), archive("target", "1.0-1")],
+            ),
+            (
+                vec![package("base", "3-2")],
+                vec![archive("base", "3-2"), archive("base", "3-2")],
+            ),
+            (
+                vec![package("base", "3-2"), package("base", "4-1")],
+                vec![archive("base", "4-1")],
+            ),
+        ] {
+            assert!(matches!(
+                derive_install_transaction_plan(&before, &after, &archives),
+                Err(PackageRuntimeError::InvalidResolution),
+            ));
+        }
+    }
+
+    #[test]
+    fn transaction_preview_is_restart_cleaned_and_rejects_links() {
+        let tree = TestTree::new();
+        let preview = tree.root.join(PACKAGE_TRANSACTION_PREVIEW_DIRECTORY);
+        fs::create_dir_all(preview.join("local")).expect("stale preview");
+        fs::write(preview.join("local/partial"), b"interrupted").expect("stale preview content");
+        let runtime = tree.package_runtime();
+        assert!(!preview.exists());
+
+        std::os::unix::fs::symlink(tree.root.join("etc"), &preview).expect("hostile preview link");
+        assert!(matches!(
+            runtime.clear_transaction_preview_database(),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == preview
         ));
     }
 
