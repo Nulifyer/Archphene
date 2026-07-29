@@ -488,6 +488,11 @@ class ArchpheneRuntimeService : Service() {
                     !packageOperationActive &&
                     !commandActive
 
+        val packageMutationRollbackAvailable: Boolean
+            get() =
+                packageMutationRepairAvailable &&
+                    packageMutationStatus.endsWith("\trollback")
+
         val packageCacheRecoveryAvailable: Boolean
             get() = packageCacheRecoveryReady()
 
@@ -675,6 +680,8 @@ class ArchpheneRuntimeService : Service() {
 
         fun repairPackageMutation(): Boolean = requestPackageMutationRepair()
 
+        fun rollbackPackageMutation(): Boolean = requestPackageMutationRollback()
+
         fun clearPackageCache(): Boolean = requestPackageCacheCleanup()
 
         fun startDebugPackagePhaseFixture(
@@ -699,6 +706,13 @@ class ArchpheneRuntimeService : Service() {
                 MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS &&
                 readyHandle != 0L &&
                 NativeRuntime.nativeArmPackagePreTransactionTestHold(readyHandle, holdMillis)
+
+        fun armDebugPackagePostTransactionHold(holdMillis: Long): Boolean =
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+                holdMillis in
+                MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS &&
+                readyHandle != 0L &&
+                NativeRuntime.nativeArmPackagePostTransactionTestHold(readyHandle, holdMillis)
 
         fun armDebugPackageWorkerHold(holdMillis: Long): Boolean {
             if (
@@ -12708,19 +12722,32 @@ class ArchpheneRuntimeService : Service() {
         if (packageMutationStatus.isNotEmpty()) {
             packageRecoveryMessageRevision = jobRevision
             packageRecoveryMessage =
-                "Package mutation was interrupted. Repair re-verifies and completes the " +
-                    "retained transaction."
+                if (packageMutationStatus.endsWith("\trollback")) {
+                    "Package mutation was interrupted. Repair completes the retained " +
+                        "transaction, or Roll back restores the exact previous package state."
+                } else {
+                    "Package mutation was interrupted. Repair re-verifies and completes the " +
+                        "retained transaction."
+                }
         }
     }
 
     @Synchronized
-    private fun requestPackageMutationRepair(): Boolean {
+    private fun requestPackageMutationRepair(): Boolean =
+        requestPackageMutationRecovery(rollback = false)
+
+    @Synchronized
+    private fun requestPackageMutationRollback(): Boolean =
+        requestPackageMutationRecovery(rollback = true)
+
+    private fun requestPackageMutationRecovery(rollback: Boolean): Boolean {
         val activeHandle = readyHandle
         val packageName = jobPackage
         val operation = jobOperation
         if (
             activeHandle == 0L ||
             packageMutationStatus.isEmpty() ||
+            (rollback && !packageMutationStatus.endsWith("\trollback")) ||
             packageName.isEmpty() ||
             operation !in
                 NativeRuntime.JOB_OPERATION_INSTALL..NativeRuntime.JOB_OPERATION_REMOVE ||
@@ -12741,12 +12768,18 @@ class ArchpheneRuntimeService : Service() {
             operation,
             NativeRuntime.JOB_QUEUED,
             0,
-            "Preparing durable package repair",
+            if (rollback) {
+                "Preparing exact package rollback"
+            } else {
+                "Preparing durable package repair"
+            },
         )
         val worker =
             Thread(
                 {
-                    requireRuntimeWorker("Package mutation repair")
+                    requireRuntimeWorker(
+                        if (rollback) "Package mutation rollback" else "Package mutation repair",
+                    )
                     val scratch = PackageIoScratch()
                     var jobId = 0L
                     var phase = 0
@@ -12785,7 +12818,11 @@ class ArchpheneRuntimeService : Service() {
                             operation,
                             NativeRuntime.JOB_QUEUED,
                             0,
-                            "Queued interrupted package repair",
+                            if (rollback) {
+                                "Queued exact package rollback"
+                            } else {
+                                "Queued interrupted package repair"
+                            },
                         )
                         record(
                             NativeRuntime.JOB_RESOLVING,
@@ -12803,11 +12840,19 @@ class ArchpheneRuntimeService : Service() {
                             NativeRuntime.JOB_INSTALLING,
                             3,
                             60,
-                            "Repairing interrupted package transaction",
+                            if (rollback) {
+                                "Restoring exact previous package state"
+                            } else {
+                                "Repairing interrupted package transaction"
+                            },
                         )
                         runPackageCommand(
                             activeHandle,
-                            NativeRuntime.PACKAGE_COMMAND_REPAIR_MUTATION,
+                            if (rollback) {
+                                NativeRuntime.PACKAGE_COMMAND_ROLLBACK_MUTATION
+                            } else {
+                                NativeRuntime.PACKAGE_COMMAND_REPAIR_MUTATION
+                            },
                             packageName,
                             scratch,
                         )
@@ -12818,9 +12863,20 @@ class ArchpheneRuntimeService : Service() {
                             NativeRuntime.JOB_COMPLETE,
                             4,
                             100,
-                            "Repaired package transaction for $packageName",
+                            if (rollback) {
+                                "Rolled back package transaction for $packageName"
+                            } else {
+                                "Repaired package transaction for $packageName"
+                            },
                         )
-                        Log.i(TAG, "Repaired interrupted package transaction for $packageName")
+                        Log.i(
+                            TAG,
+                            if (rollback) {
+                                "Rolled back interrupted package transaction for $packageName"
+                            } else {
+                                "Repaired interrupted package transaction for $packageName"
+                            },
+                        )
                     } catch (error: Exception) {
                         refreshPendingPackageMutation(activeHandle)
                         if (packageMutationStatus.isEmpty()) {
@@ -12831,7 +12887,11 @@ class ArchpheneRuntimeService : Service() {
                         refreshShellChoices(activeHandle)
                         val message =
                             boundedJobMessage(
-                                "Package repair did not finish: " +
+                                (if (rollback) {
+                                    "Package rollback did not finish: "
+                                } else {
+                                    "Package repair did not finish: "
+                                }) +
                                     (error.message ?: error.javaClass.simpleName),
                             )
                         if (jobId > 0L) {
@@ -12856,14 +12916,22 @@ class ArchpheneRuntimeService : Service() {
                                 message,
                             )
                         }
-                        Log.e(TAG, "Package mutation repair failed", error)
+                        Log.e(
+                            TAG,
+                            if (rollback) {
+                                "Package mutation rollback failed"
+                            } else {
+                                "Package mutation repair failed"
+                            },
+                            error,
+                        )
                     } finally {
                         packageOperationActive = false
                         packageThread = null
                         stopWhenUnobservedAndIdle()
                     }
                 },
-                "ArchphenePackageRepair",
+                if (rollback) "ArchphenePackageRollback" else "ArchphenePackageRepair",
             )
         schedulePackageWorker(worker, activeHandle)
         promoteWorkToForeground()

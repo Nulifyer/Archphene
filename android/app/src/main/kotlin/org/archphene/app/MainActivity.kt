@@ -108,6 +108,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var removeButton: Button
     private lateinit var aurReviewButton: Button
     private lateinit var cancelButton: Button
+    private lateinit var rollbackButton: Button
     private lateinit var ptyButton: Button
     private lateinit var importButton: Button
     private lateinit var openButton: Button
@@ -200,6 +201,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 removeButton.isEnabled = false
                 cancelButton.isEnabled = false
                 cancelButton.visibility = View.GONE
+                rollbackButton.isEnabled = false
+                rollbackButton.visibility = View.GONE
                 ptyButton.isEnabled = false
                 importButton.isEnabled = false
                 openButton.isEnabled = false
@@ -864,6 +867,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     }
                 }
             }
+        rollbackButton =
+            Button(this).apply {
+                text = "Roll back"
+                isEnabled = false
+                visibility = View.GONE
+                setOnClickListener {
+                    isEnabled = false
+                    if (runtimeBinder?.rollbackPackageMutation() == true) {
+                        updateStatus()
+                    }
+                }
+            }
         val jobRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -895,6 +910,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 0,
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 1f,
+                            ),
+                        )
+                        addView(
+                            rollbackButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
                             ),
                         )
                         addView(
@@ -3329,6 +3351,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             packageCacheButton.isEnabled = false
             cancelButton.isEnabled = false
             cancelButton.visibility = View.GONE
+            rollbackButton.isEnabled = false
+            rollbackButton.visibility = View.GONE
             ptyButton.isEnabled = false
             importButton.isEnabled = false
             shareButton.isEnabled = false
@@ -3357,6 +3381,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setVisibilityIfChanged(
             cancelButton,
             if (packageActionAvailable) View.VISIBLE else View.GONE,
+        )
+        rollbackButton.isEnabled = binder.packageMutationRollbackAvailable
+        setVisibilityIfChanged(
+            rollbackButton,
+            if (binder.packageMutationRollbackAvailable) View.VISIBLE else View.GONE,
         )
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable

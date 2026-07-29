@@ -20,7 +20,8 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
             intent.action != ACTION_ARM_COMPATIBILITY_REVIEW &&
             intent.action != ACTION_CANCEL_COMPATIBILITY_REVIEW &&
             intent.action != ACTION_ARM_PACKAGE_WORKER &&
-            intent.action != ACTION_ARM_PRE_TRANSACTION
+            intent.action != ACTION_ARM_PRE_TRANSACTION &&
+            intent.action != ACTION_ARM_POST_TRANSACTION
         ) {
             return
         }
@@ -63,6 +64,10 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
                                 binder?.armDebugPackageWorkerHold(holdMillis.toLong()) == true
                             ACTION_ARM_PRE_TRANSACTION ->
                                 binder?.armDebugPackagePreTransactionHold(
+                                    holdMillis.toLong(),
+                                ) == true
+                            ACTION_ARM_POST_TRANSACTION ->
+                                binder?.armDebugPackagePostTransactionHold(
                                     holdMillis.toLong(),
                                 ) == true
                             else ->
@@ -109,6 +114,8 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.ARM_PACKAGE_WORKER"
         private const val ACTION_ARM_PRE_TRANSACTION =
             "org.archphene.app.debug.action.ARM_PACKAGE_PRE_TRANSACTION"
+        private const val ACTION_ARM_POST_TRANSACTION =
+            "org.archphene.app.debug.action.ARM_PACKAGE_POST_TRANSACTION"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_HOLD_MILLIS = "hold-ms"

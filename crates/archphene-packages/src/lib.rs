@@ -432,6 +432,7 @@ pub struct PackageRuntime {
     compatibility_review: Arc<Mutex<Option<PackageCompatibilityReview>>>,
     replacement_review: Arc<Mutex<Option<PackageReplacementReview>>>,
     debug_pre_transaction_hold_millis: Arc<AtomicU64>,
+    debug_post_transaction_hold_millis: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -925,9 +926,27 @@ impl PackageRuntime {
             .is_ok()
     }
 
+    pub fn arm_debug_post_transaction_hold(&self, hold_millis: u64) -> bool {
+        if !(750..=30_000).contains(&hold_millis) {
+            return false;
+        }
+        self.debug_post_transaction_hold_millis
+            .compare_exchange(0, hold_millis, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
     fn hold_debug_before_transaction(&self) {
         let hold_millis = self
             .debug_pre_transaction_hold_millis
+            .swap(0, Ordering::AcqRel);
+        if hold_millis != 0 {
+            thread::sleep(Duration::from_millis(hold_millis));
+        }
+    }
+
+    fn hold_debug_after_transaction(&self) {
+        let hold_millis = self
+            .debug_post_transaction_hold_millis
             .swap(0, Ordering::AcqRel);
         if hold_millis != 0 {
             thread::sleep(Duration::from_millis(hold_millis));
@@ -1122,6 +1141,7 @@ impl PackageRuntime {
             compatibility_review: Arc::new(Mutex::new(None)),
             replacement_review: Arc::new(Mutex::new(None)),
             debug_pre_transaction_hold_millis: Arc::new(AtomicU64::new(0)),
+            debug_post_transaction_hold_millis: Arc::new(AtomicU64::new(0)),
         };
         runtime.clear_transaction_preview_database()?;
         if runtime.read_pending_mutation()?.is_none() {
@@ -3516,6 +3536,7 @@ impl PackageRuntime {
         if has_explicit {
             self.recover_pending_install_reasons()?;
         }
+        self.hold_debug_after_transaction();
         self.validate_local_database()?;
         let expected = resolved_version(resolution, recovery_target)?;
         if self.installed_version(recovery_target)?.as_str()? != expected {
@@ -3771,11 +3792,15 @@ impl PackageRuntime {
             PackageMutationIntent::Install {
                 request,
                 resolution,
+                rollback,
                 ..
             } if request == package => {
                 let version = resolved_version(&resolution, package)?;
                 output.push(b"install\t")?;
                 output.push(version.as_bytes())?;
+                if rollback.is_some() {
+                    output.push(b"\trollback")?;
+                }
             }
             PackageMutationIntent::Remove {
                 package: target,
@@ -3788,6 +3813,191 @@ impl PackageRuntime {
             _ => return Err(PackageRuntimeError::Busy),
         }
         Ok(output)
+    }
+
+    pub fn rollback_pending_mutation(
+        &self,
+        package: &str,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let intent = self
+            .read_pending_mutation()?
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let PackageMutationIntent::Install {
+            request,
+            resolution,
+            replacements,
+            rollback: Some(rollback),
+            ..
+        } = intent
+        else {
+            return Err(PackageRuntimeError::InvalidResolution);
+        };
+        if request != package {
+            return Err(PackageRuntimeError::Busy);
+        }
+        self.recover_database_lock()?;
+        self.restore_replacement_repair(&replacements)?;
+
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let trust_directory = self
+            .keyring
+            .parent()
+            .and_then(Path::to_str)
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let cache_path = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+        let cache = cache_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+
+        let mut retained = Vec::with_capacity(rollback.archives.len());
+        for record in &rollback.archives {
+            self.verify_rollback_archive(record)?;
+            retained.push(InstallArchive {
+                path: cache_path
+                    .join(&record.filename)
+                    .to_str()
+                    .ok_or(PackageRuntimeError::InvalidPath)?
+                    .to_owned(),
+                name: record.name.clone(),
+                version: record.version.clone(),
+                explicitly_installed: record.explicitly_installed,
+            });
+        }
+        if !retained.is_empty() {
+            self.publish_install_reason_intent(&retained)?;
+            let mut arguments = vec![
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--gpgdir",
+                trust_directory,
+                "--cachedir",
+                cache,
+                "--noconfirm",
+                "--noprogressbar",
+                "--noscriptlet",
+                "--ask",
+                "4",
+                "--asdeps",
+                "-U",
+            ];
+            arguments.extend(retained.iter().map(|archive| archive.path.as_str()));
+            if let Err(error) = self.run_bytes_with_timeout(
+                PackageTool::Pacman,
+                &arguments,
+                TRANSACTION_TIMEOUT,
+                MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+                false,
+            ) {
+                let _ = self.recover_database_lock();
+                let _ = self.recover_pending_install_reasons();
+                return Err(error);
+            }
+            self.recover_pending_install_reasons()?;
+        }
+
+        let mut additions = Vec::with_capacity(rollback.previously_absent.len());
+        for name in &rollback.previously_absent {
+            if !self.installed_version(name)?.as_bytes().is_empty() {
+                additions.push(name.as_str());
+            }
+        }
+        if !additions.is_empty() {
+            let mut plan_arguments = vec![
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--print",
+                "--print-format",
+                "%n",
+                "-R",
+            ];
+            plan_arguments.extend(additions.iter().copied());
+            let plan =
+                self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
+            let mut planned = plan.as_str()?.lines().collect::<Vec<_>>();
+            planned.sort_unstable();
+            let mut expected = additions.clone();
+            expected.sort_unstable();
+            if planned != expected {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            let mut arguments = vec![
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--noconfirm",
+                "--noprogressbar",
+                "--noscriptlet",
+                "-R",
+            ];
+            arguments.extend(additions.iter().copied());
+            if let Err(error) = self.run_bytes_with_timeout(
+                PackageTool::Pacman,
+                &arguments,
+                TRANSACTION_TIMEOUT,
+                MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+                false,
+            ) {
+                let _ = self.recover_database_lock();
+                return Err(error);
+            }
+        }
+
+        self.validate_local_database()?;
+        for record in &rollback.archives {
+            if self.installed_version(&record.name)?.as_str()? != record.version {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        for name in &rollback.previously_absent {
+            if !self.installed_version(name)?.as_bytes().is_empty() {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        let mut forward_archives = Vec::with_capacity(resolution.as_str()?.lines().count());
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            forward_archives.push(InstallArchive {
+                path: cache_path
+                    .join(payload.filename)
+                    .to_str()
+                    .ok_or(PackageRuntimeError::InvalidPath)?
+                    .to_owned(),
+                name: payload.name.to_owned(),
+                version: payload.version.to_owned(),
+                explicitly_installed: false,
+            });
+        }
+        self.clear_database_repair(&forward_archives)?;
+        self.clear_replacement_repair()?;
+        self.clear_pending_mutation()?;
+        self.reconcile_aur_lifecycle_capabilities()?;
+        self.refresh_system_trust()?;
+        self.installed_version(package)
     }
 
     pub fn repair_pending_mutation(
@@ -4692,6 +4902,37 @@ impl PackageRuntime {
             }));
         }
         Ok(None)
+    }
+
+    fn verify_rollback_archive(
+        &self,
+        record: &RollbackArchiveRecord,
+    ) -> Result<(), PackageRuntimeError> {
+        self.verify_package(
+            &record.filename,
+            &record.name,
+            &record.version,
+            record.archive_bytes,
+        )?;
+        let archive = self
+            .arch_root
+            .join(PACKAGE_CACHE_DIRECTORY)
+            .join(&record.filename);
+        let signature = archive.with_file_name(format!("{}.sig", record.filename));
+        if hex_sha256(&hash_regular_file(
+            &archive,
+            record.archive_bytes,
+            PACKAGE_ARCHIVE_LIMIT,
+        )?) != record.archive_sha256
+            || hex_sha256(&hash_regular_file(
+                &signature,
+                record.signature_bytes,
+                PACKAGE_SIGNATURE_LIMIT,
+            )?) != record.signature_sha256
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        Ok(())
     }
 
     pub fn begin_package_download(
@@ -9556,6 +9797,10 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         assert!(!runtime.arm_debug_pre_transaction_hold(30_001));
         assert!(runtime.arm_debug_pre_transaction_hold(750));
         assert!(!runtime.arm_debug_pre_transaction_hold(750));
+        assert!(!runtime.arm_debug_post_transaction_hold(749));
+        assert!(!runtime.arm_debug_post_transaction_hold(30_001));
+        assert!(runtime.arm_debug_post_transaction_hold(750));
+        assert!(!runtime.arm_debug_post_transaction_hold(750));
     }
 
     impl Drop for TestTree {

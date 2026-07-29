@@ -57,6 +57,7 @@ internal object NativeRuntime {
     const val PACKAGE_COMMAND_AUR_CANDIDATE_STATE = 10
     const val PACKAGE_COMMAND_INSTALL_PLAN = 11
     const val PACKAGE_COMMAND_AUTHORIZE_INSTALL_PLAN = 12
+    const val PACKAGE_COMMAND_ROLLBACK_MUTATION = 13
     const val JOB_QUEUED = 1
     const val JOB_RESOLVING = 2
     const val JOB_DOWNLOADING = 3
@@ -667,6 +668,10 @@ internal object NativeRuntime {
     external fun nativeCancelPackageCompatibilityReview(handle: Long): Boolean
     external fun nativeArmPackageCompatibilityReviewTestHold(holdMillis: Long): Boolean
     external fun nativeArmPackagePreTransactionTestHold(
+        handle: Long,
+        holdMillis: Long,
+    ): Boolean
+    external fun nativeArmPackagePostTransactionTestHold(
         handle: Long,
         holdMillis: Long,
     ): Boolean
