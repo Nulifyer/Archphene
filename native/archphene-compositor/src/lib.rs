@@ -14540,6 +14540,45 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeCursorComponent(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    component: i32,
+) -> i32 {
+    let Some(compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    match component {
+        0 => i32::try_from(compositor.core.cursor_width()).unwrap_or(i32::MAX),
+        1 => i32::try_from(compositor.core.cursor_height()).unwrap_or(i32::MAX),
+        2 => compositor.core.cursor_hotspot_component(0),
+        3 => compositor.core.cursor_hotspot_component(1),
+        _ => -2,
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeCopyCursor(
+    environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    bitmap: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    compositor
+        .core
+        .state
+        .cursor_frame
+        .as_ref()
+        .map_or(-1, |frame| copy_frame_to_bitmap(frame, environment, bitmap))
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeSurroundingTextLength(
     _environment: *mut std::ffi::c_void,
     _owner: *mut std::ffi::c_void,

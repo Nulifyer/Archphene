@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-28
+Updated: 2026-07-29
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -541,8 +541,31 @@ pointer-enter serial, maps all 36 protocol shapes to Android system pointer
 icons, and versions repeated same-size changes without per-motion allocation.
 Host protocol tests prove text and crosshair transitions; exact-ABI builds,
 native compositor probes, scoped device logs, and inspected full-device
-captures pass. Legacy client-supplied cursor-surface bitmaps remain manager
-owned and currently fall back to a usable arrow at the wrapper boundary.
+captures pass. Authenticated Binder v7 also transfers changed legacy
+client-supplied ARGB cursor surfaces with a 256×256/65,536-pixel bound and
+strict bitmap/hotspot validation. Stock Qt 5 publishes repeated 24×24 arrow
+cursors with exact 3,1 hotspots through current generated launchers on both
+ABIs; Samsung additionally proves a 24×24 pointing-hand cursor with hotspot
+11,12. The device gate additionally found and fixed an Android
+ownership error: explicitly recycling the prior cursor bitmap could crash
+`ViewRootImpl` while it compared
+deferred pointer-icon updates, so accepted cursors now remain framework-owned
+until Android can reclaim them.
+
+Package resolution now treats Qt's Wayland platform modules as dependency-owned
+Archphene runtime companions. A closure containing, or an existing shared root
+owning, `qt5-base` or `qt6-base` adds the matching signed `qt5-wayland` or
+`qt6-wayland` package unless it is already present. A clean emulator review of
+stock `qt5ct` visibly included `qt5-wayland` in its 23-package closure and
+installed both through the normal manager flow; the migrated Samsung root was
+repaired through the same UI. This remains generic toolkit adaptation rather
+than a modified application.
+
+The sealed AArch64 path bridge now exports `shm_open` and `shm_unlink` under
+both `GLIBC_2.17` and `GLIBC_2.34`. This fixed current stock ARM `wev`, whose
+new symbol import had bypassed the older interposer and attempted to use
+Android's absent conventional `/dev/shm`; host bridge gates and a real shared
+Samsung Code-terminal launch pass.
 
 Non-Latin composing input beyond the deterministic manager boundary, non-text
 clipboard formats, launcher accessibility, and real-client pointer

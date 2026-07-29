@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Binder
@@ -96,6 +97,7 @@ class LauncherActivity :
     private var pointerButtonState = 0
     private var pointerCaptureRequested = false
     private var cursorSystemIcon = PointerIcon.TYPE_ARROW
+    private var customCursorPointerIcon: PointerIcon? = null
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
     private var softImeRequested = false
     private val showImeAfterTouch =
@@ -145,7 +147,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_CURSOR_ICON ||
+                    code !in CALLBACK_STATUS..CALLBACK_CURSOR ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -283,16 +285,51 @@ class LauncherActivity :
                             handler.post { applyPointerCapture(active == 1) }
                             true
                         }
-                        CALLBACK_CURSOR_ICON -> {
-                            val systemIcon = data.readInt()
-                            if (
-                                !validCursorSystemIcon(systemIcon) ||
-                                data.dataAvail() != 0
-                            ) {
-                                return@runCatching false
+                        CALLBACK_CURSOR -> {
+                            when (data.readInt()) {
+                                CURSOR_KIND_SYSTEM -> {
+                                    val systemIcon = data.readInt()
+                                    if (
+                                        !validCursorSystemIcon(systemIcon) ||
+                                        data.dataAvail() != 0
+                                    ) {
+                                        return@runCatching false
+                                    }
+                                    handler.post { applyCursorSystemIcon(systemIcon) }
+                                    true
+                                }
+                                CURSOR_KIND_BITMAP -> {
+                                    val width = data.readInt()
+                                    val height = data.readInt()
+                                    val hotspotX = data.readInt()
+                                    val hotspotY = data.readInt()
+                                    if (
+                                        !validCursorBitmapMetadata(
+                                            width,
+                                            height,
+                                            hotspotX,
+                                            hotspotY,
+                                        )
+                                    ) {
+                                        return@runCatching false
+                                    }
+                                    val bitmap = Bitmap.CREATOR.createFromParcel(data)
+                                    if (
+                                        bitmap.width != width ||
+                                        bitmap.height != height ||
+                                        bitmap.config != Bitmap.Config.ARGB_8888 ||
+                                        data.dataAvail() != 0
+                                    ) {
+                                        bitmap.recycle()
+                                        return@runCatching false
+                                    }
+                                    handler.post {
+                                        applyCursorBitmap(bitmap, hotspotX, hotspotY)
+                                    }
+                                    true
+                                }
+                                else -> false
                             }
-                            handler.post { applyCursorSystemIcon(systemIcon) }
-                            true
                         }
                         else -> false
                     }
@@ -536,7 +573,9 @@ class LauncherActivity :
             holder.addCallback(this@LauncherActivity)
             isFocusable = true
             isFocusableInTouchMode = true
-            pointerIcon = PointerIcon.getSystemIcon(this@LauncherActivity, cursorSystemIcon)
+            pointerIcon =
+                customCursorPointerIcon
+                    ?: PointerIcon.getSystemIcon(this@LauncherActivity, cursorSystemIcon)
         }
 
     private fun recreateSurfaceView() {
@@ -597,6 +636,7 @@ class LauncherActivity :
             binding = false
         }
         documentThread.quitSafely()
+        customCursorPointerIcon = null
         super.onDestroy()
     }
 
@@ -738,14 +778,56 @@ class LauncherActivity :
         if (!validCursorSystemIcon(systemIcon)) {
             return
         }
+        customCursorPointerIcon = null
         cursorSystemIcon = systemIcon
         surfaceView.pointerIcon = PointerIcon.getSystemIcon(this, systemIcon)
+    }
+
+    private fun applyCursorBitmap(
+        bitmap: Bitmap,
+        hotspotX: Int,
+        hotspotY: Int,
+    ) {
+        if (
+            !validCursorBitmapMetadata(bitmap.width, bitmap.height, hotspotX, hotspotY) ||
+            bitmap.config != Bitmap.Config.ARGB_8888
+        ) {
+            bitmap.recycle()
+            return
+        }
+        val pointerIcon =
+            runCatching {
+                PointerIcon.create(bitmap, hotspotX.toFloat(), hotspotY.toFloat())
+            }.getOrNull()
+        if (pointerIcon == null) {
+            bitmap.recycle()
+            return
+        }
+        customCursorPointerIcon = pointerIcon
+        cursorSystemIcon = CUSTOM_CURSOR_ICON
+        surfaceView.pointerIcon = pointerIcon
+        // PointerIcon and ViewRootImpl may compare the previous bitmap on a
+        // later frame. Dropping our old PointerIcon reference lets Android
+        // reclaim it when safe; explicitly recycling it here makes that
+        // deferred comparison crash on rapid cursor changes.
     }
 
     private fun validCursorSystemIcon(systemIcon: Int): Boolean =
         systemIcon == PointerIcon.TYPE_NULL ||
             systemIcon in PointerIcon.TYPE_ARROW..PointerIcon.TYPE_WAIT ||
             systemIcon in PointerIcon.TYPE_CELL..PointerIcon.TYPE_GRABBING
+
+    private fun validCursorBitmapMetadata(
+        width: Int,
+        height: Int,
+        hotspotX: Int,
+        hotspotY: Int,
+    ): Boolean =
+        width in 1..MAX_CURSOR_DIMENSION &&
+            height in 1..MAX_CURSOR_DIMENSION &&
+            width.toLong() * height.toLong() <= MAX_CURSOR_PIXELS &&
+            hotspotX in 0 until width &&
+            hotspotY in 0 until height
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         attachSurface()
@@ -2650,7 +2732,7 @@ class LauncherActivity :
         private const val CAPABILITIES_V2 = "c:wayland,input,ime,clipboard,documents"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 6
+        private const val PROTOCOL_VERSION = 7
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2665,7 +2747,7 @@ class LauncherActivity :
         private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
-        private const val CALLBACK_CURSOR_ICON = IBinder.FIRST_CALL_TRANSACTION + 5
+        private const val CALLBACK_CURSOR = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120
@@ -2675,6 +2757,11 @@ class LauncherActivity :
         private const val MIN_FONT_SCALE_MILLIS = 500
         private const val MAX_FONT_SCALE_MILLIS = 3_000
         private const val MAX_INPUT_RECORDS = 32
+        private const val CURSOR_KIND_SYSTEM = 0
+        private const val CURSOR_KIND_BITMAP = 1
+        private const val CUSTOM_CURSOR_ICON = -1
+        private const val MAX_CURSOR_DIMENSION = 256
+        private const val MAX_CURSOR_PIXELS = 65_536L
         private const val SOFT_IME_TOUCH_DELAY_MILLIS = 300L
         private const val INPUT_TOUCH_DOWN = 1
         private const val INPUT_TOUCH_MOTION = 2

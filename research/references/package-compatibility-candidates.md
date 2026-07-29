@@ -42,7 +42,7 @@ Diagnostic tools isolate failed layers; not necessarily showcase apps.
 | `weston`           | `weston-simple-shm`               | Basic SHM buffers, frame callbacks, damage and resize             |
 | `weston`           | `weston-simple-egl`               | EGL surfaces, GPU buffers and frame pacing                        |
 | `weston`           | `weston-simple-vulkan`            | Vulkan WSI and GPU presentation                                   |
-| `wev`              | `wev`                             | Pointer, keyboard, touch, modifiers, repeat and focus events      |
+| `wev`              | `wev`                             | Private SHM startup plus pointer, keyboard, touch, modifiers, repeat, and focus events |
 | `wl-clipboard`     | `wl-copy`, `wl-paste`             | Clipboard MIME types, ownership and Android/Linux synchronization |
 | `gtk4-demos`       | `gtk4-demo`                       | Broad GTK 4 widget and rendering coverage                         |
 | `libadwaita-demos` | demo app                          | Adaptive layouts, mobile-sized windows and modern GNOME widgets   |

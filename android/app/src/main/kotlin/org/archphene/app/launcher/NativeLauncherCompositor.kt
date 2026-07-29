@@ -1,5 +1,6 @@
 package org.archphene.app.launcher
 
+import android.graphics.Bitmap
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
@@ -185,6 +186,31 @@ internal class NativeLauncherCompositor(
             RESULT_CLOSED
         } else {
             nativeCursorSystemIcon(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
+        }
+    }
+
+    fun cursorWidth(): Int = cursorComponent(CURSOR_WIDTH)
+
+    fun cursorHeight(): Int = cursorComponent(CURSOR_HEIGHT)
+
+    fun cursorHotspot(component: Int): Int = cursorComponent(CURSOR_HOTSPOT_X + component)
+
+    fun copyCursor(bitmap: Bitmap): Boolean {
+        val current = ownerHandle()
+        return current != 0L &&
+            nativeCopyCursor(current, bitmap).also {
+                PerformanceMetrics.recordCompositorJni()
+            } == 0
+    }
+
+    private fun cursorComponent(component: Int): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeCursorComponent(current, component).also {
                 PerformanceMetrics.recordCompositorJni()
             }
         }
@@ -421,6 +447,16 @@ internal class NativeLauncherCompositor(
 
     private external fun nativeCursorSystemIcon(handle: Long): Int
 
+    private external fun nativeCursorComponent(
+        handle: Long,
+        component: Int,
+    ): Int
+
+    private external fun nativeCopyCursor(
+        handle: Long,
+        bitmap: Bitmap,
+    ): Int
+
     private external fun nativeImeSurroundingTextLength(handle: Long): Int
 
     private external fun nativeCopyImeSurroundingText(
@@ -500,6 +536,9 @@ internal class NativeLauncherCompositor(
         const val FLAG_IME_CHANGED = 1 shl 6
         const val FLAG_POINTER_CAPTURE_CHANGED = 1 shl 7
         const val FLAG_CURSOR_CHANGED = 1 shl 8
+        private const val CURSOR_WIDTH = 0
+        private const val CURSOR_HEIGHT = 1
+        private const val CURSOR_HOTSPOT_X = 2
 
         init {
             System.loadLibrary("archphene_compositor")
