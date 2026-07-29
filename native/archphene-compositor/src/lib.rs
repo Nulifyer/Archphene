@@ -1005,8 +1005,44 @@ struct CommittedFrame {
     #[allow(dead_code)]
     format: wl_shm::Format,
     #[allow(dead_code)]
-    pixels: Vec<u8>,
+    pixels: Mutex<Vec<u8>>,
     source: Option<Arc<CommittedFrame>>,
+}
+
+impl CommittedFrame {
+    fn new(
+        width: u32,
+        height: u32,
+        format: wl_shm::Format,
+        pixels: Vec<u8>,
+        source: Option<Arc<CommittedFrame>>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            format,
+            pixels: Mutex::new(pixels),
+            source,
+        }
+    }
+
+    fn pixels(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
+        self.pixels
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn pixels_mut(&mut self) -> &mut Vec<u8> {
+        self.pixels
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn into_pixels(self) -> Vec<u8> {
+        self.pixels
+            .into_inner()
+            .unwrap_or_else(|error| error.into_inner())
+    }
 }
 
 impl BufferTransform {
@@ -1216,6 +1252,7 @@ fn transform_buffer_frame(
         .and_then(|count| count.checked_mul(4))
         .and_then(|count| usize::try_from(count).ok())
         .ok_or(())?;
+    let source_pixels = source.pixels();
     let mut pixels = vec![0; pixel_count];
     for surface_y in 0..height {
         for surface_x in 0..width {
@@ -1230,16 +1267,17 @@ fn transform_buffer_frame(
             let source_index = ((buffer_y * source.width + buffer_x) * 4) as usize;
             let destination_index = ((surface_y * width + surface_x) * 4) as usize;
             pixels[destination_index..destination_index + 4]
-                .copy_from_slice(&source.pixels[source_index..source_index + 4]);
+                .copy_from_slice(&source_pixels[source_index..source_index + 4]);
         }
     }
-    Ok(Arc::new(CommittedFrame {
+    drop(source_pixels);
+    Ok(Arc::new(CommittedFrame::new(
         width,
         height,
-        format: source.format,
+        source.format,
         pixels,
-        source: Some(source),
-    }))
+        Some(source),
+    )))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1307,6 +1345,7 @@ fn apply_viewport_to_frame(
         .and_then(|count| count.checked_mul(4))
         .and_then(|count| usize::try_from(count).ok())
         .ok_or(ViewportApplyError::BadSize)?;
+    let frame_pixels = frame.pixels();
     let mut pixels = vec![0; byte_count];
     for destination_y in 0..height {
         let source_y = (source.y
@@ -1321,16 +1360,17 @@ fn apply_viewport_to_frame(
             let source_index = ((source_y * frame.width + source_x) * 4) as usize;
             let destination_index = ((destination_y * width + destination_x) * 4) as usize;
             pixels[destination_index..destination_index + 4]
-                .copy_from_slice(&frame.pixels[source_index..source_index + 4]);
+                .copy_from_slice(&frame_pixels[source_index..source_index + 4]);
         }
     }
-    Ok(Arc::new(CommittedFrame {
+    drop(frame_pixels);
+    Ok(Arc::new(CommittedFrame::new(
         width,
         height,
-        format: frame.format,
+        frame.format,
         pixels,
-        source: Some(frame),
-    }))
+        Some(frame),
+    )))
 }
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn copy_wayland_pixels_to_android(
@@ -2907,12 +2947,13 @@ fn copy_frame_to_native_window_buffer(
     let Some(source_stride) = frame_width.checked_mul(4) else {
         return -4;
     };
+    let frame_pixels = frame.pixels();
     if width == frame_width && height == frame_height {
         for row in 0..height {
             let source_start = row * source_stride;
             let destination_start = row * destination_stride;
             if copy_wayland_pixels_to_android(
-                &frame.pixels[source_start..source_start + source_stride],
+                &frame_pixels[source_start..source_start + source_stride],
                 frame.format,
                 &mut destination[destination_start..destination_start + source_stride],
             )
@@ -2933,7 +2974,7 @@ fn copy_frame_to_native_window_buffer(
             let target = destination_y
                 .saturating_mul(destination_stride)
                 .saturating_add(destination_x.saturating_mul(4));
-            let Some(source_pixel) = frame.pixels.get(source..source + 4) else {
+            let Some(source_pixel) = frame_pixels.get(source..source + 4) else {
                 return -5;
             };
             let Some(destination_pixel) = destination.get_mut(target..target + 4) else {
@@ -3059,6 +3100,7 @@ pub struct ShmPoolData {
 
 struct ShmBufferInner {
     pool: Arc<Mutex<ShmPoolInner>>,
+    patch: Mutex<Vec<u8>>,
     offset: usize,
     width: usize,
     height: usize,
@@ -3077,16 +3119,21 @@ enum ShmReadDamage {
     Region(RegionRectangle),
 }
 
+struct ShmSnapshotState<'a> {
+    surface_damage: &'a [RegionRectangle],
+    buffer_damage: &'a [RegionRectangle],
+    transform: BufferTransform,
+    scale: i32,
+    viewport_active: bool,
+    allow_in_place: bool,
+}
+
 impl ShmBufferInner {
     fn snapshot(
         &self,
         previous: Option<&Arc<CommittedFrame>>,
-        surface_damage: &[RegionRectangle],
-        buffer_damage: &[RegionRectangle],
-        transform: BufferTransform,
-        scale: i32,
-        viewport_active: bool,
-    ) -> io::Result<CommittedFrame> {
+        state: ShmSnapshotState<'_>,
+    ) -> io::Result<Arc<CommittedFrame>> {
         const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
         let row_bytes = self
             .width
@@ -3099,33 +3146,105 @@ impl ShmBufferInner {
             return Err(io::Error::other("SHM frame exceeds the bridge limit"));
         }
 
-        let previous = previous.map(|frame| {
-            let mut frame = frame.as_ref();
-            while let Some(source) = frame.source.as_deref() {
-                frame = source;
-            }
-            frame
-        });
+        let previous = previous.map(original_buffer_frame);
         let compatible_previous = previous.filter(|frame| {
             frame.width == self.width as u32
                 && frame.height == self.height as u32
                 && frame.format == self.format
-                && frame.pixels.len() == frame_bytes
+                && frame.pixels().len() == frame_bytes
         });
         let damage = self.read_damage(
             compatible_previous.is_some(),
-            surface_damage,
-            buffer_damage,
-            transform,
-            scale,
-            viewport_active,
+            state.surface_damage,
+            state.buffer_damage,
+            state.transform,
+            state.scale,
+            state.viewport_active,
         );
+        if state.allow_in_place {
+            if let Some(previous) = compatible_previous.as_ref() {
+                match damage {
+                    ShmReadDamage::Unchanged => return Ok(Arc::clone(previous)),
+                    ShmReadDamage::Region(region) => {
+                        self.apply_region_patch(previous, row_bytes, region)?;
+                        return Ok(Arc::clone(previous));
+                    }
+                    ShmReadDamage::Full => {}
+                }
+            }
+        }
         let mut pixels = match (compatible_previous, damage) {
             (Some(previous), ShmReadDamage::Unchanged | ShmReadDamage::Region(_)) => {
-                previous.pixels.clone()
+                previous.pixels().clone()
             }
             _ => vec![0u8; frame_bytes],
         };
+        self.read_pixels(&mut pixels, row_bytes, damage)?;
+        Ok(Arc::new(CommittedFrame::new(
+            self.width as u32,
+            self.height as u32,
+            self.format,
+            pixels,
+            None,
+        )))
+    }
+
+    fn apply_region_patch(
+        &self,
+        frame: &CommittedFrame,
+        row_bytes: usize,
+        region: RegionRectangle,
+    ) -> io::Result<()> {
+        let left = usize::try_from(region.x)
+            .map_err(|_| io::Error::other("negative SHM damage origin"))?;
+        let top = usize::try_from(region.y)
+            .map_err(|_| io::Error::other("negative SHM damage origin"))?;
+        let width = usize::try_from(region.width)
+            .map_err(|_| io::Error::other("negative SHM damage width"))?;
+        let height = usize::try_from(region.height)
+            .map_err(|_| io::Error::other("negative SHM damage height"))?;
+        let destination_left = left
+            .checked_mul(4)
+            .ok_or_else(|| io::Error::other("SHM damage offset overflow"))?;
+        let damage_bytes = width
+            .checked_mul(4)
+            .ok_or_else(|| io::Error::other("SHM damage size overflow"))?;
+        let patch_bytes = damage_bytes
+            .checked_mul(height)
+            .ok_or_else(|| io::Error::other("SHM damage size overflow"))?;
+        let mut patch = self.patch.lock().unwrap_or_else(|error| error.into_inner());
+        patch.resize(patch_bytes, 0);
+        {
+            let pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
+            for (row, destination) in patch.chunks_exact_mut(damage_bytes).enumerate() {
+                let source_row = top
+                    .checked_add(row)
+                    .ok_or_else(|| io::Error::other("SHM damage offset overflow"))?;
+                let source_offset = self.source_offset(source_row, destination_left)?;
+                pool.file.read_exact_at(destination, source_offset as u64)?;
+            }
+        }
+        let mut pixels = frame.pixels();
+        for (row, source) in patch.chunks_exact(damage_bytes).enumerate() {
+            let destination_start = top
+                .checked_add(row)
+                .and_then(|row| row.checked_mul(row_bytes))
+                .and_then(|offset| offset.checked_add(destination_left))
+                .ok_or_else(|| io::Error::other("SHM damage offset overflow"))?;
+            let destination_end = destination_start
+                .checked_add(damage_bytes)
+                .ok_or_else(|| io::Error::other("SHM damage size overflow"))?;
+            pixels[destination_start..destination_end].copy_from_slice(source);
+        }
+        Ok(())
+    }
+
+    fn read_pixels(
+        &self,
+        pixels: &mut [u8],
+        row_bytes: usize,
+        damage: ShmReadDamage,
+    ) -> io::Result<()> {
         let pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
         match damage {
             ShmReadDamage::Full => {
@@ -3166,13 +3285,7 @@ impl ShmBufferInner {
                 }
             }
         }
-        Ok(CommittedFrame {
-            width: self.width as u32,
-            height: self.height as u32,
-            format: self.format,
-            pixels,
-            source: None,
-        })
+        Ok(())
     }
 
     fn source_offset(&self, row: usize, byte_offset: usize) -> io::Result<usize> {
@@ -5700,6 +5813,7 @@ impl Dispatch<WlShmPool, ShmPoolData> for CompositorState {
                     ShmBufferData {
                         inner: Arc::new(ShmBufferInner {
                             pool: Arc::clone(&data.inner),
+                            patch: Mutex::new(Vec::new()),
                             offset: range.start,
                             width,
                             height,
@@ -6607,17 +6721,20 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     Some(match assignment {
                         Some(buffer) => match buffer.inner.snapshot(
                             base_frame.as_ref(),
-                            &surface_damage,
-                            &buffer_damage,
-                            next_transform,
-                            next_scale,
-                            viewport_active,
+                            ShmSnapshotState {
+                                surface_damage: &surface_damage,
+                                buffer_damage: &buffer_damage,
+                                transform: next_transform,
+                                scale: next_scale,
+                                viewport_active,
+                                allow_in_place: !synchronized,
+                            },
                         ) {
                             Ok(frame) => {
                                 if buffer.resource.is_alive() {
                                     buffer.resource.release();
                                 }
-                                Some(Arc::new(frame))
+                                Some(frame)
                             }
                             Err(error) => {
                                 resource.post_error(
@@ -7887,46 +8004,51 @@ fn blend_frame(
     if source.width == 0 || source.height == 0 || target_width == 0 || target_height == 0 {
         return;
     }
+    let destination_width = destination.width;
+    let destination_height = destination.height;
+    let destination_format = destination.format;
+    let source_pixels = source.pixels();
+    let destination_pixels = destination.pixels_mut();
     for target_y in 0..target_height {
         let destination_y = i64::from(y) + i64::from(target_y);
-        if destination_y < 0 || destination_y >= i64::from(destination.height) {
+        if destination_y < 0 || destination_y >= i64::from(destination_height) {
             continue;
         }
         let source_y =
             ((u64::from(target_y) * u64::from(source.height)) / u64::from(target_height)) as u32;
         for target_x in 0..target_width {
             let destination_x = i64::from(x) + i64::from(target_x);
-            if destination_x < 0 || destination_x >= i64::from(destination.width) {
+            if destination_x < 0 || destination_x >= i64::from(destination_width) {
                 continue;
             }
             let source_x =
                 ((u64::from(target_x) * u64::from(source.width)) / u64::from(target_width)) as u32;
             let source_index = ((source_y * source.width + source_x) * 4) as usize;
             let destination_index =
-                ((destination_y as u32 * destination.width + destination_x as u32) * 4) as usize;
+                ((destination_y as u32 * destination_width + destination_x as u32) * 4) as usize;
             let source_is_opaque = opaque_region.is_some_and(|region| {
                 region.contains(f64::from(target_x) + 0.5, f64::from(target_y) + 0.5)
             });
             let source_alpha = if source.format == wl_shm::Format::Argb8888 && !source_is_opaque {
-                u32::from(source.pixels[source_index + 3])
+                u32::from(source_pixels[source_index + 3])
             } else {
                 255
             };
-            let destination_alpha = if destination.format == wl_shm::Format::Argb8888 {
-                u32::from(destination.pixels[destination_index + 3])
+            let destination_alpha = if destination_format == wl_shm::Format::Argb8888 {
+                u32::from(destination_pixels[destination_index + 3])
             } else {
                 255
             };
             for channel in 0..3 {
-                destination.pixels[destination_index + channel] = blend_channel(
-                    source.pixels[source_index + channel],
+                destination_pixels[destination_index + channel] = blend_channel(
+                    source_pixels[source_index + channel],
                     source_alpha,
-                    destination.pixels[destination_index + channel],
+                    destination_pixels[destination_index + channel],
                     destination_alpha,
                 );
             }
-            if destination.format == wl_shm::Format::Argb8888 {
-                destination.pixels[destination_index + 3] =
+            if destination_format == wl_shm::Format::Argb8888 {
+                destination_pixels[destination_index + 3] =
                     (source_alpha + destination_alpha * (255 - source_alpha) / 255) as u8;
             }
         }
@@ -8142,30 +8264,24 @@ fn update_composited_frame(state: &mut CompositorState) {
             frame.width == output_width
                 && frame.height == output_height
                 && frame.format == root.format
-                && frame.pixels.len() == pixel_count
+                && frame.pixels().len() == pixel_count
         })
-        .map(|frame| frame.pixels);
+        .map(CommittedFrame::into_pixels);
     let pixels = if let Some(base) = popup_base {
-        base.pixels.clone()
+        base.pixels().clone()
     } else if !prefer_original_buffers
         && !state.tile_toplevels
         && root.format != wl_shm::Format::Argb8888
-        && pixel_count == root.pixels.len()
+        && pixel_count == root.pixels().len()
     {
-        root.pixels.clone()
+        root.pixels().clone()
     } else if let Some(mut pixels) = reusable_pixels {
         pixels.fill(0);
         pixels
     } else {
         vec![0; pixel_count]
     };
-    let mut composed = CommittedFrame {
-        width: output_width,
-        height: output_height,
-        format: root.format,
-        pixels,
-        source: None,
-    };
+    let mut composed = CommittedFrame::new(output_width, output_height, root.format, pixels, None);
     if pixel_count == 0 {
         state.last_frame = None;
         return;
@@ -8190,7 +8306,7 @@ fn update_composited_frame(state: &mut CompositorState) {
                     0,
                     prefer_original_buffers,
                 );
-                for pixel in composed.pixels.chunks_exact_mut(4) {
+                for pixel in composed.pixels_mut().chunks_exact_mut(4) {
                     pixel[0] = ((u16::from(pixel[0]) * 3) / 5) as u8;
                     pixel[1] = ((u16::from(pixel[1]) * 3) / 5) as u8;
                     pixel[2] = ((u16::from(pixel[2]) * 3) / 5) as u8;
@@ -8281,7 +8397,7 @@ fn update_composited_frame(state: &mut CompositorState) {
     }
     state.last_frame_width = composed.width;
     state.last_frame_height = composed.height;
-    state.last_frame_checksum = composed.pixels.iter().fold(0u32, |checksum, value| {
+    state.last_frame_checksum = composed.pixels().iter().fold(0u32, |checksum, value| {
         checksum.wrapping_add(u32::from(*value))
     });
     state.last_frame = Some(Arc::new(composed));
@@ -8334,13 +8450,8 @@ fn compose_toplevel_frame(
     if pixel_count == 0 {
         return None;
     }
-    let mut composed = CommittedFrame {
-        width,
-        height,
-        format: root_frame.format,
-        pixels: vec![0; pixel_count],
-        source: None,
-    };
+    let mut composed =
+        CommittedFrame::new(width, height, root_frame.format, vec![0; pixel_count], None);
     blend_surface_tree(
         state,
         &mut composed,
@@ -10882,8 +10993,8 @@ fn copy_frame_to_bitmap(
             frame.width,
             frame.height,
             |bitmap| {
-                for (source, destination) in frame
-                    .pixels
+                let frame_pixels = frame.pixels();
+                for (source, destination) in frame_pixels
                     .chunks_exact(row_bytes)
                     .zip(bitmap.pixels.chunks_exact_mut(bitmap.stride_bytes))
                 {
@@ -14813,14 +14924,25 @@ mod tests {
     }
 
     fn test_frame(width: u32, height: u32, values: &[u8]) -> Arc<CommittedFrame> {
-        let pixels = values.iter().flat_map(|value| [*value, 0, 0, 0]).collect();
-        Arc::new(CommittedFrame {
+        let pixels = values
+            .iter()
+            .flat_map(|value| [*value, 0, 0, 0])
+            .collect();
+        Arc::new(CommittedFrame::new(
             width,
             height,
-            format: wl_shm::Format::Xrgb8888,
+            wl_shm::Format::Xrgb8888,
             pixels,
-            source: None,
-        })
+            None,
+        ))
+    }
+
+    fn frame_values(frame: &CommittedFrame) -> Vec<u8> {
+        frame
+            .pixels()
+            .chunks_exact(4)
+            .map(|pixel| pixel[0])
+            .collect()
     }
 
     #[test]
@@ -14834,11 +14956,7 @@ mod tests {
 
         assert_eq!((frame.width, frame.height), (3, 2));
         assert_eq!(
-            frame
-                .pixels
-                .chunks_exact(4)
-                .map(|pixel| pixel[0])
-                .collect::<Vec<_>>(),
+            frame_values(&frame),
             [2, 4, 6, 1, 3, 5]
         );
     }
@@ -14846,30 +14964,21 @@ mod tests {
     #[test]
     fn physical_presentation_preserves_original_client_raster() {
         let original = test_frame(2, 2, &[1, 2, 3, 4]);
-        let logical = Arc::new(CommittedFrame {
-            width: 1,
-            height: 1,
-            format: wl_shm::Format::Xrgb8888,
-            pixels: vec![1, 0, 0, 0],
-            source: Some(Arc::clone(&original)),
-        });
+        let logical = Arc::new(CommittedFrame::new(
+            1,
+            1,
+            wl_shm::Format::Xrgb8888,
+            vec![1, 0, 0, 0],
+            Some(Arc::clone(&original)),
+        ));
         let selected = presentation_buffer_frame(&logical, true, BufferTransform::Normal, None);
         assert!(Arc::ptr_eq(&selected, &original));
 
-        let mut output = CommittedFrame {
-            width: 2,
-            height: 2,
-            format: wl_shm::Format::Xrgb8888,
-            pixels: vec![0; 16],
-            source: None,
-        };
+        let mut output =
+            CommittedFrame::new(2, 2, wl_shm::Format::Xrgb8888, vec![0; 16], None);
         blend_popup_frame(&mut output, &selected, 0, 0, 2, 2);
         assert_eq!(
-            output
-                .pixels
-                .chunks_exact(4)
-                .map(|pixel| pixel[0])
-                .collect::<Vec<_>>(),
+            frame_values(&output),
             [1, 2, 3, 4]
         );
         assert!(Arc::ptr_eq(
@@ -14893,11 +15002,7 @@ mod tests {
         for (transform, dimensions) in transforms {
             let frame = transform_buffer_frame(test_frame(2, 3, &[1, 2, 3, 4, 5, 6]), transform, 1)
                 .expect("transformed frame");
-            let mut values = frame
-                .pixels
-                .chunks_exact(4)
-                .map(|pixel| pixel[0])
-                .collect::<Vec<_>>();
+            let mut values = frame_values(&frame);
             values.sort_unstable();
             assert_eq!((frame.width, frame.height), dimensions);
             assert_eq!(values, [1, 2, 3, 4, 5, 6]);
@@ -14915,11 +15020,7 @@ mod tests {
 
         assert_eq!((frame.width, frame.height), (2, 1));
         assert_eq!(
-            frame
-                .pixels
-                .chunks_exact(4)
-                .map(|pixel| pixel[0])
-                .collect::<Vec<_>>(),
+            frame_values(&frame),
             [1, 3]
         );
         assert!(
@@ -14941,11 +15042,7 @@ mod tests {
             transform_buffer_frame(rotated, BufferTransform::Normal, 1).expect("restored source");
         assert_eq!((restored.width, restored.height), (2, 3));
         assert_eq!(
-            restored
-                .pixels
-                .chunks_exact(4)
-                .map(|pixel| pixel[0])
-                .collect::<Vec<_>>(),
+            frame_values(&restored),
             [1, 2, 3, 4, 5, 6]
         );
     }
@@ -14984,6 +15081,7 @@ mod tests {
         file.write_all_at(&next_pixels, 0).expect("write SHM fixture");
         let buffer = ShmBufferInner {
             pool: Arc::new(Mutex::new(ShmPoolInner { file, size: 16 })),
+            patch: Mutex::new(Vec::new()),
             offset: 0,
             width: 2,
             height: 2,
@@ -14994,21 +15092,68 @@ mod tests {
         let frame = buffer
             .snapshot(
                 Some(&previous),
-                &[],
-                &[RegionRectangle::new(1, 0, 1, 1).expect("damage")],
-                BufferTransform::Normal,
-                1,
-                false,
+                ShmSnapshotState {
+                    surface_damage: &[],
+                    buffer_damage: &[RegionRectangle::new(1, 0, 1, 1).expect("damage")],
+                    transform: BufferTransform::Normal,
+                    scale: 1,
+                    viewport_active: false,
+                    allow_in_place: true,
+                },
             )
             .expect("partial SHM snapshot");
-        assert_eq!(
-            frame
-                .pixels
-                .chunks_exact(4)
-                .map(|pixel| pixel[0])
-                .collect::<Vec<_>>(),
-            [1, 20, 3, 4]
+        assert!(Arc::ptr_eq(&frame, &previous));
+        assert_eq!(frame_values(&frame), [1, 20, 3, 4]);
+        let replacement_pixels = [
+            50, 0, 0, 0, 60, 0, 0, 0, 70, 0, 0, 0, 80, 0, 0, 0,
+        ];
+        buffer
+            .pool
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .file
+            .write_all_at(&replacement_pixels, 0)
+            .expect("replace SHM fixture");
+        let synchronized = buffer
+            .snapshot(
+                Some(&previous),
+                ShmSnapshotState {
+                    surface_damage: &[],
+                    buffer_damage: &[RegionRectangle::new(0, 0, 1, 1).expect("damage")],
+                    transform: BufferTransform::Normal,
+                    scale: 1,
+                    viewport_active: false,
+                    allow_in_place: false,
+                },
+            )
+            .expect("detached synchronized snapshot");
+        assert!(!Arc::ptr_eq(&synchronized, &previous));
+        assert_eq!(frame_values(&synchronized), [50, 20, 3, 4]);
+        assert_eq!(frame_values(&previous), [1, 20, 3, 4]);
+
+        buffer
+            .pool
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .file
+            .set_len(4)
+            .expect("truncate SHM fixture");
+        assert!(
+            buffer
+                .snapshot(
+                    Some(&previous),
+                    ShmSnapshotState {
+                        surface_damage: &[],
+                        buffer_damage: &[RegionRectangle::new(0, 1, 1, 1).expect("damage")],
+                        transform: BufferTransform::Normal,
+                        scale: 1,
+                        viewport_active: false,
+                        allow_in_place: true,
+                    },
+                )
+                .is_err()
         );
+        assert_eq!(frame_values(&previous), [1, 20, 3, 4]);
         std::fs::remove_file(path).expect("remove SHM fixture");
     }
 
@@ -15017,6 +15162,7 @@ mod tests {
         let file = File::open("/dev/null").expect("open harmless fixture");
         let buffer = ShmBufferInner {
             pool: Arc::new(Mutex::new(ShmPoolInner { file, size: 16 })),
+            patch: Mutex::new(Vec::new()),
             offset: 0,
             width: 2,
             height: 2,
@@ -15096,8 +15242,8 @@ mod tests {
         )
         .expect("valid viewport");
         assert_eq!((frame.width, frame.height), (4, 4));
-        assert_eq!(&frame.pixels[0..4], &[2, 0, 0, 0]);
-        assert_eq!(&frame.pixels[60..64], &[7, 0, 0, 0]);
+        assert_eq!(&frame.pixels()[0..4], &[2, 0, 0, 0]);
+        assert_eq!(&frame.pixels()[60..64], &[7, 0, 0, 0]);
         assert_eq!(
             (
                 original_buffer_frame(&frame).width,
@@ -15126,29 +15272,25 @@ mod tests {
     }
     #[test]
     fn scales_frame_pixels_into_the_configured_rectangle() {
-        let source = CommittedFrame {
-            width: 2,
-            height: 1,
-            format: wl_shm::Format::Xrgb8888,
-            pixels: vec![10, 20, 30, 255, 200, 210, 220, 255],
-            source: None,
-        };
-        let mut destination = CommittedFrame {
-            width: 4,
-            height: 2,
-            format: wl_shm::Format::Argb8888,
-            pixels: vec![0; 4 * 2 * 4],
-            source: None,
-        };
+        let source = CommittedFrame::new(
+            2,
+            1,
+            wl_shm::Format::Xrgb8888,
+            vec![10, 20, 30, 255, 200, 210, 220, 255],
+            None,
+        );
+        let mut destination =
+            CommittedFrame::new(4, 2, wl_shm::Format::Argb8888, vec![0; 4 * 2 * 4], None);
         blend_popup_frame(&mut destination, &source, 0, 0, 4, 2);
+        let destination_pixels = destination.pixels();
         for row in 0..2 {
             let offset = row * 16;
             assert_eq!(
-                &destination.pixels[offset..offset + 8],
+                &destination_pixels[offset..offset + 8],
                 &[10, 20, 30, 255, 10, 20, 30, 255]
             );
             assert_eq!(
-                &destination.pixels[offset + 8..offset + 16],
+                &destination_pixels[offset + 8..offset + 16],
                 &[200, 210, 220, 255, 200, 210, 220, 255]
             );
         }
@@ -15156,42 +15298,40 @@ mod tests {
 
     #[test]
     fn clips_and_alpha_blends_popup_frames() {
-        let mut destination = CommittedFrame {
-            width: 2,
-            height: 1,
-            format: wl_shm::Format::Xrgb8888,
-            pixels: vec![10, 20, 30, 0, 40, 50, 60, 0],
-            source: None,
-        };
-        let source = CommittedFrame {
-            width: 2,
-            height: 1,
-            format: wl_shm::Format::Argb8888,
-            pixels: vec![110, 120, 130, 128, 210, 220, 230, 255],
-            source: None,
-        };
+        let mut destination = CommittedFrame::new(
+            2,
+            1,
+            wl_shm::Format::Xrgb8888,
+            vec![10, 20, 30, 0, 40, 50, 60, 0],
+            None,
+        );
+        let source = CommittedFrame::new(
+            2,
+            1,
+            wl_shm::Format::Argb8888,
+            vec![110, 120, 130, 128, 210, 220, 230, 255],
+            None,
+        );
 
         blend_popup_frame(&mut destination, &source, 1, 0, 2, 1);
 
-        assert_eq!(destination.pixels, [10, 20, 30, 0, 75, 85, 95, 0]);
+        assert_eq!(
+            *destination.pixels(),
+            [10, 20, 30, 0, 75, 85, 95, 0]
+        );
     }
 
     #[test]
     fn opaque_surface_region_ignores_argb_alpha() {
-        let mut destination = CommittedFrame {
-            width: 2,
-            height: 1,
-            format: wl_shm::Format::Argb8888,
-            pixels: vec![0; 8],
-            source: None,
-        };
-        let source = CommittedFrame {
-            width: 2,
-            height: 1,
-            format: wl_shm::Format::Argb8888,
-            pixels: vec![10, 20, 30, 0, 40, 50, 60, 0],
-            source: None,
-        };
+        let mut destination =
+            CommittedFrame::new(2, 1, wl_shm::Format::Argb8888, vec![0; 8], None);
+        let source = CommittedFrame::new(
+            2,
+            1,
+            wl_shm::Format::Argb8888,
+            vec![10, 20, 30, 0, 40, 50, 60, 0],
+            None,
+        );
         let opaque_region = RegionState {
             operations: vec![RegionOperation::Add(
                 RegionRectangle::new(0, 0, 1, 1).expect("valid region"),
@@ -15200,25 +15340,23 @@ mod tests {
 
         blend_frame(&mut destination, &source, Some(&opaque_region), 0, 0, 2, 1);
 
-        assert_eq!(destination.pixels, [10, 20, 30, 255, 0, 0, 0, 0]);
+        assert_eq!(
+            *destination.pixels(),
+            [10, 20, 30, 255, 0, 0, 0, 0]
+        );
     }
 
     #[test]
     fn opaque_surface_region_uses_surface_coordinates_when_scaled() {
-        let mut destination = CommittedFrame {
-            width: 2,
-            height: 1,
-            format: wl_shm::Format::Argb8888,
-            pixels: vec![0; 8],
-            source: None,
-        };
-        let source = CommittedFrame {
-            width: 4,
-            height: 1,
-            format: wl_shm::Format::Argb8888,
-            pixels: vec![10, 20, 30, 0, 10, 20, 30, 0, 40, 50, 60, 0, 40, 50, 60, 0],
-            source: None,
-        };
+        let mut destination =
+            CommittedFrame::new(2, 1, wl_shm::Format::Argb8888, vec![0; 8], None);
+        let source = CommittedFrame::new(
+            4,
+            1,
+            wl_shm::Format::Argb8888,
+            vec![10, 20, 30, 0, 10, 20, 30, 0, 40, 50, 60, 0, 40, 50, 60, 0],
+            None,
+        );
         let opaque_region = RegionState {
             operations: vec![RegionOperation::Add(
                 RegionRectangle::new(0, 0, 1, 1).expect("valid region"),
@@ -15227,7 +15365,10 @@ mod tests {
 
         blend_frame(&mut destination, &source, Some(&opaque_region), 0, 0, 2, 1);
 
-        assert_eq!(destination.pixels, [10, 20, 30, 255, 0, 0, 0, 0]);
+        assert_eq!(
+            *destination.pixels(),
+            [10, 20, 30, 255, 0, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -15236,27 +15377,18 @@ mod tests {
         for value in 0u8..16 {
             source_pixels.extend_from_slice(&[value, 0, 0, 0]);
         }
-        let source = CommittedFrame {
-            width: 4,
-            height: 4,
-            format: wl_shm::Format::Xrgb8888,
-            pixels: source_pixels,
-            source: None,
-        };
-        let mut output = CommittedFrame {
-            width: 2,
-            height: 2,
-            format: wl_shm::Format::Xrgb8888,
-            pixels: vec![0; 16],
-            source: None,
-        };
+        let source =
+            CommittedFrame::new(4, 4, wl_shm::Format::Xrgb8888, source_pixels, None);
+        let mut output =
+            CommittedFrame::new(2, 2, wl_shm::Format::Xrgb8888, vec![0; 16], None);
 
         blend_popup_frame(&mut output, &source, -1, -1, 4, 4);
 
-        assert_eq!(output.pixels[0], 5);
-        assert_eq!(output.pixels[4], 6);
-        assert_eq!(output.pixels[8], 9);
-        assert_eq!(output.pixels[12], 10);
+        let output_pixels = output.pixels();
+        assert_eq!(output_pixels[0], 5);
+        assert_eq!(output_pixels[4], 6);
+        assert_eq!(output_pixels[8], 9);
+        assert_eq!(output_pixels[12], 10);
     }
 
     fn test_positioner(
