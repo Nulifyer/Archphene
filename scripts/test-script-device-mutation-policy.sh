@@ -72,7 +72,7 @@ done
 
 ((clear_count >= 10)) ||
   archphene_die "app-data reset policy scan covered too few scripts: $clear_count"
-((optional_install_count >= 37)) ||
+((optional_install_count >= 50)) ||
   archphene_die \
     "optional APK-install policy scan covered too few scripts: $optional_install_count"
 ((reboot_count >= 2)) ||

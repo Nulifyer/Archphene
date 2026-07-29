@@ -5,25 +5,28 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=
 apk=
 clean_data=false
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --clean-data) clean_data=true; shift ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --clean-data"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk] --clean-data"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 [[ "$clean_data" == true ]] ||
   archphene_die "--clean-data is required because this gate clears Archphene app data"
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.PackageSearchTestReceiver"
@@ -49,7 +52,12 @@ cleanup() {
 trap cleanup EXIT
 
 archphene_adb_run shell cmd uimode night no >/dev/null
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell pm clear "$package" >/dev/null
 archphene_adb_run logcat -c

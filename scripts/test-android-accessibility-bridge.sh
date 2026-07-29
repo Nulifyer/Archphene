@@ -7,14 +7,16 @@ abi=x86_64
 serial=emulator-5554
 timeout=30
 clean_data=false
+skip_install=true
 while (($#)); do
   case "$1" in
     --android-abi) abi="${2:?}"; shift 2 ;;
     --serial) serial="${2:?}"; shift 2 ;;
     --timeout-seconds) timeout="${2:?}"; shift 2 ;;
     --clean-data) clean_data=true; shift ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--timeout-seconds N] --clean-data"
+      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--timeout-seconds N] [--install-apk] --clean-data"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -26,7 +28,6 @@ archphene_validate_choice "$abi" ABI x86_64 arm64-v8a
 archphene_test_init "$serial"
 
 apk="$ARCHPHENE_ROOT/prototypes/accessibility-capability-probe/out-$abi/archphene-accessibility-probe.apk"
-archphene_require_file "$apk"
 package=org.archphene.accessibilityprobe
 activity="$package/org.archphene.bridge.AccessibilityProbeActivity"
 service="$package/org.archphene.bridge.ProbeAccessibilityService"
@@ -131,7 +132,12 @@ assert_queue_empty() {
   [[ "$value" == $'ERROR\tEMPTY' ]] || archphene_die "$1: $value"
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk"
 archphene_adb_run shell pm clear "$package" >/dev/null
 archphene_adb_run logcat -c
 socket="$(start_probe)"

@@ -8,6 +8,7 @@ serial=emulator-5554
 timeout=30
 apk=
 clean_data=false
+skip_install=true
 while (($#)); do
   case "$1" in
     --android-abi) abi="${2:?}"; shift 2 ;;
@@ -15,8 +16,9 @@ while (($#)); do
     --timeout-seconds) timeout="${2:?}"; shift 2 ;;
     --apk) apk="${2:?}"; shift 2 ;;
     --clean-data) clean_data=true; shift ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--timeout-seconds N] [--apk PATH] --clean-data"
+      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--timeout-seconds N] [--apk PATH --install-apk] --clean-data"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -28,7 +30,6 @@ archphene_validate_choice "$abi" ABI x86_64 arm64-v8a
 archphene_test_init "$serial"
 
 apk="${apk:-$ARCHPHENE_ROOT/prototypes/secrets-capability-probe/out-$abi/archphene-secrets-probe.apk}"
-archphene_require_file "$apk"
 package=org.archphene.secretsprobe
 activity="$package/org.archphene.bridge.SecretsProbeActivity"
 secret=archphene-secret-value-284917
@@ -100,7 +101,12 @@ assert_ciphertext_omits() {
     || archphene_die "encrypted record plaintext scan failed for '$plaintext': $output"
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk"
 trap cleanup EXIT
 archphene_adb_run shell pm clear "$package" >/dev/null
 archphene_adb_run logcat -c

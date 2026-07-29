@@ -8,6 +8,7 @@ serial=emulator-5554
 timeout=30
 apk=
 clean_data=false
+skip_install=true
 while (($#)); do
   case "$1" in
     --android-abi) abi="${2:?}"; shift 2 ;;
@@ -15,8 +16,9 @@ while (($#)); do
     --timeout-seconds) timeout="${2:?}"; shift 2 ;;
     --apk) apk="${2:?}"; shift 2 ;;
     --clean-data) clean_data=true; shift ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--timeout-seconds N] [--apk PATH] --clean-data"
+      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--timeout-seconds N] [--apk PATH --install-apk] --clean-data"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -33,7 +35,6 @@ package=org.archphene.cameraprobe
 activity="$package/org.archphene.bridge.CameraProbeActivity"
 apk="${apk:-$ARCHPHENE_ROOT/prototypes/camera-capability-probe/out-$abi/archphene-camera-probe.apk}"
 permission_pattern='resource-id="[^"]*:id/permission_(allow_[^"]+|deny)_button"'
-archphene_require_file "$apk"
 
 cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
@@ -147,7 +148,12 @@ select_permission() {
   archphene_die "camera permission action $action did not close the prompt"
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk"
 archphene_adb_run shell pm clear "$package" >/dev/null
 archphene_adb_run logcat -c
 socket="$(start_probe)"

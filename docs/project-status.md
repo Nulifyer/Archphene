@@ -1748,7 +1748,7 @@ no test alias, private mirror/state directory, or Android folder remained.
 Mandatory APK fixtures and the remaining non-`pm clear` mutation classes still
 need the same explicit-default audit.
 
-All 33 tests that already had an optional APK-install path are now
+All 46 tests that already had an optional APK-install path are now
 non-installing by default. `--install-apk` is the explicit action that permits
 `adb install -r`; the old `--skip-install` option remains accepted for command
 compatibility, and development examples that intentionally replace a build
@@ -1770,6 +1770,15 @@ evidence. This exposed prior captures of the still-visible picker or an
 unrendered black transition; the replacement Samsung and emulator frames show
 the populated platform open/share sheets.
 
+The 13 clean-sandbox manager, package-presentation, onboarding, camera,
+secrets, and accessibility gates now separate their two destructive actions:
+`--clean-data` authorizes only the named sandbox reset, while `--install-apk`
+separately authorizes package replacement. Without the install action they
+require the expected package to be present and exercise its current installed
+bytes. Syntax/help and the executable mutation-policy gate pass without
+contacting either device; the deliberately destructive clean-data lanes were
+not rerun merely to validate their argument boundary.
+
 The two older interrupted-session gates are now state-aware as well. They use
 the installed manager unless `--install-apk` is explicit, reject an existing
 active shared shell before installing permissions or stopping processes,
@@ -1782,7 +1791,7 @@ message, shell selector, and actionable Start shell control.
 
 The standalone script mutation rules are now executable rather than review
 convention. `test-script-device-mutation-policy.sh` currently covers 19
-app-data-reset scripts, 37 optional APK-install scripts, three reboot scripts,
+app-data-reset scripts, 50 optional APK-install scripts, three reboot scripts,
 and 31 permission/settings writers; each must fail closed behind its named
 action or expose a restoration path. The first run found implicit reboot paths
 in startup and package recovery. Startup now uses the installed manager by
