@@ -4009,7 +4009,7 @@ static int open_shm_directory(const char *name, char component[NAME_MAX + 1]) {
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
 }
 
-int shm_open(const char *name, int flags, mode_t mode) {
+static int shm_open_impl(const char *name, int flags, mode_t mode) {
     char component[NAME_MAX + 1];
     int directory = open_shm_directory(name, component);
     if (directory < 0) return -1;
@@ -4021,7 +4021,11 @@ int shm_open(const char *name, int flags, mode_t mode) {
     return result;
 }
 
-int shm_unlink(const char *name) {
+int shm_open(const char *name, int flags, mode_t mode) {
+    return shm_open_impl(name, flags, mode);
+}
+
+static int shm_unlink_impl(const char *name) {
     char component[NAME_MAX + 1];
     int directory = open_shm_directory(name, component);
     if (directory < 0) return -1;
@@ -4031,6 +4035,31 @@ int shm_unlink(const char *name) {
     errno = saved_errno;
     return result;
 }
+
+int shm_unlink(const char *name) {
+    return shm_unlink_impl(name);
+}
+
+/*
+ * glibc moved POSIX shared-memory entry points into libc in 2.34. Current
+ * AArch64 applications therefore request the newer symbol versions, while
+ * older Arch Linux ARM binaries still request GLIBC_2.17. Export both through
+ * the same bounded private-runtime implementation.
+ */
+#if defined(__aarch64__)
+int archphene_shm_open_glibc_2_34(
+        const char *name, int flags, mode_t mode) {
+    return shm_open_impl(name, flags, mode);
+}
+
+int archphene_shm_unlink_glibc_2_34(const char *name) {
+    return shm_unlink_impl(name);
+}
+
+__asm__(".symver archphene_shm_open_glibc_2_34,shm_open@GLIBC_2.34, remove");
+__asm__(".symver archphene_shm_unlink_glibc_2_34,shm_unlink@GLIBC_2.34, remove");
+#endif
+
 static int open_impl(const char *symbol, const char *path, int flags, mode_t mode,
         bool has_mode) {
     if (!has_mode

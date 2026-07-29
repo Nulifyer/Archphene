@@ -93,6 +93,12 @@ for symbol in dlmopen dlopen; do
   grep -Eq "$symbol@GLIBC_2\\.34" "$work/arm-symbols.txt" ||
     archphene_die "refreshed AArch64 bridge is missing $symbol@GLIBC_2.34"
 done
+for symbol in shm_open shm_unlink; do
+  grep -Eq "$symbol@@GLIBC_2\\.17" "$work/arm-symbols.txt" ||
+    archphene_die "refreshed AArch64 bridge is missing $symbol@GLIBC_2.17"
+  grep -Eq "$symbol@GLIBC_2\\.34" "$work/arm-symbols.txt" ||
+    archphene_die "refreshed AArch64 bridge is missing $symbol@GLIBC_2.34"
+done
 
 install -m755 "$work/libarchphene_path_bridge-x86_64.so" \
   "$x86_artifact/tooling/build/archphene-path-bridge-x86_64/libarchphene_path_bridge.so"
