@@ -54,6 +54,9 @@ const GTK_SETTINGS_LIBRARY: &str = "libarchphene_gtk3_settings.so";
 const QT_PLATFORM_THEME_LIBRARY: &str = "libarchphene_qt_platform_theme.so";
 const QT_STYLE_LIBRARY: &str = "libarchphene_qt_style.so";
 const QT_KDE_CONFIG_LIBRARY: &str = "libarchphene_kde_config.so";
+const XDG_OPEN_COMMAND: &str = "xdg-open";
+const XDG_OPEN_LOCAL_PATH: &str = "usr/local/bin/xdg-open";
+const XDG_OPEN_RUNTIME_TARGET: &str = "../../../run/package-runtime-v1/xdg-open";
 const GUI_RUNTIME_PACKAGES: [&str; 4] = ["qt5-base", "qt5-wayland", "qt6-base", "qt6-wayland"];
 const GUI_RUNTIME_COMPANIONS: [(usize, usize); 2] = [(0, 1), (2, 3)];
 const TOOLKIT_PLUGIN_DIRECTORY: &str = "run/toolkit-plugins-v1";
@@ -1024,6 +1027,7 @@ impl PackageRuntime {
         let mut has_qt_platform_theme = false;
         let mut has_qt_style = false;
         let mut has_qt_kde_config = false;
+        let mut has_xdg_open = false;
         let mut tools: [Option<PathBuf>; 5] = std::array::from_fn(|_| None);
         let mut entry_count = 0_usize;
         for (index, line) in manifest.lines().skip(1).enumerate() {
@@ -1059,6 +1063,7 @@ impl PackageRuntime {
                     has_qt_platform_theme |= entry.logical == QT_PLATFORM_THEME_LIBRARY;
                     has_qt_style |= entry.logical == QT_STYLE_LIBRARY;
                     has_qt_kde_config |= entry.logical == QT_KDE_CONFIG_LIBRARY;
+                    has_xdg_open |= entry.logical == XDG_OPEN_COMMAND;
                 }
                 _ => return Err(PackageRuntimeError::InvalidManifest),
             }
@@ -1112,6 +1117,9 @@ impl PackageRuntime {
                     ),
                 )?;
             }
+        }
+        if has_xdg_open {
+            publish_xdg_open_command(arch_root)?;
         }
         let gdk_pixbuf_module_file = if has_gdk_pixbuf_svg_loader {
             Some(prepare_gdk_pixbuf_module_file(arch_root, &alias_root)?)
@@ -7716,6 +7724,43 @@ fn prepare_alias_directory(path: &Path) -> Result<(), PackageRuntimeError> {
     Ok(())
 }
 
+fn publish_xdg_open_command(arch_root: &Path) -> Result<(), PackageRuntimeError> {
+    for relative in ["usr", "usr/local", "usr/local/bin"] {
+        let directory = arch_root.join(relative);
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&directory)?;
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))?;
+            }
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+    }
+    let command = arch_root.join(XDG_OPEN_LOCAL_PATH);
+    match fs::symlink_metadata(&command) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                && fs::read_link(&command)? == Path::new(XDG_OPEN_RUNTIME_TARGET) =>
+        {
+            Ok(())
+        }
+        // /usr/local belongs to the user. Preserve an intentional local
+        // override instead of turning it into a package-runtime startup
+        // failure; the verified private adapter remains available to GUI
+        // processes through the runtime command directory.
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            symlink(XDG_OPEN_RUNTIME_TARGET, command)?;
+            Ok(())
+        }
+        Err(error) => Err(PackageRuntimeError::Io(error)),
+    }
+}
+
 fn pacman_config_with_hook_override(
     source: &[u8],
     hook_override_root: &Path,
@@ -12365,13 +12410,15 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
         tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
         tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        tree.file("libarchphene_pkg_777777777777777777777777.so", b"open");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
 tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
 keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
 ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
 library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n\
-library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
+library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n\
+library\txdg-open\tlibarchphene_pkg_777777777777777777777777.so\t4\n";
         let runtime = PackageRuntime::prepare(
             &tree.root,
             &tree.native,
@@ -12392,6 +12439,18 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                 .join("libarchphene_pkg_333333333333333333333333.so")
                 .canonicalize()
                 .expect("source target")
+        );
+        let local_xdg_open = tree.root.join(XDG_OPEN_LOCAL_PATH);
+        assert_eq!(
+            fs::read_link(&local_xdg_open).expect("local xdg-open link"),
+            Path::new(XDG_OPEN_RUNTIME_TARGET),
+        );
+        assert_eq!(
+            local_xdg_open.canonicalize().expect("xdg-open target"),
+            tree.native
+                .join("libarchphene_pkg_777777777777777777777777.so")
+                .canonicalize()
+                .expect("xdg-open source"),
         );
         let pacman_config = fs::read(tree.root.join(PACMAN_CONFIG_FILE)).expect("pacman config");
         assert_eq!(
@@ -12420,6 +12479,30 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                 .library_path
                 .as_encoded_bytes()
                 .ends_with(tree.root.join("usr/lib").as_os_str().as_encoded_bytes())
+        );
+    }
+
+    #[test]
+    fn xdg_open_publication_preserves_a_user_local_override() {
+        let tree = TestTree::new();
+        let local = tree.root.join("usr/local/bin");
+        fs::create_dir_all(&local).expect("local command directory");
+        let command = local.join(XDG_OPEN_COMMAND);
+        fs::write(&command, b"#!/bin/sh\nexit 0\n").expect("user xdg-open");
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700))
+            .expect("user command mode");
+
+        publish_xdg_open_command(&tree.root).expect("non-destructive publication");
+
+        assert_eq!(
+            fs::read(&command).expect("preserved user command"),
+            b"#!/bin/sh\nexit 0\n",
+        );
+        assert!(
+            !fs::symlink_metadata(command)
+                .expect("user command metadata")
+                .file_type()
+                .is_symlink()
         );
     }
 

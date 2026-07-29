@@ -43,11 +43,11 @@ The wrapper also starts one frontend that owns `org.freedesktop.portal.Desktop` 
 - freedesktop.org notification `GetCapabilities`, `GetServerInformation`, `Notify`, and `CloseNotification`;
 - `xdg-open` as a fallback for applications that do not call the portal directly.
 
-`DBUS_SESSION_BUS_ADDRESS`, `GIO_USE_PORTALS=1`, `NOTIFY_FORCE_PORTAL=1`, and the private `xdg-open` directory are exported to the unmodified Linux process. Android target-SDK executable restrictions are preserved: daemon and adapter executables run directly from the APK native-library directory, while only an app-private symlink is created for `xdg-open`.
+`DBUS_SESSION_BUS_ADDRESS`, `GIO_USE_PORTALS=1`, and `NOTIFY_FORCE_PORTAL=1` are exported to the unmodified Linux process. A manifest-verified Android-native `xdg-open` adapter is published through the shared runtime command directory and, unless the user already owns that name, the conventional `/usr/local/bin/xdg-open` boundary. The glibc path bridge recognizes only that verified adapter, removes incompatible preload variables, and executes it directly instead of passing a Bionic executable to the glibc loader. The adapter uses the private D-Bus OpenURI portal; the untrusted Linux process never receives the Android broker address. Android target-SDK executable restrictions are therefore preserved while ordinary shells and applications can invoke stock `xdg-open`.
 
 The first standard notification remains queued while Android displays `POST_NOTIFICATIONS`; consent posts it without requiring the Linux application to retry. Denial discards the bounded queue and remains authoritative. The queue holds at most 32 notification IDs.
 
-Dual-ABI builds pass ELF dependency checks. A manager-generated KCalc wrapper passes portal discovery, HTTP(S)-only scheme policy, portal and classic notification permission/post/withdraw, portal OpenURI, and `xdg-open` on the x86_64 emulator. The private-bus contract and first-use notification lifecycle also pass on a physical AArch64 Samsung device.
+Dual-ABI builds pass ELF dependency checks. A manager-generated KCalc wrapper passes portal discovery, HTTP(S)-only scheme policy, portal and classic notification permission/post/withdraw, portal OpenURI, and `xdg-open` on the x86_64 emulator. The private-bus contract and first-use notification lifecycle also pass on a physical AArch64 Samsung device. Current Samsung VS Code additionally invokes unmodified `xdg-open` from its integrated Bash and visibly opens a live .NET MVC service in Brave.
 
 ## Printing
 

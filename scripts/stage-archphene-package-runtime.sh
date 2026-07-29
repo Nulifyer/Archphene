@@ -84,6 +84,8 @@ stage_architecture() {
   roles["@loader"]=loader
   sources["libarchphene_path_bridge.so"]="$path_bridge"
   roles["libarchphene_path_bridge.so"]=library
+  sources["xdg-open"]="$ARCHPHENE_ROOT/tooling/build/android-dbus/$architecture/xdg-open"
+  roles["xdg-open"]=library
   sources["@keyring"]="$keyring"
   roles["@keyring"]=keyring
   sources["@ownertrust"]="$ownertrust"

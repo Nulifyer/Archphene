@@ -2863,10 +2863,66 @@ static void complete_managed_maintenance_command(const char *name) {
     if (strcmp(name, "ldconfig") == 0) _exit(EXIT_SUCCESS);
 }
 
+static bool trusted_android_bridge_command(
+        const char *name, const char *command) {
+    if (name == NULL || command == NULL
+            || strcmp(name, "xdg-open") != 0
+            || inside_trusted_root(command)) {
+        return false;
+    }
+    char expected[PATH_MAX];
+    return runtime_command(name, expected)
+            && strcmp(command, expected) == 0;
+}
+
+static int prepare_android_bridge_environment(
+        char *const environment[], char *output[4096]) {
+    char *const *source = environment == NULL ? environ : environment;
+    size_t output_count = 0;
+    for (size_t index = 0; source[index] != NULL; index++) {
+        if (index >= 4095) return E2BIG;
+        if (strncmp(source[index], "LD_PRELOAD=", 11) != 0
+                && strncmp(source[index], "LD_LIBRARY_PATH=", 16) != 0) {
+            output[output_count++] = source[index];
+        }
+    }
+    output[output_count] = NULL;
+    return 0;
+}
+
+static int launch_android_bridge_command(
+        const char *name, const char *command, char *const arguments[],
+        char *const environment[]) {
+    if (!trusted_android_bridge_command(name, command)) return 1;
+    if (arguments == NULL || arguments[0] == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    char *clean_environment[4096];
+    int result =
+            prepare_android_bridge_environment(environment, clean_environment);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    typedef int (*function_type)(
+            const char *, char *const[], char *const[]);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "execve");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    real(command, arguments, clean_environment);
+    return -1;
+}
+
 static int launch_runtime_executable(const char *name, const char *requested,
         const char *command, char *const arguments[],
         char *const environment[]) {
     complete_managed_maintenance_command(name);
+    int android_bridge = launch_android_bridge_command(
+            name, command, arguments, environment);
+    if (android_bridge <= 0) return -1;
     if (trusted_loader[0] == '\0' || trusted_library_path[0] == '\0') {
         errno = EACCES;
         return -1;
@@ -2947,6 +3003,22 @@ static int spawn_runtime_executable(pid_t *process, const char *name,
         const posix_spawn_file_actions_t *file_actions,
         const posix_spawnattr_t *attributes, char *const arguments[],
         char *const environment[]) {
+    if (trusted_android_bridge_command(name, command)) {
+        if (arguments == NULL || arguments[0] == NULL) return EINVAL;
+        char *clean_environment[4096];
+        int result = prepare_android_bridge_environment(
+                environment, clean_environment);
+        if (result != 0) return result;
+        typedef int (*function_type)(pid_t *, const char *,
+                const posix_spawn_file_actions_t *,
+                const posix_spawnattr_t *, char *const[], char *const[]);
+        function_type real =
+                (function_type)dlsym(RTLD_NEXT, "posix_spawn");
+        return real == NULL
+                ? ENOSYS
+                : real(process, command, file_actions, attributes,
+                        arguments, clean_environment);
+    }
     if (trusted_loader[0] == '\0' || trusted_library_path[0] == '\0') {
         return EACCES;
     }

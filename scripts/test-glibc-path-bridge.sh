@@ -224,6 +224,7 @@ test "$process_identity_output" = process-identity-ok
 mkdir -p "$root/commands"
 cp "$(readlink -f /bin/echo)" "$root/commands/cat"
 chmod 400 "$root/commands/cat"
+ln -s "$(readlink -f /bin/echo)" "$root/commands/xdg-open"
 test ! -x "$root/commands/cat"
 access_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
@@ -265,6 +266,13 @@ direct_output="$(
   "$root/exec-probe" --direct "$root/commands/cat"
 )"
 test "$direct_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+android_bridge_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct /usr/bin/xdg-open
+)"
+test "$android_bridge_output" = bridge-arg
 spawn_direct_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
   ARCHPHENE_RUNTIME_LOADER="$loader_path" \
@@ -279,6 +287,13 @@ spawn_path_output="$(
   "$root/exec-probe" --spawn-path cat
 )"
 test "$spawn_path_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+android_bridge_spawn_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --spawn-path xdg-open
+)"
+test "$android_bridge_spawn_output" = bridge-arg
 ln -s "$loader_path" "$root/commands/linked-cat"
 linked_command_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \

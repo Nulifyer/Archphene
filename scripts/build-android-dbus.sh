@@ -139,12 +139,10 @@ common_flags=(
   "$ROOT/native/archphene-portal/archphene_secret_probe.c" \
   "$BUILD_ROOT/build/dbus/libdbus-1.a" \
   -pie -pthread -o "$OUTPUT/secret-probe"
-"${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" \
-  -fPIE -O2 -Wall -Wextra -Werror \
-  -I"$ROOT/native/archphene-android-capability" \
+"${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" "${common_flags[@]}" \
   "$ROOT/native/archphene-portal/archphene_xdg_open.c" \
-  "$ROOT/native/archphene-android-capability/archphene_android.c" \
-  -pie -o "$OUTPUT/xdg-open"
+  "$BUILD_ROOT/build/dbus/libdbus-1.a" \
+  -pie -pthread -o "$OUTPUT/xdg-open"
 
 for executable in dbus-daemon portal-service portal-probe secret-probe xdg-open; do
   "${TOOLCHAIN}/bin/llvm-strip" "$OUTPUT/$executable"

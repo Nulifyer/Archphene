@@ -60,9 +60,11 @@ val buildArchpheneAndroidDbus =
             "tooling/build/android-dbus/x86_64/dbus-daemon",
             "tooling/build/android-dbus/x86_64/portal-service",
             "tooling/build/android-dbus/x86_64/portal-probe",
+            "tooling/build/android-dbus/x86_64/xdg-open",
             "tooling/build/android-dbus/aarch64/dbus-daemon",
             "tooling/build/android-dbus/aarch64/portal-service",
             "tooling/build/android-dbus/aarch64/portal-probe",
+            "tooling/build/android-dbus/aarch64/xdg-open",
         )
     }
 
@@ -160,6 +162,7 @@ val rebuildArchphenePackageRuntimePathBridges =
 
 tasks.register<Exec>("stageArchphenePackageRuntime") {
     dependsOn(rebuildArchphenePackageRuntimePathBridges)
+    dependsOn(buildArchpheneAndroidDbus)
     workingDir(rootDir)
     commandLine("bash", "scripts/stage-archphene-package-runtime.sh")
     inputs.files(
@@ -186,6 +189,8 @@ tasks.register<Exec>("stageArchphenePackageRuntime") {
             include("SHA256SUMS", "**/runtime-root/usr/bin/*", "**/runtime-root/usr/lib/*")
             include("**/elf-needed-resolved.tsv", "**/glibc-archphene-runtime-aarch64/*")
         },
+        file("tooling/build/android-dbus/x86_64/xdg-open"),
+        file("tooling/build/android-dbus/aarch64/xdg-open"),
     )
     outputs.dir("android/app/build/generated/packageRuntime")
 }

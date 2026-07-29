@@ -2359,6 +2359,21 @@ The same x86_64 project is available inside Code's integrated terminal:
 generic runtime, and the browser reaches the running service. C# language
 service installation, debugging, and breakpoints remain open.
 
+Current VS Code on the physical AArch64 Samsung now passes the same
+user-visible path with a stock .NET 10 MVC project. The production compositor
+keymap carries the complete common US punctuation and modifier set, so the
+integrated terminal preserves `/`, `-`, `.`, and `:` instead of silently
+dropping them. The package runtime publishes a manifest-verified `xdg-open`
+adapter at the conventional Linux command boundary; the preload bridge executes
+that Android-native adapter without the glibc loader, and the adapter calls the
+private XDG OpenURI portal rather than receiving the privileged Android broker
+address. VS Code created, restored, built, and ran the project at
+`127.0.0.1:5263`; unmodified `xdg-open` brought Brave forward with the rendered
+MVC home page. The full-device browser frame and authenticated wrapper log were
+captured before the server and exact test tree were removed. Only the
+user-approved C# debugger-extension, breakpoint, and debug-control portion
+remains open.
+
 With user approval, the normal Archphene package UI has now installed stock Git
 2.55.0 into both shared roots. The executable is immediately visible from the
 manager Terminal and each existing Code integrated Bash. A bounded device gate

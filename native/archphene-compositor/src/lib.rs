@@ -2613,10 +2613,14 @@ fn android_key_to_evdev(key: i32) -> Option<u32> {
         76 => 53,
         59 => 42,
         60 => 54,
+        115 => 58,
         113 => 29,
         114 => 97,
         57 => 56,
         58 => 100,
+        117 => 125,
+        118 => 126,
+        82 => 139,
         19 => 103,
         21 => 105,
         22 => 106,
@@ -2649,9 +2653,11 @@ fn android_meta_to_wayland(meta: i32) -> u32 {
     const ANDROID_SHIFT: i32 = 0x0000_00c1;
     const ANDROID_ALT: i32 = 0x0000_0032;
     const ANDROID_CONTROL: i32 = 0x0000_7000;
+    const ANDROID_META: i32 = 0x0007_0000;
     u32::from(meta & ANDROID_SHIFT != 0)
         | (u32::from(meta & ANDROID_CONTROL != 0) << 2)
         | (u32::from(meta & ANDROID_ALT != 0) << 3)
+        | (u32::from(meta & ANDROID_META != 0) << 6)
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -10837,6 +10843,9 @@ impl CompositorCore {
         if pressed_keys.iter().any(|key| matches!(key, 56 | 100)) {
             mask |= 1 << 3;
         }
+        if pressed_keys.iter().any(|key| matches!(key, 125 | 126)) {
+            mask |= 1 << 6;
+        }
         mask
     }
     pub fn keyboard_key(&mut self, key: u32, pressed: bool, time: u32) -> u32 {
@@ -10860,7 +10869,7 @@ impl CompositorCore {
         let duplicate = self.state.pressed_keys.contains(&key) == pressed;
         let previous_modifiers =
             Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
-        self.state.reported_modifiers = reported_modifiers & 0x0d;
+        self.state.reported_modifiers = reported_modifiers & 0x4d;
         if duplicate {
             let modifiers = Self::keyboard_modifier_mask(&self.state.pressed_keys)
                 | self.state.reported_modifiers;
@@ -10938,7 +10947,7 @@ impl CompositorCore {
         }
         let previous_modifiers =
             Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
-        self.state.reported_modifiers = reported_modifiers & 0x0d;
+        self.state.reported_modifiers = reported_modifiers & 0x4d;
         let modifiers =
             Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
         let serial = self.next_input_serial();
@@ -17874,6 +17883,11 @@ mod tests {
         assert_eq!(CompositorCore::keyboard_modifier_mask(&[29]), 4);
         assert_eq!(CompositorCore::keyboard_modifier_mask(&[56]), 8);
         assert_eq!(CompositorCore::keyboard_modifier_mask(&[54, 97, 100]), 13);
+        assert_eq!(CompositorCore::keyboard_modifier_mask(&[125]), 1 << 6);
+        assert_eq!(
+            CompositorCore::keyboard_modifier_mask(&[42, 29, 56, 126]),
+            0x4d
+        );
         assert_eq!(CompositorCore::keyboard_modifier_mask(&[24]), 0);
     }
 
@@ -17884,6 +17898,21 @@ mod tests {
         assert_eq!(android_key_to_evdev(7), Some(11));
         assert_eq!(android_key_to_evdev(16), Some(10));
         assert_eq!(android_key_to_evdev(66), Some(28));
+        assert_eq!(android_key_to_evdev(68), Some(41));
+        assert_eq!(android_key_to_evdev(69), Some(12));
+        assert_eq!(android_key_to_evdev(70), Some(13));
+        assert_eq!(android_key_to_evdev(71), Some(26));
+        assert_eq!(android_key_to_evdev(72), Some(27));
+        assert_eq!(android_key_to_evdev(73), Some(43));
+        assert_eq!(android_key_to_evdev(74), Some(39));
+        assert_eq!(android_key_to_evdev(75), Some(40));
+        assert_eq!(android_key_to_evdev(55), Some(51));
+        assert_eq!(android_key_to_evdev(56), Some(52));
+        assert_eq!(android_key_to_evdev(76), Some(53));
+        assert_eq!(android_key_to_evdev(82), Some(139));
+        assert_eq!(android_key_to_evdev(115), Some(58));
+        assert_eq!(android_key_to_evdev(117), Some(125));
+        assert_eq!(android_key_to_evdev(118), Some(126));
         assert_eq!(android_key_to_evdev(113), Some(29));
         assert_eq!(android_key_to_evdev(142), Some(88));
         assert_eq!(android_key_to_evdev(0), None);
@@ -17893,6 +17922,8 @@ mod tests {
         assert_eq!(android_meta_to_wayland(0x2000), 1 << 2);
         assert_eq!(android_meta_to_wayland(0x20), 1 << 3);
         assert_eq!(android_meta_to_wayland(0x7073), 0x0d);
+        assert_eq!(android_meta_to_wayland(0x10000), 1 << 6);
+        assert_eq!(android_meta_to_wayland(0x77073), 0x4d);
     }
 
     #[test]
@@ -18065,6 +18096,19 @@ mod tests {
     fn embeds_null_terminated_xkb_v1_keymap() {
         assert!(XKB_KEYMAP.starts_with(b"xkb_keymap {"));
         assert!(XKB_KEYMAP.ends_with(b"};\n\0"));
+        for symbols in [
+            b"[ 1, exclam ]".as_slice(),
+            b"[ minus, underscore ]".as_slice(),
+            b"[ bracketleft, braceleft ]".as_slice(),
+            b"[ semicolon, colon ]".as_slice(),
+            b"[ backslash, bar ]".as_slice(),
+            b"[ slash, question ]".as_slice(),
+        ] {
+            assert!(
+                XKB_KEYMAP.windows(symbols.len()).any(|window| window == symbols),
+                "keymap omitted {symbols:?}"
+            );
+        }
     }
 }
 

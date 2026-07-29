@@ -222,6 +222,7 @@ pub struct CommandEnvironment {
     library_path: OsString,
     path_bridge: PathBuf,
     command_directory: PathBuf,
+    command_path: OsString,
     gdk_pixbuf_module_file: Option<PathBuf>,
     gtk_settings_module: Option<PathBuf>,
     qt_plugin_root: Option<PathBuf>,
@@ -252,7 +253,9 @@ impl CommandEnvironment {
         }
         let root_metadata = fs::symlink_metadata(arch_root)?;
         let loader_metadata = fs::symlink_metadata(loader)?;
+        let resolved_root = arch_root.canonicalize()?;
         let resolved_bridge = path_bridge.canonicalize()?;
+        let resolved_command_directory = command_directory.canonicalize()?;
         let bridge_metadata = fs::symlink_metadata(&resolved_bridge)?;
         let command_metadata = fs::symlink_metadata(command_directory)?;
         if root_metadata.file_type().is_symlink()
@@ -263,9 +266,15 @@ impl CommandEnvironment {
             || !safe_regular_file(&bridge_metadata)
             || command_metadata.file_type().is_symlink()
             || !command_metadata.is_dir()
+            || resolved_command_directory == resolved_root
+            || !resolved_command_directory.starts_with(&resolved_root)
         {
             return Err(ProcessError::InvalidEnvironment);
         }
+        let command_relative = resolved_command_directory
+            .strip_prefix(&resolved_root)
+            .map_err(|_| ProcessError::InvalidEnvironment)?;
+        let command_path = Path::new("/").join(command_relative).into_os_string();
         let gdk_pixbuf_module_file = match gdk_pixbuf_module_file {
             Some(path) => {
                 if !valid_absolute_path(path) {
@@ -294,7 +303,8 @@ impl CommandEnvironment {
             loader: loader.to_path_buf(),
             library_path: library_path.to_os_string(),
             path_bridge: resolved_bridge,
-            command_directory: command_directory.to_path_buf(),
+            command_directory: resolved_command_directory,
+            command_path,
             gdk_pixbuf_module_file,
             gtk_settings_module: None,
             qt_plugin_root: None,
@@ -614,10 +624,11 @@ impl CommandEnvironment {
             .env_clear()
             .env("HOME", "/home/archphene")
             .env("TMPDIR", "/tmp")
-            .env(
-                "PATH",
-                "/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin",
-            )
+            .env("PATH", {
+                let mut path = self.command_path.clone();
+                path.push(":/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin");
+                path
+            })
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .env("LOCPATH", self.arch_root.join("usr/lib/locale"))
@@ -3146,7 +3157,7 @@ mod tests {
         assert_eq!(
             value("PATH"),
             Some(OsStr::new(
-                "/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin",
+                "/run/aliases:/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin",
             )),
         );
         assert_eq!(value("LANG"), Some(OsStr::new("C.UTF-8")));
