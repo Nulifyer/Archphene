@@ -4,22 +4,25 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.FolderGrantTestReceiver"
@@ -35,6 +38,25 @@ action_hold_sync=org.archphene.app.debug.action.HOLD_PROJECT_SYNC
 output_dir="$ARCHPHENE_ROOT/tooling/build/folder-mirror"
 mkdir -p "$output_dir"
 
+initial_running=false
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  initial_running=true
+fi
+original_section=
+
+restore_section() {
+  [[ -n "$original_section" ]] || return 0
+  local ui
+  ui="$(archphene_capture_ui "folder-mirror-restore-$serial" 2>/dev/null || true)"
+  if archphene_regex_contains \
+    "$ui" "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\""; then
+    archphene_tap_ui_pattern \
+      "$ui" \
+      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+      "$original_section" || true
+  fi
+}
+
 cleanup() {
   archphene_adb_run shell am broadcast -n "$receiver" -a "$action_clean_grant" \
     --es token "$token" >/dev/null 2>&1 || true
@@ -45,6 +67,11 @@ cleanup() {
   archphene_adb_run shell am force-stop com.android.documentsui \
     >/dev/null 2>&1 || true
   archphene_adb_run shell rm -r "$remote" >/dev/null 2>&1 || true
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  if [[ "$initial_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+    restore_section || true
+  fi
 }
 trap cleanup EXIT
 
@@ -89,19 +116,47 @@ select_folder() {
   archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:ALLOW|Allow)"' "Allow"
 }
 
-archphene_adb_run shell mkdir "$remote" "$remote/src" "$remote/.git" >/dev/null
-archphene_adb_run shell sh -c \
-  "'printf root-$token > $remote/main.txt; printf nested-$token > $remote/src/nested.txt; printf git-$token > $remote/.git/config; : > $remote/empty.bin; truncate -s 134217728 $remote/cancel.bin'"
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am force-stop com.google.android.documentsui >/dev/null 2>&1 || true
 archphene_adb_run shell am force-stop com.android.documentsui >/dev/null 2>&1 || true
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 25 >/dev/null
+initial_ui="$(archphene_capture_ui "folder-mirror-initial-$serial")"
+if archphene_regex_contains "$initial_ui" 'text="Connect Android files\?"'; then
+  archphene_skip_storage_onboarding "folder-mirror-onboarding-$serial"
+  initial_ui="$ARCHPHENE_UI"
+fi
+original_section="$(
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$initial_ui"
+)"
+archphene_open_manager_section Files "folder-mirror-preflight-files-$serial"
+archphene_wait_ui_exact_text \
+  "No Android folder connected" "folder-mirror-preflight-empty-$serial" 20
+if archphene_adb_run shell test -e "$remote"; then
+  archphene_die "refusing to replace pre-existing Android fixture path: $remote"
+fi
+archphene_adb_run shell mkdir "$remote" "$remote/src" "$remote/.git" >/dev/null
+archphene_adb_run shell sh -c \
+  "'printf root-$token > $remote/main.txt; printf nested-$token > $remote/src/nested.txt; printf git-$token > $remote/.git/config; : > $remote/empty.bin; truncate -s 134217728 $remote/cancel.bin'"
 wait_receiver "$action_prepare" "Stale native staging fixture prepared"
 
-archphene_open_manager_section Files "folder-mirror-files-$serial"
 archphene_wait_ui 'text="(?:CONNECT|CHANGE|Connect|Change)"' \
   "folder-mirror-connect-$serial" 20
 archphene_tap_ui_pattern \
