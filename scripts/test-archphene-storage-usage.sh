@@ -5,25 +5,28 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=
 apk=
 builder_apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --builder-apk) builder_apk="${2:?missing value for --builder-apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --builder-apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --builder-apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
-[[ -n "$builder_apk" ]] || archphene_die "--builder-apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+  [[ -n "$builder_apk" ]] ||
+    archphene_die "--builder-apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
-archphene_require_file "$builder_apk"
 manager=org.archphene.app.debug
 builder=org.archphene.builder.debug
 activity="$manager/org.archphene.app.MainActivity"
@@ -33,6 +36,25 @@ output_dir="$ARCHPHENE_ROOT/tooling/build/storage-usage"
 state_dir="$(archphene_mktemp_dir storage-usage-state)"
 mkdir -p "$output_dir"
 
+initial_running=false
+if archphene_android_pid "$manager" >/dev/null 2>&1; then
+  initial_running=true
+fi
+original_section=
+
+restore_section() {
+  [[ -n "$original_section" ]] || return 0
+  local ui
+  ui="$(archphene_capture_ui "storage-usage-restore-$serial" 2>/dev/null || true)"
+  if archphene_regex_contains \
+    "$ui" "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\""; then
+    archphene_tap_ui_pattern \
+      "$ui" \
+      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+      "$original_section" || true
+  fi
+}
+
 cleanup() {
   archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
   archphene_adb_run shell run-as "$manager" \
@@ -41,6 +63,10 @@ cleanup() {
     rm -f "$builder_fixture" >/dev/null 2>&1 || true
   archphene_adb_run shell run-as "$builder" \
     rmdir files/aur-build-workspace-v2 >/dev/null 2>&1 || true
+  if [[ "$initial_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+    restore_section || true
+  fi
   find "$state_dir" -mindepth 1 -maxdepth 1 -type f -delete 2>/dev/null || true
   rmdir "$state_dir" 2>/dev/null || true
 }
@@ -108,8 +134,16 @@ wait_for_storage_value() {
   archphene_die "$label did not reach expected storage state: $value"
 }
 
-archphene_adb_run install -r "$builder_apk" >/dev/null
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_require_file "$builder_apk"
+  archphene_adb_run install -r "$builder_apk" >/dev/null
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "$manager is not installed; pass --install-apk with --apk"
+archphene_adb_run shell pm path "$builder" >/dev/null ||
+  archphene_die "$builder is not installed; pass --install-apk with --builder-apk"
 
 existing_manager="$(
   archphene_adb_run shell run-as "$manager" sh -c \
@@ -141,7 +175,21 @@ archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 25 >/dev/null
 ui="$(archphene_capture_ui "storage-usage-launch-$serial")"
 if archphene_regex_contains "$ui" 'text="Connect Android files\?"'; then
   archphene_tap_ui_pattern "$ui" 'text="(?:NOT NOW|Not now)"' "Not now"
+  ui="$(archphene_capture_ui "storage-usage-after-onboarding-$serial")"
 fi
+original_section="$(
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$ui"
+)"
 archphene_open_manager_section Files "storage-usage-files-$serial"
 ui="$(archphene_capture_ui "storage-usage-refresh-$serial")"
 archphene_tap_ui_pattern \
