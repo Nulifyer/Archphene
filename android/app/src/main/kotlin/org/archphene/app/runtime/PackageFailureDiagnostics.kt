@@ -26,6 +26,10 @@ internal class UnsupportedPackageCompatibilityException(
     detail: String,
 ) : IllegalStateException(detail)
 
+internal class PackageFileConflictException(
+    detail: String,
+) : IllegalStateException(detail)
+
 internal data class PlannedPackageRemoval(
     val name: String,
     val version: String,
@@ -205,6 +209,14 @@ internal object PackageFailureDiagnostics {
         mutationStarted: Boolean,
         installedStateRefreshed: Boolean,
     ): String {
+        if (error is PackageFileConflictException) {
+            val detail =
+                (error.message ?: "A package file is already owned")
+                    .replace('\t', ' ')
+                    .replace('\r', ' ')
+                    .replace('\n', ' ')
+            return "$detail No Linux packages were changed. Review before retrying."
+        }
         if (mutationStarted) {
             return if (installedStateRefreshed) {
                 "$action did not finish. Installed state was refreshed; Review before continuing."

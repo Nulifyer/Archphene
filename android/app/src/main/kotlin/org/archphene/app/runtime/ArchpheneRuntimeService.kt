@@ -11758,6 +11758,11 @@ class ArchpheneRuntimeService : Service() {
                                             nativeOutput,
                                         )
                                     }
+                                if (length == NativeRuntime.ERROR_PACKAGE_FILE_CONFLICT) {
+                                    throw PackageFileConflictException(
+                                        readNativeMessage(nativeOutput, length),
+                                    )
+                                }
                                 if (length <= 0 || length > NativeRuntime.PACKAGE_OUTPUT_SIZE) {
                                     throw IllegalStateException(
                                         readNativeMessage(nativeOutput, length),

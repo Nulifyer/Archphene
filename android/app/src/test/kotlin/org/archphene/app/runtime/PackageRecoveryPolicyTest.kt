@@ -57,6 +57,22 @@ class PackageRecoveryPolicyTest {
     }
 
     @Test
+    fun typed_file_conflict_reports_the_exact_owner_even_after_commit_was_entered() {
+        assertEquals(
+            "package file usr/bin/dotnet is already owned by installed package " +
+                "dotnet-runtime (-11) No Linux packages were changed. Review before retrying.",
+            PackageFailureDiagnostics.install(
+                PackageFileConflictException(
+                    "package file usr/bin/dotnet is already owned by installed package " +
+                        "dotnet-runtime (-11)",
+                ),
+                mutationStarted = true,
+                installedStateRefreshed = true,
+            ),
+        )
+    }
+
+    @Test
     fun cache_recovery_reclaims_only_packages_outside_the_current_closure() {
         assertEquals(
             listOf("old-tool", "unrelated"),

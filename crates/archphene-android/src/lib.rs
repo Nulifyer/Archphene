@@ -151,6 +151,7 @@ mod android {
     const ERROR_PROCESS: jint = -8;
     const ERROR_STORAGE: jint = -9;
     const ERROR_LAUNCHER: jint = -10;
+    const ERROR_PACKAGE_FILE_CONFLICT: jint = -11;
     const MAX_ANDROID_DNS_REQUEST_BYTES: usize = 512;
     const MAX_LAUNCHER_REVIEW_REQUEST_BYTES: usize = 32 * 1024;
     const MAX_PACKAGE_CACHE_SELECTION_BYTES: usize = 32 * 1024;
@@ -828,6 +829,22 @@ mod android {
         }
         destination[..bytes.len()].copy_from_slice(bytes);
         i32::try_from(bytes.len()).unwrap_or(i32::MAX)
+    }
+
+    fn copy_aur_install_result(
+        result: Result<ToolOutput, PackageRuntimeError>,
+        destination: &mut [u8],
+    ) -> jint {
+        match result {
+            Err(error @ PackageRuntimeError::FileConflict { .. }) => {
+                let diagnostic = error.to_string();
+                let length = diagnostic.len().min(destination.len().saturating_sub(1));
+                destination[..length].copy_from_slice(&diagnostic.as_bytes()[..length]);
+                destination[length] = 0;
+                ERROR_PACKAGE_FILE_CONFLICT
+            }
+            result => copy_tool_result(result, destination),
+        }
     }
 
     fn copy_package_resolution_result(
@@ -3855,7 +3872,7 @@ mod android {
                 },
             )
             .collect();
-        copy_tool_result(
+        copy_aur_install_result(
             package_runtime.install_verified_aur_archives(&mut install_inputs, &package_name),
             output,
         )
@@ -3996,7 +4013,7 @@ mod android {
                 install_script_sha256: verified.install_script_sha256,
             })
             .collect();
-        copy_tool_result(
+        copy_aur_install_result(
             package_runtime.install_verified_aur_archives(&mut install_inputs, &selected_package),
             output,
         )
