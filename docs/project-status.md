@@ -925,14 +925,35 @@ and proves the requested package and version. Real AArch64 and x86_64
 older-to-newer upgrades, including changed dependency sets and reviewed
 package replacement, now pass on both exact ABIs.
 Reviewed AUR lifecycle scripts are enabled under the exact capability described
-above; official-package scriptlets remain disabled, and generic hook policy is
-still open. Accepted replacements now also pass deterministic manager death
+above; official-package scriptlets remain disabled. Generic libalpm hooks are
+now isolated through an exact bounded private `HookDir` and replaced after
+official mutation by installed, root-contained trust and desktop-cache
+adapters. Accepted replacements now also pass deterministic manager death
 after their exact snapshot and durable mutation intent are published but before
 pacman begins. Restart exposes Repair at the retained commit boundary; repair
 restores the old record, revalidates the authorized plan, completes signed
 official `curl`, and clears all transaction residue on both exact ABIs. Exact
 rollback, reviewed dependency-orphan cleanup, and retry-to-completion under real
 storage pressure now also pass; whole-operation AUR recovery remains open.
+
+The hook boundary no longer lets pacman discover and execute arbitrary
+root-owned hook commands in the Android fake root. Rust scans at most 1,024
+entries across the system and local hook directories, validates bounded
+regular `.hook` files or existing `/dev/null` overrides, and publishes an
+app-private mode-0700 directory containing an exact `/dev/null` override for
+each name. Both pacman configurations place that absolute `HookDir` in
+`[options]`, and every mutation refreshes it before pacman starts. After an
+official install, removal, repair, or rollback, Archphene conditionally runs
+only installed root-contained adapters for trust, GIO modules, GLib schemas,
+fontconfig, GDK-Pixbuf, GTK input modules, desktop MIME associations, shared
+MIME data, and dconf. Missing subsystem directories are valid for a partial
+Arch root. Adapter failure retains the mutation journal and exact repair
+inputs; this was exercised on Samsung when `update-mime-database` exposed a
+path-translation defect, then repaired through the visible retained Repair
+flow after correction. The reusable gate proves no libalpm hook or scriptlet
+ran, all applicable caches have transaction-fresh timestamps, and 24 x86_64
+plus 29 AArch64 hooks are isolated. Normal reviewed dependency cleanup,
+residue checks, and inspected full-device completion pass on both targets.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -999,8 +1020,8 @@ Accepted replacement interruption and forward Repair also pass from a durable
 pre-pacman boundary on both devices. A separate post-pacman gate proves exact
 signed rollback on both ABIs, including removal of AArch64's newly introduced
 `jemalloc` dependency and restoration of the prior dependency reason.
-Hooks/scriptlets remain open, so this is not yet a complete production
-transaction engine.
+Official-package scriptlets and whole-operation AUR recovery remain open, so
+this is not yet a complete production transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16
@@ -1884,7 +1905,9 @@ death, installed with exact script SHA-256
 `c910a24270895767939b23194673d76641432aa107e6e81ca8ad6f7a8fc6e9b7`,
 survived another manager death, removed normally, and pruned the capability.
 Full-device screenshots and the installed/removed UI states were inspected.
-Official-package scriptlets and the generic hook/recovery policy remain open.
+Official-package scriptlets and whole-operation AUR recovery remain open; the
+generic libalpm hook boundary is now isolated behind bounded maintenance
+adapters.
 
 The AUR pre-install decision surface is now explicitly gated as a complete
 contract rather than by one token per section. Six mutually compact,
@@ -1921,8 +1944,8 @@ explicit Retry persists removal across catalog refresh, opens Android's
 uninstall confirmation, waits for confirmed absence, then opens the trusted
 replacement install confirmation. A real stale emulator Foot identity
 completed that full-device flow and returned to Current. Recursive
-cross-package-base AUR dependency review/builds and official-package
-scriptlet/hook policy remain open.
+cross-package-base AUR recovery and official-package scriptlet policy remain
+open.
 
 Split-package build and installation now close the boundary exposed by .NET.
 The Builder returns every required archive instead of only the selected output;

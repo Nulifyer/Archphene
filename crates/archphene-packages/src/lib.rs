@@ -61,6 +61,9 @@ const PACKAGE_MUTATION_INTENT_HEADER: &str = "org.archphene.package-mutation.v1"
 const PACKAGE_MUTATION_INTENT_LIMIT: u64 = 384 * 1024;
 const PACKAGE_DATABASE_REPAIR_DIRECTORY: &str = "run/package-database-repair-v1";
 const PACKAGE_TRANSACTION_PREVIEW_DIRECTORY: &str = "run/package-transaction-preview-v1";
+const PACKAGE_HOOK_OVERRIDE_DIRECTORY: &str = "run/package-hook-overrides-v1";
+const PACKAGE_HOOK_DIRECTORY_ENTRY_LIMIT: usize = 1024;
+const PACKAGE_HOOK_FILE_LIMIT: u64 = 64 * 1024;
 const PACKAGE_REPLACEMENT_REPAIR_DIRECTORY: &str = "run/package-replacement-repair-v1";
 const PACKAGE_REPLACEMENT_REPAIR_TEMP_DIRECTORY: &str = "run/package-replacement-repair-v1.tmp";
 const PACKAGE_REPLACEMENT_LOCAL_TEMP_DIRECTORY: &str =
@@ -416,6 +419,7 @@ pub struct PackageRuntime {
     native_root: PathBuf,
     alias_root: PathBuf,
     pacman_config: PathBuf,
+    hook_override_root: PathBuf,
     architecture: RepositoryArchitecture,
     loader: PathBuf,
     keyring: PathBuf,
@@ -1098,16 +1102,22 @@ impl PackageRuntime {
             None
         };
 
+        let hook_override_root = arch_root.join(PACKAGE_HOOK_OVERRIDE_DIRECTORY);
+        prepare_package_hook_overrides(arch_root, &hook_override_root)?;
         let pacman_config = arch_root.join(PACMAN_CONFIG_FILE);
+        let pacman_config_content =
+            pacman_config_with_hook_override(architecture.pacman_config(), &hook_override_root)?;
         publish_regular_file(
             &pacman_config,
             &arch_root.join(PACMAN_CONFIG_TEMP_FILE),
-            architecture.pacman_config(),
+            &pacman_config_content,
         )?;
         let aur_pacman_config = architecture.aur_pacman_config();
         if aur_pacman_config.is_empty() {
             return Err(PackageRuntimeError::InvalidManifest);
         }
+        let aur_pacman_config =
+            pacman_config_with_hook_override(&aur_pacman_config, &hook_override_root)?;
         publish_regular_file(
             &arch_root.join(AUR_PACMAN_CONFIG_FILE),
             &arch_root.join(AUR_PACMAN_CONFIG_TEMP_FILE),
@@ -1133,6 +1143,7 @@ impl PackageRuntime {
             native_root,
             alias_root,
             pacman_config,
+            hook_override_root,
             architecture,
             loader,
             keyring,
@@ -1159,6 +1170,10 @@ impl PackageRuntime {
             runtime.recover_pending_install_reasons()?;
         }
         Ok(runtime)
+    }
+
+    fn refresh_package_hook_overrides(&self) -> Result<(), PackageRuntimeError> {
+        prepare_package_hook_overrides(&self.arch_root, &self.hook_override_root)
     }
 
     pub fn run(
@@ -1222,6 +1237,106 @@ impl PackageRuntime {
 
     fn refresh_system_trust(&self) -> Result<bool, PackageRuntimeError> {
         self.materialize_system_trust(true)
+    }
+
+    fn refresh_desktop_caches(&self) -> Result<u32, PackageRuntimeError> {
+        let environment = self.command_environment()?;
+        let mut completed = 0_u32;
+        for (command, arguments, prerequisite) in [
+            ("fc-cache", &["-s"][..], "etc/fonts"),
+            (
+                "gdk-pixbuf-query-loaders",
+                &["--update-cache"][..],
+                "usr/lib/gdk-pixbuf-2.0",
+            ),
+            (
+                "gtk-query-immodules-3.0",
+                &["--update-cache"][..],
+                "usr/lib/gtk-3.0",
+            ),
+            ("dconf", &["update"][..], "etc/dconf/db"),
+        ] {
+            if self.maintenance_directory(prerequisite)?.is_some()
+                && self.run_desktop_cache_adapter(&environment, command, arguments)?
+            {
+                completed = completed.saturating_add(1);
+            }
+        }
+        for (command, relative, arguments) in [
+            (
+                "gio-querymodules",
+                "usr/lib/gio/modules",
+                &["/usr/lib/gio/modules"][..],
+            ),
+            (
+                "glib-compile-schemas",
+                "usr/share/glib-2.0/schemas",
+                &["/usr/share/glib-2.0/schemas"][..],
+            ),
+            (
+                "update-desktop-database",
+                "usr/share/applications",
+                &["--quiet"][..],
+            ),
+            (
+                "update-mime-database",
+                "usr/share/mime",
+                &["usr/share/mime"][..],
+            ),
+        ] {
+            if self.maintenance_directory(relative)?.is_none() {
+                continue;
+            }
+            if command == "update-mime-database"
+                && self
+                    .maintenance_directory("usr/share/mime/packages")?
+                    .is_none()
+            {
+                continue;
+            }
+            if self.run_desktop_cache_adapter(&environment, command, arguments)? {
+                completed = completed.saturating_add(1);
+            }
+        }
+        Ok(completed)
+    }
+
+    fn maintenance_directory(
+        &self,
+        relative: &str,
+    ) -> Result<Option<PathBuf>, PackageRuntimeError> {
+        let directory = self.arch_root.join(relative);
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(PackageRuntimeError::UnsafeEntry(directory));
+                }
+                Ok(Some(directory))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(PackageRuntimeError::Io(error)),
+        }
+    }
+
+    fn run_desktop_cache_adapter(
+        &self,
+        environment: &CommandEnvironment,
+        command: &str,
+        arguments: &[&str],
+    ) -> Result<bool, PackageRuntimeError> {
+        if !environment.command_available(command)? {
+            return Ok(false);
+        }
+        let output = environment.run_as_root(command, arguments)?;
+        if output.exit_code() != 0 {
+            let mut diagnostic = empty_tool_output();
+            diagnostic.push(output.as_bytes())?;
+            return Err(PackageRuntimeError::ToolFailed(
+                output.exit_code(),
+                Box::new(diagnostic),
+            ));
+        }
+        Ok(true)
     }
 
     fn materialize_system_trust(&self, force: bool) -> Result<bool, PackageRuntimeError> {
@@ -3104,6 +3219,7 @@ impl PackageRuntime {
         &self,
         input: &mut VerifiedAurArchive<'_>,
     ) -> Result<ToolOutput, PackageRuntimeError> {
+        self.refresh_package_hook_overrides()?;
         let source = &mut *input.source;
         let filename = input.filename;
         let package = input.package;
@@ -3273,6 +3389,7 @@ impl PackageRuntime {
         inputs: &mut [VerifiedAurArchive<'_>],
         selected_package: &str,
     ) -> Result<ToolOutput, PackageRuntimeError> {
+        self.refresh_package_hook_overrides()?;
         if inputs.is_empty()
             || inputs.len() > aur::MAX_AUR_DEPENDENCIES
             || !safe_logical_name(selected_package)
@@ -3460,6 +3577,7 @@ impl PackageRuntime {
         expected_replacements: &[InstalledPackageIdentity],
         retained_replacements: Option<&[ReplacementRepairRecord]>,
     ) -> Result<(), PackageRuntimeError> {
+        self.refresh_package_hook_overrides()?;
         let package_count = resolution.as_str()?.lines().count();
         let mut archives = Vec::with_capacity(package_count);
         for line in resolution.as_str()?.lines() {
@@ -3651,12 +3769,13 @@ impl PackageRuntime {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
         }
+        self.refresh_system_trust()?;
+        self.refresh_desktop_caches()?;
         if mode == InstallResolutionMode::Repair {
             self.clear_database_repair(&archives)?;
         }
-        self.clear_pending_mutation()?;
         self.clear_replacement_repair()?;
-        self.refresh_system_trust()?;
+        self.clear_pending_mutation()?;
         Ok(())
     }
 
@@ -3876,6 +3995,7 @@ impl PackageRuntime {
     }
 
     pub fn remove(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        self.refresh_package_hook_overrides()?;
         let (expected_removals, cleanup) = self.consume_package_removal_review(package)?;
         let plan = self.preview_removal(package, cleanup)?;
         if plan != expected_removals {
@@ -3940,9 +4060,11 @@ impl PackageRuntime {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
         }
+        self.refresh_system_trust()?;
+        self.refresh_desktop_caches()?;
+        self.reconcile_aur_lifecycle_capabilities()?;
         self.clear_replacement_repair()?;
         self.clear_pending_mutation()?;
-        self.reconcile_aur_lifecycle_capabilities()?;
         Ok(empty_tool_output())
     }
 
@@ -3951,6 +4073,7 @@ impl PackageRuntime {
         package: &str,
         removals: &[ReplacementRepairRecord],
     ) -> Result<ToolOutput, PackageRuntimeError> {
+        self.refresh_package_hook_overrides()?;
         if removals.is_empty()
             || removals.len() > MAX_INSTALL_PLAN_REMOVALS
             || !removals.iter().any(|removal| removal.name == package)
@@ -3997,6 +4120,9 @@ impl PackageRuntime {
                 .is_ok_and(|version| version.as_bytes().is_empty())
         }) {
             self.validate_local_database()?;
+            self.refresh_system_trust()?;
+            self.refresh_desktop_caches()?;
+            self.reconcile_aur_lifecycle_capabilities()?;
             self.clear_pending_mutation()?;
             return Ok(empty_tool_output());
         } else {
@@ -4103,13 +4229,15 @@ impl PackageRuntime {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
         }
+        self.refresh_system_trust()?;
+        self.refresh_desktop_caches()?;
+        self.reconcile_aur_lifecycle_capabilities()?;
         if legacy_snapshot {
             self.clear_removal_repair()?;
         } else {
             self.clear_replacement_repair()?;
         }
         self.clear_pending_mutation()?;
-        self.reconcile_aur_lifecycle_capabilities()?;
         Ok(empty_tool_output())
     }
 
@@ -4160,6 +4288,7 @@ impl PackageRuntime {
         if !safe_logical_name(package) {
             return Err(PackageRuntimeError::InvalidQuery);
         }
+        self.refresh_package_hook_overrides()?;
         let intent = self
             .read_pending_mutation()?
             .ok_or(PackageRuntimeError::InvalidResolution)?;
@@ -4337,11 +4466,12 @@ impl PackageRuntime {
                 explicitly_installed: false,
             });
         }
+        self.refresh_system_trust()?;
+        self.refresh_desktop_caches()?;
+        self.reconcile_aur_lifecycle_capabilities()?;
         self.clear_database_repair(&forward_archives)?;
         self.clear_replacement_repair()?;
         self.clear_pending_mutation()?;
-        self.reconcile_aur_lifecycle_capabilities()?;
-        self.refresh_system_trust()?;
         self.installed_version(package)
     }
 
@@ -6364,6 +6494,136 @@ fn prepare_alias_directory(path: &Path) -> Result<(), PackageRuntimeError> {
         }
         fs::remove_file(entry.path())?;
     }
+    Ok(())
+}
+
+fn pacman_config_with_hook_override(
+    source: &[u8],
+    hook_override_root: &Path,
+) -> Result<Vec<u8>, PackageRuntimeError> {
+    let hook_override = hook_override_root
+        .to_str()
+        .ok_or(PackageRuntimeError::InvalidPath)?;
+    if !hook_override_root.is_absolute()
+        || hook_override.len() > 1024
+        || hook_override
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+    {
+        return Err(PackageRuntimeError::InvalidPath);
+    }
+    let section_offset = source
+        .windows(2)
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, bytes)| (bytes == b"\n[").then_some(index + 1))
+        .ok_or(PackageRuntimeError::InvalidManifest)?;
+    let mut output = Vec::with_capacity(source.len() + hook_override.len() + 16);
+    output.extend_from_slice(&source[..section_offset]);
+    output.extend_from_slice(b"HookDir = ");
+    output.extend_from_slice(hook_override.as_bytes());
+    output.push(b'\n');
+    output.extend_from_slice(&source[section_offset..]);
+    Ok(output)
+}
+
+fn safe_package_hook_name(name: &str) -> bool {
+    name.len() > ".hook".len()
+        && name.len() <= 255
+        && name.ends_with(".hook")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+}
+
+fn prepare_package_hook_overrides(
+    arch_root: &Path,
+    override_root: &Path,
+) -> Result<(), PackageRuntimeError> {
+    match fs::symlink_metadata(override_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(PackageRuntimeError::UnsafeEntry(
+                override_root.to_path_buf(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(override_root)?;
+        }
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    fs::set_permissions(override_root, fs::Permissions::from_mode(0o700))?;
+    let mut existing_count = 0_usize;
+    for entry in fs::read_dir(override_root)? {
+        existing_count = existing_count.saturating_add(1);
+        if existing_count > PACKAGE_HOOK_DIRECTORY_ENTRY_LIMIT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if !safe_package_hook_name(&name)
+            || !metadata.file_type().is_symlink()
+            || fs::read_link(&path)? != Path::new("/dev/null")
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        fs::remove_file(path)?;
+    }
+
+    let mut hook_names = BTreeSet::new();
+    let mut scanned_entries = 0_usize;
+    for relative in ["usr/share/libalpm/hooks", "etc/pacman.d/hooks"] {
+        let directory = arch_root.join(relative);
+        let directory_metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(directory));
+        }
+        for entry in fs::read_dir(&directory)? {
+            scanned_entries = scanned_entries.saturating_add(1);
+            if scanned_entries > PACKAGE_HOOK_DIRECTORY_ENTRY_LIMIT {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+            let entry = entry?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+            if !name.ends_with(".hook") {
+                continue;
+            }
+            if !safe_package_hook_name(&name)
+                || hook_names.len() >= PACKAGE_HOOK_DIRECTORY_ENTRY_LIMIT
+            {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                if fs::read_link(&path)? != Path::new("/dev/null") {
+                    return Err(PackageRuntimeError::UnsafeEntry(path));
+                }
+            } else if !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > PACKAGE_HOOK_FILE_LIMIT
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(path));
+            }
+            hook_names.insert(name);
+        }
+    }
+    for name in hook_names {
+        symlink("/dev/null", override_root.join(name))?;
+    }
+    File::open(override_root)?.sync_all()?;
     Ok(())
 }
 
@@ -10257,9 +10517,19 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                 .canonicalize()
                 .expect("source target")
         );
+        let pacman_config = fs::read(tree.root.join(PACMAN_CONFIG_FILE)).expect("pacman config");
         assert_eq!(
-            fs::read(tree.root.join(PACMAN_CONFIG_FILE)).expect("pacman config"),
-            X86_64_PACMAN_CONFIG
+            pacman_config,
+            pacman_config_with_hook_override(
+                X86_64_PACMAN_CONFIG,
+                &tree.root.join(PACKAGE_HOOK_OVERRIDE_DIRECTORY),
+            )
+            .expect("hook-isolated pacman config"),
+        );
+        let pacman_config = std::str::from_utf8(&pacman_config).expect("UTF-8 pacman config");
+        assert!(
+            pacman_config.find("HookDir = ").expect("hook option")
+                < pacman_config.find("[core]").expect("core section"),
         );
         assert_eq!(
             fs::metadata(tree.root.join(PACMAN_CONFIG_FILE))
@@ -10277,6 +10547,45 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                     .as_encoded_bytes()
             )
         );
+    }
+
+    #[test]
+    fn package_hooks_are_bounded_and_disabled_before_pacman() {
+        let tree = TestTree::new();
+        let system_hooks = tree.root.join("usr/share/libalpm/hooks");
+        let custom_hooks = tree.root.join("etc/pacman.d/hooks");
+        fs::create_dir_all(&system_hooks).expect("system hook directory");
+        fs::create_dir_all(&custom_hooks).expect("custom hook directory");
+        fs::write(
+            system_hooks.join("30-system-cache.hook"),
+            b"[Action]\nWhen=PostTransaction\nExec=/usr/bin/cache\n",
+        )
+        .expect("system hook");
+        fs::write(
+            custom_hooks.join("90-local-cache.hook"),
+            b"[Action]\nWhen=PostTransaction\nExec=/usr/bin/cache\n",
+        )
+        .expect("custom hook");
+        fs::write(custom_hooks.join("README"), b"ignored").expect("non-hook file");
+        let overrides = tree.root.join(PACKAGE_HOOK_OVERRIDE_DIRECTORY);
+
+        prepare_package_hook_overrides(&tree.root, &overrides).expect("hook overrides");
+        for name in ["30-system-cache.hook", "90-local-cache.hook"] {
+            assert_eq!(
+                fs::read_link(overrides.join(name)).expect("disabled hook"),
+                Path::new("/dev/null"),
+            );
+        }
+        assert!(!overrides.join("README").exists());
+
+        fs::remove_file(overrides.join("30-system-cache.hook")).expect("remove safe override");
+        fs::write(overrides.join("30-system-cache.hook"), b"substituted")
+            .expect("substitute override");
+        assert!(matches!(
+            prepare_package_hook_overrides(&tree.root, &overrides),
+            Err(PackageRuntimeError::UnsafeEntry(path))
+                if path == overrides.join("30-system-cache.hook")
+        ));
     }
 
     #[test]
