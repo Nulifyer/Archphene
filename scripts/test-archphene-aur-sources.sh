@@ -5,25 +5,28 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=
 apk=
 builder_apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --builder-apk) builder_apk="${2:?missing value for --builder-apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --builder-apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --builder-apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
-[[ -n "$builder_apk" ]] || archphene_die "--builder-apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+  [[ -n "$builder_apk" ]] ||
+    archphene_die "--builder-apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
-archphene_require_file "$builder_apk"
 manager=org.archphene.app.debug
 builder=org.archphene.builder.debug
 package=visual-studio-code-bin
@@ -74,8 +77,16 @@ local_package_count() {
     awk 'NF { count++ } END { print count + 0 }'
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
-archphene_adb_run install -r "$builder_apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_require_file "$builder_apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+  archphene_adb_run install -r "$builder_apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "$manager is not installed; pass --install-apk with --apk"
+archphene_adb_run shell pm path "$builder" >/dev/null ||
+  archphene_die "$builder is not installed; pass --install-apk with --builder-apk"
 package_uids="$(
   archphene_adb_run shell cmd package list packages -U |
     tr -d '\r'

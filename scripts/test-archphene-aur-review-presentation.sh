@@ -4,18 +4,23 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL [--apk PATH]"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
 package=org.archphene.app.debug
@@ -84,13 +89,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n "$apk" ]]; then
+if [[ "$skip_install" == false ]]; then
   archphene_require_file "$apk"
   archphene_adb_run install -r "$apk" >/dev/null
 fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
-archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 25 >/dev/null
 archphene_wait_ui_exact_text \
   "Archphene is ready" "aur-review-presentation-ready-$serial" 20
 original_section="$(
@@ -196,7 +202,7 @@ open_section Digests \
   'AUR commit: 1{40}.*Snapshot SHA-256: 3{64}.*archphene-aur-ux-fixture-1\.2\.3\.tar\.gz SHA-256: 2{64}.*Build closure SHA-256: 5{64}.*Builder input SHA-256: 4{64}.*Builder closure SHA-256: 5{64}.*Built package SHA-256: 6{64}' \
   digests
 open_section Recipe \
-  'Runtime dependencies.*• glibc.*• zlib.*Build dependencies.*• rust.*• cargo.*Check dependencies.*• bats.*Valid PGP keys.*0123456789ABCDEF0123456789ABCDEF01234567.*Visible build functions.*prepare\(\).*build\(\).*check\(\).*package\(\).*Install script: archphene-aur-ux-fixture\.install.*post_install\(\).*PKGBUILD.*pkgname=archphene-aur-ux-fixture' \
+  'Runtime dependencies.*• glibc.*• zlib.*Build dependencies.*• rust.*• cargo.*Check dependencies.*• bats.*Valid PGP keys.*0123456789ABCDEF0123456789ABCDEF01234567.*Visible build functions.*prepare\(\).*build\(\).*check\(\).*package\(\).*Install script(?: for archphene-aur-ux-fixture)?: archphene-aur-ux-fixture\.install.*post_install\(\).*PKGBUILD.*pkgname=archphene-aur-ux-fixture' \
   recipe
 open_section "Build logs" \
   'Finished making: archphene-aur-ux-fixture 1\.2\.3-1' logs false

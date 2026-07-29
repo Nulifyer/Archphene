@@ -4,29 +4,39 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 manager=org.archphene.app.debug
 package=visual-studio-code-bin
 output_dir="$ARCHPHENE_ROOT/tooling/build/aur-review"
 mkdir -p "$output_dir"
 
+initial_running=false
+if archphene_android_pid "$manager" >/dev/null 2>&1; then
+  initial_running=true
+fi
+
 cleanup() {
-  archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
+  if [[ "$initial_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -37,7 +47,12 @@ local_package_count() {
     awk 'NF { count++ } END { print count + 0 }'
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "$manager is not installed; pass --install-apk with --apk"
 archphene_adb_run shell am force-stop "$manager" >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell monkey -p "$manager" \
