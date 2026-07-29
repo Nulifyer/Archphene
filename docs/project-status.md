@@ -591,12 +591,25 @@ The card reports reclaimed unrelated bytes (or that none can safely be freed),
 then advances only that durable job to Review. Kotlin persists the bounded
 result against the Rust journal's durable job ID plus exact terminal identity,
 so a cold Service restart restores it while a later identical failure cannot
-inherit stale recovery. The state-preserving exact-ABI gates create a 4 KiB
+inherit stale recovery. The state-preserving exact-ABI gates create a 3.5 KiB
 synthetic unrelated set and exercise the full UI on both targets. The empty
 x86_64 emulator cache and the Samsung's populated cache pass; all 548
 pre-existing Samsung archive/signature files remain byte-identical, synthetic
 files are removed, and inspected full-device screenshots show the exact
 capacity evidence and persistent Review state.
+
+A separate bounded emulator-only gate constrains the real app filesystem to
+48 MiB free using recognized unrelated package-cache artifacts. The normal
+signed `angle-grinder` closure reaches its actual 70 MiB preflight requirement,
+fails before mutation, selectively reclaims about 9.2 GiB without touching the
+verified closure, resolves Review into Retry, and installs `angle-grinder` plus
+`jemalloc` to completion with no journal, repair snapshot, or pacman lock.
+Cleanup traps remove fixtures on every exit and restore the target's original
+installed state. Full-device failure, recovery, and completion frames pass
+visual inspection; Samsung passes the corresponding typed recovery and
+state-preservation matrix without filling its large personal storage volume.
+The shared formatter now reports one decimal below ten units instead of
+overstating reclaimed capacity through whole-unit ceiling.
 
 The Packages workspace also exposes Downloads independently of a failure.
 Rust scans at most 4,096 cache artifacts once, groups archives, detached
@@ -918,8 +931,8 @@ after their exact snapshot and durable mutation intent are published but before
 pacman begins. Restart exposes Repair at the retained commit boundary; repair
 restores the old record, revalidates the authorized plan, completes signed
 official `curl`, and clears all transaction residue on both exact ABIs. Exact
-rollback and reviewed dependency-orphan cleanup now also pass; whole-operation
-AUR recovery and retry-to-completion under real storage pressure remain open.
+rollback, reviewed dependency-orphan cleanup, and retry-to-completion under real
+storage pressure now also pass; whole-operation AUR recovery remains open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -986,8 +999,8 @@ Accepted replacement interruption and forward Repair also pass from a durable
 pre-pacman boundary on both devices. A separate post-pacman gate proves exact
 signed rollback on both ABIs, including removal of AArch64's newly introduced
 `jemalloc` dependency and restoration of the prior dependency reason.
-Hooks/scriptlets and a real-storage-pressure retry-to-completion gate remain
-open, so this is not yet a complete production transaction engine.
+Hooks/scriptlets remain open, so this is not yet a complete production
+transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16

@@ -4993,15 +4993,7 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
-    private fun formatStorageBytes(bytes: Long): String =
-        when {
-            bytes < 1024 -> "$bytes B"
-            bytes < 1024 * 1024 -> "${(bytes + 1023) / 1024} KiB"
-            bytes < 1024L * 1024 * 1024 ->
-                "${(bytes + 1024 * 1024 - 1) / (1024 * 1024)} MiB"
-            else ->
-                "${(bytes + 1024L * 1024 * 1024 - 1) / (1024L * 1024 * 1024)} GiB"
-        }
+    private fun formatStorageBytes(bytes: Long): String = StorageSizeFormatter.format(bytes)
 
     private fun createSessionNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {

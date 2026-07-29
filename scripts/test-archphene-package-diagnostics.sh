@@ -174,7 +174,7 @@ for fixture in "${cases[@]}"; do
   if [[ "$failure" == storage ]]; then
     archphene_tap_text "$ARCHPHENE_UI" "Clear cache"
     archphene_wait_ui_exact_text \
-      "Freed 4 KiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
+      "Freed 3.5 KiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
       "package-diagnostics-storage-cleaned-$serial" 20
     archphene_wait_ui_exact_text \
       "Review" "package-diagnostics-storage-review-$serial" 15
@@ -192,7 +192,7 @@ for fixture in "${cases[@]}"; do
     archphene_adb_run shell input text "$package_name" >/dev/null
     archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
     archphene_wait_ui_exact_text \
-      "Freed 4 KiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
+      "Freed 3.5 KiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
       "package-diagnostics-storage-restored-$serial" 20
     archphene_wait_ui_exact_text \
       "Review" "package-diagnostics-storage-restored-review-$serial" 15

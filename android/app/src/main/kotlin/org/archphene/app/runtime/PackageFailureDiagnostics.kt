@@ -31,6 +31,46 @@ internal data class PlannedPackageRemoval(
     val version: String,
 )
 
+internal object StorageSizeFormatter {
+    fun format(bytes: Long): String {
+        require(bytes >= 0L)
+        if (bytes < 1024L) {
+            return "$bytes B"
+        }
+        val unitBytes: Long
+        val suffix: String
+        when {
+            bytes < 1024L * 1024L -> {
+                unitBytes = 1024L
+                suffix = "KiB"
+            }
+            bytes < 1024L * 1024L * 1024L -> {
+                unitBytes = 1024L * 1024L
+                suffix = "MiB"
+            }
+            else -> {
+                unitBytes = 1024L * 1024L * 1024L
+                suffix = "GiB"
+            }
+        }
+        val whole = bytes / unitBytes
+        val remainder = bytes % unitBytes
+        if (remainder == 0L) {
+            return "$whole $suffix"
+        }
+        if (whole >= 10L) {
+            val rounded = whole + if (remainder >= (unitBytes + 1L) / 2L) 1L else 0L
+            return "$rounded $suffix"
+        }
+        val fractionalTenth =
+            (remainder * 10L + unitBytes / 2L) / unitBytes
+        if (fractionalTenth == 10L) {
+            return "${whole + 1L} $suffix"
+        }
+        return "$whole.$fractionalTenth $suffix"
+    }
+}
+
 internal object PackageInstallPlanCodec {
     fun decode(bytes: ByteArray): List<PlannedPackageRemoval> =
         PackageRemovalListCodec.decode(bytes, "org.archphene.package-install-plan.v1")
@@ -138,8 +178,8 @@ internal object PackageFailureDiagnostics {
                 "Unsupported on this device: $detail. No Linux packages were changed."
             error is InsufficientPackageStorageException ->
                 "Not enough Linux storage: " +
-                    "${formatStorageBytes(error.requiredBytes)} is required and " +
-                    "${formatStorageBytes(error.availableBytes)} is available. " +
+                    "${StorageSizeFormatter.format(error.requiredBytes)} is required and " +
+                    "${StorageSizeFormatter.format(error.availableBytes)} is available. " +
                     "Clear unrelated downloads or free Android storage, then Review."
             normalized.contains("no space left") ||
                 normalized.contains("enospc") ||
@@ -165,13 +205,4 @@ internal object PackageFailureDiagnostics {
         }
     }
 
-    private fun formatStorageBytes(bytes: Long): String =
-        when {
-            bytes < 1024 -> "$bytes B"
-            bytes < 1024 * 1024 -> "${(bytes + 1023) / 1024} KiB"
-            bytes < 1024L * 1024 * 1024 ->
-                "${(bytes + 1024 * 1024 - 1) / (1024 * 1024)} MiB"
-            else ->
-                "${(bytes + 1024L * 1024 * 1024 - 1) / (1024L * 1024 * 1024)} GiB"
-        }
 }

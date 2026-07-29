@@ -161,7 +161,7 @@ archphene_wait_ui_exact_text \
   "Clear cache" "package-background-new-job-$serial" 30
 archphene_tap_text "$ARCHPHENE_UI" "Clear cache"
 archphene_wait_ui_exact_text \
-  "Freed 4 KiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
+  "Freed 3.5 KiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
   "package-background-new-job-cleaned-$serial" 30
 remaining="$(
   archphene_adb_run shell run-as "$package" \

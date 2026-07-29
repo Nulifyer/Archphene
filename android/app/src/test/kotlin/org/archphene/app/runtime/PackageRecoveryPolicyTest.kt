@@ -7,6 +7,14 @@ import org.junit.Test
 
 class PackageRecoveryPolicyTest {
     @Test
+    fun storage_sizes_do_not_overstate_reclaimed_capacity() {
+        assertEquals("9.1 GiB", StorageSizeFormatter.format(9_717_772_288L))
+        assertEquals("1.5 KiB", StorageSizeFormatter.format(1536L))
+        assertEquals("757 MiB", StorageSizeFormatter.format(757L * 1024L * 1024L))
+        assertEquals("0 B", StorageSizeFormatter.format(0L))
+    }
+
+    @Test
     fun typed_preflight_storage_failure_preserves_exact_capacity_evidence() {
         val message =
             PackageFailureDiagnostics.install(
