@@ -4,22 +4,25 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.DocumentsProviderTestReceiver"
@@ -32,6 +35,11 @@ action_clean=org.archphene.app.debug.action.CLEAN_DOCUMENTS_PROVIDER_TEST
 output_dir="$ARCHPHENE_ROOT/tooling/build/documents-provider"
 mkdir -p "$output_dir"
 
+initial_running=false
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  initial_running=true
+fi
+
 cleanup() {
   archphene_adb_run shell am broadcast -n "$receiver" -a "$action_clean" \
     --es token "$token" >/dev/null 2>&1 || true
@@ -39,10 +47,18 @@ cleanup() {
     >/dev/null 2>&1 || true
   archphene_adb_run shell am force-stop com.android.documentsui \
     >/dev/null 2>&1 || true
+  if [[ "$initial_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
