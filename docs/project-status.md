@@ -2105,6 +2105,19 @@ Official forward scriptlet execution and the generic libalpm hook boundary are
 now covered. A signed script-bearing reverse rollback gate and whole-operation
 AUR recovery remain open.
 
+Recursive AUR recovery now advances at package-base boundaries rather than only
+after the whole graph completes. After each independently verified base, Rust
+atomically replaces the mode-0600 graph capability with an exact complete
+dependency-first prefix. Restart rehashes and revalidates every retained
+archive, reviewed base/version/output identity, build provenance, lifecycle
+script, graph digest, ABI, and signed-closure digest before Kotlin prepares the
+first unfinished base with only its verified ancestors. Partial-base output is
+rejected, and the final native install path separately requires every reviewed
+base. The Rust workspace, strict Clippy, Android JVM tests/lint, and both
+release JNI ABIs pass. An exact-device kill after the first retained dependency
+base remains required before whole-operation recursive recovery is considered
+closed.
+
 The AUR pre-install decision surface is now explicitly gated as a complete
 contract rather than by one token per section. Six mutually compact,
 expandable, selectable sections expose source origins and licenses; maintainer,

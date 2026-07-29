@@ -93,6 +93,28 @@ fn parse_launcher_reduced_isolation(
     }
 }
 
+#[cfg(any(target_os = "android", test))]
+fn completed_aur_graph_base_count(
+    required_package_counts: impl IntoIterator<Item = usize>,
+    output_count: usize,
+) -> Option<usize> {
+    if output_count == 0 {
+        return None;
+    }
+    let mut expected = 0_usize;
+    let mut completed_base_count = None;
+    for (index, required_package_count) in required_package_counts.into_iter().enumerate() {
+        if required_package_count == 0 {
+            return None;
+        }
+        expected = expected.checked_add(required_package_count)?;
+        if expected == output_count {
+            completed_base_count = Some(index + 1);
+        }
+    }
+    completed_base_count
+}
+
 #[cfg(target_os = "android")]
 mod android {
     #![allow(unsafe_code)]
@@ -139,7 +161,7 @@ mod android {
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
     use sha2::{Digest, Sha256};
 
-    use super::{MAX_RUNTIME_HANDLES, RuntimeRegistry};
+    use super::{MAX_RUNTIME_HANDLES, RuntimeRegistry, completed_aur_graph_base_count};
 
     const ERROR_INVALID_HANDLE: jint = -1;
     const ERROR_INVALID_ARGUMENT: jint = -2;
@@ -459,14 +481,17 @@ mod android {
         closure_sha256: [u8; 32],
         expected_architecture: Option<&str>,
     ) -> Result<Vec<VerifiedAurGraphOutput>, AurGraphVerificationError> {
-        let expected_count = reviews.iter().try_fold(0_usize, |total, review| {
-            total.checked_add(review.required_packages.len())
-        });
-        if expected_count != Some(entries.len()) || descriptors.len() != entries.len() {
+        let Some(completed_review_count) = completed_aur_graph_base_count(
+            reviews.iter().map(|review| review.required_packages.len()),
+            entries.len(),
+        ) else {
+            return Err(AurGraphVerificationError::Jni(ERROR_INVALID_ARGUMENT));
+        };
+        if descriptors.len() != entries.len() {
             return Err(AurGraphVerificationError::Jni(ERROR_INVALID_ARGUMENT));
         }
         let mut entry_index = 0_usize;
-        for review in reviews {
+        for review in reviews.iter().take(completed_review_count) {
             for required_package in &review.required_packages {
                 let Some(entry) = entries.get(entry_index) else {
                     return Err(AurGraphVerificationError::Jni(ERROR_INVALID_ARGUMENT));
@@ -3481,16 +3506,16 @@ mod android {
             Ok(None) => return 0,
             Err(error) => return copy_package_error(&error, output),
         };
-        let expected_count = reviews.iter().try_fold(0_usize, |total, review| {
-            total.checked_add(review.required_packages.len())
-        });
-        if expected_count != Some(persisted.len()) {
+        let Some(completed_review_count) = completed_aur_graph_base_count(
+            reviews.iter().map(|review| review.required_packages.len()),
+            persisted.len(),
+        ) else {
             return ERROR_INVALID_STATE;
-        }
+        };
         let mut entries = Vec::with_capacity(persisted.len());
         let mut files = Vec::with_capacity(persisted.len());
         let mut index = 0_usize;
-        for review in &reviews {
+        for review in reviews.iter().take(completed_review_count) {
             for required_package in &review.required_packages {
                 let Some(candidate) = persisted.get(index) else {
                     return ERROR_INVALID_STATE;
@@ -4000,6 +4025,13 @@ mod android {
             dependencies.dedup();
             (graph, reviews, closure, package_runtime, dependencies)
         };
+        if completed_aur_graph_base_count(
+            reviews.iter().map(|review| review.required_packages.len()),
+            entries.len(),
+        ) != Some(reviews.len())
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
         let mut verified = match verify_aur_graph_outputs(
             &descriptor_values,
             &entries,
@@ -7191,6 +7223,19 @@ mod tests {
             assert!(registry.create().is_some());
         }
         assert!(registry.create().is_none());
+    }
+
+    #[test]
+    fn aur_graph_recovery_accepts_only_complete_dependency_first_prefixes() {
+        let counts = [2_usize, 1, 3];
+        assert_eq!(completed_aur_graph_base_count(counts, 2), Some(1));
+        assert_eq!(completed_aur_graph_base_count(counts, 3), Some(2));
+        assert_eq!(completed_aur_graph_base_count(counts, 6), Some(3));
+        for incomplete in [0, 1, 4, 5, 7] {
+            assert_eq!(completed_aur_graph_base_count(counts, incomplete), None);
+        }
+        assert_eq!(completed_aur_graph_base_count([2, 0, 1], 2), None);
+        assert_eq!(completed_aur_graph_base_count([2, 0, 1], 3), None);
     }
 
     #[test]

@@ -15313,6 +15313,104 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
     }
 
     #[test]
+    fn aur_graph_built_capability_advances_from_a_durable_prefix() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let dependency_archive = b"verified dependency prefix";
+        let root_archive = b"verified root completion";
+        let dependency_path = tree.root.join("verified-prefix-dependency");
+        let root_path = tree.root.join("verified-prefix-root");
+        fs::write(&dependency_path, dependency_archive).expect("dependency output");
+        fs::write(&root_path, root_archive).expect("root output");
+        let dependency_digest = <[u8; 32]>::from(Sha256::digest(dependency_archive));
+        let root_digest = <[u8; 32]>::from(Sha256::digest(root_archive));
+
+        let prefix = {
+            let mut source = File::open(&dependency_path).expect("open dependency output");
+            runtime
+                .persist_aur_graph_built_capability(
+                    "root-bin",
+                    "x86_64",
+                    [5_u8; 32],
+                    [6_u8; 32],
+                    &mut [VerifiedAurGraphCapabilityArchive {
+                        source: &mut source,
+                        package_base: "dependency-base",
+                        base_package_name: "dependency-bin",
+                        version: "1.0-1",
+                        review_sha256: [3_u8; 32],
+                        filename: "dependency-bin-1.0-1-x86_64.pkg.tar.zst",
+                        package: "dependency-bin",
+                        archive_bytes: dependency_archive.len() as u64,
+                        installed_bytes: 4096,
+                        build_package_count: 339,
+                        sha256: dependency_digest,
+                    }],
+                )
+                .expect("persist dependency prefix")
+        };
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(
+            runtime
+                .restore_aur_graph_built_capability("root-bin", "x86_64", [5_u8; 32], [6_u8; 32],)
+                .expect("restore prefix")
+                .expect("prefix capability"),
+            prefix,
+        );
+
+        let completed = {
+            let mut dependency_source =
+                File::open(&prefix[0].path).expect("open retained dependency");
+            let mut root_source = File::open(&root_path).expect("open root output");
+            runtime
+                .persist_aur_graph_built_capability(
+                    "root-bin",
+                    "x86_64",
+                    [5_u8; 32],
+                    [6_u8; 32],
+                    &mut [
+                        VerifiedAurGraphCapabilityArchive {
+                            source: &mut dependency_source,
+                            package_base: "dependency-base",
+                            base_package_name: "dependency-bin",
+                            version: "1.0-1",
+                            review_sha256: [3_u8; 32],
+                            filename: "dependency-bin-1.0-1-x86_64.pkg.tar.zst",
+                            package: "dependency-bin",
+                            archive_bytes: dependency_archive.len() as u64,
+                            installed_bytes: 4096,
+                            build_package_count: 339,
+                            sha256: dependency_digest,
+                        },
+                        VerifiedAurGraphCapabilityArchive {
+                            source: &mut root_source,
+                            package_base: "root-base",
+                            base_package_name: "root-bin",
+                            version: "2.0-1",
+                            review_sha256: [4_u8; 32],
+                            filename: "root-bin-2.0-1-x86_64.pkg.tar.zst",
+                            package: "root-bin",
+                            archive_bytes: root_archive.len() as u64,
+                            installed_bytes: 8192,
+                            build_package_count: 340,
+                            sha256: root_digest,
+                        },
+                    ],
+                )
+                .expect("advance graph capability")
+        };
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0], prefix[0]);
+        assert_eq!(
+            runtime
+                .restore_aur_graph_built_capability("root-bin", "x86_64", [5_u8; 32], [6_u8; 32],)
+                .expect("restore completed graph")
+                .expect("completed capability"),
+            completed,
+        );
+    }
+
+    #[test]
     fn aur_lifecycle_capability_is_private_exact_and_reconciled() {
         let tree = TestTree::new();
         tree.local_package(
