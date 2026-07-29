@@ -693,6 +693,13 @@ class ArchpheneRuntimeService : Service() {
                 MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS &&
                 NativeRuntime.nativeArmPackageCompatibilityReviewTestHold(holdMillis)
 
+        fun armDebugPackagePreTransactionHold(holdMillis: Long): Boolean =
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+                holdMillis in
+                MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS &&
+                readyHandle != 0L &&
+                NativeRuntime.nativeArmPackagePreTransactionTestHold(readyHandle, holdMillis)
+
         fun armDebugPackageWorkerHold(holdMillis: Long): Boolean {
             if (
                 applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||

@@ -911,9 +911,13 @@ older-to-newer upgrades, including changed dependency sets and reviewed
 package replacement, now pass on both exact ABIs.
 Reviewed AUR lifecycle scripts are enabled under the exact capability described
 above; official-package scriptlets remain disabled, and generic hook policy is
-still open. Replacement interruption injection, exact rollback,
-whole-operation AUR recovery, dependency-orphan cleanup, and retry-to-completion
-under real storage pressure remain open.
+still open. Accepted replacements now also pass deterministic manager death
+after their exact snapshot and durable mutation intent are published but before
+pacman begins. Restart exposes Repair at the retained commit boundary; repair
+restores the old record, revalidates the authorized plan, completes signed
+official `curl`, and clears all transaction residue on both exact ABIs. Exact
+rollback, whole-operation AUR recovery, dependency-orphan cleanup, and
+retry-to-completion under real storage pressure remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -971,10 +975,10 @@ and prove the durable Complete result survives manager process death. Full-
 device screenshots also verify the responsive closure view and state-driven
 actions. Physical AArch64 and emulated x86_64 older-to-newer,
 changed-dependency, and reviewed replacement transactions now pass.
-Hooks/scriptlets, replacement interruption injection, closure-wide rollback,
-orphan cleanup, and a
-real-storage-pressure retry-to-completion gate remain open, so this is not yet
-a complete production transaction engine.
+Accepted replacement interruption and forward Repair also pass from a durable
+pre-pacman boundary on both devices. Hooks/scriptlets, closure-wide rollback,
+orphan cleanup, and a real-storage-pressure retry-to-completion gate remain
+open, so this is not yet a complete production transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16

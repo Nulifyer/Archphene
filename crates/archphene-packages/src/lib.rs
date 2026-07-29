@@ -15,7 +15,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -431,6 +431,7 @@ pub struct PackageRuntime {
     compatibility_analysis: Arc<Mutex<()>>,
     compatibility_review: Arc<Mutex<Option<PackageCompatibilityReview>>>,
     replacement_review: Arc<Mutex<Option<PackageReplacementReview>>>,
+    debug_pre_transaction_hold_millis: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -915,6 +916,24 @@ fn push_desktop_record(
 }
 
 impl PackageRuntime {
+    pub fn arm_debug_pre_transaction_hold(&self, hold_millis: u64) -> bool {
+        if !(750..=30_000).contains(&hold_millis) {
+            return false;
+        }
+        self.debug_pre_transaction_hold_millis
+            .compare_exchange(0, hold_millis, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn hold_debug_before_transaction(&self) {
+        let hold_millis = self
+            .debug_pre_transaction_hold_millis
+            .swap(0, Ordering::AcqRel);
+        if hold_millis != 0 {
+            thread::sleep(Duration::from_millis(hold_millis));
+        }
+    }
+
     pub fn prepare(
         arch_root: &Path,
         native_root: &Path,
@@ -1102,6 +1121,7 @@ impl PackageRuntime {
             compatibility_analysis: Arc::new(Mutex::new(())),
             compatibility_review: Arc::new(Mutex::new(None)),
             replacement_review: Arc::new(Mutex::new(None)),
+            debug_pre_transaction_hold_millis: Arc::new(AtomicU64::new(0)),
         };
         runtime.clear_transaction_preview_database()?;
         if runtime.read_pending_mutation()?.is_none() {
@@ -3445,6 +3465,7 @@ impl PackageRuntime {
         if has_explicit {
             self.publish_install_reason_intent(&archives)?;
         }
+        self.hold_debug_before_transaction();
         let mut transaction_arguments = vec![
             "--config",
             config,
@@ -9237,6 +9258,17 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
             )
             .expect("local dependency description");
         }
+    }
+
+    #[test]
+    fn debug_pre_transaction_hold_is_bounded_and_single_use() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+
+        assert!(!runtime.arm_debug_pre_transaction_hold(749));
+        assert!(!runtime.arm_debug_pre_transaction_hold(30_001));
+        assert!(runtime.arm_debug_pre_transaction_hold(750));
+        assert!(!runtime.arm_debug_pre_transaction_hold(750));
     }
 
     impl Drop for TestTree {

@@ -6892,6 +6892,33 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeArmPackagePreTransactionTestHold(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        hold_millis: jlong,
+    ) -> jboolean {
+        let (Ok(handle), Ok(hold_millis)) = (u64::try_from(handle), u64::try_from(hold_millis))
+        else {
+            return JNI_FALSE;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return JNI_FALSE;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return JNI_FALSE;
+        };
+        let Some(package_runtime) = runtime.package_runtime() else {
+            return JNI_FALSE;
+        };
+        if package_runtime.arm_debug_pre_transaction_hold(hold_millis) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCancelPackageCompatibilityReview(
         _environment: JNIEnv,
         _class: JClass,
