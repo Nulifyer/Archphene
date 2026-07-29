@@ -1531,7 +1531,7 @@ class LauncherActivity :
         target: View,
         state: ImeState,
     ) : BaseInputConnection(target, true) {
-        private var composing = false
+        private val composition = ImeCompositionState()
         private val editorBuffer: Editable = checkNotNull(editable)
 
         init {
@@ -1571,15 +1571,18 @@ class LauncherActivity :
                     cursorBytes,
                 )
             if (submitted) {
-                composing = value.isNotEmpty()
+                composition.replaceAcceptedPreedit(value)
             }
             return submitted && super.setComposingText(text, newCursorPosition)
         }
 
         override fun finishComposingText(): Boolean {
-            val submitted = !composing || submitIme(IME_PREEDIT, "", 0, 0)
+            val acceptedPreedit = composition.finishCommit()
+            val submitted =
+                acceptedPreedit == null ||
+                    submitIme(IME_COMMIT, acceptedPreedit, 0, 0)
             if (submitted) {
-                composing = false
+                composition.clear()
             }
             return submitted && super.finishComposingText()
         }
@@ -1599,7 +1602,7 @@ class LauncherActivity :
             }
             val submitted = submitIme(IME_COMMIT, value, 0, 0)
             if (submitted) {
-                composing = false
+                composition.clear()
             }
             return submitted && super.commitText(text, newCursorPosition)
         }

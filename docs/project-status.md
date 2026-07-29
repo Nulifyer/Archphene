@@ -507,6 +507,21 @@ workspace, 48 compositor tests, glibc path/exec/socket/identity probes, runtime
 source contract, exact AArch64 build/install, scoped fatal-log check, and
 full-device portrait/IME/landscape inspection pass.
 
+The generated launcher now also matches Android's composition-finish
+semantics. Wayland preedit is deliberately absent from client surrounding
+text, so clearing preedit when an IME called `finishComposingText()` discarded
+the user's accepted candidate. Each InputConnection now retains only its
+latest successfully delivered bounded preedit, commits that exact value on
+finish, and clears it after an explicit commit or cancellation. On the
+physical Samsung, the stock HeliBoard path delivered a real preedit operation
+to unmodified VS Code; the underlined `m` remained after the keyboard was
+dismissed. On the API 36 x86_64 emulator, stock Google Keyboard selected its
+direct-commit path and entered `heu` into unmodified Code - OSS. Both tests
+used manager-generated wrappers, scoped logs, exact-ABI builds, and
+full-device screenshots. Real user-driven non-Latin composition remains open;
+Japanese/CJK/emoji coverage is still deterministic boundary coverage plus
+unit coverage, not a claim about an installed non-Latin Android IME.
+
 The shared command boundary now applies one package-independent policy to
 dependency programs. Bare command lookup resolves the installed shared-root
 `/usr/bin`; exact absolute execution may resolve a regular executable anywhere
@@ -585,7 +600,7 @@ new symbol import had bypassed the older interposer and attempted to use
 Android's absent conventional `/dev/shm`; host bridge gates and a real shared
 Samsung Code-terminal launch pass.
 
-Non-Latin composing input beyond the deterministic manager boundary, non-text
+Real user-driven non-Latin composing input beyond the deterministic manager boundary, non-text
 clipboard formats, launcher accessibility, and real-client pointer
 lock/confinement variants still need explicit production-client coverage.
 SHM snapshots and client-buffer normalization also remain copied; the new
