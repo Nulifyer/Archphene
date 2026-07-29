@@ -288,6 +288,7 @@ static char trusted_command_environment[PATH_MAX + 32];
 static char trusted_root_environment[PATH_MAX + 27];
 static char trusted_program_path[PATH_MAX];
 static char trusted_root[PATH_MAX];
+static char trusted_root_input[PATH_MAX];
 static char trusted_shm_root[PATH_MAX];
 static bool fake_chroot_active;
 static bool root_identity_active;
@@ -295,6 +296,13 @@ static atomic_uint message_queue_sequence = 1;
 static atomic_uint semaphore_sequence = 1;
 __attribute__((visibility("hidden")))
 void *archphene_real_syscall_function;
+
+static bool path_inside_spelling(const char *path, const char *root) {
+    if (path == NULL || root == NULL || root[0] == '\0') return false;
+    size_t root_length = strlen(root);
+    return strncmp(path, root, root_length) == 0
+            && (path[root_length] == '\0' || path[root_length] == '/');
+}
 
 #define ARCHPHENE_STRINGIFY_INNER(value) #value
 #define ARCHPHENE_STRINGIFY(value) ARCHPHENE_STRINGIFY_INNER(value)
@@ -711,7 +719,8 @@ static void report_blocked_syscall(int signal_number, siginfo_t *information,
     } while (value != 0 && digit_count < sizeof(digits));
     while (digit_count > 0) message[length++] = digits[--digit_count];
     message[length++] = '\n';
-    (void)write(STDERR_FILENO, message, length);
+    ssize_t ignored = write(STDERR_FILENO, message, length);
+    (void)ignored;
     _exit(128 + SIGSYS);
 }
 
@@ -1709,10 +1718,9 @@ static void capture_trusted_program_path(void) {
 
 static bool initialize_trusted_shm_root(void) {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
-    size_t root_length = strlen(trusted_root);
     int length;
-    if (runtime != NULL && strncmp(runtime, trusted_root, root_length) == 0
-            && (runtime[root_length] == '\0' || runtime[root_length] == '/')) {
+    if (path_inside_spelling(runtime, trusted_root)
+            || path_inside_spelling(runtime, trusted_root_input)) {
         length = snprintf(trusted_shm_root, sizeof(trusted_shm_root),
                 "%s/.archphene-shm", runtime);
     } else if (runtime == NULL || strcmp(runtime, "/run") == 0) {
@@ -1750,14 +1758,20 @@ static void capture_trusted_root(void) {
         return;
     }
     size_t length = strlen(resolved);
-    if (length >= sizeof(trusted_root)) return;
+    size_t input_length = strlen(candidate);
+    if (length >= sizeof(trusted_root)
+            || input_length >= sizeof(trusted_root_input)) {
+        return;
+    }
     memcpy(trusted_root, resolved, length + 1);
+    memcpy(trusted_root_input, candidate, input_length + 1);
     int written = snprintf(trusted_root_environment,
             sizeof(trusted_root_environment),
-            "ARCHPHENE_RUNTIME_ROOT=%s", trusted_root);
+            "ARCHPHENE_RUNTIME_ROOT=%s", trusted_root_input);
     if (written <= 0
             || (size_t)written >= sizeof(trusted_root_environment)) {
         trusted_root[0] = '\0';
+        trusted_root_input[0] = '\0';
         trusted_root_environment[0] = '\0';
         return;
     }
@@ -1771,7 +1785,8 @@ static void capture_trusted_root(void) {
             || !install_runtime_compatibility_filter())) {
         static const char failure[] =
                 "Archphene could not initialize Linux compatibility\n";
-        (void)write(STDERR_FILENO, failure, sizeof(failure) - 1);
+        ssize_t ignored = write(STDERR_FILENO, failure, sizeof(failure) - 1);
+        (void)ignored;
         _exit(EXIT_FAILURE);
     }
 }
@@ -1871,10 +1886,7 @@ static bool trusted_runtime_command_path(const char *path, const char *name) {
 }
 
 static bool inside_trusted_root(const char *path) {
-    if (trusted_root[0] == '\0' || path == NULL) return false;
-    size_t root_length = strlen(trusted_root);
-    return strncmp(path, trusted_root, root_length) == 0
-            && (path[root_length] == '\0' || path[root_length] == '/');
+    return path_inside_spelling(path, trusted_root);
 }
 
 static bool inside_kernel_filesystem(const char *path) {
@@ -2338,8 +2350,7 @@ static int prepare_runtime_launch(const char *name, const char *requested,
 #define RUNTIME_PROGRAM_ENVIRONMENT "ARCHPHENE_RUNTIME_PROGRAM_PATH="
 
 static int prepare_runtime_environment(char *const environment[],
-        const char *program, char entry[PATH_MAX + 34],
-        char *output[4096]) {
+        const char *program, char entry[PATH_MAX + 34], char *output[4096]) {
     int written = snprintf(entry, PATH_MAX + 34, "%s%s",
             RUNTIME_PROGRAM_ENVIRONMENT, program);
     if (written <= 0 || written >= PATH_MAX + 34) return ENAMETOOLONG;
@@ -2428,6 +2439,13 @@ struct runtime_linkage_search {
             [RUNTIME_LINKAGE_OBJECT_PATH_BYTES];
 };
 
+static bool runtime_physical_realpath(
+        const char *path, char output[PATH_MAX]) {
+    typedef char *(*function_type)(const char *, char *);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "realpath");
+    return real != NULL && real(path, output) != NULL;
+}
+
 static bool runtime_library_path_contains(
         const char *library_path, const char *directory) {
     size_t directory_length = strlen(directory);
@@ -2507,7 +2525,7 @@ static int runtime_linkage_directory(
         if (length <= 0 || (size_t)length >= sizeof(candidate)) {
             return ENAMETOOLONG;
         }
-        if (realpath(candidate, physical) == NULL) {
+        if (!runtime_physical_realpath(candidate, physical)) {
             return errno == ENOENT ? ENOENT : EACCES;
         }
     }
@@ -2533,7 +2551,7 @@ static int runtime_linkage_candidate(
         return ENAMETOOLONG;
     }
     char resolved[PATH_MAX];
-    if (realpath(candidate, resolved) == NULL) {
+    if (!runtime_physical_realpath(candidate, resolved)) {
         return errno == ENOENT ? ENOENT : EACCES;
     }
     struct stat metadata;
@@ -2767,7 +2785,7 @@ static int prepare_runtime_library_path(const char *program,
     if (queue == NULL) return ENOMEM;
     char resolved[PATH_MAX];
     int result;
-    if (realpath(program, resolved) == NULL) {
+    if (!runtime_physical_realpath(program, resolved)) {
         result = EACCES;
         goto complete;
     }
@@ -2926,7 +2944,33 @@ static int spawn_runtime_executable(pid_t *process, const char *name,
     int environment_error = prepare_runtime_environment(environment,
             launch.program, program_environment, runtime_environment);
     if (environment_error != 0) return environment_error;
-    return real(process, trusted_loader, file_actions, attributes,
+    /*
+     * Node/Electron launchers commonly use a detached posix_spawn bootstrap:
+     * the short-lived CLI exits after creating the real GUI. A supervised
+     * Android surface owns the complete Linux process group, so allowing that
+     * child to request a new group/session makes the manager conclude that the
+     * app closed and tear down a still-starting GUI. Preserve every other
+     * caller attribute while clearing only the two detachment flags.
+     */
+    posix_spawnattr_t supervised_attributes;
+    const posix_spawnattr_t *effective_attributes = attributes;
+    if (supervised_process_group && attributes != NULL) {
+        short flags = 0;
+        int error = posix_spawnattr_getflags(attributes, &flags);
+        if (error != 0) return error;
+        short detached_flags = POSIX_SPAWN_SETPGROUP;
+#ifdef POSIX_SPAWN_SETSID
+        detached_flags |= POSIX_SPAWN_SETSID;
+#endif
+        if ((flags & detached_flags) != 0) {
+            supervised_attributes = *attributes;
+            error = posix_spawnattr_setflags(
+                    &supervised_attributes, flags & ~detached_flags);
+            if (error != 0) return error;
+            effective_attributes = &supervised_attributes;
+        }
+    }
+    return real(process, trusted_loader, file_actions, effective_attributes,
             loader_arguments, runtime_environment);
 }
 
@@ -3209,12 +3253,10 @@ static const char *translate_path(const char *path, char output[PATH_MAX],
         *translated = true;
         return output;
     }
-    if (trusted_root[0] != '\0') {
-        size_t root_length = strlen(trusted_root);
-        if (strncmp(path, trusted_root, root_length) == 0
-                && (path[root_length] == '\0' || path[root_length] == '/')) {
-            return path;
-        }
+    if ((inside_trusted_root(path)
+            || path_inside_spelling(path, trusted_root_input))
+            && !has_parent_component(path)) {
+        return path;
     }
     bool allowed = false;
     if (fake_chroot_active && strcmp(path, "/") == 0) {
@@ -3258,10 +3300,9 @@ static const char *translate_follow_path(const char *path,
      * as a logical absolute path would prefix trusted_root a second time and
      * turn a valid create into ENOENT.
      */
-    size_t root_length = strlen(trusted_root);
-    if (root_length > 0
-            && strncmp(path, trusted_root, root_length) == 0
-            && (path[root_length] == '\0' || path[root_length] == '/')) {
+    if ((inside_trusted_root(path)
+            || path_inside_spelling(path, trusted_root_input))
+            && !has_parent_component(path)) {
         *translated = false;
         return path;
     }
@@ -3807,12 +3848,36 @@ static void *dlopen_impl(const char *path, int flags) {
         errno = ENOSYS;
         return NULL;
     }
-    if (path == NULL) return real(NULL, flags);
+    if (path == NULL) {
+        void *library = real(NULL, flags);
+        if (library != NULL) (void)dlerror();
+        return library;
+    }
+    /*
+     * A name without a slash is a loader lookup key, not a path relative to
+     * the process working directory. Preserve normal glibc search semantics;
+     * only explicit absolute or slash-containing relative paths cross the
+     * logical Linux/physical Android filesystem boundary.
+     */
+    if (strchr(path, '/') == NULL) {
+        void *library = real(path, flags);
+        /*
+         * Optional dlsym probes performed by a successful library
+         * constructor can leave a thread-local loader diagnostic behind.
+         * Clear it so callers do not mistake a successful dlopen for a
+         * failed load. This is observable with current libsystemd and
+         * Chromium's GDK-pixbuf loader.
+         */
+        if (library != NULL) (void)dlerror();
+        return library;
+    }
     bool translated;
     char buffer[PATH_MAX];
     const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return NULL;
-    return real(target, flags);
+    void *library = real(target, flags);
+    if (library != NULL) (void)dlerror();
+    return library;
 }
 
 void *dlopen(const char *path, int flags) {
@@ -3826,12 +3891,18 @@ static void *dlmopen_impl(Lmid_t namespace, const char *path, int flags) {
         errno = ENOSYS;
         return NULL;
     }
-    if (path == NULL) return real(namespace, NULL, flags);
+    if (path == NULL) {
+        void *library = real(namespace, NULL, flags);
+        if (library != NULL) (void)dlerror();
+        return library;
+    }
     bool translated;
     char buffer[PATH_MAX];
     const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return NULL;
-    return real(namespace, target, flags);
+    void *library = real(namespace, target, flags);
+    if (library != NULL) (void)dlerror();
+    return library;
 }
 
 void *dlmopen(Lmid_t namespace, const char *path, int flags) {

@@ -6,8 +6,8 @@ cd "$root"
 
 container_cli="${CONTAINER_CLI:-podman}"
 keyring_commit="09fcb20da1bd9504bed249da1bc0d08f86e8bd56"
-glibc_version="2.43"
-glibc_sha256="d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
+glibc_version="2.44+r5+g7cba77790f32"
+glibc_commit="7cba77790f3279bec3ac20e9c7632b021cd53f95"
 build_key="68B3537F39A313B3E574D06777193F152BDBE6A6"
 mirror="https://ca.us.mirror.archlinuxarm.org"
 jobs="${JOBS:-2}"
@@ -40,7 +40,7 @@ path_bridge_volume="$root/native/archphene-glibc-path-bridge"
   -e SKIP_CHOWN="${SKIP_CHOWN:-0}" \
   -e KEYRING_COMMIT="$keyring_commit" \
   -e GLIBC_VERSION="$glibc_version" \
-  -e GLIBC_SHA256="$glibc_sha256" \
+  -e GLIBC_COMMIT="$glibc_commit" \
   -e BUILD_KEY="$build_key" \
   -e MIRROR="$mirror" \
   -e JOBS="$jobs" \
@@ -173,13 +173,11 @@ cp /tmp/arm/transaction.tsv /out/package-versions.tsv
 source=/tmp/glibc-source
 obj=/tmp/glibc-obj
 install=/tmp/glibc-install
-archive=/tmp/glibc.tar.xz
-mkdir "$source"
-curl --proto =https --tlsv1.2 --fail --location --retry 3 \
-  --silent --show-error --output "$archive" \
-  "https://ftp.gnu.org/gnu/glibc/glibc-$GLIBC_VERSION.tar.xz"
-printf "%s  %s\n" "$GLIBC_SHA256" "$archive" | sha256sum -c -
-tar -xJf "$archive" --strip-components=1 -C "$source"
+git init --quiet "$source"
+git -C "$source" remote add origin https://sourceware.org/git/glibc.git
+git -C "$source" fetch --quiet --depth 1 origin "$GLIBC_COMMIT"
+git -C "$source" checkout --quiet --detach FETCH_HEAD
+[[ "$(git -C "$source" rev-parse HEAD)" == "$GLIBC_COMMIT" ]]
 patch -d "$source" -p1 < /archphene-patches/0001-android-app-seccomp-compat.patch
 mkdir "$obj"
 (
@@ -231,7 +229,7 @@ grep -Eq "setfsuid@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "dlmopen@GLIBC_2\\.34" /tmp/path-bridge-symbols.txt
 grep -Eq "dlopen@GLIBC_2\\.34" /tmp/path-bridge-symbols.txt
 
-printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
+printf "glibc-%s+commit.%s\n" "$GLIBC_VERSION" "$GLIBC_COMMIT" \
   > /out/glibc/source-commit.txt
 printf "%s\n" "$KEYRING_COMMIT" > /out/keyring-source-commit.txt
 printf "%s\n" "$BUILD_KEY" > /out/package-signing-fingerprint.txt

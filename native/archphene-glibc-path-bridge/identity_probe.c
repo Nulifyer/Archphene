@@ -4,13 +4,18 @@
 #include <fcntl.h>
 #include <linux/stat.h>
 #include <pwd.h>
+#include <spawn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/fsuid.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+extern char **environ;
 
 int main(int argc, char **argv) {
     uid_t expected = argc == 2 && strcmp(argv[1], "--root") == 0 ? 0 : 1000;
@@ -110,6 +115,17 @@ int main(int argc, char **argv) {
         return 11;
     }
 #endif
+    if (argc == 3 && strcmp(argv[1], "--spawn-group") == 0) {
+        char *end = NULL;
+        long expected_group = strtol(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0' || expected_group <= 0
+                || getpgrp() != expected_group) {
+            fprintf(stderr, "spawned group expected=%ld actual=%ld\n",
+                    expected_group, (long)getpgrp());
+            return 1;
+        }
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "--supervised") == 0) {
         pid_t group = getpgrp();
         pid_t session = getsid(0);
@@ -117,6 +133,37 @@ int main(int argc, char **argv) {
                 || setpgid(0, 0) != 0 || getpgrp() != group) {
             fputs("supervised process escaped its process group\n", stderr);
             return 8;
+        }
+        posix_spawnattr_t attributes;
+        if (posix_spawnattr_init(&attributes) != 0
+                || posix_spawnattr_setflags(
+                    &attributes, POSIX_SPAWN_SETPGROUP) != 0
+                || posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+            fputs("detached spawn attributes could not be prepared\n", stderr);
+            return 15;
+        }
+        char expected_group[32];
+        if (snprintf(expected_group, sizeof(expected_group), "%ld",
+                    (long)group) <= 0) {
+            posix_spawnattr_destroy(&attributes);
+            return 16;
+        }
+        char *child_arguments[] = {
+            argv[0], "--spawn-group", expected_group, NULL
+        };
+        pid_t child = -1;
+        int spawn_error = posix_spawn(
+                &child, "/usr/bin/identity-probe", NULL, &attributes,
+                child_arguments, environ);
+        posix_spawnattr_destroy(&attributes);
+        int status = 0;
+        if (spawn_error != 0 || child <= 0 || waitpid(child, &status, 0) != child
+                || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr,
+                    "supervised detached spawn escaped its process group "
+                    "error=%d child=%ld status=%d\n",
+                    spawn_error, (long)child, status);
+            return 17;
         }
     }
     return 0;

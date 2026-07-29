@@ -1759,10 +1759,22 @@ impl RuntimeHost {
     }
 
     fn aur_review_by_package(&self, package_name: &str, version: &str) -> Option<&AurReview> {
-        self.aur_review
+        let mut matches = self
+            .aur_review
             .iter()
             .chain(self.aur_dependency_reviews.iter())
-            .find(|review| review.package_name == package_name && review.version == version)
+            .filter(|review| {
+                review.version == version
+                    && review
+                        .required_packages
+                        .iter()
+                        .any(|required| required == package_name)
+            });
+        let review = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(review)
     }
 
     pub fn resolve_aur_build_environment(
@@ -2252,7 +2264,11 @@ fn aur_build_environment_targets(
     if reviews.is_empty() || reviews.len() > 32 {
         return Err(PackageRuntimeError::InvalidPayload);
     }
-    let mut targets = BTreeSet::from(["base-devel".to_owned()]);
+    // Arch's base-devel meta-package deliberately assumes that a base system
+    // already exists. Resolve both so the same verified closure can provision
+    // the isolated builder and later install every runtime dependency into a
+    // new shared Archphene root without a second, implicit download set.
+    let mut targets = BTreeSet::from(["base".to_owned(), "base-devel".to_owned()]);
     for review in reviews {
         let required_packages: BTreeSet<&str> = review
             .required_packages
@@ -2396,7 +2412,43 @@ mod tests {
                 .expect("aggregate build targets")
                 .into_iter()
                 .collect::<Vec<_>>(),
-            ["aur-helper", "base-devel", "cmake", "glibc"]
+            ["aur-helper", "base", "base-devel", "cmake", "glibc"]
+        );
+    }
+
+    #[test]
+    fn aur_split_outputs_reuse_only_their_unique_review_capability() {
+        let mut host = RuntimeHost::new(1);
+        host.aur_review = Some(test_aur_review(
+            "toolchain-bin",
+            "toolchain-sdk-bin",
+            &[
+                "toolchain-host-bin",
+                "toolchain-runtime-bin",
+                "toolchain-sdk-bin",
+            ],
+            &[],
+        ));
+
+        assert_eq!(
+            host.aur_review_by_package("toolchain-host-bin", "1.0-1")
+                .map(|review| review.package_base.as_str()),
+            Some("toolchain-bin"),
+        );
+        assert!(
+            host.aur_review_by_package("unreviewed-output", "1.0-1")
+                .is_none()
+        );
+
+        host.aur_dependency_reviews.push(test_aur_review(
+            "ambiguous-bin",
+            "ambiguous-bin",
+            &["toolchain-host-bin"],
+            &[],
+        ));
+        assert!(
+            host.aur_review_by_package("toolchain-host-bin", "1.0-1")
+                .is_none()
         );
     }
 

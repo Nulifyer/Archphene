@@ -10078,7 +10078,13 @@ class ArchpheneRuntimeService : Service() {
         }
         require(!reader.hasRemaining())
         val packages = decodeResolvedPayloads(bytes, 512)
-        require(packages.any { payload -> payload.name == "base-devel" })
+        check(
+            packages.any { payload -> payload.name == "base" } &&
+                packages.any { payload -> payload.name == "base-devel" },
+        ) {
+            "The official catalog does not provide base and base-devel; " +
+                "refresh catalogs and retry"
+        }
         val totalBytes =
             packages.fold(0L) { total, payload ->
                 Math.addExact(total, payload.size)

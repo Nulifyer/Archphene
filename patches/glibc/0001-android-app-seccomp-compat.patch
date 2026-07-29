@@ -497,12 +497,11 @@ diff --git a/sysdeps/unix/sysv/linux/openat2.c b/sysdeps/unix/sysv/linux/openat2
 index ac7b7058..2c9b1718 100644
 --- a/sysdeps/unix/sysv/linux/openat2.c
 +++ b/sysdeps/unix/sysv/linux/openat2.c
-@@ -18,6 +18,7 @@
+@@ -18,5 +18,6 @@
     <https://www.gnu.org/licenses/>.  */
  
  #include <fcntl.h>
 +#include <errno.h>
- #include <bits/openat2.h>
  #include <sysdep-cancel.h>
  
 @@ -25,5 +26,10 @@ __openat2 (int dfd, const char *filename,

@@ -4,8 +4,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-glibc_version="2.43"
-glibc_sha256="d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
+glibc_version="2.44+r5+g7cba77790f32"
+glibc_commit="7cba77790f3279bec3ac20e9c7632b021cd53f95"
 jobs="${JOBS:-2}"
 glibc_out="tooling/build/glibc-archphene-runtime-x86_64"
 stage="tooling/build/ci-package-runtime"
@@ -33,7 +33,7 @@ path_bridge_volume="$root/native/archphene-glibc-path-bridge"
   -e HOST_GID="$(id -g)" \
   -e SKIP_CHOWN="${SKIP_CHOWN:-0}" \
   -e GLIBC_VERSION="$glibc_version" \
-  -e GLIBC_SHA256="$glibc_sha256" \
+  -e GLIBC_COMMIT="$glibc_commit" \
   -e JOBS="$jobs" \
   -v "$container_volume:/out" \
   -v "$patch_volume:/archphene-patches:ro" \
@@ -108,13 +108,11 @@ fi
 source=/tmp/glibc-source
 obj=/tmp/glibc-obj
 install=/tmp/glibc-install
-archive=/tmp/glibc.tar.xz
-mkdir "$source"
-curl --proto =https --tlsv1.2 --fail --location --retry 3 \
-  --silent --show-error --output "$archive" \
-  "https://ftp.gnu.org/gnu/glibc/glibc-$GLIBC_VERSION.tar.xz"
-printf "%s  %s\n" "$GLIBC_SHA256" "$archive" | sha256sum -c -
-tar -xJf "$archive" --strip-components=1 -C "$source"
+git init --quiet "$source"
+git -C "$source" remote add origin https://sourceware.org/git/glibc.git
+git -C "$source" fetch --quiet --depth 1 origin "$GLIBC_COMMIT"
+git -C "$source" checkout --quiet --detach FETCH_HEAD
+[[ "$(git -C "$source" rev-parse HEAD)" == "$GLIBC_COMMIT" ]]
 patch -d "$source" -p1 < /archphene-patches/0001-android-app-seccomp-compat.patch
 mkdir "$obj"
 (
@@ -179,7 +177,7 @@ for name in "${runtime_files[@]}"; do
     }
   done < <(readelf -lW "/out/glibc/$name" | awk "/ LOAD / { print \$NF }")
 done
-printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
+printf "glibc-%s+commit.%s\n" "$GLIBC_VERSION" "$GLIBC_COMMIT" \
   > /out/glibc/source-commit.txt
 
 if [[ "$SKIP_CHOWN" != "1" ]]; then

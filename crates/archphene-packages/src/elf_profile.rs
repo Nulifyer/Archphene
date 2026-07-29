@@ -21,6 +21,11 @@ const MAX_NEEDED_PER_OBJECT: usize = 256;
 const MAX_NEEDED_NAME_BYTES: usize = 255;
 const MAX_PROFILE_OBJECTS: usize = 256;
 const MAX_PROFILE_EDGES: usize = 4096;
+const MAX_SCRIPT_PROFILE_BYTES: u64 = 256 * 1024;
+const SCRIPT_PROFILE_CHUNK_BYTES: usize = 8192;
+const MAX_SCRIPT_PROFILE_LINE_BYTES: usize = 4096;
+const MAX_SCRIPT_DELEGATES: usize = 8;
+const ELECTRON_NODE_MARKER: &[u8] = b"ELECTRON_RUN_AS_NODE=1";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IntegrationProfile {
@@ -32,8 +37,15 @@ pub struct IntegrationProfile {
 #[derive(Clone, Debug)]
 enum ObjectProfile {
     Elf(Vec<String>),
+    Script(ScriptProfile),
     NotElf,
     Invalid,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ScriptProfile {
+    topology: u16,
+    delegates: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +80,7 @@ impl<'a> IntegrationProfiler<'a> {
         let mut complete = true;
         let mut edges = 0_usize;
         let mut root_profiled = false;
+        let mut root_script = false;
 
         while let Some(logical_path) = queue.pop_front() {
             if !visited.insert(logical_path.clone()) {
@@ -84,6 +97,25 @@ impl<'a> IntegrationProfiler<'a> {
                         root_profiled = true;
                     }
                     needed
+                }
+                ObjectProfile::Script(script) => {
+                    if visited.len() == 1 {
+                        root_profiled = true;
+                        root_script = true;
+                    }
+                    topology |= script.topology;
+                    complete = false;
+                    for delegate in script.delegates {
+                        let Some(path) = desktop::resolve_root_regular_file(
+                            self.root,
+                            Path::new(&delegate),
+                            true,
+                        ) else {
+                            continue;
+                        };
+                        queue.push_back(path);
+                    }
+                    continue;
                 }
                 ObjectProfile::NotElf if visited.len() == 1 => {
                     return IntegrationProfile::default();
@@ -110,7 +142,7 @@ impl<'a> IntegrationProfiler<'a> {
         }
         IntegrationProfile {
             topology,
-            profiled: root_profiled,
+            profiled: root_profiled && (!root_script || topology != 0),
             complete: root_profiled && complete,
         }
     }
@@ -122,7 +154,13 @@ impl<'a> IntegrationProfiler<'a> {
         let path = self.root.join(logical_path.trim_start_matches('/'));
         let profile = match parse_dynamic_dependencies(&path) {
             Ok(Some(needed)) => ObjectProfile::Elf(needed),
-            Ok(None) => ObjectProfile::NotElf,
+            Ok(None) => match profile_script(&path) {
+                Ok(script) if script.topology != 0 || !script.delegates.is_empty() => {
+                    ObjectProfile::Script(script)
+                }
+                Ok(_) => ObjectProfile::NotElf,
+                Err(_) => ObjectProfile::Invalid,
+            },
             Err(_) => ObjectProfile::Invalid,
         };
         self.objects
@@ -143,6 +181,131 @@ impl<'a> IntegrationProfiler<'a> {
         .into_iter()
         .find_map(|candidate| desktop::resolve_root_regular_file(self.root, &candidate, false))
     }
+}
+
+fn profile_script(path: &Path) -> io::Result<ScriptProfile> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_SCRIPT_PROFILE_BYTES
+    {
+        return Ok(ScriptProfile::default());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let mut bytes = [0_u8; SCRIPT_PROFILE_CHUNK_BYTES + MAX_SCRIPT_PROFILE_LINE_BYTES];
+    let mut carry = 0_usize;
+    let mut total = 0_u64;
+    let mut shebang = false;
+    let mut profile = ScriptProfile::default();
+    loop {
+        let read = file.read(&mut bytes[carry..carry + SCRIPT_PROFILE_CHUNK_BYTES])?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(read).map_err(|_| io::ErrorKind::InvalidData)?)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        if total > metadata.len() || total > MAX_SCRIPT_PROFILE_BYTES {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let available = carry + read;
+        if total == u64::try_from(read).map_err(|_| io::ErrorKind::InvalidData)? {
+            shebang = bytes[..available].starts_with(b"#!");
+            if !shebang {
+                return Ok(ScriptProfile::default());
+            }
+        }
+        let mut line_start = 0_usize;
+        while let Some(line_end) = bytes[line_start..available]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| line_start + offset)
+        {
+            profile_script_line(&bytes[line_start..line_end], &mut profile);
+            line_start = line_end + 1;
+        }
+        carry = available - line_start;
+        if carry > MAX_SCRIPT_PROFILE_LINE_BYTES {
+            return Ok(ScriptProfile::default());
+        }
+        bytes.copy_within(line_start..available, 0);
+    }
+    if total != metadata.len() || !shebang {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    profile_script_line(&bytes[..carry], &mut profile);
+    Ok(profile)
+}
+
+fn profile_script_line(line: &[u8], profile: &mut ScriptProfile) {
+    if explicit_electron_node_line(line) {
+        profile.topology |= TOPOLOGY_CHROMIUM;
+    }
+    if profile.delegates.len() >= MAX_SCRIPT_DELEGATES {
+        return;
+    }
+    if let Some(delegate) = explicit_absolute_exec_delegate(line) {
+        profile.delegates.push(delegate);
+    }
+}
+
+fn explicit_electron_node_line(line: &[u8]) -> bool {
+    let line = line.strip_suffix(b"\r").unwrap_or(line).trim_ascii_start();
+    if line.starts_with(b"#") {
+        return false;
+    }
+    let Some(mut rest) = line.strip_prefix(ELECTRON_NODE_MARKER) else {
+        return false;
+    };
+    if !rest.first().is_some_and(u8::is_ascii_whitespace) {
+        return false;
+    }
+    rest = rest.trim_ascii_start();
+    if let Some(after_exec) = rest.strip_prefix(b"exec")
+        && after_exec.first().is_some_and(u8::is_ascii_whitespace)
+    {
+        rest = after_exec.trim_ascii_start();
+    }
+    let command = rest
+        .trim_ascii_start()
+        .split(|byte| byte.is_ascii_whitespace())
+        .next()
+        .unwrap_or_default();
+    command
+        .windows(b"electron".len())
+        .any(|window| window.eq_ignore_ascii_case(b"electron"))
+}
+
+fn explicit_absolute_exec_delegate(line: &[u8]) -> Option<String> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line).trim_ascii_start();
+    if line.starts_with(b"#") {
+        return None;
+    }
+    let rest = line.strip_prefix(b"exec")?;
+    if !rest.first().is_some_and(u8::is_ascii_whitespace) {
+        return None;
+    }
+    let command = rest
+        .trim_ascii_start()
+        .split(|byte| byte.is_ascii_whitespace())
+        .next()
+        .unwrap_or_default();
+    if !command.starts_with(b"/")
+        || command.len() > MAX_SCRIPT_PROFILE_LINE_BYTES
+        || command
+            .iter()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !b"/._+-".contains(byte))
+    {
+        return None;
+    }
+    String::from_utf8(command.to_vec()).ok()
 }
 
 fn valid_library_name(name: &str) -> bool {
@@ -447,6 +610,82 @@ mod tests {
         assert!(profile.profiled);
         assert!(profile.complete);
         assert_eq!(profile.topology, TOPOLOGY_QT6 | TOPOLOGY_WAYLAND);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn profiles_only_an_explicit_electron_shell_contract() {
+        let root = test_root();
+        let executable = root.join("usr/bin/electron-app-real");
+        fs::create_dir_all(executable.parent().expect("script parent")).expect("script directory");
+        let mut script = b"#!/bin/sh\n".to_vec();
+        while script.len() < SCRIPT_PROFILE_CHUNK_BYTES - 8 {
+            script.extend_from_slice(b"#\n");
+        }
+        assert_eq!(script.len(), SCRIPT_PROFILE_CHUNK_BYTES - 8);
+        script
+            .extend_from_slice(b"ELECTRON_RUN_AS_NODE=1 exec /usr/lib/electron/electron \"$@\"\n");
+        fs::write(&executable, script).expect("Electron script");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("script permissions");
+        std::os::unix::fs::symlink("electron-app-real", root.join("usr/bin/electron-app"))
+            .expect("contained launcher symlink");
+
+        let profile = IntegrationProfiler::new(&root).profile("/usr/bin/electron-app");
+        assert_eq!(profile.topology, TOPOLOGY_CHROMIUM);
+        assert!(profile.profiled);
+        assert!(!profile.complete);
+
+        for unrelated_script in [
+            b"#!/bin/sh\n# ELECTRON_RUN_AS_NODE=1 exec /usr/lib/electron/electron\nexec app \"$@\"\n"
+                .as_slice(),
+            b"#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec /usr/bin/unrelated \"$@\"\n".as_slice(),
+            b"#!/bin/sh\n# Saying Electron is not an execution contract.\nexec app \"$@\"\n"
+                .as_slice(),
+        ] {
+            fs::write(&executable, unrelated_script).expect("unrelated script");
+            let unrelated = IntegrationProfiler::new(&root).profile("/usr/bin/electron-app");
+            assert_eq!(unrelated, IntegrationProfile::default());
+        }
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn follows_a_bounded_literal_script_delegate_to_an_electron_contract() {
+        let root = test_root();
+        let launcher = root.join("usr/bin/editor");
+        let delegated = root.join("usr/share/editor/bin/editor");
+        fs::create_dir_all(launcher.parent().expect("launcher parent"))
+            .expect("launcher directory");
+        fs::create_dir_all(delegated.parent().expect("delegate parent"))
+            .expect("delegate directory");
+        fs::write(
+            &launcher,
+            b"#!/bin/bash\nexec /usr/share/editor/bin/editor \"$@\"\n",
+        )
+        .expect("launcher script");
+        fs::write(
+            &delegated,
+            b"#!/bin/sh\nELECTRON=\"$APP_ROOT/editor\"\nCLI=\"$APP_ROOT/cli.js\"\nELECTRON_RUN_AS_NODE=1 \"$ELECTRON\" \"$CLI\" \"$@\"\n",
+        )
+        .expect("delegated script");
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
+            .expect("launcher permissions");
+        fs::set_permissions(&delegated, fs::Permissions::from_mode(0o755))
+            .expect("delegate permissions");
+
+        let profile = IntegrationProfiler::new(&root).profile("/usr/bin/editor");
+        assert_eq!(profile.topology, TOPOLOGY_CHROMIUM);
+        assert!(profile.profiled);
+        assert!(!profile.complete);
+
+        fs::write(
+            &delegated,
+            b"#!/bin/sh\nELECTRON_RUN_AS_NODE=1 /usr/bin/unrelated \"$@\"\n",
+        )
+        .expect("non-Electron delegated script");
+        let unrelated = IntegrationProfiler::new(&root).profile("/usr/bin/editor");
+        assert_eq!(unrelated, IntegrationProfile::default());
         fs::remove_dir_all(root).expect("cleanup");
     }
 

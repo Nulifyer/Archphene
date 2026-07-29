@@ -2,12 +2,15 @@
 set -euo pipefail
 
 root="${TMPDIR:-/tmp}/archphene-path-bridge-test"
+physical_alias="${TMPDIR:-/tmp}/archphene-path-bridge-alias-$$"
 output="${1:-$root/libarchphene_path_bridge.so}"
 loader_path="$(readlink -f /bin/echo)"
 host_loader="$(readlink -f "$(gcc -print-file-name=ld-linux-x86-64.so.2)")"
 host_libc="$(readlink -f "$(gcc -print-file-name=libc.so.6)")"
+trap 'test ! -L "$physical_alias" || unlink "$physical_alias"' EXIT
 rm -rf "$root"
 mkdir -p "$root/usr/share/archphene-test"
+mkdir -p "$root/usr/bin"
 mkdir -p "$root/usr/lib/locale/C.utf8"
 mkdir -p "$root/usr/lib/archphene-example"
 mkdir -p "$root/dev" "$root/proc" "$root/sys"
@@ -26,6 +29,9 @@ gcc -O2 -Wall -Wextra -Werror \
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/shm-probe" native/archphene-glibc-path-bridge/shm_probe.c
 gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/shared-memory-file-probe" \
+  native/archphene-glibc-path-bridge/shared_memory_file_probe.c
+gcc -O2 -Wall -Wextra -Werror \
   -o "$root/exec-probe" native/archphene-glibc-path-bridge/exec_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/readlink-probe" native/archphene-glibc-path-bridge/readlink_probe.c
@@ -33,7 +39,8 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/process-identity-probe" \
   native/archphene-glibc-path-bridge/process_identity_probe.c
 gcc -O2 -Wall -Wextra -Werror \
-  -o "$root/identity-probe" native/archphene-glibc-path-bridge/identity_probe.c
+  -o "$root/usr/bin/identity-probe" \
+  native/archphene-glibc-path-bridge/identity_probe.c
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   -o "$root/usr/lib/archphene-example/libdlopen-fixture.so" \
   native/archphene-glibc-path-bridge/dlopen_fixture.c
@@ -55,6 +62,9 @@ gcc -O2 -Wall -Wextra -Werror \
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/dlopen-probe" \
   native/archphene-glibc-path-bridge/dlopen_probe.c -ldl
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/dlopen-name-probe" \
+  native/archphene-glibc-path-bridge/dlopen_name_probe.c -ldl
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/socket-probe" native/archphene-glibc-path-bridge/socket_probe.c
 gcc -O2 -Wall -Wextra -Werror \
@@ -92,14 +102,34 @@ export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
 mkdir -p "$XDG_RUNTIME_DIR"
 mkdir -p "$root/run"
-ARCHPHENE_FAKE_CHROOT=1 "$root/identity-probe"
+ARCHPHENE_FAKE_CHROOT=1 "$root/usr/bin/identity-probe"
 ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_ROOT_IDENTITY=1 \
-  "$root/identity-probe" --root
+  "$root/usr/bin/identity-probe" --root
 ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_SUPERVISED_PROCESS_GROUP=1 \
-  "$root/identity-probe" --supervised
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_RUNTIME_PROGRAM_PATH="$root/usr/bin/identity-probe" \
+  "$root/usr/bin/identity-probe" --supervised
 test "$(ARCHPHENE_FAKE_CHROOT=1 "$root/dlopen-probe")" = dynamic-loading-ok
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 \
+  LD_LIBRARY_PATH="$root/usr/lib/archphene-example" \
+    "$root/dlopen-name-probe" libdlopen-fixture.so
+)" = dlopen-name-ok
 test "$("$root/message-queue-probe")" = ipc-ok
 test "$("$root/landlock-probe")" = optional-sandbox-denied
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 \
+    "$root/shared-memory-file-probe" "$root/tmp"
+)" = shared-memory-file-ok
+ln -s "$root" "$physical_alias"
+test "$(
+  ARCHPHENE_RUNTIME_ROOT="$physical_alias" \
+  XDG_RUNTIME_DIR="$physical_alias/runtime" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+    "$root/shared-memory-file-probe" "$physical_alias/tmp"
+)" = shared-memory-file-ok
+unlink "$physical_alias"
 ln -s /usr/share/archphene-test/value \
   "$root/usr/share/archphene-test/absolute-value"
 test "$(
@@ -577,7 +607,7 @@ test "$(cat "$root/rename-target")" = rename-compatible
 "$root/mkdir-probe" "$root/mkdir-target"
 test -d "$root/mkdir-target"
 "$root/shm-probe"
-ARCHPHENE_FAKE_CHROOT=1 "$root/identity-probe"
+ARCHPHENE_FAKE_CHROOT=1 "$root/usr/bin/identity-probe"
 mkdir -p "$root/run"
 ARCHPHENE_FAKE_CHROOT=1 "$root/socket-probe" |
   grep -qx unix-socket-bridge-passed
