@@ -4,22 +4,25 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.PackageJobTestReceiver"
@@ -37,6 +40,11 @@ job_existed=false
 recovery_existed=false
 backup_ready=false
 cache_inventory_before=
+initial_running=false
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  initial_running=true
+fi
+original_section=
 
 package_cache_inventory() {
   archphene_adb_run shell \
@@ -52,32 +60,48 @@ clean_package_cache_fixture() {
     >/dev/null 2>&1 || true
 }
 
+restore_section() {
+  [[ -n "$original_section" ]] || return 0
+  local ui
+  ui="$(archphene_capture_ui "package-diagnostics-restore-$serial" 2>/dev/null || true)"
+  if archphene_regex_contains \
+    "$ui" "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\""; then
+    archphene_tap_ui_pattern \
+      "$ui" \
+      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+      "$original_section" || true
+  fi
+}
+
 cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
   clean_package_cache_fixture
-  if [[ "$backup_ready" != true ]]; then
-    return
-  fi
-  if [[ "$job_existed" == true ]] &&
-      archphene_adb_run shell run-as "$package" test -f "$job_backup" 2>/dev/null; then
-    archphene_adb_run shell run-as "$package" cp -p "$job_backup" "$job_store" \
+  if [[ "$backup_ready" == true ]]; then
+    if [[ "$job_existed" == true ]] &&
+        archphene_adb_run shell run-as "$package" test -f "$job_backup" 2>/dev/null; then
+      archphene_adb_run shell run-as "$package" cp -p "$job_backup" "$job_store" \
+        >/dev/null 2>&1 || true
+    else
+      archphene_adb_run shell run-as "$package" rm -f "$job_store" \
+        >/dev/null 2>&1 || true
+    fi
+    if [[ "$recovery_existed" == true ]] &&
+        archphene_adb_run shell run-as "$package" test -f "$recovery_backup" 2>/dev/null; then
+      archphene_adb_run shell run-as "$package" cp -p \
+        "$recovery_backup" "$recovery_preferences" >/dev/null 2>&1 || true
+    else
+      archphene_adb_run shell run-as "$package" rm -f "$recovery_preferences" \
+        >/dev/null 2>&1 || true
+    fi
+    archphene_adb_run shell run-as "$package" rm -f \
+      "$job_backup" "$recovery_backup" >/dev/null 2>&1 || true
+    archphene_adb_run shell run-as "$package" rmdir "$backup_root" \
       >/dev/null 2>&1 || true
-  else
-    archphene_adb_run shell run-as "$package" rm -f "$job_store" \
-      >/dev/null 2>&1 || true
   fi
-  if [[ "$recovery_existed" == true ]] &&
-      archphene_adb_run shell run-as "$package" test -f "$recovery_backup" 2>/dev/null; then
-    archphene_adb_run shell run-as "$package" cp -p \
-      "$recovery_backup" "$recovery_preferences" >/dev/null 2>&1 || true
-  else
-    archphene_adb_run shell run-as "$package" rm -f "$recovery_preferences" \
-      >/dev/null 2>&1 || true
+  if [[ "$initial_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+    restore_section || true
   fi
-  archphene_adb_run shell run-as "$package" rm -f \
-    "$job_backup" "$recovery_backup" >/dev/null 2>&1 || true
-  archphene_adb_run shell run-as "$package" rmdir "$backup_root" \
-    >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -92,7 +116,12 @@ cases=(
   "refresh-failed|remove|Removal did not finish and installed state could not be refreshed. Restart Archphene, then Review.|97"
 )
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 clean_package_cache_fixture
 archphene_adb_run shell run-as "$package" mkdir -p "$backup_root"
@@ -142,8 +171,23 @@ for fixture in "${cases[@]}"; do
     if archphene_regex_contains "$ARCHPHENE_UI" 'text="Connect Android files\?"'; then
       archphene_skip_storage_onboarding "package-diagnostics-onboarding-$serial"
     fi
+    original_section="$(
+      python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$ARCHPHENE_UI"
+    )"
     first=false
   fi
+  archphene_open_manager_section \
+    Packages "package-diagnostics-packages-$failure-$serial"
   archphene_wait_ui 'class="android.widget.EditText"' \
     "package-diagnostics-field-$failure-$serial" 15
   archphene_tap_ui_pattern "$ARCHPHENE_UI" \
