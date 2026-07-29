@@ -454,6 +454,16 @@ changing Foot or Bash. The shared root publishes `archphene` at
 and Android's system fonts, so Foot remains runnable after `ttf-dejavu` is
 removed through the normal manager UI.
 
+The Android font path is now an explicit read-only bridge instead of a
+configuration-only claim. Absolute `/system/fonts` reads and fontconfig's
+contained directory-FD-relative enumeration pass through to Android's
+root-owned system partition; other `/system` paths remain outside the managed
+Linux namespace, and Android continues to deny app-UID writes. Both exact ABIs
+enumerate a nonempty font cache and resolve `Droid Sans Mono`. The emulator,
+which has no installed Arch font package, now passes the full Foot
+Home/resume/crash/relaunch gate with inspected full-device output; Samsung
+passes the same lifecycle gate.
+
 Private ELF search paths are now scoped to the process that needs them. Rust
 initial launch and the exact-ABI C exec/spawn bridge traverse only the reachable
 `DT_NEEDED` closure, bounded to 256 objects and 256 dependencies per object.

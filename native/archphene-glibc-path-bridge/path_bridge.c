@@ -1891,6 +1891,14 @@ static bool inside_kernel_filesystem(const char *path) {
     return false;
 }
 
+static bool inside_android_font_filesystem(const char *path) {
+    if (path == NULL) return false;
+    static const char prefix[] = "/system/fonts";
+    size_t length = sizeof(prefix) - 1;
+    return strncmp(path, prefix, length) == 0
+            && (path[length] == '\0' || path[length] == '/');
+}
+
 int capset(struct __user_cap_header_struct *header,
         const struct __user_cap_data_struct *data) {
     if (fake_chroot_active && root_identity_active) return 0;
@@ -1979,7 +1987,17 @@ static const char *translate_at_path(int directory, const char *path,
          * absolute paths are preserved by translate_path(). Chromium, for
          * example, opens /proc once and checks self/task with fstatat().
          */
-        if (inside_kernel_filesystem(base) && !has_parent_component(path)) {
+        /*
+         * Android's system font directory is a host resource intentionally
+         * published by the managed fontconfig file. Fontconfig enumerates it
+         * through a directory descriptor and then uses relative openat/stat
+         * calls. Preserve only contained relative operations below that exact
+         * root. Android keeps the root-owned system partition immutable to the
+         * app UID, just as it does for absolute /system/fonts operations.
+         */
+        if ((inside_kernel_filesystem(base)
+                    || inside_android_font_filesystem(base))
+                && !has_parent_component(path)) {
             return path;
         }
         errno = EACCES;
@@ -3254,7 +3272,8 @@ static const char *translate_follow_path(const char *path,
     if (inside_shared_memory_path(path)) {
         return translate_path(path, output, translated);
     }
-    if (inside_kernel_filesystem(path)) {
+    if (inside_kernel_filesystem(path)
+            || inside_android_font_filesystem(path)) {
         *translated = false;
         return path;
     }
