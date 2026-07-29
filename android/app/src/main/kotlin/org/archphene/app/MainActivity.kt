@@ -3577,6 +3577,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             packageName.isNotEmpty() &&
                                 (
                                     !terminal ||
+                                        binder.packageMutationRepairAvailable ||
                                         (
                                             binder.packageTerminalActivityVisible &&
                                                 selectedPackage == packageName

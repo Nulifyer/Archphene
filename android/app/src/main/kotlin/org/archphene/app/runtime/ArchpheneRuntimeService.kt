@@ -12755,20 +12755,16 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun refreshPendingPackageMutation(activeHandle: Long) {
-        val packageName = jobPackage
-        if (packageName.isEmpty()) {
-            packageMutationStatus = ""
-            return
-        }
+        val requestedPackage = jobPackage.ifEmpty { "base" }
         val scratch = PackageIoScratch()
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        val packageBytes = requestedPackage.toByteArray(StandardCharsets.UTF_8)
         scratch.requestBuffer.clear()
         scratch.requestBuffer.put(packageBytes)
         scratch.outputBuffer.clear()
         val length =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
-                NativeRuntime.PACKAGE_COMMAND_PENDING_MUTATION,
+                NativeRuntime.PACKAGE_COMMAND_PENDING_MUTATION_ANY,
                 scratch.requestBuffer,
                 packageBytes.size,
                 scratch.outputBuffer,
@@ -12785,7 +12781,40 @@ class ArchpheneRuntimeService : Service() {
         val bytes = ByteArray(length)
         scratch.outputBuffer.position(0)
         scratch.outputBuffer.get(bytes)
-        packageMutationStatus = String(bytes, StandardCharsets.UTF_8)
+        if (bytes.isEmpty()) {
+            packageMutationStatus = ""
+            return
+        }
+        val pending =
+            try {
+                PendingPackageMutationCodec.decode(bytes)
+            } catch (error: IllegalArgumentException) {
+                packageMutationStatus = ""
+                Log.e(TAG, "Pending package mutation response is malformed", error)
+                return
+            }
+        val mutationOperation =
+            if (pending.install) {
+                NativeRuntime.JOB_OPERATION_INSTALL
+            } else {
+                NativeRuntime.JOB_OPERATION_REMOVE
+            }
+        if (jobPackage != pending.packageName) {
+            Log.w(
+                TAG,
+                "Recovered package mutation identity ${pending.packageName} " +
+                    "instead of durable job ${jobPackage.ifEmpty { "(none)" }}",
+            )
+            jobPackage = pending.packageName
+            jobRepository = "recovery"
+            jobOperation = mutationOperation
+            jobState = NativeRuntime.JOB_FAILED
+        } else if (jobOperation != mutationOperation) {
+            packageMutationStatus = ""
+            Log.e(TAG, "Pending package mutation operation disagrees with the durable job")
+            return
+        }
+        packageMutationStatus = pending.status
         if (packageMutationStatus.isNotEmpty()) {
             packageRecoveryMessageRevision = jobRevision
             packageRecoveryMessage =

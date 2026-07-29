@@ -31,6 +31,53 @@ internal data class PlannedPackageRemoval(
     val version: String,
 )
 
+internal data class PendingPackageMutation(
+    val packageName: String,
+    val status: String,
+    val install: Boolean,
+)
+
+internal object PendingPackageMutationCodec {
+    private val packageName = Regex("[A-Za-z0-9@+._-]{1,128}")
+
+    fun decode(bytes: ByteArray): PendingPackageMutation {
+        require(bytes.isNotEmpty() && bytes.size <= 16 * 1024)
+        val text =
+            StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString()
+        val fields = text.split('\t')
+        require(
+            fields.size in 3..4 &&
+                packageName.matches(fields[0]) &&
+                fields[2].length in 1..128 &&
+                fields[2].none { character ->
+                    character.isWhitespace() || character.isISOControl()
+                },
+        )
+        val install =
+            when (fields[1]) {
+                "install" -> {
+                    require(fields.size == 3 || fields[3] == "rollback")
+                    true
+                }
+                "remove" -> {
+                    require(fields.size == 3)
+                    false
+                }
+                else -> throw IllegalArgumentException("Invalid pending package mutation operation")
+            }
+        return PendingPackageMutation(
+            packageName = fields[0],
+            status = fields.drop(1).joinToString("\t"),
+            install = install,
+        )
+    }
+}
+
 internal object StorageSizeFormatter {
     fun format(bytes: Long): String {
         require(bytes >= 0L)

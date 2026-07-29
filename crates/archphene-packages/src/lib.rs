@@ -342,7 +342,7 @@ impl fmt::Display for PackageRuntimeError {
             Self::SizeMismatch => formatter.write_str("package-runtime file size mismatch"),
             Self::OutputLimit => formatter.write_str("package command output exceeds its limit"),
             Self::Timeout => formatter.write_str("package command timed out"),
-            Self::Busy => formatter.write_str("another package catalog transfer is active"),
+            Self::Busy => formatter.write_str("another package operation is active"),
             Self::InvalidCatalog => formatter.write_str("invalid package repository catalog"),
             Self::Desktop(error) => error.fmt(formatter),
             Self::InvalidQuery => formatter.write_str("invalid package search query"),
@@ -2796,11 +2796,15 @@ impl PackageRuntime {
                     Box::new(error),
                 )
             })?;
-        let recovery_target = packages.first().copied().unwrap_or(BASE_PACKAGE);
+        // The durable journal must identify a package contained in this
+        // dependency transaction. The AUR package that requested the
+        // dependencies is installed by a later, separate transaction and
+        // therefore cannot be used to validate or repair this one.
+        let recovery_target = dependency_recovery_target(&resolution)?.to_owned();
         self.install_resolution(
             &resolution,
             &[BASE_PACKAGE],
-            recovery_target,
+            &recovery_target,
             InstallResolutionMode::Normal,
             &[],
             None,
@@ -4407,6 +4411,41 @@ impl PackageRuntime {
                 output.push(version.as_bytes())?;
             }
             _ => return Err(PackageRuntimeError::Busy),
+        }
+        Ok(output)
+    }
+
+    pub fn pending_mutation_any(&self) -> Result<ToolOutput, PackageRuntimeError> {
+        let mut output = empty_tool_output();
+        let Some(intent) = self.read_pending_mutation()? else {
+            return Ok(output);
+        };
+        match intent {
+            PackageMutationIntent::Install {
+                request,
+                resolution,
+                rollback,
+                ..
+            } => {
+                let version = resolved_version(&resolution, &request)?;
+                output.push(request.as_bytes())?;
+                output.push(b"\tinstall\t")?;
+                output.push(version.as_bytes())?;
+                if rollback.is_some() {
+                    output.push(b"\trollback")?;
+                }
+            }
+            PackageMutationIntent::Remove { package, removals } => {
+                let version = removals
+                    .iter()
+                    .find(|removal| removal.name == package)
+                    .ok_or(PackageRuntimeError::InvalidResolution)?
+                    .version
+                    .as_str();
+                output.push(package.as_bytes())?;
+                output.push(b"\tremove\t")?;
+                output.push(version.as_bytes())?;
+            }
         }
         Ok(output)
     }
@@ -10227,6 +10266,17 @@ fn resolved_version<'a>(
         .ok_or(PackageRuntimeError::MissingTarget)
 }
 
+fn dependency_recovery_target(resolution: &PackageResolution) -> Result<&str, PackageRuntimeError> {
+    Ok(parse_resolved_payload(
+        resolution
+            .as_str()?
+            .lines()
+            .next()
+            .ok_or(PackageRuntimeError::MissingTarget)?,
+    )?
+    .name)
+}
+
 fn parse_install_reason_intent(input: &str) -> Result<Vec<&str>, PackageRuntimeError> {
     if input.len() as u64 > INSTALL_REASON_INTENT_LIMIT {
         return Err(PackageRuntimeError::InvalidResolution);
@@ -12208,17 +12258,17 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/provider-impl-1.0-1-x86_64.pkg.t
     fn aur_dependency_resolution_accepts_pacman_validated_soname_providers() {
         let provider = "core\tpacman\t7.1.0-2\tpacman-7.1.0-2-x86_64.pkg.tar.zst\t\
 https://geo.mirror.pkgbuild.com/core/os/x86_64/pacman-7.1.0-2-x86_64.pkg.tar.zst\t1024\n";
-        assert_eq!(
-            parse_resolution_output_mode(
-                provider,
-                &["libalpm.so"],
-                RepositoryArchitecture::X86_64,
-                false,
-            )
-            .expect("pacman-validated soname provider")
-            .as_str()
-            .expect("UTF-8"),
+        let resolution = parse_resolution_output_mode(
             provider,
+            &["libalpm.so"],
+            RepositoryArchitecture::X86_64,
+            false,
+        )
+        .expect("pacman-validated soname provider");
+        assert_eq!(resolution.as_str().expect("UTF-8"), provider);
+        assert_eq!(
+            dependency_recovery_target(&resolution).expect("concrete journal target"),
+            "pacman",
         );
         assert!(matches!(
             parse_resolution_output(provider, &["libalpm.so"], RepositoryArchitecture::X86_64,),
@@ -13092,6 +13142,45 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
                 Err(PackageRuntimeError::InvalidResolution)
             ));
         }
+    }
+
+    #[test]
+    fn pending_mutation_discovery_recovers_the_journal_identity_independently() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let resolution = parse_resolution_output(
+            "core\tbase\t3-2\tbase-3-2-any.pkg.tar.zst\t\
+https://geo.mirror.pkgbuild.com/core/os/x86_64/base-3-2-any.pkg.tar.zst\t1024\n\
+extra\tlibgcc\t16.1.1-1\tlibgcc-16.1.1-1-x86_64.pkg.tar.zst\t\
+https://geo.mirror.pkgbuild.com/extra/os/x86_64/libgcc-16.1.1-1-x86_64.pkg.tar.zst\t2048\n",
+            &["base", "libgcc"],
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("dependency resolution");
+        runtime
+            .publish_mutation_intent(&PackageMutationIntent::Install {
+                request: "libgcc".to_owned(),
+                explicit_targets: vec!["base".to_owned()],
+                resolution,
+                replacements: Vec::new(),
+                rollback: Some(InstallRollbackPlan {
+                    archives: Vec::new(),
+                    previously_absent: vec!["libgcc".to_owned()],
+                }),
+            })
+            .expect("publish interrupted dependency transaction");
+
+        assert_eq!(
+            runtime
+                .pending_mutation_any()
+                .expect("discover pending transaction")
+                .as_bytes(),
+            b"libgcc\tinstall\t16.1.1-1\trollback",
+        );
+        assert!(matches!(
+            runtime.pending_mutation("dotnet-sdk-bin"),
+            Err(PackageRuntimeError::Busy)
+        ));
     }
 
     #[test]
