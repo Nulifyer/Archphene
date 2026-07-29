@@ -2392,26 +2392,210 @@ static bool runtime_vaddr_offset(const Elf64_Phdr *headers, size_t count,
     return false;
 }
 
-/*
- * The Android loader resolves an ELF DT_RUNPATH before the preload bridge can
- * translate it. Append safe absolute runpath entries below the private Arch
- * root to the explicit loader path. This keeps package-provided layouts such
- * as /usr/lib/vala-0.56 working without exposing Android's host filesystem.
- */
-static int prepare_runtime_library_path(const char *program,
-        char output[PATH_MAX]) {
-    size_t output_length = strlen(trusted_library_path);
-    if (output_length == 0 || output_length >= PATH_MAX) return EACCES;
-    memcpy(output, trusted_library_path, output_length + 1);
+#define RUNTIME_LINKAGE_OBJECT_LIMIT 256
+#define RUNTIME_LINKAGE_OBJECT_PATH_BYTES 1024
+#define RUNTIME_LINKAGE_NEEDED_LIMIT 256
+#define RUNTIME_LINKAGE_SEARCH_PATH_LIMIT 64
 
+struct runtime_linkage_queue {
+    size_t count;
+    size_t next;
+    char objects[RUNTIME_LINKAGE_OBJECT_LIMIT]
+            [RUNTIME_LINKAGE_OBJECT_PATH_BYTES];
+};
+
+struct runtime_linkage_search {
+    size_t count;
+    char paths[RUNTIME_LINKAGE_SEARCH_PATH_LIMIT]
+            [RUNTIME_LINKAGE_OBJECT_PATH_BYTES];
+};
+
+static bool runtime_library_path_contains(
+        const char *library_path, const char *directory) {
+    size_t directory_length = strlen(directory);
+    const char *entry = library_path;
+    while (entry != NULL) {
+        const char *separator = strchr(entry, ':');
+        size_t length = separator == NULL
+                ? strlen(entry) : (size_t)(separator - entry);
+        if (length == directory_length
+                && memcmp(entry, directory, length) == 0) {
+            return true;
+        }
+        entry = separator == NULL ? NULL : separator + 1;
+    }
+    return false;
+}
+
+static int runtime_linkage_queue_add(
+        struct runtime_linkage_queue *queue, const char *path) {
+    size_t length = strlen(path);
+    if (!inside_trusted_root(path)
+            || length == 0 || length >= RUNTIME_LINKAGE_OBJECT_PATH_BYTES) {
+        return EACCES;
+    }
+    for (size_t index = 0; index < queue->count; index++) {
+        if (strcmp(queue->objects[index], path) == 0) return 0;
+    }
+    if (queue->count >= RUNTIME_LINKAGE_OBJECT_LIMIT) return E2BIG;
+    memcpy(queue->objects[queue->count++], path, length + 1);
+    return 0;
+}
+
+static int runtime_linkage_search_add(
+        struct runtime_linkage_search *search, const char *path) {
+    size_t length = strlen(path);
+    if (!inside_trusted_root(path)
+            || length == 0 || length >= RUNTIME_LINKAGE_OBJECT_PATH_BYTES) {
+        return EACCES;
+    }
+    for (size_t index = 0; index < search->count; index++) {
+        if (strcmp(search->paths[index], path) == 0) return 0;
+    }
+    if (search->count >= RUNTIME_LINKAGE_SEARCH_PATH_LIMIT) return E2BIG;
+    memcpy(search->paths[search->count++], path, length + 1);
+    return 0;
+}
+
+static int runtime_linkage_directory(
+        const char *object, const char *entry, char physical[PATH_MAX]) {
+    if (entry[0] == '/') {
+        if (has_parent_component(entry)
+                || !resolve_root_path(entry, physical)) {
+            return EACCES;
+        }
+    } else {
+        const char *suffix = NULL;
+        if (strcmp(entry, "$ORIGIN") == 0
+                || strcmp(entry, "${ORIGIN}") == 0) {
+            suffix = "";
+        } else if (strncmp(entry, "$ORIGIN/", 8) == 0) {
+            suffix = entry + 8;
+        } else if (strncmp(entry, "${ORIGIN}/", 10) == 0) {
+            suffix = entry + 10;
+        } else {
+            return ENOENT;
+        }
+        char parent[PATH_MAX];
+        size_t object_length = strlen(object);
+        if (object_length >= sizeof(parent)) return ENAMETOOLONG;
+        memcpy(parent, object, object_length + 1);
+        char *separator = strrchr(parent, '/');
+        if (separator == NULL) return EACCES;
+        *separator = '\0';
+        char candidate[PATH_MAX];
+        int length = snprintf(candidate, sizeof(candidate), "%s/%s",
+                parent, suffix);
+        if (length <= 0 || (size_t)length >= sizeof(candidate)) {
+            return ENAMETOOLONG;
+        }
+        if (realpath(candidate, physical) == NULL) {
+            return errno == ENOENT ? ENOENT : EACCES;
+        }
+    }
+    struct stat metadata;
+    if (stat(physical, &metadata) != 0) {
+        return errno == ENOENT ? ENOENT : EACCES;
+    }
+    if (!inside_trusted_root(physical)
+            || !S_ISDIR(metadata.st_mode)
+            || (metadata.st_mode & S_IWOTH) != 0) {
+        return EACCES;
+    }
+    return 0;
+}
+
+static int runtime_linkage_candidate(
+        struct runtime_linkage_queue *queue,
+        const char *directory, const char *name) {
+    char candidate[PATH_MAX];
+    int length = snprintf(candidate, sizeof(candidate), "%s/%s",
+            directory, name);
+    if (length <= 0 || (size_t)length >= sizeof(candidate)) {
+        return ENAMETOOLONG;
+    }
+    char resolved[PATH_MAX];
+    if (realpath(candidate, resolved) == NULL) {
+        return errno == ENOENT ? ENOENT : EACCES;
+    }
+    struct stat metadata;
+    if (stat(resolved, &metadata) != 0
+            || !inside_trusted_root(resolved)
+            || !S_ISREG(metadata.st_mode)
+            || (metadata.st_mode & S_IWOTH) != 0) {
+        return EACCES;
+    }
+    return runtime_linkage_queue_add(queue, resolved);
+}
+
+static int runtime_linkage_dependency(
+        struct runtime_linkage_queue *queue,
+        const struct runtime_linkage_search *search,
+        const char *object, const char *name) {
+    size_t name_length = strlen(name);
+    if (name_length == 0 || name_length > 255 || strchr(name, '/') != NULL) {
+        return ENOEXEC;
+    }
+    for (const unsigned char *cursor = (const unsigned char *)name;
+            *cursor != '\0'; cursor++) {
+        if (*cursor < 32 || *cursor == 127) return ENOEXEC;
+    }
+    (void)object;
+    static const char *const defaults[] = {"/usr/lib", "/lib"};
+    for (size_t index = 0;
+            index < sizeof(defaults) / sizeof(defaults[0]); index++) {
+        char directory[PATH_MAX];
+        if (!resolve_root_path(defaults[index], directory)) return EACCES;
+        int result = runtime_linkage_candidate(queue, directory, name);
+        if (result == 0) return 0;
+        if (result != ENOENT) return result;
+    }
+    for (size_t index = 0; index < search->count; index++) {
+        int result = runtime_linkage_candidate(
+                queue, search->paths[index], name);
+        if (result == 0) return 0;
+        if (result != ENOENT) return result;
+    }
+    return 0;
+}
+
+static int runtime_dynamic_string(int descriptor,
+        const struct stat *metadata, Elf64_Off table_offset,
+        Elf64_Xword table_bytes, Elf64_Xword index,
+        char *output, size_t output_bytes) {
+    if (index >= table_bytes || output_bytes < 2
+            || table_offset > (Elf64_Off)metadata->st_size
+            || index > (Elf64_Xword)metadata->st_size - table_offset) {
+        return ENOEXEC;
+    }
+    size_t maximum = (size_t)(table_bytes - index);
+    if (maximum > output_bytes) maximum = output_bytes;
+    if ((Elf64_Xword)maximum > (Elf64_Xword)metadata->st_size
+            - table_offset - index) {
+        maximum = (size_t)((Elf64_Xword)metadata->st_size
+                - table_offset - index);
+    }
+    if (maximum == 0
+            || pread(descriptor, output, maximum,
+                (off_t)(table_offset + index)) != (ssize_t)maximum) {
+        return EIO;
+    }
+    char *terminator = memchr(output, '\0', maximum);
+    if (terminator == NULL) return ENAMETOOLONG;
+    return 0;
+}
+
+static int runtime_collect_linkage_object(const char *object,
+        char output[PATH_MAX], size_t *output_length,
+        struct runtime_linkage_queue *queue) {
     typedef int (*open_type)(const char *, int, ...);
     open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
     if (real_open == NULL) return ENOSYS;
-    int descriptor = real_open(program, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int descriptor = real_open(object, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (descriptor < 0) return errno;
+    int result = 0;
     struct stat metadata;
     Elf64_Ehdr elf;
-    int result = 0;
     if (fstat(descriptor, &metadata) != 0
             || !S_ISREG(metadata.st_mode)
             || pread(descriptor, &elf, sizeof(elf), 0) != (ssize_t)sizeof(elf)
@@ -2452,6 +2636,9 @@ static int prepare_runtime_library_path(const char *program,
     Elf64_Xword string_table_bytes = 0;
     Elf64_Xword runpath_index = 0;
     bool has_runpath = false;
+    bool has_path = false;
+    Elf64_Xword needed[RUNTIME_LINKAGE_NEEDED_LIMIT];
+    size_t needed_count = 0;
     size_t dynamic_count = (size_t)(dynamic->p_filesz / sizeof(Elf64_Dyn));
     for (size_t index = 0; index < dynamic_count; index++) {
         Elf64_Dyn entry;
@@ -2467,65 +2654,74 @@ static int prepare_runtime_library_path(const char *program,
             string_table_address = entry.d_un.d_ptr;
         } else if (entry.d_tag == DT_STRSZ) {
             string_table_bytes = entry.d_un.d_val;
+        } else if (entry.d_tag == DT_NEEDED) {
+            if (needed_count >= RUNTIME_LINKAGE_NEEDED_LIMIT) {
+                result = E2BIG;
+                goto complete;
+            }
+            needed[needed_count++] = entry.d_un.d_val;
         } else if (entry.d_tag == DT_RUNPATH
                 || (entry.d_tag == DT_RPATH && !has_runpath)) {
             runpath_index = entry.d_un.d_val;
             has_runpath = entry.d_tag == DT_RUNPATH;
+            has_path = true;
         }
     }
-    if (string_table_address == 0 || string_table_bytes == 0
-            || runpath_index >= string_table_bytes) {
+    if (needed_count == 0 && !has_path) goto complete;
+    if (string_table_address == 0 || string_table_bytes == 0) {
+        result = ENOEXEC;
         goto complete;
     }
     Elf64_Off string_table_offset;
     if (!runtime_vaddr_offset(headers, elf.e_phnum,
                 string_table_address, &string_table_offset)
-            || string_table_offset > (Elf64_Off)metadata.st_size
-            || runpath_index > (Elf64_Xword)metadata.st_size
-                    - string_table_offset) {
+            || string_table_offset > (Elf64_Off)metadata.st_size) {
         result = ENOEXEC;
         goto complete;
     }
-    char runpath[2048];
-    size_t maximum = (size_t)(string_table_bytes - runpath_index);
-    if (maximum > sizeof(runpath)) maximum = sizeof(runpath);
-    ssize_t read_bytes = pread(descriptor, runpath, maximum,
-            (off_t)(string_table_offset + runpath_index));
-    if (read_bytes <= 0) {
-        result = EIO;
-        goto complete;
-    }
-    char *terminator = memchr(runpath, '\0', (size_t)read_bytes);
-    if (terminator == NULL) {
-        result = ENAMETOOLONG;
-        goto complete;
-    }
-    for (char *entry = runpath; entry != NULL;) {
-        char *separator = strchr(entry, ':');
-        if (separator != NULL) *separator = '\0';
-        if (entry[0] == '/' && !has_parent_component(entry)) {
+    struct runtime_linkage_search search = {0};
+    char runpath[2049] = {0};
+    if (has_path) {
+        result = runtime_dynamic_string(descriptor, &metadata,
+                string_table_offset, string_table_bytes, runpath_index,
+                runpath, sizeof(runpath));
+        if (result != 0) goto complete;
+        for (char *entry = runpath; entry != NULL;) {
+            char *separator = strchr(entry, ':');
+            if (separator != NULL) *separator = '\0';
             char physical[PATH_MAX];
-            if (!resolve_root_path(entry, physical)) {
-                result = ENOENT;
+            int path_result =
+                    runtime_linkage_directory(object, entry, physical);
+            if (path_result == 0) {
+                result = runtime_linkage_search_add(&search, physical);
+                if (result != 0) goto complete;
+                if (entry[0] == '/'
+                        && !runtime_library_path_contains(output, physical)) {
+                    size_t length = strlen(physical);
+                    if (length > PATH_MAX - *output_length - 2) {
+                        result = ENAMETOOLONG;
+                        goto complete;
+                    }
+                    output[(*output_length)++] = ':';
+                    memcpy(output + *output_length, physical, length + 1);
+                    *output_length += length;
+                }
+            } else if (path_result != ENOENT) {
+                result = path_result;
                 goto complete;
             }
-            struct stat directory;
-            if (stat(physical, &directory) != 0
-                    || !S_ISDIR(directory.st_mode)
-                    || (directory.st_mode & S_IWOTH) != 0) {
-                result = EACCES;
-                goto complete;
-            }
-            size_t length = strlen(physical);
-            if (length > PATH_MAX - output_length - 2) {
-                result = ENAMETOOLONG;
-                goto complete;
-            }
-            output[output_length++] = ':';
-            memcpy(output + output_length, physical, length + 1);
-            output_length += length;
+            entry = separator == NULL ? NULL : separator + 1;
         }
-        entry = separator == NULL ? NULL : separator + 1;
+    }
+    for (size_t index = 0; index < needed_count; index++) {
+        char name[256];
+        result = runtime_dynamic_string(descriptor, &metadata,
+                string_table_offset, string_table_bytes, needed[index],
+                name, sizeof(name));
+        if (result != 0) goto complete;
+        result = runtime_linkage_dependency(
+                queue, &search, object, name);
+        if (result != 0) goto complete;
     }
 
 complete:
@@ -2534,6 +2730,47 @@ complete:
         close(descriptor);
         errno = saved_errno;
     }
+    return result;
+}
+
+/*
+ * The Android loader resolves ELF search paths before the preload bridge can
+ * translate them. Walk only the launched program's bounded, root-contained
+ * DT_NEEDED graph and append reachable absolute RUNPATH/RPATH directories to
+ * this process's explicit loader path. Relative $ORIGIN paths remain scoped to
+ * dependency discovery and are never promoted globally.
+ */
+static int prepare_runtime_library_path(const char *program,
+        char output[PATH_MAX]) {
+    size_t output_length = strlen(trusted_library_path);
+    if (output_length == 0 || output_length >= PATH_MAX) return EACCES;
+    memcpy(output, trusted_library_path, output_length + 1);
+    struct runtime_linkage_queue *queue = calloc(1, sizeof(*queue));
+    if (queue == NULL) return ENOMEM;
+    char resolved[PATH_MAX];
+    int result;
+    if (realpath(program, resolved) == NULL) {
+        result = EACCES;
+        goto complete;
+    }
+    if (!inside_trusted_root(resolved)) {
+        /*
+         * Verified runtime-tool aliases resolve into the APK's native library
+         * directory rather than the shared Arch root. They already use the
+         * sealed base path and cannot contribute root-private RUNPATHs.
+         */
+        result = 0;
+        goto complete;
+    }
+    result = runtime_linkage_queue_add(queue, resolved);
+    while (result == 0 && queue->next < queue->count) {
+        result = runtime_collect_linkage_object(
+                queue->objects[queue->next++],
+                output, &output_length, queue);
+    }
+
+complete:
+    free(queue);
     return result;
 }
 

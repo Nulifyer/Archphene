@@ -454,6 +454,17 @@ changing Foot or Bash. The shared root publishes `archphene` at
 and Android's system fonts, so Foot remains runnable after `ttf-dejavu` is
 removed through the normal manager UI.
 
+Private ELF search paths are now scoped to the process that needs them. Rust
+initial launch and the exact-ABI C exec/spawn bridge traverse only the reachable
+`DT_NEEDED` closure, bounded to 256 objects and 256 dependencies per object.
+They export at most 64 canonical root-contained, non-world-writable absolute
+RUNPATH/RPATH directories; `$ORIGIN` entries participate in traversal without
+being added globally. This replaces the global `/usr/lib/pulseaudio` exception
+and prevents unrelated application-private libraries from mixing. A
+deterministic transitive host fixture passes, and interactive Bash launches the
+installed Foot binary through the nested bridge on both the x86_64 emulator and
+AArch64 Samsung with inspected full-device captures.
+
 The launcher now treats Android pixels and Wayland logical coordinates as
 separate spaces. It derives logical size, integer output scale, and fractional
 scale from Android density, maps touch/pointer coordinates back to that logical

@@ -42,6 +42,16 @@ gcc -O2 -Wall -Wextra -Werror \
   native/archphene-glibc-path-bridge/runpath_probe.c \
   -L"$root/usr/lib/archphene-example" -ldlopen-fixture \
   -Wl,-rpath,/usr/lib/archphene-example
+gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+  -o "$root/usr/lib/libarchphene-transitive-front.so" \
+  native/archphene-glibc-path-bridge/transitive_runpath_front.c \
+  -L"$root/usr/lib/archphene-example" -ldlopen-fixture \
+  -Wl,-rpath,/usr/lib/archphene-example
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/usr/lib/archphene-example/transitive-runpath-probe" \
+  native/archphene-glibc-path-bridge/transitive_runpath_probe.c \
+  -L"$root/usr/lib" -larchphene-transitive-front \
+  -Wl,-rpath-link,"$root/usr/lib/archphene-example"
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/dlopen-probe" \
   native/archphene-glibc-path-bridge/dlopen_probe.c -ldl
@@ -275,6 +285,14 @@ runpath_output="$(
   "$root/exec-probe" --direct /usr/lib/archphene-example/runpath-probe
 )"
 test "$runpath_output" = absolute-runpath-ok
+transitive_runpath_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc"):$root/usr/lib" \
+  "$root/exec-probe" --direct \
+    /usr/lib/archphene-example/transitive-runpath-probe
+)"
+test "$transitive_runpath_output" = transitive-absolute-runpath-ok
 nested_spawn_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
   ARCHPHENE_RUNTIME_LOADER="$loader_path" \

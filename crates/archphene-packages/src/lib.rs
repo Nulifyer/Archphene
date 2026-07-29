@@ -1137,12 +1137,6 @@ impl PackageRuntime {
         library_path.push(native_root.as_os_str());
         library_path.push(":");
         library_path.push(arch_root.join("usr/lib").as_os_str());
-        // Arch's libpulse uses an absolute /usr/lib/pulseaudio RUNPATH for
-        // libpulsecommon. The Android host cannot resolve that root-absolute
-        // path, so expose the standard Arch system-library directory through
-        // the verified loader just like /usr/lib itself.
-        library_path.push(":");
-        library_path.push(arch_root.join("usr/lib/pulseaudio").as_os_str());
         let mut executable_path = alias_root.as_os_str().to_os_string();
         executable_path.push(":");
         executable_path.push(arch_root.join("usr/bin").as_os_str());
@@ -10552,12 +10546,10 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
             0o600
         );
         assert!(
-            runtime.library_path.as_encoded_bytes().ends_with(
-                tree.root
-                    .join("usr/lib/pulseaudio")
-                    .as_os_str()
-                    .as_encoded_bytes()
-            )
+            runtime
+                .library_path
+                .as_encoded_bytes()
+                .ends_with(tree.root.join("usr/lib").as_os_str().as_encoded_bytes())
         );
     }
 

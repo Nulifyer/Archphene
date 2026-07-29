@@ -3,6 +3,7 @@
 
 pub mod integration;
 
+use std::collections::{BTreeSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -59,7 +60,12 @@ const GUI_INTEGRATION_WARM_OBSERVATIONS: u8 = 15;
 const TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_GDK_PIXBUF_MODULE_FILE_BYTES: u64 = 16 * 1024;
 const MAX_ELF_PROGRAM_HEADERS: usize = 128;
+const MAX_ELF_DYNAMIC_ENTRIES: u64 = 4096;
 const MAX_ELF_RUNPATH_BYTES: usize = 2048;
+const MAX_ELF_NEEDED_NAME_BYTES: usize = 255;
+const MAX_ELF_NEEDED_PER_OBJECT: usize = 256;
+const MAX_ELF_DEPENDENCY_OBJECTS: usize = 256;
+const MAX_ELF_PRIVATE_LIBRARY_PATHS: usize = 64;
 const GTK_SETTINGS_LOGICAL_PATH: &str = "/home/archphene/.config/gtk-3.0/settings.ini";
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -1824,13 +1830,72 @@ fn prepare_launch(
     })
 }
 
+#[derive(Debug)]
+struct ElfDynamicLinkage {
+    search_paths: Vec<ElfSearchPath>,
+    needed: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ElfSearchPath {
+    physical: PathBuf,
+    export_to_loader: bool,
+}
+
 fn elf_absolute_library_paths(root: &Path, program: &Path) -> Result<Vec<PathBuf>, ProcessError> {
+    let canonical_root = root.canonicalize()?;
+    let canonical_program = program.canonicalize()?;
+    if canonical_program == canonical_root || !canonical_program.starts_with(&canonical_root) {
+        return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
+    }
+    let mut queue = VecDeque::from([canonical_program]);
+    let mut visited = BTreeSet::new();
+    let mut paths = Vec::new();
+    while let Some(object) = queue.pop_front() {
+        if !visited.insert(object.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_ELF_DEPENDENCY_OBJECTS {
+            return Err(ProcessError::UnsupportedProgram);
+        }
+        let linkage = elf_dynamic_linkage(root, &canonical_root, &object)?;
+        for path in &linkage.search_paths {
+            if path.export_to_loader && !paths.contains(&path.physical) {
+                if paths.len() >= MAX_ELF_PRIVATE_LIBRARY_PATHS {
+                    return Err(ProcessError::UnsupportedProgram);
+                }
+                paths.push(path.physical.clone());
+            }
+        }
+        for needed in linkage.needed {
+            if let Some(dependency) = resolve_elf_dependency(
+                root,
+                &canonical_root,
+                &object,
+                &linkage.search_paths,
+                &needed,
+            )? {
+                queue.push_back(dependency);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn elf_dynamic_linkage(
+    root: &Path,
+    canonical_root: &Path,
+    program: &Path,
+) -> Result<ElfDynamicLinkage, ProcessError> {
     let mut file = File::open(program)?;
     let file_bytes = file.metadata()?.len();
     let mut header = [0_u8; 64];
     let header_bytes = file.read(&mut header)?;
     if header_bytes < header.len() {
-        return Ok(Vec::new());
+        return Ok(ElfDynamicLinkage {
+            search_paths: Vec::new(),
+            needed: Vec::new(),
+        });
     }
     if &header[..4] != b"\x7fELF" || header[4] != 2 || header[5] != 1 {
         return Err(ProcessError::UnsupportedProgram);
@@ -1867,18 +1932,22 @@ fn elf_absolute_library_paths(root: &Path, program: &Path) -> Result<Vec<PathBuf
         }
     }
     let Some((dynamic_offset, dynamic_bytes)) = dynamic else {
-        return Ok(Vec::new());
+        return Ok(ElfDynamicLinkage {
+            search_paths: Vec::new(),
+            needed: Vec::new(),
+        });
     };
     if dynamic_offset > file_bytes
         || dynamic_bytes > file_bytes - dynamic_offset
-        || dynamic_bytes / 16 > 4096
+        || dynamic_bytes / 16 > MAX_ELF_DYNAMIC_ENTRIES
     {
         return Err(ProcessError::UnsupportedProgram);
     }
     let mut string_address = None;
     let mut string_bytes = None;
+    let mut rpath_index = None;
     let mut runpath_index = None;
-    let mut has_runpath = false;
+    let mut needed_indices = Vec::new();
     file.seek(SeekFrom::Start(dynamic_offset))?;
     for _ in 0..dynamic_bytes / 16 {
         let mut entry = [0_u8; 16];
@@ -1887,24 +1956,28 @@ fn elf_absolute_library_paths(root: &Path, program: &Path) -> Result<Vec<PathBuf
         let value = little_u64(&entry[8..]);
         match tag {
             0 => break,
+            1 => {
+                if needed_indices.len() >= MAX_ELF_NEEDED_PER_OBJECT {
+                    return Err(ProcessError::UnsupportedProgram);
+                }
+                needed_indices.push(value);
+            }
             5 => string_address = Some(value),
             10 => string_bytes = Some(value),
-            29 => {
-                runpath_index = Some(value);
-                has_runpath = true;
-            }
-            15 if !has_runpath => runpath_index = Some(value),
+            15 => rpath_index = Some(value),
+            29 => runpath_index = Some(value),
             _ => {}
         }
     }
-    let (Some(string_address), Some(string_bytes), Some(runpath_index)) =
-        (string_address, string_bytes, runpath_index)
-    else {
-        return Ok(Vec::new());
-    };
-    if runpath_index >= string_bytes {
-        return Err(ProcessError::UnsupportedProgram);
+    if needed_indices.is_empty() && rpath_index.is_none() && runpath_index.is_none() {
+        return Ok(ElfDynamicLinkage {
+            search_paths: Vec::new(),
+            needed: Vec::new(),
+        });
     }
+    let (Some(string_address), Some(string_bytes)) = (string_address, string_bytes) else {
+        return Err(ProcessError::UnsupportedProgram);
+    };
     let string_offset = loads[..load_count]
         .iter()
         .find_map(|(address, offset, bytes)| {
@@ -1912,52 +1985,186 @@ fn elf_absolute_library_paths(root: &Path, program: &Path) -> Result<Vec<PathBuf
                 .then_some(offset + (string_address - address))
         })
         .ok_or(ProcessError::UnsupportedProgram)?;
-    let maximum = (string_bytes - runpath_index)
-        .min(MAX_ELF_RUNPATH_BYTES as u64)
-        .min(file_bytes.saturating_sub(string_offset + runpath_index));
+
+    let mut search_paths = Vec::new();
+    if let Some(path_index) = runpath_index.or(rpath_index) {
+        let runpath = read_elf_dynamic_string(
+            &mut file,
+            file_bytes,
+            string_offset,
+            string_bytes,
+            path_index,
+            MAX_ELF_RUNPATH_BYTES,
+        )?;
+        for value in runpath.split(':') {
+            let Some(path) = resolve_elf_search_path(root, canonical_root, program, value)? else {
+                continue;
+            };
+            if !search_paths
+                .iter()
+                .any(|existing: &ElfSearchPath| existing.physical == path.physical)
+            {
+                if search_paths.len() >= MAX_ELF_PRIVATE_LIBRARY_PATHS {
+                    return Err(ProcessError::UnsupportedProgram);
+                }
+                search_paths.push(path);
+            }
+        }
+    }
+
+    let mut needed = Vec::with_capacity(needed_indices.len());
+    for index in needed_indices {
+        let name = read_elf_dynamic_string(
+            &mut file,
+            file_bytes,
+            string_offset,
+            string_bytes,
+            index,
+            MAX_ELF_NEEDED_NAME_BYTES,
+        )?;
+        if name.is_empty()
+            || name.contains('/')
+            || name
+                .bytes()
+                .any(|byte| byte == 0 || byte.is_ascii_control())
+        {
+            return Err(ProcessError::UnsupportedProgram);
+        }
+        needed.push(name);
+    }
+    Ok(ElfDynamicLinkage {
+        search_paths,
+        needed,
+    })
+}
+
+fn read_elf_dynamic_string(
+    file: &mut File,
+    file_bytes: u64,
+    string_offset: u64,
+    string_bytes: u64,
+    index: u64,
+    limit: usize,
+) -> Result<String, ProcessError> {
+    if index >= string_bytes {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    let offset = string_offset
+        .checked_add(index)
+        .filter(|offset| *offset < file_bytes)
+        .ok_or(ProcessError::UnsupportedProgram)?;
+    let maximum = (string_bytes - index)
+        .min((limit + 1) as u64)
+        .min(file_bytes - offset);
     if maximum == 0 {
         return Err(ProcessError::UnsupportedProgram);
     }
-    let mut runpath = [0_u8; MAX_ELF_RUNPATH_BYTES];
-    file.seek(SeekFrom::Start(string_offset + runpath_index))?;
-    file.read_exact(&mut runpath[..maximum as usize])?;
-    let end = runpath[..maximum as usize]
+    let mut bytes = vec![0_u8; maximum as usize];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    let end = bytes
         .iter()
         .position(|byte| *byte == 0)
         .ok_or(ProcessError::UnsupportedProgram)?;
-    let runpath =
-        std::str::from_utf8(&runpath[..end]).map_err(|_| ProcessError::UnsupportedProgram)?;
-    let canonical_root = root.canonicalize()?;
-    let mut paths = Vec::new();
-    for value in runpath.split(':').filter(|value| value.starts_with('/')) {
+    if end > limit {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    std::str::from_utf8(&bytes[..end])
+        .map(str::to_owned)
+        .map_err(|_| ProcessError::UnsupportedProgram)
+}
+
+fn resolve_elf_search_path(
+    root: &Path,
+    canonical_root: &Path,
+    program: &Path,
+    value: &str,
+) -> Result<Option<ElfSearchPath>, ProcessError> {
+    let (physical, export_to_loader) = if value.starts_with('/') {
         let logical = Path::new(value);
-        if logical.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::Prefix(_) | Component::CurDir
-            )
-        }) {
-            return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
-        }
-        let physical = root.join(
-            logical
-                .strip_prefix("/")
-                .map_err(|_| ProcessError::UnsafeCommand(program.to_path_buf()))?,
-        );
-        let resolved = physical.canonicalize()?;
-        let metadata = fs::symlink_metadata(&resolved)?;
-        if !metadata.is_dir()
-            || metadata.mode() & 0o002 != 0
-            || resolved == canonical_root
-            || !resolved.starts_with(&canonical_root)
+        if logical
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
         {
             return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
         }
-        if !paths.contains(&resolved) {
-            paths.push(resolved);
+        (
+            root.join(
+                logical
+                    .strip_prefix("/")
+                    .map_err(|_| ProcessError::UnsafeCommand(program.to_path_buf()))?,
+            ),
+            true,
+        )
+    } else {
+        let suffix = value
+            .strip_prefix("$ORIGIN/")
+            .or_else(|| value.strip_prefix("${ORIGIN}/"))
+            .or_else(|| (value == "$ORIGIN" || value == "${ORIGIN}").then_some(""));
+        let Some(suffix) = suffix else {
+            return Ok(None);
+        };
+        let suffix = Path::new(suffix);
+        if suffix
+            .components()
+            .any(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
+        {
+            return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
         }
+        (
+            program
+                .parent()
+                .ok_or_else(|| ProcessError::UnsafeCommand(program.to_path_buf()))?
+                .join(suffix),
+            false,
+        )
+    };
+    let resolved = match physical.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ProcessError::Io(error)),
+    };
+    let metadata = fs::symlink_metadata(&resolved)?;
+    if !metadata.is_dir()
+        || metadata.mode() & 0o002 != 0
+        || resolved == canonical_root
+        || !resolved.starts_with(canonical_root)
+    {
+        return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
     }
-    Ok(paths)
+    Ok(Some(ElfSearchPath {
+        physical: resolved,
+        export_to_loader,
+    }))
+}
+
+fn resolve_elf_dependency(
+    root: &Path,
+    canonical_root: &Path,
+    program: &Path,
+    search_paths: &[ElfSearchPath],
+    name: &str,
+) -> Result<Option<PathBuf>, ProcessError> {
+    let mut candidates = Vec::with_capacity(search_paths.len() + 2);
+    candidates.push(root.join("usr/lib").join(name));
+    candidates.push(root.join("lib").join(name));
+    candidates.extend(search_paths.iter().map(|path| path.physical.join(name)));
+    for candidate in candidates {
+        let resolved = match candidate.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(ProcessError::Io(error)),
+        };
+        if !resolved.starts_with(canonical_root) || resolved == canonical_root {
+            return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
+        }
+        let metadata = fs::symlink_metadata(&resolved)?;
+        if !metadata.is_file() || metadata.mode() & 0o002 != 0 {
+            return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
+        }
+        return Ok(Some(resolved));
+    }
+    Ok(None)
 }
 
 fn little_u16(bytes: &[u8]) -> u16 {
@@ -2703,8 +2910,28 @@ mod tests {
         }
 
         fn elf_runpath_program(&self, name: &str, runpath: &str) {
-            let string_offset = 240_usize;
-            let mut content = vec![0_u8; string_offset + runpath.len() + 1];
+            self.elf_linkage_file(&format!("usr/bin/{name}"), &[], Some(runpath));
+        }
+
+        fn elf_linkage_file(&self, relative: &str, needed: &[&str], runpath: Option<&str>) {
+            let mut strings = vec![0_u8];
+            let mut needed_indices = Vec::with_capacity(needed.len());
+            for name in needed {
+                needed_indices.push(strings.len() as u64);
+                strings.extend_from_slice(name.as_bytes());
+                strings.push(0);
+            }
+            let runpath_index = runpath.map(|path| {
+                let index = strings.len() as u64;
+                strings.extend_from_slice(path.as_bytes());
+                strings.push(0);
+                index
+            });
+            let dynamic_offset = 176_usize;
+            let dynamic_entries = 3 + needed.len() + usize::from(runpath.is_some());
+            let dynamic_bytes = dynamic_entries * 16;
+            let string_offset = dynamic_offset + dynamic_bytes;
+            let mut content = vec![0_u8; string_offset + strings.len()];
             let content_bytes = content.len() as u64;
             content[..6].copy_from_slice(b"\x7fELF\x02\x01");
             content[32..40].copy_from_slice(&64_u64.to_le_bytes());
@@ -2713,17 +2940,30 @@ mod tests {
             content[64..68].copy_from_slice(&1_u32.to_le_bytes());
             content[96..104].copy_from_slice(&content_bytes.to_le_bytes());
             content[120..124].copy_from_slice(&2_u32.to_le_bytes());
-            content[128..136].copy_from_slice(&176_u64.to_le_bytes());
-            content[136..144].copy_from_slice(&176_u64.to_le_bytes());
-            content[152..160].copy_from_slice(&64_u64.to_le_bytes());
-            content[176..184].copy_from_slice(&5_i64.to_le_bytes());
-            content[184..192].copy_from_slice(&(string_offset as u64).to_le_bytes());
-            content[192..200].copy_from_slice(&10_i64.to_le_bytes());
-            content[200..208].copy_from_slice(&((runpath.len() + 1) as u64).to_le_bytes());
-            content[208..216].copy_from_slice(&29_i64.to_le_bytes());
-            content[string_offset..string_offset + runpath.len()]
-                .copy_from_slice(runpath.as_bytes());
-            self.program(name, &content);
+            content[128..136].copy_from_slice(&(dynamic_offset as u64).to_le_bytes());
+            content[136..144].copy_from_slice(&(dynamic_offset as u64).to_le_bytes());
+            content[152..160].copy_from_slice(&(dynamic_bytes as u64).to_le_bytes());
+            let mut entry = dynamic_offset;
+            content[entry..entry + 8].copy_from_slice(&5_i64.to_le_bytes());
+            content[entry + 8..entry + 16].copy_from_slice(&(string_offset as u64).to_le_bytes());
+            entry += 16;
+            content[entry..entry + 8].copy_from_slice(&10_i64.to_le_bytes());
+            content[entry + 8..entry + 16].copy_from_slice(&(strings.len() as u64).to_le_bytes());
+            entry += 16;
+            for index in needed_indices {
+                content[entry..entry + 8].copy_from_slice(&1_i64.to_le_bytes());
+                content[entry + 8..entry + 16].copy_from_slice(&index.to_le_bytes());
+                entry += 16;
+            }
+            if let Some(index) = runpath_index {
+                content[entry..entry + 8].copy_from_slice(&29_i64.to_le_bytes());
+                content[entry + 8..entry + 16].copy_from_slice(&index.to_le_bytes());
+            }
+            content[string_offset..].copy_from_slice(&strings);
+            let path = self.0.join(relative);
+            fs::create_dir_all(path.parent().expect("ELF parent")).expect("ELF directory");
+            fs::write(&path, content).expect("ELF");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("ELF permissions");
         }
     }
 
@@ -3137,6 +3377,83 @@ mod tests {
                     .expect("canonical runpath")
             ]
         );
+    }
+
+    #[test]
+    fn launch_plan_maps_only_reachable_transitive_absolute_runpaths() {
+        let root = TestRoot::new();
+        root.elf_linkage_file("usr/bin/client", &["libpulse.so.0"], None);
+        root.elf_linkage_file(
+            "usr/lib/libpulse.so.0",
+            &["libpulsecommon.so"],
+            Some("/usr/lib/pulseaudio"),
+        );
+        root.elf_linkage_file("usr/lib/pulseaudio/libpulsecommon.so", &[], None);
+        root.elf_linkage_file(
+            "usr/lib/unrelated/libunrelated.so",
+            &[],
+            Some("/usr/lib/unrelated-private"),
+        );
+        fs::create_dir_all(root.0.join("usr/lib/unrelated-private"))
+            .expect("unrelated private directory");
+
+        let plan =
+            prepare_launch(&root.0, "client", root.0.join("usr/bin/client")).expect("launch");
+        assert_eq!(
+            plan.library_paths,
+            vec![
+                root.0
+                    .join("usr/lib/pulseaudio")
+                    .canonicalize()
+                    .expect("transitive runpath")
+            ],
+        );
+    }
+
+    #[test]
+    fn origin_paths_enable_traversal_without_becoming_global_loader_paths() {
+        let root = TestRoot::new();
+        root.elf_linkage_file(
+            "usr/bin/client",
+            &["libprivate.so"],
+            Some("$ORIGIN/../lib/client"),
+        );
+        root.elf_linkage_file("usr/lib/client/libprivate.so", &[], Some("/opt/client/lib"));
+        fs::create_dir_all(root.0.join("opt/client/lib")).expect("absolute private directory");
+
+        let plan =
+            prepare_launch(&root.0, "client", root.0.join("usr/bin/client")).expect("launch");
+        assert_eq!(
+            plan.library_paths,
+            vec![
+                root.0
+                    .join("opt/client/lib")
+                    .canonicalize()
+                    .expect("dependency runpath")
+            ],
+        );
+    }
+
+    #[test]
+    fn transitive_runpath_escape_and_world_writable_directories_fail_closed() {
+        let root = TestRoot::new();
+        root.elf_linkage_file("usr/bin/escape", &["libescape.so"], None);
+        root.elf_linkage_file("usr/lib/libescape.so", &[], Some("$ORIGIN/../../.."));
+        assert!(matches!(
+            prepare_launch(&root.0, "escape", root.0.join("usr/bin/escape")),
+            Err(ProcessError::UnsafeCommand(_))
+        ));
+
+        root.elf_linkage_file("usr/bin/writable", &["libwritable.so"], None);
+        root.elf_linkage_file("usr/lib/libwritable.so", &[], Some("/usr/lib/writable"));
+        let writable = root.0.join("usr/lib/writable");
+        fs::create_dir_all(&writable).expect("writable directory");
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o777))
+            .expect("writable permissions");
+        assert!(matches!(
+            prepare_launch(&root.0, "writable", root.0.join("usr/bin/writable")),
+            Err(ProcessError::UnsafeCommand(_))
+        ));
     }
 
     #[test]
