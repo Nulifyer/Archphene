@@ -72,6 +72,8 @@ public final class NativeCompositor implements AutoCloseable {
     private static final int HOST_ACTIVE = 64;
     private static final int KEYBOARD_COUNT = 65;
     private static final int FOCUSED_KEYBOARD_COUNT = 66;
+    private static final int CURSOR_SYSTEM_ICON = 67;
+    private static final int CURSOR_CHANGE_SERIAL = 68;
 
     static { System.loadLibrary("archphene_compositor"); }
 
@@ -175,6 +177,8 @@ public final class NativeCompositor implements AutoCloseable {
     public int cursorWidth() { return command(CURSOR_WIDTH); }
     public int cursorHeight() { return command(CURSOR_HEIGHT); }
     public int cursorHotspot(int component) { return command(CURSOR_HOTSPOT, component); }
+    public int cursorSystemIcon() { return command(CURSOR_SYSTEM_ICON); }
+    public int cursorChangeSerial() { return command(CURSOR_CHANGE_SERIAL); }
     public int dismissPopups() { return command(DISMISS_POPUPS); }
     public int damageCount() { return command(DAMAGE_COUNT); }
     public int damageComponent(int component) { return command(DAMAGE_COMPONENT, component); }

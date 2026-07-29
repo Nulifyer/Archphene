@@ -792,6 +792,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             String lastPopupSignature = "";
             int lastCursorWidth = -1;
             int lastCursorHeight = -1;
+            int lastCursorSerial = -1;
             int lastWindowSerial = -1;
             int lastImeViewGeneration = -1;
             while (running.get()) {
@@ -942,10 +943,18 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                 }
                 int cursorWidth = compositor.cursorWidth();
                 int cursorHeight = compositor.cursorHeight();
-                if (cursorWidth != lastCursorWidth || cursorHeight != lastCursorHeight) {
+                int cursorSerial = compositor.cursorChangeSerial();
+                if (cursorSerial != lastCursorSerial
+                        || cursorWidth != lastCursorWidth
+                        || cursorHeight != lastCursorHeight) {
+                    lastCursorSerial = cursorSerial;
                     lastCursorWidth = cursorWidth;
                     lastCursorHeight = cursorHeight;
-                    publishCursor(compositor, cursorWidth, cursorHeight);
+                    publishCursor(
+                            compositor,
+                            cursorWidth,
+                            cursorHeight,
+                            compositor.cursorSystemIcon());
                 }
                 drainClipboard(compositor);
                 drainLinuxDrag(compositor);
@@ -1119,7 +1128,14 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         List<WindowFrame> snapshot = List.copyOf(windows);
         activity.runOnUiThread(() -> listener.onWindows(snapshot));
     }
-    private void publishCursor(NativeCompositor compositor, int width, int height) {
+    private void publishCursor(
+            NativeCompositor compositor, int width, int height, int systemIcon) {
+        if (systemIcon >= 0) {
+            ArchpheneInputView target = inputView;
+            activity.runOnUiThread(() -> target.setPointerIcon(
+                    PointerIcon.getSystemIcon(activity, systemIcon)));
+            return;
+        }
         if (width <= 0 || height <= 0) {
             ArchpheneInputView target = inputView;
             activity.runOnUiThread(() -> target.setPointerIcon(

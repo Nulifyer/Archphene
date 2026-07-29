@@ -99,6 +99,7 @@ class LauncherSessionService : Service() {
         var densityDpi = DEFAULT_DENSITY_DPI
         var fontScaleMillis = DEFAULT_FONT_SCALE_MILLIS
         var attachmentFramesLogged = 0
+        var cursorChangesLogged = 0
         val presentationBuffer =
             ByteBuffer
                 .allocateDirect(
@@ -2005,6 +2006,28 @@ class LauncherSessionService : Service() {
             if (result and NativeLauncherCompositor.FLAG_POINTER_CAPTURE_CHANGED != 0) {
                 notifyPointerCapture(session, compositor.pointerCaptureActive())
             }
+            if (result and NativeLauncherCompositor.FLAG_CURSOR_CHANGED != 0) {
+                val nativeIcon = compositor.cursorSystemIcon()
+                val systemIcon =
+                    if (nativeIcon == CUSTOM_CURSOR_ICON) {
+                        // A cursor-surface bitmap is manager-owned and cannot
+                        // cross this capability boundary by reference. Keep a
+                        // usable arrow; cursor-shape-v1 crosses allocation-free.
+                        ANDROID_CURSOR_ARROW
+                    } else {
+                        nativeIcon
+                    }
+                if (session.cursorChangesLogged < MAX_CURSOR_CHANGE_LOGS) {
+                    session.cursorChangesLogged += 1
+                    Log.i(
+                        TAG,
+                        "Wayland cursor changed session=${session.id} " +
+                            "source=${if (nativeIcon < 0) "surface" else "shape"} " +
+                            "systemIcon=$systemIcon",
+                    )
+                }
+                notifyCursorIcon(session, systemIcon)
+            }
             pollLinuxProcess(session)
             surfaceHandler.postDelayed(
                 this,
@@ -2490,6 +2513,35 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyCursorIcon(
+        session: Session,
+        systemIcon: Int,
+    ) {
+        if (!session.active || !validCursorSystemIcon(systemIcon)) {
+            return
+        }
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(systemIcon)
+            session.clientToken.transact(
+                CALLBACK_CURSOR_ICON,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver cursor icon session=${session.id}", error)
+        } finally {
+            data.recycle()
+        }
+    }
+
+    private fun validCursorSystemIcon(systemIcon: Int): Boolean =
+        systemIcon == 0 || systemIcon in 1000..1004 || systemIcon in 1006..1021
+
     private fun notifyDocumentRequest(
         session: Session,
         request: PendingDocumentRequest,
@@ -2711,7 +2763,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 5
+        private const val PROTOCOL_VERSION = 6
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2726,6 +2778,7 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
+        private const val CALLBACK_CURSOR_ICON = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val MAX_SESSIONS = 16
         private const val MAX_SURFACE_DIMENSION = 8192
         private const val MAX_SURFACE_PIXELS = 33_554_432L
@@ -2744,6 +2797,9 @@ class LauncherSessionService : Service() {
         private const val STATUS_STOPPED = 3
         private const val MAX_INPUT_RECORDS = 32
         private const val MAX_ATTACHMENT_FRAME_LOGS = 4
+        private const val MAX_CURSOR_CHANGE_LOGS = 4
+        private const val CUSTOM_CURSOR_ICON = -1
+        private const val ANDROID_CURSOR_ARROW = 1000
         private const val INPUT_FIELDS = 6
         private const val UINT_MASK = 0xffff_ffffL
         private const val UINT_HIGH_MASK = -0x1_0000_0000L

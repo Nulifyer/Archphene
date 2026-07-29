@@ -534,10 +534,19 @@ the entry and forces two complete launcher rebuilds; both produce the same
 `3db705420d7e923e8f91a770a086a8806248e136de47c6bfd90517e50608fcd3`
 SHA-256.
 
-The equivalent real-client gate remains open on the x86_64 emulator, which is
-not currently attached. HOME/resume, deliberate client crash/descendant
-cleanup, non-Latin composing input, non-text clipboard, pointer lock, and
-launcher accessibility still need explicit production-client variants.
+Production Code - OSS on the x86_64 emulator and VS Code on the physical
+AArch64 Samsung now exercise the standard cursor-shape-v1 protocol through
+authenticated manager/wrapper Binder v6. The compositor validates the focused
+pointer-enter serial, maps all 36 protocol shapes to Android system pointer
+icons, and versions repeated same-size changes without per-motion allocation.
+Host protocol tests prove text and crosshair transitions; exact-ABI builds,
+native compositor probes, scoped device logs, and inspected full-device
+captures pass. Legacy client-supplied cursor-surface bitmaps remain manager
+owned and currently fall back to a usable arrow at the wrapper boundary.
+
+Non-Latin composing input beyond the deterministic manager boundary, non-text
+clipboard formats, launcher accessibility, and real-client pointer
+lock/confinement variants still need explicit production-client coverage.
 SHM snapshots and client-buffer normalization also remain copied; the new
 reused physical output canvas is not a claim of zero-copy, Vulkan, or sustained
 high-frame-rate readiness.

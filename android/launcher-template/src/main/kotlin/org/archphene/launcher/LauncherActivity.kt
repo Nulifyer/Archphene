@@ -34,6 +34,7 @@ import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.PointerIcon
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -94,6 +95,7 @@ class LauncherActivity :
     private var managerDeathSurfaceReset = false
     private var pointerButtonState = 0
     private var pointerCaptureRequested = false
+    private var cursorSystemIcon = PointerIcon.TYPE_ARROW
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
     private var softImeRequested = false
     private val showImeAfterTouch =
@@ -143,7 +145,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_POINTER_CAPTURE ||
+                    code !in CALLBACK_STATUS..CALLBACK_CURSOR_ICON ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -281,6 +283,17 @@ class LauncherActivity :
                             handler.post { applyPointerCapture(active == 1) }
                             true
                         }
+                        CALLBACK_CURSOR_ICON -> {
+                            val systemIcon = data.readInt()
+                            if (
+                                !validCursorSystemIcon(systemIcon) ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            handler.post { applyCursorSystemIcon(systemIcon) }
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -307,6 +320,7 @@ class LauncherActivity :
                 recreateSurfaceView()
                 pointerButtonState = 0
                 applyPointerCapture(false)
+                applyCursorSystemIcon(PointerIcon.TYPE_ARROW)
                 softImeRequested = false
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
@@ -504,6 +518,7 @@ class LauncherActivity :
         recreateSurfaceView()
         pointerButtonState = 0
         applyPointerCapture(false)
+        applyCursorSystemIcon(PointerIcon.TYPE_ARROW)
         softImeRequested = false
         hasPendingLinuxClipboard = false
         pendingLinuxClipboardText = null
@@ -521,6 +536,7 @@ class LauncherActivity :
             holder.addCallback(this@LauncherActivity)
             isFocusable = true
             isFocusableInTouchMode = true
+            pointerIcon = PointerIcon.getSystemIcon(this@LauncherActivity, cursorSystemIcon)
         }
 
     private fun recreateSurfaceView() {
@@ -717,6 +733,19 @@ class LauncherActivity :
             surfaceView.releasePointerCapture()
         }
     }
+
+    private fun applyCursorSystemIcon(systemIcon: Int) {
+        if (!validCursorSystemIcon(systemIcon)) {
+            return
+        }
+        cursorSystemIcon = systemIcon
+        surfaceView.pointerIcon = PointerIcon.getSystemIcon(this, systemIcon)
+    }
+
+    private fun validCursorSystemIcon(systemIcon: Int): Boolean =
+        systemIcon == PointerIcon.TYPE_NULL ||
+            systemIcon in PointerIcon.TYPE_ARROW..PointerIcon.TYPE_WAIT ||
+            systemIcon in PointerIcon.TYPE_CELL..PointerIcon.TYPE_GRABBING
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         attachSurface()
@@ -2621,7 +2650,7 @@ class LauncherActivity :
         private const val CAPABILITIES_V2 = "c:wayland,input,ime,clipboard,documents"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 5
+        private const val PROTOCOL_VERSION = 6
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2636,6 +2665,7 @@ class LauncherActivity :
         private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
+        private const val CALLBACK_CURSOR_ICON = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120

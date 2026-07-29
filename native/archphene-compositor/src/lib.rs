@@ -20,6 +20,12 @@ use jni::objects::{JByteBuffer, JObject};
 #[cfg(target_os = "android")]
 use jni::sys::jboolean;
 use jni::{JNIEnv, objects::JByteArray, sys::jbyteArray};
+use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_device_v1::{
+    self, WpCursorShapeDeviceV1,
+};
+use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_manager_v1::{
+    self, WpCursorShapeManagerV1,
+};
 use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::{
     self, WpFractionalScaleManagerV1,
 };
@@ -442,6 +448,8 @@ pub struct CompositorState {
     cursor_frame: Option<Arc<CommittedFrame>>,
     cursor_hotspot_x: i32,
     cursor_hotspot_y: i32,
+    cursor_system_icon: i32,
+    cursor_change_serial: u32,
     touches: Vec<WlTouch>,
     active_touches: Vec<ActiveTouch>,
     touch_event_count: u32,
@@ -558,6 +566,15 @@ struct ViewportData {
 
 struct FractionalScaleData {
     surface: WlSurface,
+}
+
+enum CursorShapeTarget {
+    Pointer(WlPointer),
+    Tablet,
+}
+
+struct CursorShapeDeviceData {
+    target: CursorShapeTarget,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -2236,6 +2253,7 @@ struct LauncherSurfaceCompositor {
     last_presentation_signature: Option<[i32; 5]>,
     last_reported_ime_serial: Option<u32>,
     last_reported_pointer_capture_serial: Option<u32>,
+    last_reported_cursor_serial: Option<u32>,
 }
 
 #[cfg(target_os = "android")]
@@ -2277,6 +2295,10 @@ impl LauncherSurfaceCompositor {
         self.last_presentation_signature = None;
         self.last_reported_ime_serial = None;
         self.last_reported_pointer_capture_serial = None;
+        // Android already supplies an arrow before a Wayland client chooses a
+        // cursor. Report only subsequent client changes so attach does not
+        // incorrectly replace that default with the protocol's null cursor.
+        self.last_reported_cursor_serial = Some(self.core.cursor_change_serial());
         configure_launcher_output_resolved(&mut self.core, width, height, density_dpi);
         0
     }
@@ -2325,6 +2347,11 @@ impl LauncherSurfaceCompositor {
         if self.last_reported_pointer_capture_serial != Some(pointer_capture_serial) {
             self.last_reported_pointer_capture_serial = Some(pointer_capture_serial);
             flags |= 1 << 7;
+        }
+        let cursor_serial = self.core.cursor_change_serial();
+        if self.last_reported_cursor_serial != Some(cursor_serial) {
+            self.last_reported_cursor_serial = Some(cursor_serial);
+            flags |= 1 << 8;
         }
         flags
     }
@@ -6205,6 +6232,166 @@ impl Dispatch<WlTouch, ()> for CompositorState {
         state.touches.retain(|touch| touch.id() != resource.id());
     }
 }
+
+// Android's standard PointerIcon type values. Keeping this translation in the
+// compositor lets cursor-shape requests cross the bridge as one integer and
+// avoids allocating and rasterizing a bitmap for every standard cursor.
+const ANDROID_CURSOR_ARROW: i32 = 1000;
+const ANDROID_CURSOR_CONTEXT_MENU: i32 = 1001;
+const ANDROID_CURSOR_HAND: i32 = 1002;
+const ANDROID_CURSOR_HELP: i32 = 1003;
+const ANDROID_CURSOR_WAIT: i32 = 1004;
+const ANDROID_CURSOR_CELL: i32 = 1006;
+const ANDROID_CURSOR_CROSSHAIR: i32 = 1007;
+const ANDROID_CURSOR_TEXT: i32 = 1008;
+const ANDROID_CURSOR_VERTICAL_TEXT: i32 = 1009;
+const ANDROID_CURSOR_ALIAS: i32 = 1010;
+const ANDROID_CURSOR_COPY: i32 = 1011;
+const ANDROID_CURSOR_NO_DROP: i32 = 1012;
+const ANDROID_CURSOR_ALL_SCROLL: i32 = 1013;
+const ANDROID_CURSOR_HORIZONTAL_RESIZE: i32 = 1014;
+const ANDROID_CURSOR_VERTICAL_RESIZE: i32 = 1015;
+const ANDROID_CURSOR_NESW_RESIZE: i32 = 1016;
+const ANDROID_CURSOR_NWSE_RESIZE: i32 = 1017;
+const ANDROID_CURSOR_ZOOM_IN: i32 = 1018;
+const ANDROID_CURSOR_ZOOM_OUT: i32 = 1019;
+const ANDROID_CURSOR_GRAB: i32 = 1020;
+const ANDROID_CURSOR_GRABBING: i32 = 1021;
+const CUSTOM_CURSOR_ICON: i32 = -1;
+
+fn android_cursor_icon(shape: wp_cursor_shape_device_v1::Shape) -> i32 {
+    use wp_cursor_shape_device_v1::Shape;
+
+    match shape {
+        Shape::Default => ANDROID_CURSOR_ARROW,
+        Shape::ContextMenu | Shape::DndAsk => ANDROID_CURSOR_CONTEXT_MENU,
+        Shape::Help => ANDROID_CURSOR_HELP,
+        Shape::Pointer => ANDROID_CURSOR_HAND,
+        Shape::Progress | Shape::Wait => ANDROID_CURSOR_WAIT,
+        Shape::Cell => ANDROID_CURSOR_CELL,
+        Shape::Crosshair => ANDROID_CURSOR_CROSSHAIR,
+        Shape::Text => ANDROID_CURSOR_TEXT,
+        Shape::VerticalText => ANDROID_CURSOR_VERTICAL_TEXT,
+        Shape::Alias => ANDROID_CURSOR_ALIAS,
+        Shape::Copy => ANDROID_CURSOR_COPY,
+        Shape::Move | Shape::AllScroll | Shape::AllResize => ANDROID_CURSOR_ALL_SCROLL,
+        Shape::NoDrop | Shape::NotAllowed => ANDROID_CURSOR_NO_DROP,
+        Shape::Grab => ANDROID_CURSOR_GRAB,
+        Shape::Grabbing => ANDROID_CURSOR_GRABBING,
+        Shape::EResize | Shape::WResize | Shape::EwResize | Shape::ColResize => {
+            ANDROID_CURSOR_HORIZONTAL_RESIZE
+        }
+        Shape::NResize | Shape::SResize | Shape::NsResize | Shape::RowResize => {
+            ANDROID_CURSOR_VERTICAL_RESIZE
+        }
+        Shape::NeResize | Shape::SwResize | Shape::NeswResize => ANDROID_CURSOR_NESW_RESIZE,
+        Shape::NwResize | Shape::SeResize | Shape::NwseResize => ANDROID_CURSOR_NWSE_RESIZE,
+        Shape::ZoomIn => ANDROID_CURSOR_ZOOM_IN,
+        Shape::ZoomOut => ANDROID_CURSOR_ZOOM_OUT,
+        _ => ANDROID_CURSOR_ARROW,
+    }
+}
+
+fn cursor_changed(state: &mut CompositorState) {
+    state.cursor_change_serial = state.cursor_change_serial.wrapping_add(1).max(1);
+}
+
+impl GlobalDispatch<WpCursorShapeManagerV1, ()> for CompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WpCursorShapeManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<WpCursorShapeManagerV1, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WpCursorShapeManagerV1,
+        request: wp_cursor_shape_manager_v1::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_cursor_shape_manager_v1::Request::Destroy => {}
+            wp_cursor_shape_manager_v1::Request::GetPointer {
+                cursor_shape_device,
+                pointer,
+            } => {
+                data_init.init(
+                    cursor_shape_device,
+                    CursorShapeDeviceData {
+                        target: CursorShapeTarget::Pointer(pointer),
+                    },
+                );
+            }
+            wp_cursor_shape_manager_v1::Request::GetTabletToolV2 {
+                cursor_shape_device,
+                ..
+            } => {
+                data_init.init(
+                    cursor_shape_device,
+                    CursorShapeDeviceData {
+                        target: CursorShapeTarget::Tablet,
+                    },
+                );
+            }
+            _ => unreachable!("cursor-shape manager request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<WpCursorShapeDeviceV1, CursorShapeDeviceData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &WpCursorShapeDeviceV1,
+        request: wp_cursor_shape_device_v1::Request,
+        data: &CursorShapeDeviceData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_cursor_shape_device_v1::Request::Destroy => {}
+            wp_cursor_shape_device_v1::Request::SetShape { serial, shape } => {
+                let WEnum::Value(shape) = shape else {
+                    resource.post_error(
+                        wp_cursor_shape_device_v1::Error::InvalidShape,
+                        "unknown cursor shape",
+                    );
+                    return;
+                };
+                let CursorShapeTarget::Pointer(pointer) = &data.target else {
+                    return;
+                };
+                if serial != state.last_pointer_enter_serial
+                    || !pointer.is_alive()
+                    || state
+                        .pointer_focus_surface
+                        .as_ref()
+                        .is_none_or(|surface| !pointer.id().same_client_as(&surface.id()))
+                {
+                    return;
+                }
+                state.cursor_surface = None;
+                state.cursor_frame = None;
+                state.cursor_hotspot_x = 0;
+                state.cursor_hotspot_y = 0;
+                state.cursor_system_icon = android_cursor_icon(shape);
+                cursor_changed(state);
+            }
+            _ => unreachable!("cursor-shape device request added without an implementation"),
+        }
+    }
+}
+
 impl Dispatch<WlPointer, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -6245,6 +6432,8 @@ impl Dispatch<WlPointer, ()> for CompositorState {
                     state.cursor_frame = None;
                     state.cursor_hotspot_x = 0;
                     state.cursor_hotspot_y = 0;
+                    state.cursor_system_icon = 0;
+                    cursor_changed(state);
                     return;
                 };
                 if !resource.id().same_client_as(&surface.id()) {
@@ -6274,6 +6463,8 @@ impl Dispatch<WlPointer, ()> for CompositorState {
                 state.cursor_surface = Some(surface);
                 state.cursor_hotspot_x = hotspot_x;
                 state.cursor_hotspot_y = hotspot_y;
+                state.cursor_system_icon = CUSTOM_CURSOR_ICON;
+                cursor_changed(state);
             }
             wl_pointer::Request::Release => {}
             _ => unreachable!("wl_pointer request added without an implementation"),
@@ -7665,6 +7856,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         state.cursor_hotspot_x.saturating_sub(pending_offset.0);
                     state.cursor_hotspot_y =
                         state.cursor_hotspot_y.saturating_sub(pending_offset.1);
+                    state.cursor_system_icon = CUSTOM_CURSOR_ICON;
+                    cursor_changed(state);
                 }
                 if is_xdg_toplevel {
                     if has_frame
@@ -7713,6 +7906,18 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSurface, _data: &SurfaceData) {
+        if state
+            .cursor_surface
+            .as_ref()
+            .is_some_and(|cursor| cursor.id() == resource.id())
+        {
+            state.cursor_surface = None;
+            state.cursor_frame = None;
+            state.cursor_hotspot_x = 0;
+            state.cursor_hotspot_y = 0;
+            state.cursor_system_icon = 0;
+            cursor_changed(state);
+        }
         if state
             .active_locked_pointer
             .as_ref()
@@ -9290,6 +9495,9 @@ impl CompositorCore {
         display
             .handle()
             .create_global::<CompositorState, ZwpPointerConstraintsV1, _>(1, ());
+        display
+            .handle()
+            .create_global::<CompositorState, WpCursorShapeManagerV1, _>(2, ());
         display
             .handle()
             .create_global::<CompositorState, WpViewporter, _>(1, ());
@@ -11304,6 +11512,15 @@ impl CompositorCore {
             _ => 0,
         }
     }
+
+    pub fn cursor_system_icon(&self) -> i32 {
+        self.state.cursor_system_icon
+    }
+
+    pub fn cursor_change_serial(&self) -> u32 {
+        self.state.cursor_change_serial
+    }
+
     pub fn touch_count(&self) -> u32 {
         u32::try_from(self.state.touches.len()).unwrap_or(u32::MAX)
     }
@@ -14079,6 +14296,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return 0;
     }
     configure_launcher_output(&mut core, width, height, density_dpi, geometry_percent);
+    let cursor_serial = core.cursor_change_serial();
     register_launcher_compositor(LauncherSurfaceCompositor {
         core,
         window: None,
@@ -14090,6 +14308,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         last_presentation_signature: None,
         last_reported_ime_serial: None,
         last_reported_pointer_capture_serial: None,
+        last_reported_cursor_serial: Some(cursor_serial),
     })
 }
 
@@ -14304,6 +14523,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return 0;
     };
     jboolean::from(compositor.core.pointer_capture_active())
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeCursorSystemIcon(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    compositor.core.cursor_system_icon()
 }
 
 #[cfg(target_os = "android")]
@@ -14774,6 +15006,8 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeI
         66 => {
             return i32::try_from(core.focused_keyboard_resources().len()).unwrap_or(i32::MAX);
         }
+        67 => return core.cursor_system_icon(),
+        68 => return core.cursor_change_serial() as i32,
         _ => return -3,
     };
     i32::try_from(value).unwrap_or(i32::MAX)
@@ -15510,6 +15744,8 @@ mod tests {
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1 as client_pointer_constraints;
     use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_manager_v1 as client_relative_pointer_manager;
     use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1 as client_relative_pointer;
+    use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1 as client_cursor_shape_device;
+    use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1 as client_cursor_shape_manager;
 
     #[derive(Default)]
     struct PointerProtocolClient {
@@ -15519,6 +15755,7 @@ mod tests {
         unconfined: u32,
         relative_motion: Option<(f64, f64)>,
         pointer_motion: Option<(f64, f64)>,
+        pointer_enter_serial: u32,
     }
 
     impl wayland_client::Dispatch<client_wl_registry::WlRegistry, GlobalListContents>
@@ -15551,6 +15788,12 @@ mod tests {
     );
     wayland_client::delegate_noop!(
         PointerProtocolClient: client_pointer_constraints::ZwpPointerConstraintsV1
+    );
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: client_cursor_shape_manager::WpCursorShapeManagerV1
+    );
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: ignore client_cursor_shape_device::WpCursorShapeDeviceV1
     );
 
     impl wayland_client::Dispatch<client_locked_pointer::ZwpLockedPointerV1, ()>
@@ -15608,13 +15851,18 @@ mod tests {
             _connection: &Connection,
             _queue: &QueueHandle<Self>,
         ) {
-            if let client_wl_pointer::Event::Motion {
-                surface_x,
-                surface_y,
-                ..
-            } = event
-            {
-                state.pointer_motion = Some((surface_x, surface_y));
+            match event {
+                client_wl_pointer::Event::Enter { serial, .. } => {
+                    state.pointer_enter_serial = serial;
+                }
+                client_wl_pointer::Event::Motion {
+                    surface_x,
+                    surface_y,
+                    ..
+                } => {
+                    state.pointer_motion = Some((surface_x, surface_y));
+                }
+                _ => {}
             }
         }
     }
@@ -15634,6 +15882,150 @@ mod tests {
                 state.relative_motion = Some((dx, dy));
             }
         }
+    }
+
+    #[test]
+    fn standard_cursor_shapes_round_trip_and_publish_each_same_sized_change() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-cursor-shape-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            while server_stage.load(Ordering::Acquire) != 5 {
+                core.dispatch_once().expect("dispatch client");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.surfaces.len() == 1 && core.state.pointers.len() == 1 => {
+                        core.state.pointer_focus_surface = core.state.surfaces.first().cloned();
+                        core.state.last_pointer_enter_serial = 77;
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.cursor_change_serial() == 1 => {
+                        assert_eq!(core.cursor_system_icon(), ANDROID_CURSOR_TEXT);
+                        assert_eq!(core.cursor_width(), 0);
+                        assert!(core.state.cursor_surface.is_none());
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+            while core.cursor_change_serial() != 2 {
+                core.dispatch_once().expect("dispatch second shape");
+            }
+            assert_eq!(core.cursor_system_icon(), ANDROID_CURSOR_CROSSHAIR);
+            assert_eq!(core.cursor_width(), 0);
+        });
+
+        let connection = loop {
+            match UnixStream::connect(&socket) {
+                Ok(stream) => break Connection::from_socket(stream).expect("client connection"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("connect client: {error}"),
+            }
+        };
+        let (globals, mut events) =
+            registry_queue_init::<PointerProtocolClient>(&connection).expect("registry");
+        let queue = events.handle();
+        let compositor = globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&queue, 1..=6, ())
+            .expect("wl_compositor");
+        let seat = globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&queue, 1..=9, ())
+            .expect("wl_seat");
+        let cursor_manager = globals
+            .bind::<client_cursor_shape_manager::WpCursorShapeManagerV1, _, _>(
+                &queue,
+                1..=2,
+                (),
+            )
+            .expect("cursor-shape manager");
+        let _surface = compositor.create_surface(&queue, ());
+        let pointer = seat.get_pointer(&queue, ());
+        let cursor = cursor_manager.get_pointer(&pointer, &queue, ());
+        connection.flush().expect("flush cursor-shape objects");
+        stage.store(1, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 2 {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("cursor-shape object roundtrip");
+        }
+
+        cursor.set_shape(77, client_cursor_shape_device::Shape::Text);
+        connection.flush().expect("flush text cursor");
+        stage.store(3, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 4 {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("text cursor roundtrip");
+        }
+
+        cursor.set_shape(77, client_cursor_shape_device::Shape::Crosshair);
+        connection.flush().expect("flush crosshair cursor");
+        stage.store(5, Ordering::Release);
+        server.join().expect("server thread");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn every_standard_cursor_shape_maps_to_an_android_system_icon() {
+        use wp_cursor_shape_device_v1::Shape;
+
+        let shapes = [
+            Shape::Default,
+            Shape::ContextMenu,
+            Shape::Help,
+            Shape::Pointer,
+            Shape::Progress,
+            Shape::Wait,
+            Shape::Cell,
+            Shape::Crosshair,
+            Shape::Text,
+            Shape::VerticalText,
+            Shape::Alias,
+            Shape::Copy,
+            Shape::Move,
+            Shape::NoDrop,
+            Shape::NotAllowed,
+            Shape::Grab,
+            Shape::Grabbing,
+            Shape::EResize,
+            Shape::NResize,
+            Shape::NeResize,
+            Shape::NwResize,
+            Shape::SResize,
+            Shape::SeResize,
+            Shape::SwResize,
+            Shape::WResize,
+            Shape::EwResize,
+            Shape::NsResize,
+            Shape::NeswResize,
+            Shape::NwseResize,
+            Shape::ColResize,
+            Shape::RowResize,
+            Shape::AllScroll,
+            Shape::ZoomIn,
+            Shape::ZoomOut,
+            Shape::DndAsk,
+            Shape::AllResize,
+        ];
+        assert_eq!(shapes.len(), 36);
+        assert!(
+            shapes
+                .iter()
+                .all(|shape| android_cursor_icon(*shape) >= ANDROID_CURSOR_ARROW)
+        );
     }
 
     #[test]
@@ -15701,7 +16093,12 @@ mod tests {
         let connection = loop {
             match UnixStream::connect(&socket) {
                 Ok(stream) => break Connection::from_socket(stream).expect("client connection"),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
                     std::thread::yield_now();
                 }
                 Err(error) => panic!("connect client: {error}"),
@@ -15858,7 +16255,12 @@ mod tests {
         let connection = loop {
             match UnixStream::connect(&socket) {
                 Ok(stream) => break Connection::from_socket(stream).expect("client connection"),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
                     std::thread::yield_now();
                 }
                 Err(error) => panic!("connect client: {error}"),
