@@ -54,6 +54,8 @@ const GTK_SETTINGS_LIBRARY: &str = "libarchphene_gtk3_settings.so";
 const QT_PLATFORM_THEME_LIBRARY: &str = "libarchphene_qt_platform_theme.so";
 const QT_STYLE_LIBRARY: &str = "libarchphene_qt_style.so";
 const QT_KDE_CONFIG_LIBRARY: &str = "libarchphene_kde_config.so";
+const GUI_RUNTIME_PACKAGES: [&str; 4] = ["qt5-base", "qt5-wayland", "qt6-base", "qt6-wayland"];
+const GUI_RUNTIME_COMPANIONS: [(usize, usize); 2] = [(0, 1), (2, 3)];
 const TOOLKIT_PLUGIN_DIRECTORY: &str = "run/toolkit-plugins-v1";
 const INSTALL_REASON_INTENT_FILE: &str = "run/package-install-reasons-v1";
 const INSTALL_REASON_INTENT_TEMP_FILE: &str = "run/package-install-reasons-v1.tmp";
@@ -1874,6 +1876,32 @@ impl PackageRuntime {
     }
 
     fn resolve_targets_with_database_mode(
+        &self,
+        packages: &[&str],
+        database_path: &Path,
+        require_named_targets: bool,
+    ) -> Result<PackageResolution, PackageRuntimeError> {
+        let resolution = self.resolve_targets_with_database_mode_once(
+            packages,
+            database_path,
+            require_named_targets,
+        )?;
+        let current_database = self.arch_root.join("var/lib/pacman");
+        let installed = if database_path == current_database {
+            installed_gui_runtime_state(&self.arch_root)?
+        } else {
+            [false; GUI_RUNTIME_PACKAGES.len()]
+        };
+        let mut targets = Vec::with_capacity(packages.len() + GUI_RUNTIME_COMPANIONS.len());
+        targets.extend_from_slice(packages);
+        append_gui_runtime_companions(&resolution, &installed, &mut targets)?;
+        if targets.len() == packages.len() {
+            return Ok(resolution);
+        }
+        self.resolve_targets_with_database_mode_once(&targets, database_path, require_named_targets)
+    }
+
+    fn resolve_targets_with_database_mode_once(
         &self,
         packages: &[&str],
         database_path: &Path,
@@ -11761,6 +11789,69 @@ fn resolution_contains(
     }))
 }
 
+fn append_gui_runtime_companions(
+    resolution: &PackageResolution,
+    installed: &[bool; GUI_RUNTIME_PACKAGES.len()],
+    targets: &mut Vec<&str>,
+) -> Result<(), PackageRuntimeError> {
+    for (trigger, companion) in GUI_RUNTIME_COMPANIONS {
+        let trigger_present =
+            installed[trigger] || resolution_contains(resolution, GUI_RUNTIME_PACKAGES[trigger])?;
+        let companion_present = installed[companion]
+            || resolution_contains(resolution, GUI_RUNTIME_PACKAGES[companion])?
+            || targets.contains(&GUI_RUNTIME_PACKAGES[companion]);
+        if trigger_present && !companion_present {
+            targets.push(GUI_RUNTIME_PACKAGES[companion]);
+        }
+    }
+    Ok(())
+}
+
+fn installed_gui_runtime_state(
+    arch_root: &Path,
+) -> Result<[bool; GUI_RUNTIME_PACKAGES.len()], PackageRuntimeError> {
+    let local = arch_root.join("var/lib/pacman/local");
+    let metadata = fs::symlink_metadata(&local)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(local));
+    }
+    let mut state = [false; GUI_RUNTIME_PACKAGES.len()];
+    let mut count = 0_usize;
+    for entry in fs::read_dir(&local)? {
+        count = count.saturating_add(1);
+        if count > LOCAL_DATABASE_ENTRY_LIMIT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if entry.file_name() == "ALPM_DB_VERSION"
+            && metadata.is_file()
+            && !metadata.file_type().is_symlink()
+        {
+            continue;
+        }
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(PackageRuntimeError::InvalidResolution);
+        };
+        let Some(index) = GUI_RUNTIME_PACKAGES.iter().position(|package| {
+            name.starts_with(package) && name.as_bytes().get(package.len()).copied() == Some(b'-')
+        }) else {
+            continue;
+        };
+        let identity = read_local_package_identity(&path)?;
+        if identity.name != GUI_RUNTIME_PACKAGES[index] || state[index] {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        state[index] = true;
+    }
+    Ok(state)
+}
+
 fn safe_package_filename(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 240
@@ -11894,6 +11985,44 @@ mod tests {
             .push(diagnostic)
             .expect("package tool failure diagnostic");
         PackageRuntimeError::ToolFailed(code, Box::new(output))
+    }
+
+    #[test]
+    fn qt_gui_closures_add_their_wayland_runtime_companions() {
+        let resolution = test_resolution(
+            "extra\tqt5-base\t5.15.17\tqt5-base.pkg.tar.zst\thttps://example/qt5-base\t1\n",
+        );
+        let mut targets = vec!["base", "qt5ct"];
+        append_gui_runtime_companions(&resolution, &[false; 4], &mut targets)
+            .expect("Qt 5 companion");
+        assert_eq!(targets, ["base", "qt5ct", "qt5-wayland"]);
+
+        let resolution = test_resolution(
+            "extra\tqt6-base\t6.10.0\tqt6-base.pkg.tar.zst\thttps://example/qt6-base\t1\n",
+        );
+        let mut targets = vec!["base", "kcalc"];
+        append_gui_runtime_companions(&resolution, &[false; 4], &mut targets)
+            .expect("Qt 6 companion");
+        assert_eq!(targets, ["base", "kcalc", "qt6-wayland"]);
+    }
+
+    #[test]
+    fn installed_or_resolved_wayland_companions_are_not_duplicated() {
+        let resolution = test_resolution(
+            "extra\tqt5-base\t5.15.17\tqt5-base.pkg.tar.zst\thttps://example/qt5-base\t1\n\
+             extra\tqt5-wayland\t5.15.17\tqt5-wayland.pkg.tar.zst\thttps://example/qt5-wayland\t1\n",
+        );
+        let mut targets = vec!["base", "qt5ct"];
+        append_gui_runtime_companions(&resolution, &[false; 4], &mut targets)
+            .expect("resolved companion");
+        assert_eq!(targets, ["base", "qt5ct"]);
+
+        let resolution =
+            test_resolution("extra\tbtop\t1\tbtop.pkg.tar.zst\thttps://example/btop\t1\n");
+        let mut targets = vec!["base", "another-qt6-app"];
+        append_gui_runtime_companions(&resolution, &[false, false, true, true], &mut targets)
+            .expect("installed companion");
+        assert_eq!(targets, ["base", "another-qt6-app"]);
     }
 
     #[test]
