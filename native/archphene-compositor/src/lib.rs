@@ -957,9 +957,15 @@ struct PointerConstraintData {
     surface: WlSurface,
     pointer: WlPointer,
     persistent: bool,
-    whole_surface: AtomicBool,
+    region: Mutex<PointerConstraintRegionState>,
     eligible: AtomicBool,
     active: AtomicBool,
+}
+
+struct PointerConstraintRegionState {
+    pending: Option<Option<RegionState>>,
+    cached: Option<Option<RegionState>>,
+    committed: Option<RegionState>,
 }
 
 struct PopupGrabState {
@@ -4641,6 +4647,45 @@ fn deactivate_pointer_lock(state: &mut CompositorState) {
         state.pointer_capture_change_serial.wrapping_add(1).max(1);
 }
 
+fn pointer_constraint_contains(
+    state: &CompositorState,
+    data: &PointerConstraintData,
+    x: f64,
+    y: f64,
+) -> bool {
+    let (origin_x, origin_y) = surface_origin_in_root(state, &data.surface, 0).unwrap_or((0, 0));
+    let mut local_x = x - f64::from(origin_x);
+    let mut local_y = y - f64::from(origin_y);
+    if state
+        .root_surface
+        .as_ref()
+        .is_some_and(|root| root.id() == data.surface.id())
+    {
+        if let Some(frame) = surface_frame(&data.surface) {
+            let (target_width, target_height) = root_input_dimensions(state);
+            local_x = scale_input_coordinate(local_x, target_width, frame.width);
+            local_y = scale_input_coordinate(local_y, target_height, frame.height);
+        }
+    }
+    let requested_contains = data
+        .region
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .committed
+        .as_ref()
+        .is_none_or(|region| region.contains(local_x, local_y));
+    let input_contains = data.surface.data::<SurfaceData>().is_none_or(|surface| {
+        surface
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .committed_input_region
+            .as_ref()
+            .is_none_or(|region| region.contains(local_x, local_y))
+    });
+    requested_contains && input_contains
+}
+
 fn activate_pointer_lock(state: &mut CompositorState, constraint: &ZwpLockedPointerV1) {
     if state.active_locked_pointer.is_some()
         || !state.host_active
@@ -4652,10 +4697,7 @@ fn activate_pointer_lock(state: &mut CompositorState, constraint: &ZwpLockedPoin
     let Some(data) = constraint.data::<PointerConstraintData>() else {
         return;
     };
-    // Region-shaped constraints remain inactive until the compositor can
-    // evaluate wl_region geometry. The protocol permits a constraint to never
-    // activate, which is safer than capturing outside the requested region.
-    if !data.whole_surface.load(Ordering::Acquire) || !data.eligible.load(Ordering::Acquire) {
+    if !data.eligible.load(Ordering::Acquire) {
         return;
     }
     let focused = state
@@ -4666,7 +4708,11 @@ fn activate_pointer_lock(state: &mut CompositorState, constraint: &ZwpLockedPoin
         .pointers
         .iter()
         .any(|pointer| pointer.is_alive() && pointer.id() == data.pointer.id());
-    if !focused || !known_pointer || data.active.swap(true, Ordering::AcqRel) {
+    if !focused
+        || !known_pointer
+        || !pointer_constraint_contains(state, data, state.pointer_x, state.pointer_y)
+        || data.active.swap(true, Ordering::AcqRel)
+    {
         return;
     }
     constraint.locked();
@@ -4696,7 +4742,7 @@ fn pointer_constraint_data(
     surface: WlSurface,
     pointer: WlPointer,
     lifetime: WEnum<zwp_pointer_constraints_v1::Lifetime>,
-    whole_surface: bool,
+    region: Option<RegionState>,
 ) -> Option<PointerConstraintData> {
     let persistent = match lifetime {
         WEnum::Value(zwp_pointer_constraints_v1::Lifetime::Oneshot) => false,
@@ -4708,10 +4754,77 @@ fn pointer_constraint_data(
         surface,
         pointer,
         persistent,
-        whole_surface: AtomicBool::new(whole_surface),
+        region: Mutex::new(PointerConstraintRegionState {
+            pending: None,
+            cached: None,
+            committed: region,
+        }),
         eligible: AtomicBool::new(true),
         active: AtomicBool::new(false),
     })
+}
+
+fn pointer_constraint_region(region: Option<WlRegion>) -> Option<Option<RegionState>> {
+    match region {
+        Some(region) => region.data::<RegionData>().map(|data| {
+            Some(
+                data.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+            )
+        }),
+        None => Some(None),
+    }
+}
+
+fn cache_pointer_constraint_regions(state: &CompositorState, surface: &WlSurface) {
+    for constraint in &state.locked_pointers {
+        let Some(data) = constraint.data::<PointerConstraintData>() else {
+            continue;
+        };
+        if data.surface.id() != surface.id() {
+            continue;
+        }
+        let mut region = data
+            .region
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(pending) = region.pending.take() {
+            region.cached = Some(pending);
+        }
+    }
+}
+
+fn apply_pointer_constraint_regions(state: &mut CompositorState, surface: &WlSurface) {
+    let mut active_outside = false;
+    for constraint in &state.locked_pointers {
+        let Some(data) = constraint.data::<PointerConstraintData>() else {
+            continue;
+        };
+        if data.surface.id() != surface.id() {
+            continue;
+        }
+        {
+            let mut region = data
+                .region
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let update = region.cached.take().or_else(|| region.pending.take());
+            if let Some(update) = update {
+                region.committed = update;
+            }
+        }
+        if data.active.load(Ordering::Acquire)
+            && !pointer_constraint_contains(state, data, state.pointer_x, state.pointer_y)
+        {
+            active_outside = true;
+        }
+    }
+    if active_outside {
+        deactivate_pointer_lock(state);
+    }
+    activate_pointer_lock_for_focus(state);
 }
 
 impl GlobalDispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
@@ -4753,9 +4866,11 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
                     );
                     return;
                 }
-                let Some(data) =
-                    pointer_constraint_data(surface, pointer, lifetime, region.is_none())
-                else {
+                let Some(region) = pointer_constraint_region(region) else {
+                    resource.post_error(0u32, "pointer lock uses an unknown region");
+                    return;
+                };
+                let Some(data) = pointer_constraint_data(surface, pointer, lifetime, region) else {
                     resource.post_error(0u32, "invalid pointer-constraint lifetime");
                     return;
                 };
@@ -4777,9 +4892,11 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
                     );
                     return;
                 }
-                let Some(data) =
-                    pointer_constraint_data(surface, pointer, lifetime, region.is_none())
-                else {
+                let Some(region) = pointer_constraint_region(region) else {
+                    resource.post_error(0u32, "pointer confinement uses an unknown region");
+                    return;
+                };
+                let Some(data) = pointer_constraint_data(surface, pointer, lifetime, region) else {
                     resource.post_error(0u32, "invalid pointer-constraint lifetime");
                     return;
                 };
@@ -4793,9 +4910,9 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
 
 impl Dispatch<ZwpLockedPointerV1, PointerConstraintData> for CompositorState {
     fn request(
-        state: &mut Self,
+        _state: &mut Self,
         _client: &Client,
-        resource: &ZwpLockedPointerV1,
+        _resource: &ZwpLockedPointerV1,
         request: zwp_locked_pointer_v1::Request,
         data: &PointerConstraintData,
         _handle: &DisplayHandle,
@@ -4805,16 +4922,13 @@ impl Dispatch<ZwpLockedPointerV1, PointerConstraintData> for CompositorState {
             zwp_locked_pointer_v1::Request::Destroy
             | zwp_locked_pointer_v1::Request::SetCursorPositionHint { .. } => {}
             zwp_locked_pointer_v1::Request::SetRegion { region } => {
-                data.whole_surface
-                    .store(region.is_none(), Ordering::Release);
-                if region.is_some()
-                    && state
-                        .active_locked_pointer
-                        .as_ref()
-                        .is_some_and(|active| active.id() == resource.id())
-                {
-                    deactivate_pointer_lock(state);
-                }
+                let Some(region) = pointer_constraint_region(region) else {
+                    return;
+                };
+                data.region
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending = Some(region);
             }
             _ => unreachable!("locked-pointer request added without an implementation"),
         }
@@ -4854,8 +4968,13 @@ impl Dispatch<ZwpConfinedPointerV1, PointerConstraintData> for CompositorState {
         match request {
             zwp_confined_pointer_v1::Request::Destroy => {}
             zwp_confined_pointer_v1::Request::SetRegion { region } => {
-                data.whole_surface
-                    .store(region.is_none(), Ordering::Release);
+                let Some(region) = pointer_constraint_region(region) else {
+                    return;
+                };
+                data.region
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending = Some(region);
             }
             _ => unreachable!("confined-pointer request added without an implementation"),
         }
@@ -6373,7 +6492,7 @@ fn subsurface_effectively_synchronized(surface: &WlSurface, surface_count: u32) 
 }
 
 fn apply_cached_subsurface_tree(
-    state: &CompositorState,
+    state: &mut CompositorState,
     surface: &WlSurface,
     depth: usize,
     apply_parent_state: bool,
@@ -6446,6 +6565,7 @@ fn apply_cached_subsurface_tree(
             .collect::<Vec<_>>();
         (children, local_damage)
     };
+    apply_pointer_constraint_regions(state, surface);
     if !local_damage.is_empty() {
         damage_batches.push((surface.clone(), local_damage));
     }
@@ -6462,7 +6582,7 @@ fn apply_cached_subsurface_tree(
 }
 
 fn apply_cached_subsurface_children(
-    state: &CompositorState,
+    state: &mut CompositorState,
     parent: &WlSurface,
 ) -> (Vec<WlCallback>, Vec<(WlSurface, Vec<RegionRectangle>)>) {
     let Some(parent_data) = parent.data::<SurfaceData>() else {
@@ -7241,6 +7361,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     }
                     surface.cached_damage.extend(local_damage);
                     surface.cached_callbacks.append(&mut callbacks);
+                    cache_pointer_constraint_regions(state, resource);
                     state.surface_commit_count = state.surface_commit_count.saturating_add(1);
                     return;
                 }
@@ -7268,6 +7389,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 );
                 let has_frame = latest_frame.is_some();
                 drop(surface);
+                apply_pointer_constraint_regions(state, resource);
 
                 state.surface_commit_count = state.surface_commit_count.saturating_add(1);
                 if has_frame {
@@ -15152,7 +15274,7 @@ mod tests {
     use wayland_client::protocol::{
         wl_compositor as client_wl_compositor, wl_pointer as client_wl_pointer,
         wl_registry as client_wl_registry, wl_seat as client_wl_seat,
-        wl_surface as client_wl_surface,
+        wl_region as client_wl_region, wl_surface as client_wl_surface,
     };
     use wayland_client::{Connection, QueueHandle};
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1 as client_locked_pointer;
@@ -15162,8 +15284,8 @@ mod tests {
 
     #[derive(Default)]
     struct PointerProtocolClient {
-        locked: bool,
-        unlocked: bool,
+        locked: u32,
+        unlocked: u32,
         relative_motion: Option<(f64, f64)>,
     }
 
@@ -15186,6 +15308,9 @@ mod tests {
     );
     wayland_client::delegate_noop!(
         PointerProtocolClient: ignore client_wl_surface::WlSurface
+    );
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: ignore client_wl_region::WlRegion
     );
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_seat::WlSeat);
     wayland_client::delegate_noop!(
@@ -15211,8 +15336,12 @@ mod tests {
             _queue: &QueueHandle<Self>,
         ) {
             match event {
-                client_locked_pointer::Event::Locked => state.locked = true,
-                client_locked_pointer::Event::Unlocked => state.unlocked = true,
+                client_locked_pointer::Event::Locked => {
+                    state.locked = state.locked.saturating_add(1);
+                }
+                client_locked_pointer::Event::Unlocked => {
+                    state.unlocked = state.unlocked.saturating_add(1);
+                }
                 _ => {}
             }
         }
@@ -15246,7 +15375,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let mut core = CompositorCore::new().expect("Wayland display");
             core.bind_socket(&server_socket).expect("bind socket");
-            while server_stage.load(Ordering::Acquire) != 4 {
+            while server_stage.load(Ordering::Acquire) != 11 {
                 core.dispatch_once().expect("dispatch client");
                 match server_stage.load(Ordering::Acquire) {
                     1 if core.state.locked_pointers.len() == 1
@@ -15261,7 +15390,25 @@ mod tests {
                         assert_eq!(core.pointer_relative_motion(3.5, -2.25, 3.5, -2.25, 7), 1);
                         server_stage.store(2, Ordering::Release);
                     }
-                    3 => {
+                    3 if core.state.locked_pointers[0]
+                        .data::<PointerConstraintData>()
+                        .expect("lock data")
+                        .region
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending
+                        .is_some() =>
+                    {
+                        assert!(core.pointer_capture_active());
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if !core.pointer_capture_active() => {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.pointer_capture_active() => {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 => {
                         assert_eq!(core.cancel_pointer_capture(), 1);
                         assert!(!core.pointer_capture_active());
                         assert_eq!(core.state.locked_pointers.len(), 1);
@@ -15272,7 +15419,7 @@ mod tests {
                                 .eligible
                                 .load(Ordering::Acquire)
                         );
-                        server_stage.store(5, Ordering::Release);
+                        server_stage.store(10, Ordering::Release);
                     }
                     _ => std::thread::yield_now(),
                 }
@@ -15314,10 +15461,12 @@ mod tests {
         let surface = compositor.create_surface(&queue, ());
         let pointer = seat.get_pointer(&queue, ());
         let _relative = relative_manager.get_relative_pointer(&pointer, &queue, ());
-        let _lock = constraints.lock_pointer(
+        let initial_region = compositor.create_region(&queue, ());
+        initial_region.add(0, 0, 10, 10);
+        let lock = constraints.lock_pointer(
             &surface,
             &pointer,
-            None,
+            Some(&initial_region),
             client_pointer_constraints::Lifetime::Persistent,
             &queue,
             (),
@@ -15328,22 +15477,57 @@ mod tests {
         let mut client = PointerProtocolClient::default();
         for _ in 0..4 {
             events.roundtrip(&mut client).expect("locked roundtrip");
-            if client.locked && client.relative_motion.is_some() {
+            if client.locked == 1 && client.relative_motion.is_some() {
                 break;
             }
         }
-        assert!(client.locked);
+        assert_eq!(client.locked, 1);
         assert_eq!(client.relative_motion, Some((3.5, -2.25)));
 
+        let outside_region = compositor.create_region(&queue, ());
+        outside_region.add(100, 100, 10, 10);
+        lock.set_region(Some(&outside_region));
+        connection.flush().expect("flush pending lock region");
         stage.store(3, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 4 {
+            std::thread::yield_now();
+        }
+        assert_eq!(client.unlocked, 0);
+
+        surface.commit();
+        connection.flush().expect("flush surface commit");
+        stage.store(5, Ordering::Release);
         for _ in 0..4 {
             events.roundtrip(&mut client).expect("unlocked roundtrip");
-            if client.unlocked {
+            if client.unlocked == 1 && stage.load(Ordering::Acquire) == 6 {
                 break;
             }
         }
-        assert!(client.unlocked);
-        stage.store(4, Ordering::Release);
+        assert_eq!(client.unlocked, 1);
+
+        lock.set_region(None);
+        surface.commit();
+        connection.flush().expect("flush full-surface lock region");
+        stage.store(7, Ordering::Release);
+        for _ in 0..4 {
+            events.roundtrip(&mut client).expect("relocked roundtrip");
+            if client.locked == 2 && stage.load(Ordering::Acquire) == 8 {
+                break;
+            }
+        }
+        assert_eq!(client.locked, 2);
+
+        stage.store(9, Ordering::Release);
+        for _ in 0..4 {
+            events
+                .roundtrip(&mut client)
+                .expect("capture escape roundtrip");
+            if client.unlocked == 2 {
+                break;
+            }
+        }
+        assert_eq!(client.unlocked, 2);
+        stage.store(11, Ordering::Release);
         server.join().expect("server thread");
         assert!(!socket.exists());
     }
