@@ -5,7 +5,7 @@ pub mod desktop;
 pub mod elf_profile;
 
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
@@ -64,6 +64,7 @@ const PACKAGE_TRANSACTION_PREVIEW_DIRECTORY: &str = "run/package-transaction-pre
 const PACKAGE_HOOK_OVERRIDE_DIRECTORY: &str = "run/package-hook-overrides-v1";
 const PACKAGE_HOOK_DIRECTORY_ENTRY_LIMIT: usize = 1024;
 const PACKAGE_HOOK_FILE_LIMIT: u64 = 64 * 1024;
+const PACMAN_SCRIPTLET_PATH: &str = "/usr/bin:/bin";
 const PACKAGE_REPLACEMENT_REPAIR_DIRECTORY: &str = "run/package-replacement-repair-v1";
 const PACKAGE_REPLACEMENT_REPAIR_TEMP_DIRECTORY: &str = "run/package-replacement-repair-v1.tmp";
 const PACKAGE_REPLACEMENT_LOCAL_TEMP_DIRECTORY: &str =
@@ -278,6 +279,14 @@ impl PackageTool {
             Self::Gpgv => "@gpgv",
             Self::Gpgconf => "@gpgconf",
         }
+    }
+}
+
+fn executable_path_for_tool(tool: PackageTool, default: &OsStr) -> &OsStr {
+    if tool == PackageTool::Pacman {
+        OsStr::new(PACMAN_SCRIPTLET_PATH)
+    } else {
+        default
     }
 }
 
@@ -3728,7 +3737,6 @@ impl PackageRuntime {
             cache,
             "--noconfirm",
             "--noprogressbar",
-            "--noscriptlet",
         ];
         if !replacement_records.is_empty() {
             transaction_arguments.extend(["--ask", "4"]);
@@ -4017,9 +4025,6 @@ impl PackageRuntime {
                 official_scriptlets |= has_scriptlet;
             }
         }
-        if run_scriptlets && official_scriptlets {
-            return Err(PackageRuntimeError::UnreviewedInstallScript);
-        }
         let removal_records = self.prepare_replacement_repair(&expected_removals)?;
         self.publish_remove_mutation_intent(package, &removal_records)?;
         let config = self
@@ -4044,7 +4049,7 @@ impl PackageRuntime {
             "--noconfirm",
             "--noprogressbar",
         ];
-        if !run_scriptlets {
+        if !run_scriptlets && !official_scriptlets {
             arguments.push("--noscriptlet");
         }
         arguments.extend([if cleanup { "-Rs" } else { "-R" }, package]);
@@ -4199,9 +4204,6 @@ impl PackageRuntime {
                 official_scriptlets |= has_scriptlet;
             }
         }
-        if run_scriptlets && official_scriptlets {
-            return Err(PackageRuntimeError::UnreviewedInstallScript);
-        }
         let mut arguments = vec![
             "--config",
             config,
@@ -4212,7 +4214,7 @@ impl PackageRuntime {
             "--noconfirm",
             "--noprogressbar",
         ];
-        if !run_scriptlets {
+        if !run_scriptlets && !official_scriptlets {
             arguments.push("--noscriptlet");
         }
         arguments.push("-R");
@@ -4362,7 +4364,6 @@ impl PackageRuntime {
                 cache,
                 "--noconfirm",
                 "--noprogressbar",
-                "--noscriptlet",
                 "--ask",
                 "4",
                 "--asdeps",
@@ -4386,7 +4387,6 @@ impl PackageRuntime {
                 self.recover_pending_install_reasons()?;
             }
         }
-
         let mut additions = Vec::with_capacity(rollback.previously_absent.len());
         for name in &rollback.previously_absent {
             if !self.installed_version(name)?.as_bytes().is_empty() {
@@ -4425,7 +4425,6 @@ impl PackageRuntime {
                 database,
                 "--noconfirm",
                 "--noprogressbar",
-                "--noscriptlet",
                 "-R",
             ];
             arguments.extend(additions.iter().copied());
@@ -4440,7 +4439,6 @@ impl PackageRuntime {
                 return Err(error);
             }
         }
-
         self.validate_local_database()?;
         for record in &rollback.archives {
             if self.installed_version(&record.name)?.as_str()? != record.version {
@@ -6006,6 +6004,7 @@ impl PackageRuntime {
             .open(&output_path)?;
         output_file.set_permissions(fs::Permissions::from_mode(0o600))?;
         let error_file = output_file.try_clone()?;
+        let executable_path = executable_path_for_tool(tool, self.executable_path.as_os_str());
 
         let mut child = Command::new(&self.loader)
             .arg("--library-path")
@@ -6016,7 +6015,7 @@ impl PackageRuntime {
             .env_clear()
             .env("HOME", self.arch_root.join("home/archphene"))
             .env("TMPDIR", self.arch_root.join("tmp"))
-            .env("PATH", &self.executable_path)
+            .env("PATH", executable_path)
             .env("LANG", "C")
             .env("LC_ALL", "C")
             .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
@@ -10439,6 +10438,19 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         assert!(!runtime.arm_debug_post_transaction_hold(30_001));
         assert!(runtime.arm_debug_post_transaction_hold(750));
         assert!(!runtime.arm_debug_post_transaction_hold(750));
+    }
+
+    #[test]
+    fn pacman_scriptlets_use_the_conventional_root_command_path() {
+        let packaged_path = OsStr::new("/private/runtime:/private/root/usr/bin");
+        assert_eq!(
+            executable_path_for_tool(PackageTool::Pacman, packaged_path),
+            OsStr::new("/usr/bin:/bin"),
+        );
+        assert_eq!(
+            executable_path_for_tool(PackageTool::Bsdtar, packaged_path),
+            packaged_path,
+        );
     }
 
     impl Drop for TestTree {

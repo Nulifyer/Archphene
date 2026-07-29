@@ -925,16 +925,21 @@ and proves the requested package and version. Real AArch64 and x86_64
 older-to-newer upgrades, including changed dependency sets and reviewed
 package replacement, now pass on both exact ABIs.
 Reviewed AUR lifecycle scripts are enabled under the exact capability described
-above; official-package scriptlets remain disabled. Generic libalpm hooks are
-now isolated through an exact bounded private `HookDir` and replaced after
-official mutation by installed, root-contained trust and desktop-cache
-adapters. Accepted replacements now also pass deterministic manager death
-after their exact snapshot and durable mutation intent are published but before
-pacman begins. Restart exposes Repair at the retained commit boundary; repair
-restores the old record, revalidates the authorized plan, completes signed
-official `curl`, and clears all transaction residue on both exact ABIs. Exact
-rollback, reviewed dependency-orphan cleanup, and retry-to-completion under real
-storage pressure now also pass; whole-operation AUR recovery remains open.
+above. Verified official and exactly reviewed AUR lifecycle scripts now retain
+libalpm's native dependency-ordered per-package pre/mutation/post lifecycle.
+Pacman alone receives the conventional fake-root `PATH=/usr/bin:/bin`, so
+unmodified scripts resolve installed commands through the existing loader and
+path bridge; other packaged tools retain their private absolute command path.
+Generic libalpm hooks remain isolated through an exact bounded private
+`HookDir` and are replaced after official mutation by installed,
+root-contained trust and desktop-cache adapters. Accepted replacements also
+pass deterministic manager death after their exact snapshot and durable
+mutation intent are published but before pacman begins. Restart exposes Repair
+at the retained commit boundary; repair restores the old record, revalidates
+the authorized plan, completes signed official `curl`, and clears all
+transaction residue on both exact ABIs. Exact rollback, reviewed
+dependency-orphan cleanup, and retry-to-completion under real storage pressure
+also pass; whole-operation AUR recovery remains open.
 
 The hook boundary no longer lets pacman discover and execute arbitrary
 root-owned hook commands in the Android fake root. Rust scans at most 1,024
@@ -950,10 +955,19 @@ MIME data, and dconf. Missing subsystem directories are valid for a partial
 Arch root. Adapter failure retains the mutation journal and exact repair
 inputs; this was exercised on Samsung when `update-mime-database` exposed a
 path-translation defect, then repaired through the visible retained Repair
-flow after correction. The reusable gate proves no libalpm hook or scriptlet
+flow after correction. The reusable gate proves no uncontrolled libalpm hook
 ran, all applicable caches have transaction-fresh timestamps, and 24 x86_64
 plus 29 AArch64 hooks are isolated. Normal reviewed dependency cleanup,
 residue checks, and inspected full-device completion pass on both targets.
+
+Official package lifecycle scripts no longer inherit the private Android-host
+command path. The signed `fontconfig` reinstall/repair gate verifies native
+`post_upgrade`, including `vercmp` and the font-cache rebuild, without a
+missing-command or arithmetic failure while preserving exact package version
+and install reason. Native rollback selection comes from libalpm using the
+restored signed archive and the installed forward package record. The remaining
+coverage item is a rollback using a signed older/newer exact-ABI pair whose
+`.INSTALL` supplies observable reverse upgrade/removal behavior.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -1020,8 +1034,9 @@ Accepted replacement interruption and forward Repair also pass from a durable
 pre-pacman boundary on both devices. A separate post-pacman gate proves exact
 signed rollback on both ABIs, including removal of AArch64's newly introduced
 `jemalloc` dependency and restoration of the prior dependency reason.
-Official-package scriptlets and whole-operation AUR recovery remain open, so
-this is not yet a complete production transaction engine.
+The signed script-bearing reverse-scriptlet gate and whole-operation AUR
+recovery remain open, so this is not yet a complete production transaction
+engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16
@@ -1905,9 +1920,9 @@ death, installed with exact script SHA-256
 `c910a24270895767939b23194673d76641432aa107e6e81ca8ad6f7a8fc6e9b7`,
 survived another manager death, removed normally, and pruned the capability.
 Full-device screenshots and the installed/removed UI states were inspected.
-Official-package scriptlets and whole-operation AUR recovery remain open; the
-generic libalpm hook boundary is now isolated behind bounded maintenance
-adapters.
+Official forward scriptlet execution and the generic libalpm hook boundary are
+now covered. A signed script-bearing reverse rollback gate and whole-operation
+AUR recovery remain open.
 
 The AUR pre-install decision surface is now explicitly gated as a complete
 contract rather than by one token per section. Six mutually compact,
@@ -1944,8 +1959,8 @@ explicit Retry persists removal across catalog refresh, opens Android's
 uninstall confirmation, waits for confirmed absence, then opens the trusted
 replacement install confirmation. A real stale emulator Foot identity
 completed that full-device flow and returned to Current. Recursive
-cross-package-base AUR recovery and official-package scriptlet policy remain
-open.
+cross-package-base AUR recovery and signed script-bearing reverse rollback
+coverage remain open.
 
 Split-package build and installation now close the boundary exposed by .NET.
 The Builder returns every required archive instead of only the selected output;

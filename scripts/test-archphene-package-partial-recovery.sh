@@ -5,13 +5,21 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=
 apk=
 damage=filesystem
+target=foot
+target_file_relative=usr/bin/foot
+target_repository=extra
+expected_scriptlet_log=
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --damage) damage="${2:?missing value for --damage}"; shift 2 ;;
+    --package) target="${2:?missing value for --package}"; shift 2 ;;
+    --file) target_file_relative="${2:?missing value for --file}"; shift 2 ;;
+    --repository) target_repository="${2:?missing value for --repository}"; shift 2 ;;
+    --expected-scriptlet-log) expected_scriptlet_log="${2:?missing value for --expected-scriptlet-log}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH [--damage filesystem|database|database-multi]"
+      echo "usage: $0 --serial SERIAL --apk PATH [--damage filesystem|database|database-multi] [--package NAME --file ROOT_RELATIVE_FILE --repository core|extra] [--expected-scriptlet-log TEXT]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -21,6 +29,13 @@ done
 [[ -n "$apk" ]] || archphene_die "--apk is required"
 [[ "$damage" == filesystem || "$damage" == database || "$damage" == database-multi ]] ||
   archphene_die "--damage must be filesystem, database, or database-multi"
+[[ "$target" =~ ^[a-zA-Z0-9@._+-]{1,128}$ ]] ||
+  archphene_die "invalid target package"
+[[ "$target_file_relative" =~ ^[a-zA-Z0-9@._+/-]{1,1024}$ &&
+  "$target_file_relative" != /* && "$target_file_relative" != *".."* ]] ||
+  archphene_die "invalid target file"
+[[ "$target_repository" == core || "$target_repository" == extra ]] ||
+  archphene_die "--repository must be core or extra"
 
 archphene_test_init "$serial"
 archphene_require_file "$apk"
@@ -31,11 +46,11 @@ seed_action=org.archphene.app.debug.action.SEED_PACKAGE_JOB
 root=files/arch-root
 local_database="$root/var/lib/pacman/local"
 cache="$root/var/cache/pacman/pkg"
+pacman_log="$root/var/log/pacman.log"
 intent="$root/run/package-mutation-v1"
 reason_intent="$root/run/package-install-reasons-v1"
-target=foot
-target_file="$root/usr/bin/foot"
-backup_root="files/test-fixtures/foot-partial-recovery-$serial"
+target_file="$root/$target_file_relative"
+backup_root="files/test-fixtures/$target-partial-recovery-$serial"
 file_backup="$backup_root/executable"
 database_backup="$backup_root/database"
 base_database_backup="$backup_root/base-database"
@@ -107,6 +122,10 @@ archphene_adb_run shell run-as "$manager" test ! -e "$intent" ||
   archphene_die "an existing package mutation must be repaired first"
 archphene_adb_run shell run-as "$manager" test ! -e "$reason_intent" ||
   archphene_die "an existing install-reason intent must be repaired first"
+pacman_log_lines_before="$(
+  archphene_adb_run exec-out run-as "$manager" cat "$pacman_log" 2>/dev/null |
+    wc -l
+)"
 
 device_abi="$(archphene_adb_run shell getprop ro.product.cpu.abi | tr -d '\r')"
 case "$device_abi" in
@@ -144,8 +163,8 @@ package_record() {
       tr -d '\r' |
       awk '/^%REASON%$/{getline; print; exit}'
   )"
-  [[ -z "$reason" ]] ||
-    archphene_die "$package_name must be explicit for this recovery fixture"
+  [[ -z "$reason" || "$reason" == 1 ]] ||
+    archphene_die "$package_name has an invalid install reason"
   archive="$(
     archphene_adb_run exec-out run-as "$manager" find "$cache" \
       -maxdepth 1 -type f -name "$package_name-$version-*.pkg.tar.*" \
@@ -163,16 +182,29 @@ package_record() {
 }
 
 base_record="$(package_record base core "$core_prefix")"
-target_record="$(package_record "$target" extra "$extra_prefix")"
+if [[ "$target_repository" == core ]]; then
+  target_record="$(package_record "$target" core "$core_prefix")"
+else
+  target_record="$(package_record "$target" extra "$extra_prefix")"
+fi
 base_version="$(cut -f3 <<<"$base_record")"
 target_version="$(cut -f3 <<<"$target_record")"
 base_entry="$local_database/base-$base_version"
 target_entry="$local_database/$target-$target_version"
+original_target_reason="$(
+  archphene_adb_run exec-out run-as "$manager" cat "$target_entry/desc" |
+    tr -d '\r' |
+    awk '/^%REASON%$/{getline; print; exit}'
+)"
+[[ -z "$original_target_reason" || "$original_target_reason" == 1 ]] ||
+  archphene_die "$target has an invalid install reason"
 intent_content="$(
   printf 'org.archphene.package-mutation.v1\n'
   printf 'install\t%s\n' "$target"
   printf 'explicit\tbase\n'
-  printf 'explicit\t%s\n' "$target"
+  if [[ -z "$original_target_reason" ]]; then
+    printf 'explicit\t%s\n' "$target"
+  fi
   printf 'archive\t%s\n' "$base_record"
   printf 'archive\t%s\n' "$target_record"
 )"
@@ -180,7 +212,9 @@ intent_content+=$'\n'
 reason_content="$(
   printf 'org.archphene.package-install-reasons.v1\n'
   printf 'base\n'
-  printf '%s\n' "$target"
+  if [[ -z "$original_target_reason" ]]; then
+    printf '%s\n' "$target"
+  fi
 )"
 reason_content+=$'\n'
 
@@ -292,13 +326,28 @@ target_reason="$(
     tr -d '\r' |
     awk '/^%REASON%$/{getline; print; exit}'
 )"
-[[ -z "$target_reason" ]] ||
-  archphene_die "Repair changed $target from explicit to dependency"
+[[ "$target_reason" == "$original_target_reason" ]] ||
+  archphene_die "Repair changed $target install reason"
 for residue in "$intent" "$intent.tmp" "$reason_intent" "$reason_intent.tmp" \
   "$root/run/package-database-repair-v1" \
   "$root/var/lib/pacman/db.lck"; do
   archphene_adb_run shell run-as "$manager" test ! -e "$residue" ||
     archphene_die "Repair left transaction residue: $residue"
+done
+new_pacman_log="$(
+  archphene_adb_run exec-out run-as "$manager" cat "$pacman_log" |
+    tail -n "+$((pacman_log_lines_before + 1))"
+)"
+if [[ -n "$expected_scriptlet_log" ]] &&
+    ! grep -F "$expected_scriptlet_log" <<<"$new_pacman_log" >/dev/null; then
+  archphene_die "Repair did not execute the expected signed package scriptlet"
+fi
+for rejected_scriptlet_log in \
+  'command not found' 'arithmetic syntax error' 'command failed to execute correctly'; do
+  if grep -F "$rejected_scriptlet_log" <<<"$new_pacman_log" >/dev/null; then
+    archphene_die \
+      "Repair scriptlet command environment failed: $rejected_scriptlet_log"
+  fi
 done
 partial="$(
   archphene_adb_run exec-out run-as "$manager" find "$cache" \
