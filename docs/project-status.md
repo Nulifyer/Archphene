@@ -155,13 +155,16 @@ descriptors while preserving visually inspected output.
 
 At 840 dp and wider, the same stateful controls are composed once into a
 persistent navigation rail, a two-column package workspace, side-by-side file
-actions, and a terminal surface that consumes the remaining display. A
-reversible emulator gate switches to tablet and external-display-sized Android
-configurations, verifies the accessibility geometry, rotates the Activity,
-captures full-device views of every section, restores the original display
-settings, and proves the normal phone branch still passes. A physical Samsung
-DeX/external-display audit and populated package/active-shell visual audits
-remain planned; this clean-data pass did not download packages.
+actions, and a terminal surface that consumes the remaining display. Package
+review actions and package mutation actions occupy two semantic rows with
+single-line labels and full touch targets, preventing the physical Samsung's
+former mid-word Remove wrapping without shrinking accessible text. A reversible
+gate switches both maintained devices to tablet and external-display-sized
+Android configurations, verifies accessibility geometry, rotates the Activity,
+and captures full-device views of every section. It restores the complete
+Archphene sandbox, prior section/running state, display overrides, and rotation;
+it does not download packages. A physical Samsung DeX/external-display audit
+with live display moves remains planned.
 
 The latest bounded Rust package-journal record is now exposed as stable Binder
 fields rather than reparsed UI text. Packages renders it as a recent-activity

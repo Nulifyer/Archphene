@@ -397,6 +397,20 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     }
                 }
             }
+        val packageActionButtons =
+            arrayOf(
+                searchButton,
+                detailsButton,
+                aurReviewButton,
+                installButton,
+                removeButton,
+            )
+        packageActionButtons.forEach { button ->
+            button.maxLines = 1
+            button.ellipsize = TextUtils.TruncateAt.END
+            button.minWidth = 0
+            button.minimumWidth = 0
+        }
         searchInput.addTextChangedListener(
             object : TextWatcher {
                 override fun beforeTextChanged(
@@ -432,44 +446,64 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
         val actionRow =
             LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
+                orientation = LinearLayout.VERTICAL
                 addView(
-                    searchButton,
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(
+                            searchButton,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            detailsButton,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            aurReviewButton,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                    },
                     LinearLayout.LayoutParams(
-                        0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
                         1f,
                     ),
                 )
                 addView(
-                    detailsButton,
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(
+                            installButton,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            removeButton,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                    },
                     LinearLayout.LayoutParams(
-                        0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        1f,
-                    ),
-                )
-                addView(
-                    aurReviewButton,
-                    LinearLayout.LayoutParams(
                         0,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        1f,
-                    ),
-                )
-                addView(
-                    installButton,
-                    LinearLayout.LayoutParams(
-                        0,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        1f,
-                    ),
-                )
-                addView(
-                    removeButton,
-                    LinearLayout.LayoutParams(
-                        0,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
                         1f,
                     ),
                 )
@@ -1401,7 +1435,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 actionRow,
                                 LinearLayout.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
-                                    dp(64),
+                                    dp(112),
                                 ),
                             )
                         },
@@ -1469,7 +1503,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         actionRow,
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
-                            dp(56),
+                            dp(112),
                         ),
                     )
                     addView(

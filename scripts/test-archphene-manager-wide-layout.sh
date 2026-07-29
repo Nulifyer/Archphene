@@ -4,16 +4,14 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
-clean_data=false
 skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
-    --clean-data) clean_data=true; shift ;;
     --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk] --clean-data"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -23,14 +21,17 @@ done
 if [[ "$skip_install" == false ]]; then
   [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
 fi
-[[ "$clean_data" == true ]] ||
-  archphene_die "--clean-data is required because this gate clears Archphene app data"
 
 archphene_test_init "$serial"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 output_dir="$ARCHPHENE_ROOT/tooling/build/manager-wide-layout"
 mkdir -p "$output_dir"
+initially_running=false
+original_section=
+if archphene_adb_run shell pidof "$package" >/dev/null 2>&1; then
+  initially_running=true
+fi
 
 initial_size_output="$(archphene_adb_run shell wm size | tr -d '\r')"
 initial_density_output="$(archphene_adb_run shell wm density | tr -d '\r')"
@@ -52,6 +53,7 @@ initial_user_rotation="$(
   archphene_die "unexpected user rotation setting: $initial_user_rotation"
 
 cleanup() {
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
   if [[ -n "$initial_size_override" ]]; then
     archphene_adb_run shell wm size "$initial_size_override" >/dev/null 2>&1 || true
   else
@@ -66,9 +68,60 @@ cleanup() {
     "$initial_accelerometer_rotation" >/dev/null 2>&1 || true
   archphene_adb_run shell settings put system user_rotation \
     "$initial_user_rotation" >/dev/null 2>&1 || true
-  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  if [[ -n "$original_section" ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+    local ui
+    ui="$(archphene_capture_ui "manager-wide-restore-$serial" 2>/dev/null || true)"
+    if archphene_regex_contains \
+      "$ui" "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\""; then
+      archphene_tap_ui_pattern \
+        "$ui" \
+        "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+        "$original_section" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ "$initially_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
+
+assert_restored() {
+  [[ "$(archphene_adb_run shell wm size | tr -d '\r')" == "$initial_size_output" ]] ||
+    archphene_die "wide-layout gate did not restore the exact display size"
+  [[ "$(archphene_adb_run shell wm density | tr -d '\r')" == "$initial_density_output" ]] ||
+    archphene_die "wide-layout gate did not restore the exact display density"
+  [[ "$(
+    archphene_adb_run shell settings get system accelerometer_rotation | tr -d '\r'
+  )" == "$initial_accelerometer_rotation" ]] ||
+    archphene_die "wide-layout gate did not restore automatic rotation"
+  [[ "$(
+    archphene_adb_run shell settings get system user_rotation | tr -d '\r'
+  )" == "$initial_user_rotation" ]] ||
+    archphene_die "wide-layout gate did not restore user rotation"
+
+  if [[ -n "$original_section" ]]; then
+    if [[ "$initially_running" == false ]]; then
+      archphene_adb_run shell am start -W -n "$activity" >/dev/null
+    fi
+    local restored_ui
+    restored_ui="$(archphene_capture_ui "manager-wide-restored-$serial")"
+    archphene_regex_contains \
+      "$restored_ui" \
+      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"[^>]*selected=\"true\"" ||
+      archphene_die "wide-layout gate did not restore manager section $original_section"
+    if [[ "$initially_running" == false ]]; then
+      archphene_adb_run shell am force-stop "$package" >/dev/null
+    fi
+  fi
+  if [[ "$initially_running" == true ]]; then
+    archphene_adb_run shell pidof "$package" >/dev/null ||
+      archphene_die "wide-layout gate did not restore the running manager"
+  else
+    ! archphene_adb_run shell pidof "$package" >/dev/null 2>&1 ||
+      archphene_die "wide-layout gate left the manager running"
+  fi
+}
 
 assert_package_geometry() {
   python3 -c '
@@ -86,6 +139,13 @@ def center(text, class_name):
         return ((values[0] + values[2]) // 2, (values[1] + values[3]) // 2)
     raise SystemExit(f"missing {class_name} node: {text}")
 
+def bounds(text, class_name):
+    for node in root.iter("node"):
+        if node.attrib.get("text") != text or node.attrib.get("class") != class_name:
+            continue
+        return tuple(map(int, re.findall(r"\d+", node.attrib["bounds"])))
+    raise SystemExit(f"missing {class_name} node: {text}")
+
 navigation = [
     center("Packages", "android.widget.Button"),
     center("Files", "android.widget.Button"),
@@ -100,6 +160,26 @@ search = center("Package name", "android.widget.EditText")
 results = center("Package results and activity", "android.widget.TextView")
 if results[0] <= search[0] + 240:
     raise SystemExit("wide package results are not in a distinct right pane")
+
+review_actions = [
+    center("Search", "android.widget.Button"),
+    center("Details", "android.widget.Button"),
+    center("AUR", "android.widget.Button"),
+]
+mutation_actions = [
+    center("Install", "android.widget.Button"),
+    center("Remove", "android.widget.Button"),
+]
+if max(point[1] for point in review_actions) - min(point[1] for point in review_actions) > 8:
+    raise SystemExit("package review actions are not in one row")
+if max(point[1] for point in mutation_actions) - min(point[1] for point in mutation_actions) > 8:
+    raise SystemExit("package mutation actions are not in one row")
+if mutation_actions[0][1] <= review_actions[0][1] + 48:
+    raise SystemExit("package mutation actions are not in a distinct second row")
+for label in ("Search", "Details", "AUR", "Install", "Remove"):
+    left, top, right, bottom = bounds(label, "android.widget.Button")
+    if right - left < 96 or bottom - top < 64:
+        raise SystemExit(f"package action touch target is too small: {label}")
 ' <<<"$ARCHPHENE_UI"
 }
 
@@ -135,7 +215,6 @@ fi
 archphene_adb_run shell pm path "$package" >/dev/null ||
   archphene_die "$package is not installed; pass --install-apk with --apk"
 archphene_adb_run shell am force-stop "$package" >/dev/null
-archphene_adb_run shell pm clear "$package" >/dev/null
 archphene_adb_run shell wm size 1600x2560 >/dev/null
 archphene_adb_run shell wm density 240 >/dev/null
 archphene_adb_run shell settings put system accelerometer_rotation 0 >/dev/null
@@ -143,8 +222,26 @@ archphene_adb_run shell settings put system user_rotation 0 >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
-archphene_skip_storage_onboarding "manager-wide-onboarding-$serial"
+initial_ui="$(archphene_capture_ui "manager-wide-initial-$serial")"
+if archphene_regex_contains "$initial_ui" 'text="Connect Android files\?"'; then
+  archphene_die \
+    "manager onboarding is incomplete; complete it before the state-preserving wide-layout gate"
+fi
+original_section="$(
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal", "Settings"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$initial_ui"
+)"
 
+archphene_open_manager_section Packages "manager-wide-packages-section-$serial"
 archphene_wait_ui_exact_text \
   "Package results and activity" "manager-wide-packages-$serial" 20
 assert_package_geometry
@@ -184,6 +281,7 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 
 trap - EXIT
 cleanup
+assert_restored
 archphene_note "Archphene wide manager layout passed on $serial"
 archphene_note "  Navigation rail, two-pane packages, side-by-side files, and rotation passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{tablet-packages,tablet-files,tablet-terminal,external-display-terminal,external-display-packages}.png"
