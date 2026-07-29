@@ -56,6 +56,7 @@ internal object NativeRuntime {
     const val PACKAGE_COMMAND_AVAILABLE_VERSION_STATE = 9
     const val PACKAGE_COMMAND_AUR_CANDIDATE_STATE = 10
     const val PACKAGE_COMMAND_INSTALL_PLAN = 11
+    const val PACKAGE_COMMAND_AUTHORIZE_INSTALL_PLAN = 12
     const val JOB_QUEUED = 1
     const val JOB_RESOLVING = 2
     const val JOB_DOWNLOADING = 3

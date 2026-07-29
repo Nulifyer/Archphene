@@ -56,19 +56,4 @@ class PackageInstallPlanCodecTest {
             )
         }
     }
-
-    @Test
-    fun replacement_failure_is_explicitly_non_mutating() {
-        assertEquals(
-            "Replacement confirmation is required: would remove old-name 1.0-1. " +
-                "No Linux packages were changed.",
-            PackageFailureDiagnostics.install(
-                PackageReplacementReviewRequiredException(
-                    listOf(PlannedPackageRemoval("old-name", "1.0-1")),
-                ),
-                mutationStarted = false,
-                installedStateRefreshed = true,
-            ),
-        )
-    }
 }

@@ -143,6 +143,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var launcherPermissionDialog: AlertDialog? = null
     private var launcherCancellationDialog: AlertDialog? = null
     private var launcherReviewDialog: AlertDialog? = null
+    private var packageReplacementDialog: AlertDialog? = null
     private var packageCacheDialog: AlertDialog? = null
     private var packageCacheDialogRequested = false
     private var packageCacheRequestedRevision = Int.MIN_VALUE
@@ -1933,6 +1934,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         launcherReviewDialog?.setOnDismissListener(null)
         launcherReviewDialog?.dismiss()
         launcherReviewDialog = null
+        packageReplacementDialog?.setOnDismissListener(null)
+        packageReplacementDialog?.dismiss()
+        packageReplacementDialog = null
         packageCacheDialog?.setOnDismissListener(null)
         packageCacheDialog?.dismiss()
         packageCacheDialog = null
@@ -2234,11 +2238,53 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         )
         updatePackageActivity()
         updatePackageActions()
+        maybeShowPackageReplacementReview()
         maybeShowPackageCache()
         maybeShowStorageOnboarding()
         maybeShowLauncherCancellation()
         maybeShowLauncherReview()
         maybeShowLauncherPermission()
+    }
+
+    private fun maybeShowPackageReplacementReview() {
+        val binder = runtimeBinder ?: return
+        if (!binder.packageReplacementReviewAvailable) {
+            packageReplacementDialog?.dismiss()
+            return
+        }
+        if (
+            packageReplacementDialog != null ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.package_replacement_title)
+                .setMessage(
+                    getString(
+                        R.string.package_replacement_message,
+                        binder.packageJobName,
+                        binder.packageReplacementReviewText,
+                    ),
+                )
+                .setNegativeButton(android.R.string.cancel) { _, _ ->
+                    binder.cancelPackageOperation()
+                }
+                .setPositiveButton(R.string.package_replacement_confirm) { _, _ ->
+                    binder.authorizePackageReplacement()
+                }
+                .create()
+        dialog.setCancelable(false)
+        dialog.setOnDismissListener {
+            if (packageReplacementDialog === dialog) {
+                packageReplacementDialog = null
+            }
+        }
+        packageReplacementDialog = dialog
+        dialog.show()
     }
 
     private fun updateDebugRuntimeEvidence() {

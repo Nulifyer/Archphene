@@ -442,6 +442,25 @@ class ArchpheneRuntimeService : Service() {
         val packageCompatibilityReviewActive: Boolean
             get() = packageResolutionThread != null
 
+        val packageReplacementReviewAvailable: Boolean
+            get() =
+                packageOperationActive &&
+                    jobState == NativeRuntime.JOB_AWAITING_CONFIRMATION &&
+                    pendingPackageReplacements.isNotEmpty() &&
+                    !packageReplacementAuthorized
+
+        val packageReplacementReviewText: String
+            get() =
+                pendingPackageReplacements.joinToString(
+                    separator = "\n",
+                ) { removal ->
+                    getString(
+                        R.string.package_replacement_item,
+                        removal.name,
+                        removal.version,
+                    )
+                }
+
         val packageRecoveryAvailable: Boolean
             get() =
                 jobPackage.isNotEmpty() &&
@@ -651,6 +670,8 @@ class ArchpheneRuntimeService : Service() {
             requestPackageRemoval(packageName)
 
         fun cancelPackageOperation(): Boolean = requestPackageCancellation()
+
+        fun authorizePackageReplacement(): Boolean = requestPackageReplacementAuthorization()
 
         fun repairPackageMutation(): Boolean = requestPackageMutationRepair()
 
@@ -1127,6 +1148,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var packageOperationActive = false
     @Volatile private var packageOperationCancelable = false
     @Volatile private var packageCancellationRequested = false
+    private val packageReplacementLock = Object()
+    @Volatile private var pendingPackageReplacements: List<PlannedPackageRemoval> = emptyList()
+    @Volatile private var packageReplacementAuthorized = false
     @Volatile private var activePackageConnection: HttpsURLConnection? = null
     @Volatile private var commandActive = false
     @Volatile private var storageDocumentActive = false
@@ -11547,6 +11571,8 @@ class ArchpheneRuntimeService : Service() {
             }
         jobPersistentId = 0L
         packageCancellationRequested = false
+        pendingPackageReplacements = emptyList()
+        packageReplacementAuthorized = false
         packageOperationCancelable = true
         packageOperationActive = true
         publishPackageJob(
@@ -12418,7 +12444,29 @@ class ArchpheneRuntimeService : Service() {
                         val installPlan =
                             packageInstallPlan(activeHandle, normalized, scratch)
                         if (installPlan.isNotEmpty()) {
-                            throw PackageReplacementReviewRequiredException(installPlan)
+                            pendingPackageReplacements = installPlan
+                            record(
+                                NativeRuntime.JOB_AWAITING_CONFIRMATION,
+                                3,
+                                96,
+                                "Review ${installPlan.size} package removal" +
+                                    if (installPlan.size == 1) "" else "s",
+                            )
+                            synchronized(packageReplacementLock) {
+                                while (
+                                    !packageReplacementAuthorized &&
+                                    !packageCancellationRequested
+                                ) {
+                                    packageReplacementLock.wait()
+                                }
+                            }
+                            throwIfPackageCancelled()
+                            runPackageCommand(
+                                activeHandle,
+                                NativeRuntime.PACKAGE_COMMAND_AUTHORIZE_INSTALL_PLAN,
+                                normalized,
+                                scratch,
+                            )
                         }
                         if (!enterPackageCommit()) {
                             throw InterruptedException("Package operation cancelled")
@@ -12555,6 +12603,8 @@ class ArchpheneRuntimeService : Service() {
                         activePackageConnection = null
                         packageOperationCancelable = false
                         packageCancellationRequested = false
+                        pendingPackageReplacements = emptyList()
+                        packageReplacementAuthorized = false
                         packageOperationActive = false
                         packageThread = null
                         stopWhenUnobservedAndIdle()
@@ -14471,6 +14521,22 @@ class ArchpheneRuntimeService : Service() {
         return true
     }
 
+    private fun requestPackageReplacementAuthorization(): Boolean {
+        synchronized(packageReplacementLock) {
+            if (
+                !packageOperationActive ||
+                jobState != NativeRuntime.JOB_AWAITING_CONFIRMATION ||
+                pendingPackageReplacements.isEmpty() ||
+                packageReplacementAuthorized
+            ) {
+                return false
+            }
+            packageReplacementAuthorized = true
+            packageReplacementLock.notifyAll()
+            return true
+        }
+    }
+
     private fun throwIfPackageCancelled() {
         if (packageCancellationRequested || Thread.currentThread().isInterrupted) {
             throw InterruptedException("Package operation cancelled")
@@ -14614,7 +14680,7 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_PUBLISHING -> "Publishing"
             NativeRuntime.JOB_BUILDING -> "Building"
             NativeRuntime.JOB_INSTALLING -> "Installing"
-            NativeRuntime.JOB_AWAITING_CONFIRMATION -> "Awaiting Android confirmation"
+            NativeRuntime.JOB_AWAITING_CONFIRMATION -> "Awaiting confirmation"
             NativeRuntime.JOB_COMPLETE -> "Complete"
             NativeRuntime.JOB_FAILED -> "Failed"
             NativeRuntime.JOB_CANCELLED -> "Cancelled"

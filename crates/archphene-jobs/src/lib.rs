@@ -107,6 +107,7 @@ impl JobState {
                     Self::Publishing
                         | Self::Building
                         | Self::Installing
+                        | Self::AwaitingConfirmation
                         | Self::Cancelled
                         | Self::Failed
                 )
@@ -130,7 +131,10 @@ impl JobState {
                 )
             }
             Self::AwaitingConfirmation => {
-                matches!(next, Self::Complete | Self::Cancelled | Self::Failed)
+                matches!(
+                    next,
+                    Self::Installing | Self::Complete | Self::Cancelled | Self::Failed
+                )
             }
             Self::Complete | Self::Failed | Self::Cancelled => false,
         }

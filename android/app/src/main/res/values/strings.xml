@@ -165,6 +165,10 @@
     <string name="package_job_empty">No package transaction</string>
     <string name="package_activity_heading">Recent package activity</string>
     <string name="package_job_unavailable">Package operation unavailable</string>
+    <string name="package_replacement_title">Confirm package replacement</string>
+    <string name="package_replacement_item">Remove %1$s %2$s</string>
+    <string name="package_replacement_message">Installing %1$s requires these removals:\n\n%2$s\n\nThe apps share one Arch environment. Continue only if these changes are expected.</string>
+    <string name="package_replacement_confirm">Replace</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>
     <string name="package_search_official">Official</string>
     <string name="package_search_installed">Installed</string>

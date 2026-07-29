@@ -31,19 +31,6 @@ internal data class PlannedPackageRemoval(
     val version: String,
 )
 
-internal class PackageReplacementReviewRequiredException(
-    val removals: List<PlannedPackageRemoval>,
-) : IllegalStateException(
-        removals.joinToString(
-            prefix = "would remove ",
-            separator = ", ",
-        ) { removal -> "${removal.name} ${removal.version}" },
-) {
-    init {
-        require(removals.isNotEmpty() && removals.size <= 48)
-    }
-}
-
 internal object PackageInstallPlanCodec {
     private val packageName = Regex("[A-Za-z0-9@+._-]{1,128}")
 
@@ -136,9 +123,6 @@ internal object PackageFailureDiagnostics {
         return when {
             error is UnsupportedPackageCompatibilityException ->
                 "Unsupported on this device: $detail. No Linux packages were changed."
-            error is PackageReplacementReviewRequiredException ->
-                "Replacement confirmation is required: $detail. " +
-                    "No Linux packages were changed."
             error is InsufficientPackageStorageException ->
                 "Not enough Linux storage: " +
                     "${formatStorageBytes(error.requiredBytes)} is required and " +

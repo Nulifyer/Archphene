@@ -814,11 +814,10 @@ allowing mutation. A cache-only gate verifies installed `btop` through that
 archive preflight without rewriting or downloading package payloads on the
 x86_64 emulator and AArch64 Samsung.
 
-A focused host contract found the remaining replacement boundary: local
+A focused host contract found the replacement boundary: local
 `-U --print` does not report an installed package that a conflict-accepting
 transaction would remove. Archphene's ordinary `--noconfirm` transaction fails
-that conflict closed, so it cannot silently replace a package, but reviewed
-replacement support is not implemented. The contract proves that an isolated
+that conflict closed, so it cannot silently replace a package. The contract proves that an isolated
 `--dbonly --ask 4` transaction against a copied local database exposes the
 exact replacement while leaving live state unchanged.
 
@@ -828,13 +827,27 @@ accepts only unchanged installed records plus additions/upgrades matching the
 exact archive set, derives every removed name/version, limits the returned plan
 to 48 removals, and deletes the preview database on every success, failure, or
 runtime restart.
-Kotlin parses a versioned strict plan and, while consent/recovery is unfinished,
-blocks any nonempty removal plan before the package commit boundary with an
-explicit “replacement confirmation is required” result. Normal
-changed-dependency updates pass this new preflight on both exact ABIs and leave
-no preview state. Presenting the removal plan for user consent, snapshotting the
-removed ownership records, binding the plan into durable recovery, and enabling
-conflict acceptance in the live transaction remain open.
+Kotlin strictly parses the versioned plan and parks the cancellable worker in a
+durable Awaiting confirmation state. A blocking Android review names every
+installed package/version that would be removed, explains the shared Arch
+environment, and offers Cancel or explicit Replace. Approval marks a
+single-use native capability bound to the exact package resolution and removal
+set. Rust then re-resolves, re-verifies, and re-simulates the transaction
+immediately before mutation; any change fails closed. It atomically snapshots
+each removed pacman ownership record, binds its canonical SHA-256 into the
+durable mutation intent, and only then enables pacman's exact conflict-
+acceptance bit. Repair verifies and restores missing or damaged retained
+records before replaying the same plan forward. Successful completion proves
+the requested version and every consented removal, then clears the intent and
+bounded snapshots.
+
+A controlled exact-ABI device gate establishes `wcurl 0.0-1` as an installed
+conflict baseline, then installs current signed official `curl 8.21.0-1`
+through the ordinary manager path. The emulator and physical Samsung both show
+the exact `wcurl` removal with Cancel/Replace, commit only after Replace,
+immediately reconcile curl as Installed, and leave no preview database,
+mutation intent, recovery snapshot, lock, partial payload, or fatal log.
+Full-device light/dark review and completion captures were visually inspected.
 
 Pacman commits the complete prepared archive set through one normal
 dependency-checking transaction; the former per-package `--nodeps` and
@@ -894,13 +907,13 @@ UID, copies when SELinux rejects hard links, avoids Android app seccomp's
 blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. Real AArch64 and x86_64
-older-to-newer upgrades, including changed dependency sets, now pass; reviewed
-package replacement remains open.
+older-to-newer upgrades, including changed dependency sets and reviewed
+package replacement, now pass on both exact ABIs.
 Reviewed AUR lifecycle scripts are enabled under the exact capability described
 above; official-package scriptlets remain disabled, and generic hook policy is
-still open. Replacement handling, exact rollback, whole-operation AUR recovery,
-dependency-orphan cleanup, and retry-to-completion under real storage pressure
-remain open.
+still open. Replacement interruption injection, exact rollback,
+whole-operation AUR recovery, dependency-orphan cleanup, and retry-to-completion
+under real storage pressure remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -956,9 +969,10 @@ rejection, redownload and reverify it, remove the package conservatively, prove
 its executable and database entry are gone, reinstall from the verified cache,
 and prove the durable Complete result survives manager process death. Full-
 device screenshots also verify the responsive closure view and state-driven
-actions. Physical AArch64 and emulated x86_64 older-to-newer and
-changed-dependency updates now pass. Reviewed replacement handling,
-hooks/scriptlets, closure-wide rollback, orphan cleanup, and a
+actions. Physical AArch64 and emulated x86_64 older-to-newer,
+changed-dependency, and reviewed replacement transactions now pass.
+Hooks/scriptlets, replacement interruption injection, closure-wide rollback,
+orphan cleanup, and a
 real-storage-pressure retry-to-completion gate remain open, so this is not yet
 a complete production transaction engine.
 

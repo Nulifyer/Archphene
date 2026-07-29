@@ -61,6 +61,10 @@ const PACKAGE_MUTATION_INTENT_HEADER: &str = "org.archphene.package-mutation.v1"
 const PACKAGE_MUTATION_INTENT_LIMIT: u64 = 384 * 1024;
 const PACKAGE_DATABASE_REPAIR_DIRECTORY: &str = "run/package-database-repair-v1";
 const PACKAGE_TRANSACTION_PREVIEW_DIRECTORY: &str = "run/package-transaction-preview-v1";
+const PACKAGE_REPLACEMENT_REPAIR_DIRECTORY: &str = "run/package-replacement-repair-v1";
+const PACKAGE_REPLACEMENT_REPAIR_TEMP_DIRECTORY: &str = "run/package-replacement-repair-v1.tmp";
+const PACKAGE_REPLACEMENT_LOCAL_TEMP_DIRECTORY: &str =
+    "var/lib/pacman/local/.archphene-replacement-repair.tmp";
 const PACKAGE_REMOVAL_REPAIR_DIRECTORY: &str = "run/package-removal-repair-v1";
 const PACKAGE_REMOVAL_REPAIR_TEMP_DIRECTORY: &str = "run/package-removal-repair-v1.tmp";
 const PACKAGE_REMOVAL_LOCAL_TEMP_DIRECTORY: &str =
@@ -426,6 +430,7 @@ pub struct PackageRuntime {
     qt_plugin_root: Option<PathBuf>,
     compatibility_analysis: Arc<Mutex<()>>,
     compatibility_review: Arc<Mutex<Option<PackageCompatibilityReview>>>,
+    replacement_review: Arc<Mutex<Option<PackageReplacementReview>>>,
 }
 
 #[derive(Debug)]
@@ -618,6 +623,14 @@ struct PackageArchiveAnalysis {
 struct PackageCompatibilityReview {
     package: String,
     resolution_sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PackageReplacementReview {
+    package: String,
+    resolution_sha256: [u8; 32],
+    removals: Vec<InstalledPackageIdentity>,
+    authorized: bool,
 }
 
 struct InstalledPackage {
@@ -1088,10 +1101,12 @@ impl PackageRuntime {
             qt_plugin_root,
             compatibility_analysis: Arc::new(Mutex::new(())),
             compatibility_review: Arc::new(Mutex::new(None)),
+            replacement_review: Arc::new(Mutex::new(None)),
         };
         runtime.clear_transaction_preview_database()?;
         if runtime.read_pending_mutation()?.is_none() {
             runtime.clear_orphaned_removal_repair()?;
+            runtime.clear_replacement_repair()?;
             runtime.recover_pending_install_reasons()?;
         }
         Ok(runtime)
@@ -1796,6 +1811,62 @@ impl PackageRuntime {
         Ok(())
     }
 
+    fn publish_package_replacement_review(
+        &self,
+        package: &str,
+        resolution: &PackageResolution,
+        removals: &[InstalledPackageIdentity],
+    ) -> Result<(), PackageRuntimeError> {
+        let review = PackageReplacementReview {
+            package: package.to_owned(),
+            resolution_sha256: Sha256::digest(resolution.as_bytes()).into(),
+            removals: removals.to_vec(),
+            authorized: removals.is_empty(),
+        };
+        self.replacement_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?
+            .replace(review);
+        Ok(())
+    }
+
+    pub fn authorize_install_plan(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let mut review = self
+            .replacement_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+        let review = review
+            .as_mut()
+            .filter(|review| review.package == package && !review.removals.is_empty())
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        review.authorized = true;
+        Ok(empty_tool_output())
+    }
+
+    fn consume_package_replacement_review(
+        &self,
+        package: &str,
+        resolution: &PackageResolution,
+    ) -> Result<Vec<InstalledPackageIdentity>, PackageRuntimeError> {
+        let review = self
+            .replacement_review
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?
+            .take()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let resolution_sha256: [u8; 32] = Sha256::digest(resolution.as_bytes()).into();
+        if review.package != package
+            || review.resolution_sha256 != resolution_sha256
+            || !review.authorized
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(review.removals)
+    }
+
     fn prepare_fresh_resolution_database(&self) -> Result<PathBuf, PackageRuntimeError> {
         let database = self.arch_root.join(AUR_BUILD_DATABASE_DIRECTORY);
         match fs::symlink_metadata(&database) {
@@ -2317,12 +2388,15 @@ impl PackageRuntime {
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
         self.consume_package_compatibility_review(package, &resolution)?;
+        let replacements = self.consume_package_replacement_review(package, &resolution)?;
         if package == BASE_PACKAGE {
             self.install_resolution(
                 &resolution,
                 &[BASE_PACKAGE],
                 package,
                 InstallResolutionMode::Normal,
+                &replacements,
+                None,
             )?;
         } else {
             self.install_resolution(
@@ -2330,6 +2404,8 @@ impl PackageRuntime {
                 &[BASE_PACKAGE, package],
                 package,
                 InstallResolutionMode::Normal,
+                &replacements,
+                None,
             )?;
         }
         let installed = self.installed_version(package)?;
@@ -2383,6 +2459,7 @@ impl PackageRuntime {
         if plan.removals.len() > MAX_INSTALL_PLAN_REMOVALS {
             return Err(PackageRuntimeError::OutputLimit);
         }
+        self.publish_package_replacement_review(package, &resolution, &plan.removals)?;
         let mut output = empty_tool_output();
         output.push(b"org.archphene.package-install-plan.v1\nremovals\t")?;
         output.push(plan.removals.len().to_string().as_bytes())?;
@@ -2403,6 +2480,7 @@ impl PackageRuntime {
         }
         let resolution = self.resolve(package)?;
         self.consume_package_compatibility_review(package, &resolution)?;
+        let replacements = self.consume_package_replacement_review(package, &resolution)?;
         // An update must retain the local database's existing install reasons.
         // install_resolution starts every archive as a dependency, keeps base
         // explicit, then promotes only packages already recorded as explicit.
@@ -2413,6 +2491,8 @@ impl PackageRuntime {
             &[BASE_PACKAGE],
             package,
             InstallResolutionMode::Normal,
+            &replacements,
+            None,
         )?;
         let installed = self.installed_version(package)?;
         let expected = resolved_version(&resolution, package)?;
@@ -2469,6 +2549,8 @@ impl PackageRuntime {
             &[BASE_PACKAGE],
             recovery_target,
             InstallResolutionMode::Normal,
+            &[],
+            None,
         )
     }
 
@@ -3235,6 +3317,8 @@ impl PackageRuntime {
         explicit_targets: &[&str],
         recovery_target: &str,
         mode: InstallResolutionMode,
+        expected_replacements: &[InstalledPackageIdentity],
+        retained_replacements: Option<&[ReplacementRepairRecord]>,
     ) -> Result<(), PackageRuntimeError> {
         let package_count = resolution.as_str()?.lines().count();
         let mut archives = Vec::with_capacity(package_count);
@@ -3323,7 +3407,40 @@ impl PackageRuntime {
             self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
         validate_install_plan(plan.as_str()?, &archives)?;
 
-        self.publish_install_mutation_intent(recovery_target, explicit_targets, resolution)?;
+        let transaction_plan = self.preview_install_transaction(&archives)?;
+        if transaction_plan.removals != expected_replacements {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let replacement_records = if mode == InstallResolutionMode::Repair {
+            let retained = retained_replacements.ok_or(PackageRuntimeError::InvalidResolution)?;
+            if retained.len() != expected_replacements.len()
+                || retained
+                    .iter()
+                    .zip(expected_replacements)
+                    .any(|(record, expected)| {
+                        record.name != expected.name || record.version != expected.version
+                    })
+            {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            retained.to_vec()
+        } else {
+            if retained_replacements.is_some() {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            self.prepare_replacement_repair(expected_replacements)?
+        };
+        if let Err(error) = self.publish_install_mutation_intent(
+            recovery_target,
+            explicit_targets,
+            resolution,
+            &replacement_records,
+        ) {
+            if mode == InstallResolutionMode::Normal && !replacement_records.is_empty() {
+                let _ = self.clear_replacement_repair();
+            }
+            return Err(error);
+        }
         let has_explicit = archives.iter().any(|archive| archive.explicitly_installed);
         if has_explicit {
             self.publish_install_reason_intent(&archives)?;
@@ -3343,6 +3460,9 @@ impl PackageRuntime {
             "--noprogressbar",
             "--noscriptlet",
         ];
+        if !replacement_records.is_empty() {
+            transaction_arguments.extend(["--ask", "4"]);
+        }
         append_install_transaction_mode(&mut transaction_arguments, mode);
         transaction_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
         if let Err(error) = self.run_bytes_with_timeout(
@@ -3369,10 +3489,20 @@ impl PackageRuntime {
         if self.installed_version(recovery_target)?.as_str()? != expected {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        for replacement in &replacement_records {
+            if !self
+                .installed_version(&replacement.name)?
+                .as_bytes()
+                .is_empty()
+            {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
         if mode == InstallResolutionMode::Repair {
             self.clear_database_repair(&archives)?;
         }
         self.clear_pending_mutation()?;
+        self.clear_replacement_repair()?;
         self.refresh_system_trust()?;
         Ok(())
     }
@@ -3644,19 +3774,30 @@ impl PackageRuntime {
                 request,
                 explicit_targets,
                 resolution,
+                replacements,
             } => {
                 if request != package {
                     return Err(PackageRuntimeError::Busy);
                 }
+                self.restore_replacement_repair(&replacements)?;
                 let explicit = explicit_targets
                     .iter()
                     .map(String::as_str)
+                    .collect::<Vec<_>>();
+                let replacement_identities = replacements
+                    .iter()
+                    .map(|replacement| InstalledPackageIdentity {
+                        name: replacement.name.clone(),
+                        version: replacement.version.clone(),
+                    })
                     .collect::<Vec<_>>();
                 self.install_resolution(
                     &resolution,
                     &explicit,
                     &request,
                     InstallResolutionMode::Repair,
+                    &replacement_identities,
+                    Some(&replacements),
                 )?;
                 let expected = resolved_version(&resolution, &request)?;
                 let installed = self.installed_version(&request)?;
@@ -3718,6 +3859,7 @@ impl PackageRuntime {
         request: &str,
         explicit_targets: &[&str],
         resolution: &PackageResolution,
+        replacements: &[ReplacementRepairRecord],
     ) -> Result<(), PackageRuntimeError> {
         let intent = PackageMutationIntent::Install {
             request: request.to_owned(),
@@ -3726,6 +3868,7 @@ impl PackageRuntime {
                 .map(|target| (*target).to_owned())
                 .collect(),
             resolution: resolution.clone(),
+            replacements: replacements.to_vec(),
         };
         self.publish_mutation_intent(&intent)
     }
@@ -4085,6 +4228,142 @@ impl PackageRuntime {
         )?
         .sync_all()?;
         Ok(())
+    }
+
+    fn prepare_replacement_repair(
+        &self,
+        removals: &[InstalledPackageIdentity],
+    ) -> Result<Vec<ReplacementRepairRecord>, PackageRuntimeError> {
+        if removals.is_empty() {
+            return Ok(Vec::new());
+        }
+        if removals.len() > MAX_INSTALL_PLAN_REMOVALS {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let snapshot = self.arch_root.join(PACKAGE_REPLACEMENT_REPAIR_DIRECTORY);
+        match fs::symlink_metadata(&snapshot) {
+            Ok(_) => return Err(PackageRuntimeError::Busy),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        let temporary = self
+            .arch_root
+            .join(PACKAGE_REPLACEMENT_REPAIR_TEMP_DIRECTORY);
+        clear_replacement_repair_directory_if_present(&temporary)?;
+        fs::create_dir(&temporary)?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))?;
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let result = (|| {
+            let mut records = Vec::with_capacity(removals.len());
+            for removal in removals {
+                let entry_name = format!("{}-{}", removal.name, removal.version);
+                let source = local.join(&entry_name);
+                if !local_database_entry_matches(&source, &removal.name, &removal.version)? {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                let destination = temporary.join(&entry_name);
+                copy_database_repair_entry(&source, &destination)?;
+                records.push(ReplacementRepairRecord {
+                    name: removal.name.clone(),
+                    version: removal.version.clone(),
+                    database_sha256: removal_repair_sha256(
+                        &destination,
+                        &removal.name,
+                        &removal.version,
+                    )?,
+                });
+            }
+            File::open(&temporary)?.sync_all()?;
+            Ok(records)
+        })();
+        let records = match result {
+            Ok(records) => records,
+            Err(error) => {
+                let _ = clear_replacement_repair_directory_if_present(&temporary);
+                return Err(error);
+            }
+        };
+        fs::rename(&temporary, &snapshot)?;
+        File::open(snapshot.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+        Ok(records)
+    }
+
+    fn restore_replacement_repair(
+        &self,
+        replacements: &[ReplacementRepairRecord],
+    ) -> Result<(), PackageRuntimeError> {
+        if replacements.is_empty() {
+            return Ok(());
+        }
+        let snapshot = self.arch_root.join(PACKAGE_REPLACEMENT_REPAIR_DIRECTORY);
+        validate_replacement_repair_directory(&snapshot, replacements)?;
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let temporary = self
+            .arch_root
+            .join(PACKAGE_REPLACEMENT_LOCAL_TEMP_DIRECTORY);
+        remove_database_repair_entry_if_present(&temporary)?;
+        for replacement in replacements {
+            let destination = local.join(format!("{}-{}", replacement.name, replacement.version));
+            let mut count = 0_usize;
+            for entry in fs::read_dir(&local)? {
+                count = count.saturating_add(1);
+                if count > LOCAL_DATABASE_ENTRY_LIMIT {
+                    return Err(PackageRuntimeError::OutputLimit);
+                }
+                let entry = entry?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path)?;
+                if entry.file_name() == "ALPM_DB_VERSION"
+                    && metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                {
+                    continue;
+                }
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(PackageRuntimeError::UnsafeEntry(path));
+                }
+                if replacements.iter().any(|candidate| {
+                    path == local.join(format!("{}-{}", candidate.name, candidate.version))
+                }) {
+                    continue;
+                }
+                let identity = read_local_package_identity(&path)?;
+                if identity.name == replacement.name {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+            }
+            if local_database_entry_matches(&destination, &replacement.name, &replacement.version)?
+            {
+                continue;
+            }
+            remove_database_repair_entry_if_present(&destination)?;
+            let source = snapshot.join(format!("{}-{}", replacement.name, replacement.version));
+            copy_database_repair_entry(&source, &temporary)?;
+            if removal_repair_sha256(&temporary, &replacement.name, &replacement.version)?
+                != replacement.database_sha256
+            {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            fs::rename(&temporary, &destination)?;
+            File::open(&local)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn clear_replacement_repair(&self) -> Result<(), PackageRuntimeError> {
+        clear_replacement_repair_directory_if_present(
+            &self
+                .arch_root
+                .join(PACKAGE_REPLACEMENT_REPAIR_TEMP_DIRECTORY),
+        )?;
+        clear_replacement_repair_directory_if_present(
+            &self.arch_root.join(PACKAGE_REPLACEMENT_REPAIR_DIRECTORY),
+        )?;
+        remove_database_repair_entry_if_present(
+            &self
+                .arch_root
+                .join(PACKAGE_REPLACEMENT_LOCAL_TEMP_DIRECTORY),
+        )
     }
 
     fn prepare_removal_repair(
@@ -7879,6 +8158,83 @@ fn copy_database_repair_entry(
     result
 }
 
+fn validate_replacement_repair_directory(
+    path: &Path,
+    replacements: &[ReplacementRepairRecord],
+) -> Result<(), PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    let mut seen = Vec::with_capacity(replacements.len());
+    for entry in fs::read_dir(path)? {
+        if seen.len() >= MAX_INSTALL_PLAN_REMOVALS {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let entry = entry?;
+        let entry_path = entry.path();
+        validate_database_repair_entry(&entry_path)?;
+        let identity = read_local_package_identity(&entry_path)?;
+        if entry.file_name().to_str()
+            != Some(format!("{}-{}", identity.name, identity.version).as_str())
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let replacement = replacements
+            .iter()
+            .find(|replacement| {
+                replacement.name == identity.name && replacement.version == identity.version
+            })
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if !valid_sha256_hex(&replacement.database_sha256)
+            || removal_repair_sha256(&entry_path, &replacement.name, &replacement.version)?
+                != replacement.database_sha256
+            || seen.iter().any(|name| name == &replacement.name)
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        seen.push(replacement.name.clone());
+    }
+    if seen.len() != replacements.len() {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(())
+}
+
+fn clear_replacement_repair_directory_if_present(path: &Path) -> Result<(), PackageRuntimeError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    let mut entries = Vec::with_capacity(4);
+    for entry in fs::read_dir(path)? {
+        if entries.len() >= MAX_INSTALL_PLAN_REMOVALS {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let entry = entry?;
+        let entry_path = entry.path();
+        validate_database_repair_entry(&entry_path)?;
+        let identity = read_local_package_identity(&entry_path)?;
+        if entry.file_name().to_str()
+            != Some(format!("{}-{}", identity.name, identity.version).as_str())
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        entries.push(entry_path);
+    }
+    for entry in entries {
+        remove_database_repair_entry(&entry)?;
+    }
+    File::open(path)?.sync_all()?;
+    fs::remove_dir(path)?;
+    File::open(path.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+    Ok(())
+}
+
 fn removal_repair_sha256(
     path: &Path,
     expected_name: &str,
@@ -8222,6 +8578,13 @@ struct InstallTransactionPlan {
     removals: Vec<InstalledPackageIdentity>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReplacementRepairRecord {
+    name: String,
+    version: String,
+    database_sha256: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstallResolutionMode {
     Normal,
@@ -8241,6 +8604,7 @@ enum PackageMutationIntent {
         request: String,
         explicit_targets: Vec<String>,
         resolution: PackageResolution,
+        replacements: Vec<ReplacementRepairRecord>,
     },
     Remove {
         package: String,
@@ -8261,6 +8625,7 @@ fn serialize_package_mutation_intent(
             request,
             explicit_targets,
             resolution,
+            replacements,
         } => {
             content.push_str("install\t");
             content.push_str(request);
@@ -8268,6 +8633,15 @@ fn serialize_package_mutation_intent(
             for target in explicit_targets {
                 content.push_str("explicit\t");
                 content.push_str(target);
+                content.push('\n');
+            }
+            for replacement in replacements {
+                content.push_str("replace\t");
+                content.push_str(&replacement.name);
+                content.push('\t');
+                content.push_str(&replacement.version);
+                content.push('\t');
+                content.push_str(&replacement.database_sha256);
                 content.push('\n');
             }
             for line in resolution.as_str()?.lines() {
@@ -8319,6 +8693,7 @@ fn parse_package_mutation_intent(
             return Err(PackageRuntimeError::InvalidResolution);
         }
         let mut explicit_targets = Vec::with_capacity(2);
+        let mut replacements = Vec::with_capacity(2);
         let mut resolution_text = String::with_capacity(input.len());
         let mut reading_archives = false;
         for line in lines {
@@ -8331,6 +8706,33 @@ fn parse_package_mutation_intent(
                     return Err(PackageRuntimeError::InvalidResolution);
                 }
                 explicit_targets.push(target.to_owned());
+            } else if let Some(replacement) = line.strip_prefix("replace\t") {
+                let mut fields = replacement.split('\t');
+                let (Some(name), Some(version), Some(database_sha256), None) =
+                    (fields.next(), fields.next(), fields.next(), fields.next())
+                else {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                };
+                if reading_archives
+                    || !safe_logical_name(name)
+                    || version.is_empty()
+                    || version.len() > 128
+                    || version
+                        .bytes()
+                        .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+                    || !valid_sha256_hex(database_sha256)
+                    || replacements.len() >= MAX_INSTALL_PLAN_REMOVALS
+                    || replacements
+                        .iter()
+                        .any(|entry: &ReplacementRepairRecord| entry.name == name)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                replacements.push(ReplacementRepairRecord {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                    database_sha256: database_sha256.to_owned(),
+                });
             } else if let Some(archive) = line.strip_prefix("archive\t") {
                 reading_archives = true;
                 resolution_text.push_str(archive);
@@ -8352,6 +8754,7 @@ fn parse_package_mutation_intent(
             request: request.to_owned(),
             explicit_targets,
             resolution,
+            replacements,
         })
     } else if let Some(removal) = operation.strip_prefix("remove\t") {
         if lines.next().is_some() {
@@ -10443,6 +10846,48 @@ https://geo.mirror.pkgbuild.com/core/os/x86_64/pacman-7.1.0-2-x86_64.pkg.tar.zst
     }
 
     #[test]
+    fn replacement_review_capability_is_exact_authorized_and_single_use() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let resolution = PackageResolution {
+            bytes: b"extra\ttool\t1.0-1\ttool-1.0-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/extra/os/x86_64/tool-1.0-1-x86_64.pkg.tar.zst\t1024\n".to_vec(),
+        };
+        let removals = vec![InstalledPackageIdentity {
+            name: "old-tool".to_owned(),
+            version: "2.0-1".to_owned(),
+        }];
+        runtime
+            .publish_package_replacement_review("tool", &resolution, &removals)
+            .expect("publish replacement review");
+        assert!(runtime.authorize_install_plan("other").is_err());
+        runtime
+            .clone()
+            .authorize_install_plan("tool")
+            .expect("authorize exact review through runtime clone");
+        assert_eq!(
+            runtime
+                .consume_package_replacement_review("tool", &resolution)
+                .expect("consume exact replacement review"),
+            removals,
+        );
+        assert!(
+            runtime
+                .consume_package_replacement_review("tool", &resolution)
+                .is_err()
+        );
+
+        runtime
+            .publish_package_replacement_review("tool", &resolution, &[])
+            .expect("publish empty plan");
+        assert_eq!(
+            runtime
+                .consume_package_replacement_review("tool", &resolution)
+                .expect("empty plan is already authorized"),
+            Vec::<InstalledPackageIdentity>::new(),
+        );
+    }
+
+    #[test]
     fn package_resolution_supports_large_bounded_closures() {
         let mut input = String::new();
         for index in 0..200 {
@@ -10818,6 +11263,70 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
     }
 
     #[test]
+    fn replacement_repair_snapshots_and_restores_every_exact_removal() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        tree.local_package("old-tool-1.0-1", "old-tool", b"%FILES%\nusr/bin/old-tool\n");
+        tree.local_dependency_package(
+            "old-library-1.0-1",
+            "old-library",
+            b"%FILES%\nusr/lib/libold.so\n",
+        );
+        let removals = vec![
+            InstalledPackageIdentity {
+                name: "old-library".to_owned(),
+                version: "1.0-1".to_owned(),
+            },
+            InstalledPackageIdentity {
+                name: "old-tool".to_owned(),
+                version: "1.0-1".to_owned(),
+            },
+        ];
+        let records = runtime
+            .prepare_replacement_repair(&removals)
+            .expect("prepare replacement recovery");
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| valid_sha256_hex(&record.database_sha256))
+        );
+
+        let local = tree.root.join("var/lib/pacman/local");
+        fs::remove_dir_all(local.join("old-tool-1.0-1")).expect("remove old tool record");
+        fs::remove_dir_all(local.join("old-library-1.0-1")).expect("remove old library record");
+        runtime
+            .restore_replacement_repair(&records)
+            .expect("restore replacement records");
+        assert!(
+            local_database_entry_matches(&local.join("old-tool-1.0-1"), "old-tool", "1.0-1",)
+                .expect("validate old tool")
+        );
+        assert!(
+            local_database_entry_matches(&local.join("old-library-1.0-1"), "old-library", "1.0-1",)
+                .expect("validate old library")
+        );
+        fs::remove_file(local.join("old-tool-1.0-1/desc")).expect("damage restored old tool");
+        runtime
+            .restore_replacement_repair(&records)
+            .expect("replace damaged exact record");
+        assert!(
+            local_database_entry_matches(&local.join("old-tool-1.0-1"), "old-tool", "1.0-1",)
+                .expect("validate repaired old tool")
+        );
+
+        runtime
+            .clear_replacement_repair()
+            .expect("clear replacement recovery");
+        assert!(
+            !tree
+                .root
+                .join(PACKAGE_REPLACEMENT_REPAIR_DIRECTORY)
+                .exists()
+        );
+    }
+
+    #[test]
     fn removal_repair_rejects_tampering_and_cleans_only_bounded_orphans() {
         let tree = TestTree::new();
         let runtime = tree.package_runtime();
@@ -10891,6 +11400,11 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
             request: "btop".to_owned(),
             explicit_targets: vec!["base".to_owned(), "btop".to_owned()],
             resolution,
+            replacements: vec![ReplacementRepairRecord {
+                name: "btop-old".to_owned(),
+                version: "1.0-1".to_owned(),
+                database_sha256: "b".repeat(64),
+            }],
         };
         let encoded = serialize_package_mutation_intent(&install, RepositoryArchitecture::X86_64)
             .expect("serialize install");
