@@ -4,6 +4,30 @@ source "$(dirname "$0")/lib/common.sh"
 serial=emulator-5554; kcalc=org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2; mousepad=org.archphene.linux.p241d399e14343c53b8b766e9126776aa
 while (($#)); do case "$1" in --serial) serial="${2:?}"; shift 2;; --kcalc-package) kcalc="${2:?}"; shift 2;; --mousepad-package) mousepad="${2:?}"; shift 2;; -h|--help) echo "usage: $0 [--serial SERIAL] [--kcalc-package NAME] [--mousepad-package NAME]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
 archphene_init_adb "$serial"
+declare -A initially_running=()
+for package in "$kcalc" "$mousepad"; do
+  initially_running["$package"]=false
+  if archphene_android_pid "$package" >/dev/null 2>&1; then
+    initially_running["$package"]=true
+  fi
+done
+cleanup() {
+  local package
+  set +e
+  for package in "$kcalc" "$mousepad"; do
+    archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1
+    if [[ "${initially_running[$package]}" == true ]]; then
+      activity="$(
+        archphene_adb_run shell cmd package resolve-activity --brief "$package" |
+          grep -E '^[^[:space:]]+/[^[:space:]]+$' |
+          tail -n1
+      )"
+      [[ -n "$activity" ]] &&
+        archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1
+    fi
+  done
+}
+trap cleanup EXIT
 wait_log() { local pattern="$1" label="$2" timeout="${3:-30}" deadline=$((SECONDS+${3:-30})); WAIT_LOG=; while ((SECONDS<deadline)); do WAIT_LOG="$(archphene_adb_run logcat -d -v brief -s ArchpheneRuntime:V ArchpheneLinuxApp:I AndroidRuntime:E '*:S')"; archphene_regex_contains "$WAIT_LOG" "$pattern" && return 0; sleep 0.4; done; archphene_die "timed out waiting for $label"; }
 test_wrapper() {
   local package="$1" missing_library="$2" activity dump failure cache cache_kib
@@ -17,5 +41,13 @@ test_wrapper() {
   archphene_note "$package passed: descriptor-library mode failed closed on $missing_library; normal launch remained healthy."
 }
 test_wrapper "$kcalc" libKF6Notifications.so.6; test_wrapper "$mousepad" libmousepad.so.0
+fatal_log="$(
+  archphene_adb_run logcat -d -v brief \
+    -s AndroidRuntime:E libc:F '*:S' 2>/dev/null ||
+    true
+)"
+[[ "$fatal_log" != *"FATAL EXCEPTION"* && "$fatal_log" != *"Fatal signal"* ]] ||
+  archphene_die "descriptor-library compatibility emitted a fatal error: $fatal_log"
+cleanup
+trap - EXIT
 archphene_note "Qt and GTK descriptor-library compatibility gate passed on $serial; retain the bounded named runtime cache."
-

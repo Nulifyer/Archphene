@@ -10,6 +10,8 @@ while (($#)); do
 done
 [[ -n "$apk" && -n "$abi" ]] || archphene_die "--apk and --abi are required"
 archphene_validate_choice "$abi" ABI x86_64 arm64-v8a
+archphene_require_file "$apk"
+archphene_require_command python3
 apk="$(realpath "$apk")"; sdk="${android_sdk:-$(archphene_android_sdk)}"; aapt2="$(archphene_android_tool "$sdk" build-tools/36.0.0/aapt2)"
 architecture=x86_64; [[ "$abi" == arm64-v8a ]] && architecture=aarch64
 count="$(python3 - "$apk" "$abi" "$architecture" <<'PY'
@@ -48,4 +50,3 @@ read -r catalog_count native_count <<<"$count"
 manifest="$("$aapt2" dump xmltree "$apk" --file AndroidManifest.xml)"
 [[ "$manifest" =~ android:extractNativeLibs.*=true ]] || archphene_die "manager APK does not enable native extraction"
 archphene_note "Manager native runtime contract passed: $abi, $catalog_count soname aliases, $native_count extractable libraries."
-

@@ -606,7 +606,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 ## P1 - Test and release gates
 
-- [ ] Finish the remaining standalone Bash-script assertion audit and run each applicable entry point.
+- [x] Finish the remaining standalone Bash-script assertion audit and run each applicable entry point.
+  - [x] Review the final 11 mechanically migrated entry points against their removed PowerShell sources. Restore provider-readiness, fresh-probe, ABI-aware catalog, visible-window/touch, fatal-log, runtime-descriptor, local-container, and prior-state assertions; retire the misleading hand-built KCalc version fixture in favor of the supported manager-generated replacement gate.
+  - [x] Pass all applicable host and device lanes: Bash syntax/help, x86_64 manager-native catalog, both PipeWire container gates, dual-ABI drag/drop, and Samsung ARM bridge, legacy catalog, Mousepad touch, Qt/GTK descriptor, and Android-confirmed KCalc replacement. Record the 16 KB gates as unavailable because only 4 KB targets are connected, and do not manufacture an ARM legacy-static result from the incompatible greenfield APK or repopulate the emulator's deliberately empty legacy-wrapper catalog.
 - [ ] Keep tests state-preserving by default and require explicit flags for destructive device changes.
   - [x] The signed package regression preserves state by default and requires `--clean-data` for uninstall/data reset.
 - [ ] Require emulator and physical-device coverage for runtime, storage, package, input, visual, permission, and lifecycle changes.

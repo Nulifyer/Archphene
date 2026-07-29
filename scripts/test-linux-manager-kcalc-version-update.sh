@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-skip_build=false; serial=emulator-5554; while (($#)); do case "$1" in --skip-build) skip_build=true; shift;; --serial) serial="${2:?}"; shift 2;; *) archphene_die "unknown argument: $1";; esac; done; old="$ARCHPHENE_ROOT/tooling/build/kcalc-version-fixtures/kcalc-26.04.0-1.apk"; latest="$ARCHPHENE_ROOT/prototypes/kcalc-android-app/out/archpheneos-kcalc.apk"; package=org.archphene.linux.kcalc
-if [[ "$skip_build" == false ]]; then "$ARCHPHENE_SCRIPTS_DIR/build-kcalc-version-fixture.sh"; "$ARCHPHENE_SCRIPTS_DIR/build-install-kcalc-app.sh" --skip-install; fi; archphene_require_file "$old"; archphene_require_file "$latest"; archphene_init_adb "$serial"; archphene_adb_run uninstall "$package" >/dev/null 2>&1 || true; archphene_adb_run install "$old" >/dev/null; before="$(archphene_adb_run shell dumpsys package "$package")"; [[ "$before" == *versionName=26.04.0-1* ]] || archphene_die 'older KCalc version was not installed'; "$ARCHPHENE_SCRIPTS_DIR/test-kcalc-calculation.sh" --serial "$serial" --package "$package"; "$ARCHPHENE_SCRIPTS_DIR/test-linux-manager-package-installer.sh" --serial "$serial"; after="$(archphene_adb_run shell dumpsys package "$package")"; [[ "$after" == *versionName=26.04.3-1* ]] || archphene_die 'KCalc did not update'; archphene_note 'KCalc version update passed: signed Arch 26.04.0-1 -> 26.04.3-1 with GUI health checks.'
+
+serial=emulator-5554
+while (($#)); do
+  case "$1" in
+    --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
+    # Accepted for compatibility with the retired hand-built fixture.
+    --skip-build) shift ;;
+    -h|--help)
+      echo "usage: $0 [--serial SERIAL] [--skip-build]"
+      exit 0
+      ;;
+    *) archphene_die "unknown argument: $1" ;;
+  esac
+done
+
+archphene_note \
+  "The hand-built org.archphene.linux.kcalc version fixture is retired; delegating to the supported manager-generated wrapper replacement gate."
+exec "$ARCHPHENE_SCRIPTS_DIR/test-kcalc-update-transaction.sh" \
+  --serial "$serial" --skip-build

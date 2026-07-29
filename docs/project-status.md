@@ -1711,6 +1711,27 @@ replacement requirement.
 
 ## Latest regression snapshot
 
+On July 29, 2026, the final 11 standalone entry points left unreviewed after the
+PowerShell-to-Bash migration were compared with their removed sources and made
+assertion-complete. The audit restored explicit drag-provider readiness and
+grant outcomes, fresh ARM probe identity, architecture-aware legacy catalog
+metadata, real visible-window touch coordinates, fatal-log checks, prior
+running/APK-state restoration, local-only Podman image policy, and an explicit
+opt-in for the legacy two-emulator APK-replacement gate. The obsolete
+hand-built KCalc version test now delegates to the supported manager-generated
+wrapper replacement transaction. All Bash files pass syntax checks and every
+audited entry point exposes a working help path. The x86_64 manager-native
+static contract and both disposable PipeWire/GStreamer container gates pass;
+drag/drop passes on the x86_64 emulator and AArch64 Samsung; and the Samsung
+passes the fresh ARM bridge probe, ABI-aware legacy catalog, full-device
+Mousepad `wl_touch` gate, Qt/GTK descriptor-library rejection/healthy relaunch,
+and Android-confirmed byte/signature-stable KCalc replacement. Both connected
+targets report 4 KiB pages, so the two 16 KiB lanes remain unavailable rather
+than being reported as passes. The emulator's retained legacy manager has no
+legacy KCalc/Mousepad wrappers, and the available AArch64 APK is the greenfield
+manager without the retired legacy static catalog; neither missing fixture was
+silently installed or treated as evidence.
+
 On July 22, 2026, a current-source x86_64 debug manager was built with the reproducible Podman toolchain, installed on the API 36 emulator, and passed the complete broad emulator regression in one sequence. The run covered package update and refresh, repository search and version selection, Android app-settings routing, authenticated runtime-pack execution and cleanup, KCalc launch/calculation/menu/rotation, native compositor input, Android PackageInstaller update, and Mousepad document, IME, touch, secondary-window, and live-theme behavior.
 
 The connected Samsung SM-S908U (Android 15, AArch64) now runs the exact current-source manager and Terminal under the maintained development signer. Because the original prototype key was unavailable, the explicitly authorized reset was preceded by verified archives of both installed APKs and their private state; 1.60 GiB of manager package/runtime data and 46 MiB of Terminal home/runtime were restored under the new UIDs. Managed Arch Bash, the ARM native catalog, and manager startup/catalog rendering pass. The old Foot, KCalc, and Mousepad wrapper APKs plus persistent Linux homes were separately archived before their deliberate signer migrations.
