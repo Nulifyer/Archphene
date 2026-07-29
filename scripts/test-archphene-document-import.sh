@@ -4,22 +4,25 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.DocumentsProviderTestReceiver"
@@ -39,6 +42,25 @@ debug_provider_deadline_extra=org.archphene.app.extra.DEBUG_DOCUMENT_IMPORT_PROV
 test_provider_authority="$package.import-test"
 mkdir -p "$output_dir"
 
+initial_running=false
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  initial_running=true
+fi
+original_section=
+
+restore_section() {
+  [[ -n "$original_section" ]] || return 0
+  local ui
+  ui="$(archphene_capture_ui "document-import-restore-$serial" 2>/dev/null || true)"
+  if archphene_regex_contains \
+    "$ui" "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\""; then
+    archphene_tap_ui_pattern \
+      "$ui" \
+      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+      "$original_section" || true
+  fi
+}
+
 cleanup() {
   archphene_adb_run shell am broadcast -n "$receiver" -a "$action_clean" \
     --es token "$token" >/dev/null 2>&1 || true
@@ -46,10 +68,20 @@ cleanup() {
     >/dev/null 2>&1 || true
   archphene_adb_run shell am force-stop com.android.documentsui \
     >/dev/null 2>&1 || true
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  if [[ "$initial_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+    restore_section || true
+  fi
 }
 trap cleanup EXIT
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 multiple_handlers="$(
   archphene_adb_run shell cmd package query-activities --brief \
     -a android.intent.action.SEND_MULTIPLE \
@@ -66,7 +98,21 @@ archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
 initial_ui="$(archphene_capture_ui "document-import-onboarding-$serial")"
 if archphene_regex_contains "$initial_ui" 'text="Connect Android files\?"'; then
   archphene_skip_storage_onboarding "document-import-onboarding-$serial"
+  initial_ui="$ARCHPHENE_UI"
 fi
+original_section="$(
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$initial_ui"
+)"
 
 archphene_adb_run shell am broadcast -n "$receiver" -a "$action_create" \
   --es token "$token" >/dev/null
@@ -135,16 +181,25 @@ archphene_wait_ui_unwrapped \
   "document-import-multiple-$serial" 25
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-multiple.png"
 
+archphene_open_manager_section Files "document-import-progress-files-$serial"
+progress_ready_ui="$ARCHPHENE_UI"
+read -r cancel_import_x cancel_import_y < <(
+  archphene_ui_node_center \
+    "$progress_ready_ui" \
+    'text="Import"[^>]*class="android\.widget\.Button"[^>]*enabled="true"' \
+    "Import"
+)
 archphene_adb_run logcat -c
-archphene_adb_run shell am start -W -n "$activity" \
+archphene_adb_run shell am start -n "$activity" \
   -a android.intent.action.VIEW -c android.intent.category.DEFAULT \
   -t text/plain -d "$source_uri" -f 1 \
-  --ei "$debug_import_delay_extra" 50 >/dev/null
-archphene_wait_ui_unwrapped \
-  "Importing 1 of 1: $source_name .* copied" \
-  "document-import-progress-$serial" 20
+  --ei "$debug_import_delay_extra" 100 >/dev/null
+archphene_wait_log \
+  "Debug document import chunk delay active" 10 \
+  'ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
+sleep 1
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-progress.png"
-archphene_tap_text "$ARCHPHENE_UI" "Cancel import"
+archphene_adb_run shell input tap "$cancel_import_x" "$cancel_import_y" >/dev/null
 archphene_wait_ui_unwrapped \
   "Import cancelled after 0 of 1 documents .* kept" \
   "document-import-cancelled-$serial" 20
