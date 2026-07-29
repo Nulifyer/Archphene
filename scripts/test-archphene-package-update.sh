@@ -10,6 +10,8 @@ new_version=
 install_reason=
 old_dependencies=()
 new_dependencies=()
+rollback_gate=false
+rollback_absent=()
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
@@ -20,8 +22,10 @@ while (($#)); do
     --install-reason) install_reason="${2:?missing value for --install-reason}"; shift 2 ;;
     --old-dependency) old_dependencies+=("${2:?missing value for --old-dependency}"); shift 2 ;;
     --new-dependency) new_dependencies+=("${2:?missing value for --new-dependency}"); shift 2 ;;
+    --rollback-gate) rollback_gate=true; shift ;;
+    --rollback-absent) rollback_absent+=("${2:?missing value for --rollback-absent}"); shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --package NAME --old-version VERSION --new-version VERSION --install-reason explicit|dependency [--old-dependency NAME] [--new-dependency NAME]"
+      echo "usage: $0 --serial SERIAL --apk PATH --package NAME --old-version VERSION --new-version VERSION --install-reason explicit|dependency [--old-dependency NAME] [--new-dependency NAME] [--rollback-gate] [--rollback-absent NAME]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -39,7 +43,8 @@ done
   archphene_die "old and new versions must differ"
 [[ "$install_reason" == explicit || "$install_reason" == dependency ]] ||
   archphene_die "--install-reason must be explicit or dependency"
-for dependency in "${old_dependencies[@]}" "${new_dependencies[@]}"; do
+for dependency in \
+  "${old_dependencies[@]}" "${new_dependencies[@]}" "${rollback_absent[@]}"; do
   [[ "$dependency" =~ ^[a-zA-Z0-9@._+-]{1,128}$ ]] ||
     archphene_die "dependency package name is invalid: $dependency"
 done
@@ -49,6 +54,7 @@ archphene_require_file "$apk"
 archphene_require_command unzip
 manager=org.archphene.app.debug
 activity="$manager/org.archphene.app.MainActivity"
+receiver="$manager/org.archphene.app.PackagePhaseTestReceiver"
 root=files/arch-root
 cache="$root/var/cache/pacman/pkg"
 local_database="$root/var/lib/pacman/local"
@@ -154,6 +160,22 @@ description="$(
 reason="$(awk '/^%REASON%$/{getline; print; exit}' <<<"$description")"
 [[ "$reason" == "$expected_reason" ]] ||
   archphene_die "baseline install reason is $reason, expected ${expected_reason:-explicit}"
+for dependency in "${rollback_absent[@]}"; do
+  installed_dependency="$(
+    archphene_adb_run exec-out run-as "$manager" find "$local_database" \
+      -maxdepth 1 -type d -name "$dependency-*" -print -quit | tr -d '\r'
+  )"
+  if [[ -n "$installed_dependency" ]]; then
+    remote_remove="root=\"$remote_root\"; alias=\"$remote_alias\"; loader=\"$remote_loader\"; native=\"$remote_native\"; pacman=\"$remote_pacman\"; libs=\"$remote_libraries\"; env -i HOME=\"\$root/home/archphene\" TMPDIR=\"\$root/tmp\" PATH=\"\$alias:\$root/usr/bin\" LANG=C LC_ALL=C GLIBC_TUNABLES=glibc.pthread.rseq=0 LD_PRELOAD=\"\$alias/libarchphene_path_bridge.so\" ARCHPHENE_RUNTIME_LOADER=\"\$loader\" ARCHPHENE_RUNTIME_LIB=\"\$libs\" ARCHPHENE_RUNTIME_COMMAND_DIR=\"\$alias\" ARCHPHENE_RUNTIME_ROOT=\"\$root\" ARCHPHENE_RUNTIME_PROGRAM_PATH=\"\$pacman\" ARCHPHENE_ROOT_IDENTITY=1 \"\$loader\" --library-path \"\$libs\" \"\$pacman\" --config \"\$root/etc/pacman.conf\" --root \"\$root\" --dbpath \"\$root/var/lib/pacman\" --noconfirm --noprogressbar --noscriptlet -R \"$dependency\""
+    archphene_adb_run shell "run-as $manager sh -c '$remote_remove'" >/dev/null
+  fi
+  installed_dependency="$(
+    archphene_adb_run exec-out run-as "$manager" find "$local_database" \
+      -maxdepth 1 -type d -name "$dependency-*" -print -quit | tr -d '\r'
+  )"
+  [[ -z "$installed_dependency" ]] ||
+    archphene_die "could not establish absent rollback baseline for $dependency"
+done
 
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
@@ -176,7 +198,103 @@ archphene_wait_ui_unwrapped \
 archphene_wait_ui 'text="Update"[^>]*enabled="true"' "package-update-action-$serial" 10
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-review.png"
 archphene_adb_run logcat -c
+if [[ "$rollback_gate" == true ]]; then
+  archphene_adb_run shell am broadcast \
+    -f 0x20 \
+    -n "$receiver" \
+    -a org.archphene.app.debug.action.ARM_PACKAGE_POST_TRANSACTION \
+    --es token package-rollback \
+    --es package "$package_name" \
+    --ei hold-ms 30000 >/dev/null
+  archphene_wait_log \
+    'Started package phases=true token=package-rollback' 15 \
+    'ArchphenePackagePhaseProbe:V *:S' >/dev/null
+fi
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Update"[^>]*enabled="true"' 'update package'
+if [[ "$rollback_gate" == true ]]; then
+  intent="$root/run/package-mutation-v1"
+  deadline=$((SECONDS + 120))
+  while ((SECONDS < deadline)); do
+    local_entry="$(
+      archphene_adb_run exec-out run-as "$manager" find "$local_database" \
+        -maxdepth 1 -type d -name "$package_name-*" | tr -d '\r'
+    )"
+    if [[ "$local_entry" == "$local_database/$package_name-$new_version" ]] &&
+        archphene_adb_run shell run-as "$manager" test -f "$intent"; then
+      break
+    fi
+    sleep 0.3
+  done
+  [[ "$local_entry" == "$local_database/$package_name-$new_version" ]] ||
+    archphene_die "post-transaction hold did not reach the new exact version"
+  archphene_adb_run exec-out run-as "$manager" cat "$intent" |
+    grep -Fqx $'rollback\tready' ||
+    archphene_die "mutation intent did not retain a complete rollback plan"
+  android_pid="$(archphene_android_pid "$manager")"
+  archphene_adb_run shell run-as "$manager" kill -9 "$android_pid" >/dev/null
+  deadline=$((SECONDS + 15))
+  while archphene_android_pid "$manager" >/dev/null 2>&1 && ((SECONDS < deadline)); do
+    sleep 0.2
+  done
+  if archphene_android_pid "$manager" >/dev/null 2>&1; then
+    archphene_die "manager survived post-transaction rollback SIGKILL"
+  fi
+
+  archphene_adb_run shell am start -W -n "$activity" >/dev/null
+  archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+  archphene_open_manager_section Packages "package-rollback-section-$serial"
+  archphene_wait_ui 'class="android.widget.EditText"' "package-rollback-field-$serial" 15
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+    'class="android.widget.EditText"' 'package name'
+  archphene_adb_run shell input keycombination 113 29 >/dev/null
+  archphene_adb_run shell input keyevent KEYCODE_DEL >/dev/null
+  archphene_adb_run shell input text "$package_name" >/dev/null
+  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+  archphene_wait_ui 'text="Roll back"' "package-rollback-action-$serial" 30
+  archphene_wait_ui 'text="Repair"' "package-rollback-repair-$serial" 15
+  archphene_wait_ui 'Roll back restores the exact previous package state' \
+    "package-rollback-message-$serial" 15
+  archphene_adb_run exec-out screencap -p >"$output_dir/$serial-interrupted.png"
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Roll back"' 'Roll back'
+  archphene_wait_ui 'text="Update · Complete · 100%"' \
+    "package-rollback-complete-$serial" 120
+  archphene_wait_ui "text=\"Rolled back package transaction for $package_name\"" \
+    "package-rollback-result-$serial" 15
+  archphene_adb_run exec-out screencap -p >"$output_dir/$serial-rolled-back.png"
+
+  local_entry="$(
+    archphene_adb_run exec-out run-as "$manager" find "$local_database" \
+      -maxdepth 1 -type d -name "$package_name-*" | tr -d '\r'
+  )"
+  [[ "$local_entry" == "$local_database/$package_name-$old_version" ]] ||
+    archphene_die "rollback did not restore $package_name $old_version"
+  description="$(
+    archphene_adb_run exec-out run-as "$manager" cat "$local_entry/desc" | tr -d '\r'
+  )"
+  reason="$(awk '/^%REASON%$/{getline; print; exit}' <<<"$description")"
+  [[ "$reason" == "$expected_reason" ]] ||
+    archphene_die "rollback changed install reason to $reason"
+  for dependency in "${rollback_absent[@]}"; do
+    installed_dependency="$(
+      archphene_adb_run exec-out run-as "$manager" find "$local_database" \
+        -maxdepth 1 -type d -name "$dependency-*" -print -quit | tr -d '\r'
+    )"
+    [[ -z "$installed_dependency" ]] ||
+      archphene_die "rollback retained newly introduced package $dependency"
+  done
+  for residue in \
+    "$intent" "$root/run/package-install-reasons-v1" \
+    "$root/run/package-database-repair-v1" \
+    "$root/run/package-replacement-repair-v1" \
+    "$root/var/lib/pacman/db.lck"; do
+    archphene_adb_run shell run-as "$manager" test ! -e "$residue" ||
+      archphene_die "rollback retained transaction state: $residue"
+  done
+  archphene_note "Archphene exact package rollback passed on $serial"
+  archphene_note "  Committed $new_version, killed the manager, restored $old_version"
+  archphene_note "  Full-device screenshots: $output_dir/$serial-{interrupted,rolled-back}.png"
+  exit 0
+fi
 archphene_wait_log "Updated $package_name: [1-9][0-9]* signed packages" 120 >/dev/null
 archphene_wait_ui 'text="Update · Complete · 100%"' "package-update-complete-$serial" 20
 archphene_wait_ui "text=\"$package_name\".*text=\"Installed\"" \

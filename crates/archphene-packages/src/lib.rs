@@ -3878,7 +3878,10 @@ impl PackageRuntime {
             });
         }
         if !retained.is_empty() {
-            self.publish_install_reason_intent(&retained)?;
+            let has_explicit = retained.iter().any(|archive| archive.explicitly_installed);
+            if has_explicit {
+                self.publish_install_reason_intent(&retained)?;
+            }
             let mut arguments = vec![
                 "--config",
                 config,
@@ -3907,10 +3910,14 @@ impl PackageRuntime {
                 false,
             ) {
                 let _ = self.recover_database_lock();
-                let _ = self.recover_pending_install_reasons();
+                if has_explicit {
+                    let _ = self.recover_pending_install_reasons();
+                }
                 return Err(error);
             }
-            self.recover_pending_install_reasons()?;
+            if has_explicit {
+                self.recover_pending_install_reasons()?;
+            }
         }
 
         let mut additions = Vec::with_capacity(rollback.previously_absent.len());

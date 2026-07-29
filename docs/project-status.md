@@ -568,8 +568,10 @@ production-classifier fixtures pass from the exact APK on the emulator and
 Samsung, with settled full-device screenshots confirming that short package
 names and the longest partial-mutation guidance remain fully on-screen.
 Forward Repair is implemented and tested for interrupted removal and a
-partially committed install filesystem. Exact rollback to older archives and
-the removal-side database-corruption matrix remain pending.
+partially committed install filesystem. Exact rollback is also available when
+the journal could bind the complete prior signed closure; unavailable or
+invalid prior artifacts leave only forward Repair. The removal-side
+database-corruption matrix remains pending.
 
 Linux-storage preflight failures now retain typed required/available byte
 counts and render those exact capacities with Clear cache before Review. The
@@ -899,8 +901,8 @@ version/reason, database validation, quarantine cleanup, transaction cleanup,
 launcher inventory, and full-device presentation pass on the emulator and
 Samsung. The same gate also removes both `base` and Foot local descriptions in
 one retained transaction; batched database reconstruction and the complete
-postconditions pass on both devices. Exact rollback to older archives and
-whole-operation AUR recovery remain open.
+postconditions pass on both devices. Exact official-package rollback now also
+passes on both devices; whole-operation AUR recovery remains open.
 
 The generic compatibility layer maps Linux root ownership to the Android app
 UID, copies when SELinux rejects hard links, avoids Android app seccomp's
@@ -976,9 +978,12 @@ device screenshots also verify the responsive closure view and state-driven
 actions. Physical AArch64 and emulated x86_64 older-to-newer,
 changed-dependency, and reviewed replacement transactions now pass.
 Accepted replacement interruption and forward Repair also pass from a durable
-pre-pacman boundary on both devices. Hooks/scriptlets, closure-wide rollback,
-orphan cleanup, and a real-storage-pressure retry-to-completion gate remain
-open, so this is not yet a complete production transaction engine.
+pre-pacman boundary on both devices. A separate post-pacman gate proves exact
+signed rollback on both ABIs, including removal of AArch64's newly introduced
+`jemalloc` dependency and restoration of the prior dependency reason.
+Hooks/scriptlets, orphan cleanup, and a real-storage-pressure
+retry-to-completion gate remain open, so this is not yet a complete production
+transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16
