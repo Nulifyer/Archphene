@@ -79,7 +79,7 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
         observedTopology == null ||
         observedLaunchers == null ||
         incompleteObservations == null ||
-        fields[16] != LauncherApkAssembler.CAPABILITIES_V2 ||
+        fields[16] != LauncherApkAssembler.CAPABILITIES_V3 ||
         verifiedExecutables > launchers ||
         profiledExecutables > launchers ||
         incompleteProfiles > profiledExecutables ||

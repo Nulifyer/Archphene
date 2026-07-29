@@ -37,13 +37,13 @@ owned.
 Every generated launcher also carries a versioned capability declaration.
 Rust supplies the exact bounded contract to deterministic APK assembly; Kotlin
 embeds and independently verifies it, and both the wrapper and manager require
-the same value before opening an authenticated Binder session. The initial
-production contract contains only the implemented Wayland, input, IME, and
-plain-text clipboard paths. A correctly signed wrapper with an older contract
-is stale and can be updated through Android confirmation; a wrapper with
-untrusted identity or signer remains quarantined. Optional or dangerous
-capabilities must not be advertised until their complete broker, evidence
-derivation, and user-review path exist.
+the same value before opening an authenticated Binder session. The V3
+production contract contains the implemented Wayland, input, IME, plain-text
+clipboard, document, and bounded HTTP(S) OpenURI paths. A correctly signed
+wrapper with an older contract is stale and can be updated through Android
+confirmation; a wrapper with untrusted identity or signer remains quarantined.
+Optional or dangerous capabilities must not be advertised until their complete
+broker, evidence derivation, and user-review path exist.
 
 This deliberately does not provide package isolation inside Arch. Installing
 an Arch or AUR package grants it the same Linux trust level it has in a normal
@@ -334,6 +334,13 @@ Archphene as a whole—such as shared package storage and synchronized project
 state—remain in the manager. The design must not pretend Android can enforce
 per-Linux-package network or filesystem isolation when every Linux process
 intentionally shares the manager UID and Arch root.
+
+OpenURI is deliberately narrower than Android's general intent system. The
+private XDG portal accepts bounded `http` and `https` URIs only, rejects
+userinfo, invalid hosts and ports, controls, and non-web schemes, then asks the
+authenticated visible wrapper to start a browsable Android intent. File and
+content exchange remain on the document broker, so OpenURI grants no Android
+URI permission.
 
 ### Storage
 

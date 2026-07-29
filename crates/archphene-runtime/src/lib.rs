@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_launcher::{
-    LAUNCHER_CAPABILITIES_V2, LauncherDescriptor, LauncherRegistry, LauncherRegistryError,
+    LAUNCHER_CAPABILITIES_V3, LauncherDescriptor, LauncherRegistry, LauncherRegistryError,
     LauncherReviewDecision, ReconcileReport, WrapperStatus,
 };
 use archphene_packages::{
@@ -1355,7 +1355,7 @@ impl RuntimeHost {
             descriptor_id_hex: descriptor.descriptor_id_hex(),
             generation: descriptor.desired_generation,
             label: descriptor.name.clone(),
-            capabilities: LAUNCHER_CAPABILITIES_V2,
+            capabilities: LAUNCHER_CAPABILITIES_V3,
             icon_path,
             icon_sha256,
         };

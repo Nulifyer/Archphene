@@ -66,6 +66,7 @@ internal class LauncherPortalBridge(
     private val requestSave: (String, String, String) -> LauncherPortalSaveResult,
     private val requestOpen: (String, String, Boolean) -> LauncherPortalOpenResult,
     private val requestDirectory: (String) -> LauncherPortalDirectoryResult,
+    private val requestOpenUri: (String) -> Boolean,
     private val importDirectory: (String, ParcelFileDescriptor) -> String?,
     private val cancelDirectoryImport: () -> Unit,
 ) : Closeable {
@@ -299,6 +300,7 @@ internal class LauncherPortalBridge(
                 if (
                     fields.isEmpty() ||
                     (
+                        fields[0] != "ARCHPHENE/1" &&
                         fields[0] != "ARCHPHENE/2" &&
                             fields[0] != "ARCHPHENE/3" &&
                             fields[0] != "ARCHPHENE/4"
@@ -308,6 +310,7 @@ internal class LauncherPortalBridge(
                     return
                 }
                 when (fields.getOrNull(1)) {
+                    "OPEN_URI" -> handleOpenUriRequest(client, fields)
                     "SAVE_FILE" -> handleSaveRequest(client, fields)
                     "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
                     "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
@@ -319,6 +322,22 @@ internal class LauncherPortalBridge(
                 runCatching { writeResponse(client, "ERROR\tFAILED") }
             }
         }
+    }
+
+    private fun handleOpenUriRequest(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (fields.size != 3 || fields[0] != "ARCHPHENE/1") {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val uri = decodeField(fields[2], PortalUriPolicy.MAX_URI_BYTES)
+        if (uri == null || !PortalUriPolicy.valid(uri)) {
+            writeResponse(client, "ERROR\tINVALID_URI")
+            return
+        }
+        writeResponse(client, if (requestOpenUri(uri)) "OK" else "ERROR\tFAILED")
     }
 
     private fun handleSaveRequest(

@@ -425,7 +425,9 @@ static void withdraw(DBusConnection *connection, uint32_t classic_id) {
     printf("PASS notification withdrawal\n");
 }
 
-static void open_uri(DBusConnection *connection, const char *uri) {
+static void open_uri(
+        DBusConnection *connection, const char *uri,
+        uint32_t expected_response) {
     const char *parent = "";
     const char *token_key = "handle_token";
     const char *token = "archphene_probe";
@@ -457,8 +459,25 @@ static void open_uri(DBusConnection *connection, const char *uri) {
         fprintf(stderr, "FAIL portal OpenURI: wrong reply\n");
         exit(1);
     }
+    const char *path = NULL;
+    dbus_message_iter_get_basic(&output, &path);
+    if (path == NULL || strlen(path) >= 256) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL portal OpenURI: invalid request path\n");
+        exit(1);
+    }
+    char path_copy[256];
+    snprintf(path_copy, sizeof(path_copy), "%s", path);
     dbus_message_unref(reply);
-    printf("PASS portal OpenURI accepted\n");
+    uint32_t response =
+            wait_request_response(connection, path_copy, "portal OpenURI");
+    if (response != expected_response) {
+        fprintf(stderr,
+                "FAIL portal OpenURI: response=%u expected=%u\n",
+                response, expected_response);
+        exit(1);
+    }
+    printf("PASS portal OpenURI response=%u\n", response);
 }
 
 static void prepare_print(DBusConnection *connection) {
@@ -1066,7 +1085,9 @@ int main(int argc, char **argv) {
         uint32_t id = argc == 3 ? (uint32_t)strtoul(argv[2], NULL, 10) : 1;
         withdraw(connection, id);
     } else if (strcmp(argv[1], "open") == 0 && argc == 3) {
-        open_uri(connection, argv[2]);
+        open_uri(connection, argv[2], 0);
+    } else if (strcmp(argv[1], "open-rejected") == 0 && argc == 3) {
+        open_uri(connection, argv[2], 2);
     } else if (strcmp(argv[1], "print") == 0 && argc == 3) {
         print_pdf(connection, argv[2], 0);
     } else if (strcmp(argv[1], "print-pipe") == 0 && argc == 2) {

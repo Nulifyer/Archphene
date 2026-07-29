@@ -6078,7 +6078,7 @@ class ArchpheneRuntimeService : Service() {
                             fields[0] == "W3" &&
                             LAUNCHER_PACKAGE.matches(fields[1]) &&
                             LAUNCHER_DESCRIPTOR.matches(fields[2]) &&
-                            fields[5] == LauncherApkAssembler.CAPABILITIES_V2,
+                            fields[5] == LauncherApkAssembler.CAPABILITIES_V3,
                     ) {
                         "Invalid native launcher publication"
                     }
@@ -6381,7 +6381,7 @@ class ArchpheneRuntimeService : Service() {
                                             metadata.getString(
                                                 "org.archphene.launcher.CAPABILITIES",
                                             ) !=
-                                            "c:${LauncherApkAssembler.CAPABILITIES_V2}"
+                                            "c:${LauncherApkAssembler.CAPABILITIES_V3}"
                                     )
                             )
                     if (installedContentIsStale) {

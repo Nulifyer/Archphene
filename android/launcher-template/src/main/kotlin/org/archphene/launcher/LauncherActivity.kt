@@ -53,6 +53,8 @@ import android.widget.Toast
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.net.URI
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
@@ -147,7 +149,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_CURSOR ||
+                    code !in CALLBACK_STATUS..CALLBACK_OPEN_URI ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -330,6 +332,18 @@ class LauncherActivity :
                                 }
                                 else -> false
                             }
+                        }
+                        CALLBACK_OPEN_URI -> {
+                            val uri = data.readString()
+                            if (
+                                uri == null ||
+                                !validBrowserUri(uri) ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            handler.post { openAndroidUri(uri) }
+                            true
                         }
                         else -> false
                     }
@@ -519,7 +533,7 @@ class LauncherActivity :
             return
         }
         val metadata = applicationMetadata()
-        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V2) {
+        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V3) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
             return
@@ -2715,6 +2729,45 @@ class LauncherActivity :
         status.setBackgroundColor(getColor(R.color.launcher_background))
     }
 
+    private fun openAndroidUri(value: String) {
+        if (!validBrowserUri(value) || isFinishing || isDestroyed) {
+            return
+        }
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(value))
+                    .addCategory(Intent.CATEGORY_BROWSABLE),
+            )
+            Log.i(TAG, "Opened Android browser for Linux URI")
+        } catch (error: ActivityNotFoundException) {
+            Log.w(TAG, "No Android browser is available", error)
+            Toast.makeText(this, R.string.browser_unavailable, Toast.LENGTH_LONG).show()
+        } catch (error: SecurityException) {
+            Log.w(TAG, "Android rejected Linux URI", error)
+            Toast.makeText(this, R.string.browser_unavailable, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun validBrowserUri(value: String): Boolean {
+        if (
+            value.isBlank() ||
+            value.toByteArray(StandardCharsets.UTF_8).size > MAX_BROWSER_URI_BYTES ||
+            value.any { character -> character.isISOControl() }
+        ) {
+            return false
+        }
+        val uri = runCatching { URI(value) }.getOrNull() ?: return false
+        val scheme = uri.scheme ?: return false
+        return !uri.isOpaque &&
+            (
+                scheme.equals("http", ignoreCase = true) ||
+                    scheme.equals("https", ignoreCase = true)
+            ) &&
+            !uri.host.isNullOrBlank() &&
+            uri.rawUserInfo == null &&
+            (uri.port == -1 || uri.port in 1..65_535)
+    }
+
     private fun applicationMetadata(): Bundle =
         packageManager
             .getApplicationInfo(packageName, PackageManager.GET_META_DATA)
@@ -2729,10 +2782,10 @@ class LauncherActivity :
         private const val TAG = "ArchpheneLauncher"
         private const val MANAGER_PACKAGE = "org.archphene.launcher.MANAGER_PACKAGE"
         private const val CAPABILITIES = "org.archphene.launcher.CAPABILITIES"
-        private const val CAPABILITIES_V2 = "c:wayland,input,ime,clipboard,documents"
+        private const val CAPABILITIES_V3 = "c:wayland,input,ime,clipboard,documents,open-uri"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 7
+        private const val PROTOCOL_VERSION = 8
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2748,6 +2801,8 @@ class LauncherActivity :
         private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val CALLBACK_CURSOR = IBinder.FIRST_CALL_TRANSACTION + 5
+        private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
+        private const val MAX_BROWSER_URI_BYTES = 4_096
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120

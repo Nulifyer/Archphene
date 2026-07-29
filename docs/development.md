@@ -433,6 +433,22 @@ restart, requires Code to publish a 576-logical-pixel-wide exact frame, opens
 the integrated terminal, captures the complete Android display, checks fatal
 logs, and restores the user's original App scale even when the test fails.
 
+Validate the authenticated Linux-to-Android browser handoff against an already
+published current-contract launcher with:
+
+```bash
+./scripts/test-launcher-open-uri.sh \
+  --serial RFCT90AEEFA \
+  --package <generated-code-package> \
+  --uri http://127.0.0.1:54321/
+```
+
+The gate rejects a `file://` request before dispatch, requires the portal
+response signal, confirms an Android browser becomes the foreground app,
+captures the complete device screen, and checks the wrapper log. If a service
+is listening at the supplied URI, the screenshot also proves that Android can
+reach a server running inside Archphene's shared network namespace.
+
 Run the outbound Android document gates with each matching exact-ABI manager
 APK:
 

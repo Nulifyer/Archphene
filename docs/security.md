@@ -25,6 +25,12 @@ The outer Android sandbox still blocks other Android applications and host
 resources. Files, camera, microphone, location, notifications, USB, and similar
 capabilities cross explicit Android-side brokers.
 
+Linux browser requests are not arbitrary Android intents. The manager accepts
+only bounded, syntactically valid HTTP(S) URIs from the private portal of an
+authenticated visible launcher. It rejects credentials and every file,
+content, custom, and `intent:` scheme; the wrapper adds `CATEGORY_BROWSABLE`
+and grants no URI permission.
+
 ### Electron reduced-isolation compatibility
 
 Chromium normally creates an additional Linux sandbox between its browser and
