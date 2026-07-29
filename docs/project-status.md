@@ -1732,6 +1732,22 @@ legacy KCalc/Mousepad wrappers, and the available AArch64 APK is the greenfield
 manager without the retired legacy static catalog; neither missing fixture was
 silently installed or treated as evidence.
 
+The destructive-default audit has also closed every unguarded standalone
+`pm clear` path. Thirteen manager and test-owned bridge gates that require a
+clean sandbox now reject ordinary invocation before ADB or artifact access and
+require explicit `--clean-data`; older clean-start gates retain their explicit
+`--reset-data` or `--reset-app-data` contracts. The generated-camera gate is
+the sole non-flagged clear path because it archives and restores the exact
+private sandbox and permission state. Terminal project-tree coverage now
+preserves app data by default, generates per-run safe aliases and Android
+folder names, rejects any pre-existing preference/path collision, and removes
+only the fixture it successfully claimed. Its physical Samsung run passed SAF
+selection, nested bidirectional synchronization, conflict idempotence, deferred
+deletion, symlink rejection, restart persistence, grant removal, and cleanup;
+no test alias, private mirror/state directory, or Android folder remained.
+APK replacement and the remaining non-`pm clear` mutation classes still need
+the same explicit-default audit.
+
 On July 22, 2026, a current-source x86_64 debug manager was built with the reproducible Podman toolchain, installed on the API 36 emulator, and passed the complete broad emulator regression in one sequence. The run covered package update and refresh, repository search and version selection, Android app-settings routing, authenticated runtime-pack execution and cleanup, KCalc launch/calculation/menu/rotation, native compositor input, Android PackageInstaller update, and Mousepad document, IME, touch, secondary-window, and live-theme behavior.
 
 The connected Samsung SM-S908U (Android 15, AArch64) now runs the exact current-source manager and Terminal under the maintained development signer. Because the original prototype key was unavailable, the explicitly authorized reset was preceded by verified archives of both installed APKs and their private state; 1.60 GiB of manager package/runtime data and 46 MiB of Terminal home/runtime were restored under the new UIDs. Managed Arch Bash, the ARM native catalog, and manager startup/catalog rendering pass. The old Foot, KCalc, and Mousepad wrapper APKs plus persistent Linux homes were separately archived before their deliberate signer migrations.

@@ -6,14 +6,22 @@ source "$(dirname "$0")/lib/android-test.sh"
 abi=x86_64
 serial=emulator-5554
 timeout=30
+clean_data=false
 while (($#)); do
   case "$1" in
     --android-abi) abi="${2:?}"; shift 2 ;;
     --serial) serial="${2:?}"; shift 2 ;;
     --timeout-seconds) timeout="${2:?}"; shift 2 ;;
+    --clean-data) clean_data=true; shift ;;
+    -h|--help)
+      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--timeout-seconds N] --clean-data"
+      exit 0
+      ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
+[[ "$clean_data" == true ]] ||
+  archphene_die "--clean-data is required because this gate clears accessibility-probe app data"
 archphene_validate_choice "$abi" ABI x86_64 arm64-v8a
 archphene_test_init "$serial"
 

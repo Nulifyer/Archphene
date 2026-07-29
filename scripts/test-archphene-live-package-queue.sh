@@ -4,12 +4,14 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+clean_data=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --clean-data) clean_data=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL --apk PATH --clean-data"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -17,6 +19,8 @@ while (($#)); do
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
 [[ -n "$apk" ]] || archphene_die "--apk is required"
+[[ "$clean_data" == true ]] ||
+  archphene_die "--clean-data is required because this gate clears Archphene app data"
 
 archphene_test_init "$serial"
 archphene_require_file "$apk"

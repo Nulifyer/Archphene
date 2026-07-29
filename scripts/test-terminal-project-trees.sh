@@ -5,10 +5,11 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=emulator-5554
 terminal_apk=
-alias_name=device-project
-folder=archphene-project-tree-test
+alias_name="archphene-test-$$"
+folder="archphene-project-tree-test-$$"
 skip_install=false
-preserve_app_data=false
+preserve_app_data=true
+fixture_owned=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?}"; shift 2 ;;
@@ -16,9 +17,11 @@ while (($#)); do
     --alias) alias_name="${2:?}"; shift 2 ;;
     --folder) folder="${2:?}"; shift 2 ;;
     --skip-install) skip_install=true; shift ;;
+    --clean-data) preserve_app_data=false; shift ;;
+    # Retained as a compatibility alias now that preservation is the default.
     --preserve-app-data) preserve_app_data=true; shift ;;
     -h|--help)
-      echo "usage: $0 [--serial SERIAL] [--skip-install] [--preserve-app-data] [--alias NAME] [--folder NAME]"
+      echo "usage: $0 [--serial SERIAL] [--skip-install] [--clean-data] [--alias NAME] [--folder NAME]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -180,7 +183,7 @@ for node in root.iter("node"):
 }
 
 cleanup() {
-  if [[ "$preserve_app_data" == true ]]; then
+  if [[ "$preserve_app_data" == true && "$fixture_owned" == true ]]; then
     local preferences deadline
     preferences="$(archphene_adb_run shell run-as "$package" cat \
       shared_prefs/archphene-terminal-projects-v1.xml 2>/dev/null || true)"
@@ -203,10 +206,29 @@ cleanup() {
     archphene_adb_run shell run-as "$package" rm -rf "$local_root" "$state_root" \
       >/dev/null 2>&1 || true
     archphene_adb_run shell rm -rf "$remote" >/dev/null 2>&1 || true
+  elif [[ "$preserve_app_data" == false ]]; then
+    archphene_adb_run shell pm clear "$package" >/dev/null 2>&1 || true
+    archphene_adb_run shell rm -rf "$remote" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
 
+if [[ "$preserve_app_data" == true ]]; then
+  preferences="$(
+    archphene_adb_run shell run-as "$package" cat \
+      shared_prefs/archphene-terminal-projects-v1.xml 2>/dev/null ||
+      true
+  )"
+  [[ "$preferences" != *"project.$alias_name"* ]] ||
+    archphene_die "project alias already exists; choose another --alias: $alias_name"
+  archphene_adb_run shell run-as "$package" test ! -e "$local_root" ||
+    archphene_die "project home already exists; choose another --alias: $alias_name"
+  archphene_adb_run shell run-as "$package" test ! -e "$state_root" ||
+    archphene_die "project state already exists; choose another --alias: $alias_name"
+  archphene_adb_run shell test ! -e "$remote" ||
+    archphene_die "Android test folder already exists; choose another --folder: $folder"
+fi
+fixture_owned=true
 if [[ "$preserve_app_data" == false ]]; then
   archphene_adb_run shell pm clear "$package" >/dev/null
 fi
