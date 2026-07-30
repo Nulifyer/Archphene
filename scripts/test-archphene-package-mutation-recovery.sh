@@ -4,37 +4,67 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
+target=git
+target_file_relative=usr/bin/git
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
+    --package) target="${2:?missing value for --package}"; shift 2 ;;
+    --file) target_file_relative="${2:?missing value for --file}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk] [--package NAME --file ROOT_RELATIVE_FILE]"
       exit 0 ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
+[[ "$target" =~ ^[a-zA-Z0-9@._+-]{1,128}$ ]] ||
+  archphene_die "invalid target package"
+[[ "$target_file_relative" =~ ^[a-zA-Z0-9@._+/-]{1,1024}$ &&
+  "$target_file_relative" != /* && "$target_file_relative" != *".."* ]] ||
+  archphene_die "invalid target file"
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.PackagePhaseTestReceiver"
 action=org.archphene.app.debug.action.START_INTERRUPTED_PACKAGE_REMOVAL
-target=strace
 local_entry=
 intent=files/arch-root/run/package-mutation-v1
 removal_repair=files/arch-root/run/package-removal-repair-v1
 removal_repair_temp=files/arch-root/run/package-removal-repair-v1.tmp
 local_repair_temp=files/arch-root/var/lib/pacman/local/.archphene-removal-repair.tmp
-target_file=files/arch-root/usr/bin/strace
+target_file="files/arch-root/$target_file_relative"
 output_dir="$ARCHPHENE_ROOT/tooling/build/package-mutation-recovery"
 mkdir -p "$output_dir"
 digest_root="$(mktemp -d)"
+initially_running=false
+original_section=
+
+restore_section() {
+  [[ -n "$original_section" ]] || return 0
+  local center ui x y
+  ui="$(archphene_capture_ui "package-recovery-restore-$serial" 2>/dev/null || true)"
+  center="$(
+    archphene_ui_node_center \
+      "$ui" \
+      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+      "$original_section" 2>/dev/null || true
+  )"
+  if [[ "$center" =~ ^[0-9]+[[:space:]][0-9]+$ ]]; then
+    read -r x y <<<"$center"
+    archphene_adb_run shell input tap "$x" "$y" >/dev/null 2>&1 || true
+  fi
+}
 
 cleanup() {
+  set +e
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
   if [[ -n "$local_entry" ]] &&
       archphene_adb_run shell run-as "$package" test -e "$target_file" 2>/dev/null &&
@@ -61,15 +91,44 @@ cleanup() {
   rm -f -- "$digest_root/changelog" "$digest_root/desc" "$digest_root/files" \
     "$digest_root/install" "$digest_root/mtree"
   rmdir -- "$digest_root"
+  archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+  restore_section >/dev/null 2>&1 || true
+  if [[ "$initially_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
 archphene_require_command python3
-archphene_adb_run install -r "$apk" >/dev/null
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  initially_running=true
+fi
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "$package is not installed; pass --install-apk with --apk"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+initial_ui="$(archphene_capture_ui "package-recovery-initial-$serial")"
+original_section="$(
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal", "Settings"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$initial_ui"
+)"
+[[ -n "$original_section" ]] ||
+  archphene_die "could not determine the original manager section"
 
 local_entry="$(
   archphene_adb_run exec-out run-as "$package" find \
@@ -77,31 +136,9 @@ local_entry="$(
     tr -d '\r' |
     head -n1
 )"
-if [[ -z "$local_entry" ]]; then
-  archphene_open_manager_section Packages "package-recovery-bootstrap-$serial"
-  archphene_wait_ui 'text="Package name"' "package-recovery-bootstrap-field-$serial" 15
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Package name"' 'package name'
-  archphene_adb_run shell input keycombination 113 29 >/dev/null
-  archphene_adb_run shell input keyevent KEYCODE_DEL >/dev/null
-  archphene_adb_run shell input text "$target" >/dev/null
-  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:DETAILS|Details)"' 'package details'
-  archphene_wait_ui \
-    'text="[^"]*/strace [^"]+.*Dependency closure: [1-9][0-9]* packages' \
-    "package-recovery-bootstrap-resolution-$serial" 30
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:INSTALL|Install)"' 'install strace'
-  archphene_wait_ui 'text="Install · Complete · 100%"' \
-    "package-recovery-bootstrap-complete-$serial" 120
-  archphene_wait_ui 'text="Installed strace [^"]+"' \
-    "package-recovery-bootstrap-result-$serial" 15
-  local_entry="$(
-    archphene_adb_run exec-out run-as "$package" find \
-      files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name "$target-*" |
-      tr -d '\r' |
-      head -n1
-  )"
-fi
 [[ -n "$local_entry" ]] || archphene_die "$target must be installed before the recovery gate"
+archphene_adb_run shell run-as "$package" test -x "$target_file" ||
+  archphene_die "$target_file must exist before the recovery gate"
 version="$(
   archphene_adb_run exec-out run-as "$package" cat "$local_entry/desc" |
     tr -d '\r' |
@@ -109,6 +146,23 @@ version="$(
 )"
 [[ "$version" =~ ^[^[:space:]]{1,128}$ ]] ||
   archphene_die "could not read the installed $target version"
+original_reason="$(
+  archphene_adb_run exec-out run-as "$package" cat "$local_entry/desc" |
+    tr -d '\r' |
+    awk '/^%REASON%$/{getline; print; exit}'
+)"
+[[ -z "$original_reason" ]] ||
+  archphene_die "$target must be explicitly installed before the recovery gate"
+archive="$(
+  archphene_adb_run exec-out run-as "$package" find \
+    files/arch-root/var/cache/pacman/pkg -maxdepth 1 -type f \
+    -name "$target-$version-*.pkg.tar.*" ! -name '*.sig' ! -name '*.part' |
+    tr -d '\r'
+)"
+[[ -n "$archive" && "$archive" != *$'\n'* ]] ||
+  archphene_die "expected one retained $target $version archive"
+archphene_adb_run shell run-as "$package" test -f "$archive.sig" ||
+  archphene_die "$target archive has no detached signature"
 archphene_adb_run shell run-as "$package" test ! -e "$intent" ||
   archphene_die "an existing package mutation must be repaired first"
 archphene_adb_run shell run-as "$package" test ! -e "$removal_repair" ||
@@ -195,6 +249,8 @@ archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
 archphene_open_manager_section Packages "package-recovery-packages-$serial"
 archphene_wait_ui 'text="Package name"' "package-recovery-field-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Package name"' 'package name'
+archphene_adb_run shell input keycombination 113 29 >/dev/null
+archphene_adb_run shell input keyevent KEYCODE_DEL >/dev/null
 archphene_adb_run shell input text "$target" >/dev/null
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 archphene_wait_ui 'text="Remove · Failed · 60%"' \
@@ -207,7 +263,7 @@ archphene_adb_run exec-out screencap -p >"$output_dir/$serial-interrupted.png"
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Repair"' 'Repair'
 archphene_wait_ui 'text="Remove · Complete · 100%"' \
   "package-recovery-complete-$serial" 60
-archphene_wait_ui 'text="Repaired package transaction for strace"' \
+archphene_wait_ui "text=\"Repaired package transaction for $target\"" \
   "package-recovery-result-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-repaired.png"
 
@@ -220,36 +276,39 @@ if archphene_adb_run shell run-as "$package" test -e "$removal_repair" ||
   archphene_die "successful repair retained a removal database snapshot"
 fi
 if archphene_adb_run shell run-as "$package" test -e "$target_file"; then
-  archphene_die "repaired removal retained the strace executable"
+  archphene_die "repaired removal retained the $target executable"
 fi
 if archphene_adb_run shell run-as "$package" test -e "$local_entry"; then
-  archphene_die "repaired removal retained the strace database entry"
+  archphene_die "repaired removal retained the $target database entry"
 fi
 
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:DETAILS|Details)"' 'package details'
 archphene_wait_ui \
-  'text="[^"]*/strace [^"]+.*Dependency closure: [1-9][0-9]* packages' \
+  "text=\"[^\"]*/$target [^\"]+.*Dependency closure: [1-9][0-9]* packages" \
   "package-recovery-resolution-$serial" 20
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:INSTALL|Install)"' 'reinstall strace'
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="(?:INSTALL|Install)"' "reinstall $target"
 archphene_wait_ui 'text="Install · Complete · 100%"' \
   "package-recovery-reinstall-$serial" 120
-archphene_wait_ui 'text="Installed strace [^"]+"' \
+archphene_wait_ui "text=\"Installed $target [^\"]+\"" \
   "package-recovery-reinstalled-$serial" 15
 archphene_adb_run shell run-as "$package" test -x "$target_file" ||
-  archphene_die "strace was not restored after the recovery gate"
+  archphene_die "$target was not restored after the recovery gate"
 reinstalled_entry="$(
   archphene_adb_run exec-out run-as "$package" find \
     files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name "$target-*" |
     tr -d '\r' |
     head -n1
 )"
-[[ -n "$reinstalled_entry" ]] || archphene_die "strace database record was not restored"
+[[ -n "$reinstalled_entry" ]] ||
+  archphene_die "$target database record was not restored"
 reason="$(
   archphene_adb_run exec-out run-as "$package" cat "$reinstalled_entry/desc" |
     tr -d '\r' |
     awk '/^%REASON%$/{getline; print; exit}'
 )"
-[[ -z "$reason" ]] || archphene_die "reinstalled strace was not retained as explicit"
+[[ "$reason" == "$original_reason" ]] ||
+  archphene_die "reinstalled $target changed its install reason"
 
 fatal_log="$(
   archphene_adb_run logcat -d -v brief \
@@ -260,7 +319,14 @@ fatal_log="$(
 
 trap - EXIT
 cleanup
+if [[ "$initially_running" == true ]]; then
+  archphene_android_pid "$package" >/dev/null ||
+    archphene_die "mutation recovery did not restore the running manager"
+else
+  ! archphene_android_pid "$package" >/dev/null 2>&1 ||
+    archphene_die "mutation recovery left a previously stopped manager running"
+fi
 archphene_note "Interrupted package mutation repair passed on $serial"
 archphene_note "  SIGKILL recovery restored a checksummed partial pacman record before removal"
-archphene_note "  Repair removed strace, cleared private state, and explicit reinstall restored it"
+archphene_note "  Repair removed $target, cleared private state, and explicit reinstall restored it"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{interrupted,repaired}.png"

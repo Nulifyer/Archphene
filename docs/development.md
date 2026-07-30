@@ -209,6 +209,21 @@ Manager replacement is a separate explicit action:
 matching signed archive must already exist; the gate fails before damage when
 they do not.
 
+## Interrupted removal recovery
+
+Run process-death repair and signed reinstall against installed explicit Git:
+
+```bash
+./scripts/test-archphene-package-mutation-recovery.sh \
+  --serial <adb-serial>
+```
+
+The gate no longer installs its manager or bootstraps a missing package.
+Another fixture may be selected with `--package` and `--file`, but it must
+already be explicitly installed and have exactly one matching signed archive
+in Archphene's package cache. Manager replacement requires the separate
+`--apk <path> --install-apk` action.
+
 ## Main-thread I/O diagnostics
 
 Debug APKs enable StrictMode after framework application initialization. Run
