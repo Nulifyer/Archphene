@@ -2664,6 +2664,7 @@ class LauncherSessionService : Service() {
             return
         }
         session.attachmentFramesLogged += 1
+        notifyAccessibilityViewport(session)
         val selectedWidth = session.presentationComponent(0)
         val selectedHeight = session.presentationComponent(1)
         val surfaceWidth = session.presentationComponent(2)
@@ -2704,7 +2705,9 @@ class LauncherSessionService : Service() {
                 "content=${session.presentationComponent(28)}," +
                 "${session.presentationComponent(29)} " +
                 "${session.presentationComponent(30)}x" +
-                "${session.presentationComponent(31)}",
+                "${session.presentationComponent(31)} " +
+                "presentation=${session.presentationComponent(32)}x" +
+                "${session.presentationComponent(33)}",
         )
     }
 
@@ -3839,6 +3842,52 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyAccessibilityViewport(session: Session) {
+        if (!session.active) return
+        val presentationWidth = session.presentationComponent(32)
+        val presentationHeight = session.presentationComponent(33)
+        val destinationX = session.presentationComponent(28)
+        val destinationY = session.presentationComponent(29)
+        val destinationWidth = session.presentationComponent(30)
+        val destinationHeight = session.presentationComponent(31)
+        if (
+            presentationWidth !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
+            presentationHeight !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
+            destinationX !in -MAX_ACCESSIBILITY_VIEWPORT..MAX_ACCESSIBILITY_VIEWPORT ||
+            destinationY !in -MAX_ACCESSIBILITY_VIEWPORT..MAX_ACCESSIBILITY_VIEWPORT ||
+            destinationWidth !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
+            destinationHeight !in 1..MAX_ACCESSIBILITY_VIEWPORT
+        ) {
+            return
+        }
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(presentationWidth)
+            data.writeInt(presentationHeight)
+            data.writeInt(destinationX)
+            data.writeInt(destinationY)
+            data.writeInt(destinationWidth)
+            data.writeInt(destinationHeight)
+            session.clientToken.transact(
+                CALLBACK_ACCESSIBILITY_VIEWPORT,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(
+                TAG,
+                "Could not publish accessibility viewport session=${session.id}",
+                error,
+            )
+        } finally {
+            data.recycle()
+        }
+    }
+
     private fun notifyAccessibilityEvent(
         session: Session,
         nodeId: Int,
@@ -4223,11 +4272,14 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
         private const val CALLBACK_APPEARANCE = IBinder.FIRST_CALL_TRANSACTION + 12
         private const val CALLBACK_ACCESSIBILITY = IBinder.FIRST_CALL_TRANSACTION + 13
+        private const val CALLBACK_ACCESSIBILITY_VIEWPORT =
+            IBinder.FIRST_CALL_TRANSACTION + 14
         private const val ACCESSIBILITY_CALLBACK_TREE = 1
         private const val ACCESSIBILITY_CALLBACK_EVENT = 2
         private const val ACCESSIBILITY_CALLBACK_MENU = 3
         private const val MAX_ACCESSIBILITY_ACTIONS = 64
         private const val MAX_ACCESSIBILITY_NODE_ID = 1_000_000
+        private const val MAX_ACCESSIBILITY_VIEWPORT = 16_384
         private const val MAX_ACCESSIBILITY_POLL_MILLIS = 250
         private const val MAX_ACCESSIBILITY_TEXT_UTF16 = 1_024
         private const val MAX_ACCESSIBILITY_TEXT_BYTES = 4_096

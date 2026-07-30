@@ -44,6 +44,15 @@ else
     || archphene_die 'the test AccessibilityService is not installed; pass --probe-apk only when installation is explicitly approved'
 fi
 archphene_adb_run shell pm path "$target" >/dev/null
+if archphene_android_pid "$target" >/dev/null 2>&1; then
+  archphene_die "refusing to replace an active $profile session"
+fi
+original_focus="$(
+  archphene_adb_run shell dumpsys window |
+    sed -n 's/.*mCurrentFocus=.* u0 \([^} ]*\/[^} ]*\)}.*/\1/p' |
+    head -1 |
+    tr -d '\r'
+)"
 
 safe_target="${target//[^A-Za-z0-9._-]/_}"
 tree_name="framework-accessibility-tree-$safe_target.txt"
@@ -71,6 +80,7 @@ old_user_rotation="$(
 [[ "$old_user_rotation" =~ ^[0-3]$ ]] \
   || archphene_die "unexpected user rotation setting: $old_user_rotation"
 restore() {
+  local status=$?
   local restore_failed=false
   if [[ "$android_activity_open" == true ]]; then
     archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
@@ -111,10 +121,17 @@ restore() {
     archphene_adb_run shell settings put system accelerometer_rotation \
       "$old_accelerometer_rotation" >/dev/null 2>&1 || restore_failed=true
   fi
+  archphene_adb_run shell am force-stop "$target" >/dev/null 2>&1 ||
+    restore_failed=true
+  if [[ -n "$original_focus" ]]; then
+    archphene_adb_run shell am start -n "$original_focus" >/dev/null 2>&1 ||
+      restore_failed=true
+  fi
   if [[ "$restore_failed" == true ]]; then
     echo "error: could not restore $profile accessibility test state" >&2
     return 1
   fi
+  return "$status"
 }
 trap restore EXIT
 if [[ "$profile" == TextEditor ]]; then
@@ -276,6 +293,43 @@ assert_current_bounds() {
     --display-width "$width" --display-height "$height" >/dev/null
 }
 
+assert_control_bounds() {
+  local tree="$1" temporary
+  shift
+  temporary="$artifact_dir/control-bounds-tree.txt"
+  printf '%s\n' "$tree" >"$temporary"
+  python3 - "$temporary" "$@" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+selectors = sys.argv[2:]
+nodes = []
+for line in Path(sys.argv[1]).read_text(errors="replace").splitlines():
+    if not line.startswith("NODE|"):
+        continue
+    fields = line.rstrip("\r\n").split("|")
+    if len(fields) < 12:
+        continue
+    match = re.fullmatch(r"(-?\d+) (-?\d+) (-?\d+) (-?\d+)", fields[5])
+    if match:
+        nodes.append((fields, tuple(map(int, match.groups()))))
+for selector in selectors:
+    matches = [
+        bounds
+        for fields, bounds in nodes
+        if selector in (fields[3], fields[4])
+    ]
+    if not matches:
+        raise SystemExit(f"missing accessibility control bounds: {selector}")
+    if not any(right - left >= 40 and bottom - top >= 20
+               for left, top, right, bottom in matches):
+        raise SystemExit(
+            f"collapsed accessibility control bounds for {selector}: {matches}"
+        )
+PY
+}
+
 png_dimensions() {
   python3 - "$1" <<'PY'
 import struct
@@ -339,6 +393,9 @@ exercise_live_rotation() {
 
   tree="$(wait_target_tree_in_bounds '' "|$profile_label|" )"
   printf '%s\n' "$tree" >"$artifact_dir/rotation-accessibility-tree.txt"
+  if [[ "$profile" == Qt5Settings ]]; then
+    assert_control_bounds "$tree" OK Cancel Apply
+  fi
   rotated_pid="$(archphene_adb_run shell pidof "$target" | tr -d '\r')"
   [[ "$rotated_pid" == "$before_pid" ]] \
     || archphene_die "$profile wrapper PID changed across rotation"
@@ -419,6 +476,10 @@ test_mousepad() {
   invoke_accessibility_action 'Show the preferences dialog'
   tree="$(wait_target_tree '' '|Mousepad Preferences|' '|Close|')"
   assert_current_bounds "$tree"
+  assert_control_bounds "$tree" Close
+  printf '%s\n' "$tree" >"$artifact_dir/preferences-accessibility-tree.txt"
+  archphene_adb_run exec-out screencap -p \
+    >"$artifact_dir/preferences-full-device.png"
   archphene_adb_run shell input keyevent KEYCODE_ESCAPE
   wait_target_tree '|Mousepad Preferences|' '|Untitled 1 - Mousepad|' >/dev/null
   invoke_accessibility_action File
@@ -636,6 +697,12 @@ if [[ -f "$artifact_dir/rotation-full-device.png" ]]; then
     --artifact "$artifact_dir/rotation-full-device.png"
     --artifact "$artifact_dir/rotation-accessibility-tree.txt"
     --artifact "$artifact_dir/restored-full-device.png"
+  )
+fi
+if [[ -f "$artifact_dir/preferences-full-device.png" ]]; then
+  manifest_args+=(
+    --artifact "$artifact_dir/preferences-full-device.png"
+    --artifact "$artifact_dir/preferences-accessibility-tree.txt"
   )
 fi
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" "${manifest_args[@]}"

@@ -23,10 +23,19 @@ done
 
 archphene_test_init "$serial"
 archphene_adb_run shell pm path "$package" >/dev/null
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  archphene_die "refusing to replace an active Kate session"
+fi
 activity="$(archphene_launcher "$package")"
 safe_serial="${serial//[^A-Za-z0-9._-]/_}"
 artifact_dir="${artifact_dir:-$ARCHPHENE_ROOT/tooling/artifacts/visual-audit/$safe_serial/kate-workflows}"
 mkdir -p "$artifact_dir"
+original_focus="$(
+  archphene_adb_run shell dumpsys window |
+    sed -n 's/.*mCurrentFocus=.* u0 \([^} ]*\/[^} ]*\)}.*/\1/p' |
+    head -1 |
+    tr -d '\r'
+)"
 
 suffix="$(date +%s)$RANDOM"
 session_name="ArchpheneWorkflow$suffix"
@@ -37,8 +46,8 @@ feedback=files/linux-home/.local/state/UserFeedback.org.kde.kate
 had_katerc=false
 had_kate_state=false
 had_feedback=false
+fatal_logs=
 
-archphene_adb_run shell am force-stop "$package"
 archphene_adb_run shell run-as "$package" mkdir -p "$backup"
 if archphene_adb_run shell run-as "$package" test -e "$katerc"; then
   archphene_adb_run shell run-as "$package" cp -a "$katerc" "$backup/katerc"
@@ -54,6 +63,7 @@ if archphene_adb_run shell run-as "$package" test -e "$feedback"; then
 fi
 
 restore_state() {
+  local status=$?
   set +e
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1
   archphene_adb_run shell run-as "$package" rm -rf \
@@ -78,8 +88,26 @@ restore_state() {
   fi
   archphene_adb_run shell run-as "$package" rm -rf "$backup" \
     >/dev/null 2>&1
+  if [[ -n "$original_focus" ]]; then
+    archphene_adb_run shell am start -n "$original_focus" >/dev/null 2>&1 ||
+      true
+  fi
+  return "$status"
 }
 trap restore_state EXIT
+
+collect_fatal_logs() {
+  local found
+  found="$(
+    archphene_adb_run logcat -d -v brief |
+      grep -E \
+        'FATAL EXCEPTION|AndroidRuntime.*Process: org\.archphene|[EF]/Archphene(Input|LinuxApp|LauncherSession)' ||
+      true
+  )"
+  if [[ -n "$found" ]]; then
+    fatal_logs+="${fatal_logs:+$'\n'}$found"
+  fi
+}
 
 # Start from an isolated anonymous Kate session. The exact prior config,
 # sessions, and feedback state are restored by the EXIT trap.
@@ -261,6 +289,7 @@ archphene_wait_ui 'text="Untitled \(2\)"' kate-workflows-after-session \
 # A new Kate window is a second Linux Wayland top-level in the same Android
 # Activity and process tree. Android Back must close only that secondary.
 ui="$(archphene_capture_ui kate-workflows-before-new-window)"
+collect_fatal_logs
 archphene_adb_run logcat -c
 archphene_tap_text "$ui" File
 archphene_wait_ui_exact_text 'New Window' kate-workflows-file-menu "$timeout"
@@ -282,6 +311,7 @@ print(matches[-1] if matches else "")
 archphene_adb_run exec-out screencap -p >"$artifact_dir/secondary-window.png"
 secondary_closed=false
 for _ in 1 2 3; do
+  collect_fatal_logs
   archphene_adb_run logcat -c
   archphene_adb_run shell input keyevent KEYCODE_BACK
   close_deadline=$((SECONDS + 5))
@@ -302,10 +332,11 @@ done
     && "$(archphene_linux_loader_pid "$android_pid")" == "$linux_pid" ]] \
   || archphene_die 'closing Kate secondary window disturbed the primary process'
 
+collect_fatal_logs
 logs="$(archphene_adb_run logcat -d -v brief \
   -s ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E '*:S')"
 printf '%s\n' "$logs" >"$artifact_dir/logcat.txt"
-[[ "$logs" != *'FATAL EXCEPTION'* && "$logs" != *'Protocol error'* ]] \
+[[ -z "$fatal_logs" && "$logs" != *'Protocol error'* ]] \
   || archphene_die 'Kate workflow produced an Android crash or Wayland protocol error'
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
   "$artifact_dir/manifest.json" \

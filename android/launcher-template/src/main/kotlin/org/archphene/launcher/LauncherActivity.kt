@@ -236,7 +236,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_ACCESSIBILITY ||
+                    code !in CALLBACK_STATUS..CALLBACK_ACCESSIBILITY_VIEWPORT ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -708,6 +708,39 @@ class LauncherActivity :
                             reply?.writeNoException()
                             reply?.writeInt(if (accepted) RESULT_OK else RESULT_INVALID)
                             true
+                        }
+                        CALLBACK_ACCESSIBILITY_VIEWPORT -> {
+                            val presentationWidth = data.readInt()
+                            val presentationHeight = data.readInt()
+                            val destinationX = data.readInt()
+                            val destinationY = data.readInt()
+                            val destinationWidth = data.readInt()
+                            val destinationHeight = data.readInt()
+                            if (
+                                presentationWidth !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
+                                presentationHeight !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
+                                destinationX !in -MAX_ACCESSIBILITY_VIEWPORT..
+                                MAX_ACCESSIBILITY_VIEWPORT ||
+                                destinationY !in -MAX_ACCESSIBILITY_VIEWPORT..
+                                MAX_ACCESSIBILITY_VIEWPORT ||
+                                destinationWidth !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
+                                destinationHeight !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
+                                data.dataAvail() != 0
+                            ) {
+                                false
+                            } else {
+                                accessibilityProvider.updateViewportTransform(
+                                    AccessibilityViewportTransform(
+                                        presentationWidth,
+                                        presentationHeight,
+                                        destinationX,
+                                        destinationY,
+                                        destinationWidth,
+                                        destinationHeight,
+                                    ),
+                                )
+                                true
+                            }
                         }
                         else -> false
                     }
@@ -4310,10 +4343,13 @@ class LauncherActivity :
         private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
         private const val CALLBACK_APPEARANCE = IBinder.FIRST_CALL_TRANSACTION + 12
         private const val CALLBACK_ACCESSIBILITY = IBinder.FIRST_CALL_TRANSACTION + 13
+        private const val CALLBACK_ACCESSIBILITY_VIEWPORT =
+            IBinder.FIRST_CALL_TRANSACTION + 14
         private const val ACCESSIBILITY_CALLBACK_TREE = 1
         private const val ACCESSIBILITY_CALLBACK_EVENT = 2
         private const val ACCESSIBILITY_CALLBACK_MENU = 3
         private const val MAX_ACCESSIBILITY_NODE_ID = 1_000_000
+        private const val MAX_ACCESSIBILITY_VIEWPORT = 16_384
         private const val MAX_ACCESSIBILITY_TEXT_UTF16 = 1_024
         private const val MAX_ACCESSIBILITY_TEXT_BYTES = 4_096
         private const val ACCESSIBILITY_TOUCH_ID = 31

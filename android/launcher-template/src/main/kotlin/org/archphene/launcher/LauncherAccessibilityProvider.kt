@@ -59,6 +59,7 @@ internal class LauncherAccessibilityProvider(
     @Volatile private var tree = emptyTree()
     @Volatile private var accessibilityFocus = 0
     @Volatile private var inputFocus = 0
+    @Volatile private var viewportTransform: AccessibilityViewportTransform? = null
     private val parseLock = Any()
     private var wireBuffer = ByteArray(INITIAL_TREE_BUFFER_BYTES)
     private var boundsRefreshGeneration = 0
@@ -81,8 +82,14 @@ internal class LauncherAccessibilityProvider(
 
     fun clear() {
         tree = emptyTree()
+        viewportTransform = null
         accessibilityFocus = 0
         inputFocus = 0
+        sendEvent(0, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+    }
+
+    fun updateViewportTransform(transform: AccessibilityViewportTransform) {
+        viewportTransform = transform
         sendEvent(0, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
     }
 
@@ -405,19 +412,33 @@ internal class LauncherAccessibilityProvider(
         val currentTree = tree
         val width = currentHost.width.coerceAtLeast(1)
         val height = currentHost.height.coerceAtLeast(1)
-        val scaleX = width.toFloat() / currentTree.viewportWidth.coerceAtLeast(1)
-        val scaleY = height.toFloat() / currentTree.viewportHeight.coerceAtLeast(1)
-        val left = (node.bounds.left * scaleX).roundToInt().coerceIn(0, width - 1)
-        val top = (node.bounds.top * scaleY).roundToInt().coerceIn(0, height - 1)
-        val right =
-            (node.bounds.right * scaleX)
-                .roundToInt()
-                .coerceIn(left + 1, width)
-        val bottom =
-            (node.bounds.bottom * scaleY)
-                .roundToInt()
-                .coerceIn(top + 1, height)
-        return Rect(left, top, right, bottom)
+        val transform = viewportTransform
+        val mapped =
+            if (transform == null) {
+                mapAccessibilityDisplayBoundsFallback(
+                    node.bounds.left,
+                    node.bounds.top,
+                    node.bounds.right,
+                    node.bounds.bottom,
+                    currentTree.viewportWidth,
+                    currentTree.viewportHeight,
+                    width,
+                    height,
+                )
+            } else {
+                mapAccessibilityDisplayBounds(
+                    node.bounds.left,
+                    node.bounds.top,
+                    node.bounds.right,
+                    node.bounds.bottom,
+                    currentTree.viewportWidth,
+                    currentTree.viewportHeight,
+                    transform,
+                    width,
+                    height,
+                )
+            }
+        return Rect(mapped.left, mapped.top, mapped.right, mapped.bottom)
     }
 
     private fun parse(input: ByteBuffer): Tree {

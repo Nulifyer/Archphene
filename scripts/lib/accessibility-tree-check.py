@@ -19,13 +19,37 @@ def main() -> None:
     parser.add_argument("--minimum-nodes", type=int, default=5)
     args = parser.parse_args()
     text = args.tree.read_text(errors="replace")
-    nodes = []
+    parsed_nodes = []
     for line in text.splitlines():
         if not line.startswith("NODE|"):
             continue
         fields = line.split("|")
         if len(fields) < 12:
             raise SystemExit("accessibility node uses the obsolete incomplete schema")
+        parsed_nodes.append(fields)
+    expected = args.expected_text.casefold()
+    matching_roots = [
+        fields[1]
+        for fields in parsed_nodes
+        if expected in fields[3].casefold() or expected in fields[4].casefold()
+    ]
+    if not matching_roots:
+        raise SystemExit(f"tree does not identify {args.expected_text!r}")
+    linux_roots = []
+    for candidate in sorted(matching_roots, key=lambda path: (path.count("."), len(path))):
+        if not any(
+            candidate == root or candidate.startswith(f"{root}.")
+            for root in linux_roots
+        ):
+            linux_roots.append(candidate)
+    nodes = []
+    for fields in parsed_nodes:
+        path = fields[1]
+        if not any(
+            path == root or path.startswith(f"{root}.")
+            for root in linux_roots
+        ):
+            continue
         bounds = BOUNDS.fullmatch(fields[5].strip())
         if not bounds:
             raise SystemExit(f"invalid accessibility bounds: {fields[5]!r}")
@@ -39,9 +63,6 @@ def main() -> None:
         nodes.append(fields)
     if len(nodes) < args.minimum_nodes:
         raise SystemExit(f"only {len(nodes)} real accessibility nodes were exported")
-    folded = text.casefold()
-    if args.expected_text.casefold() not in folded:
-        raise SystemExit(f"tree does not identify {args.expected_text!r}")
     interactive = sum(
         fields[7] == "true"
         or fields[8] == "true"

@@ -3088,6 +3088,11 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
             31 => layout.3,
             _ => 0,
         }),
+        32..=33 => root_layout.map_or(0, |layout| match component {
+            32 => i32::try_from(layout.output_width).unwrap_or(i32::MAX),
+            33 => i32::try_from(layout.output_height).unwrap_or(i32::MAX),
+            _ => 0,
+        }),
         _ => -1,
     }
 }
@@ -14856,7 +14861,7 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
     let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
-    const COMPONENTS: usize = 32;
+    const COMPONENTS: usize = 34;
     const BYTES: usize = COMPONENTS * std::mem::size_of::<i32>();
     let (Ok(capacity), Ok(address)) = (
         environment.get_direct_buffer_capacity(&output),

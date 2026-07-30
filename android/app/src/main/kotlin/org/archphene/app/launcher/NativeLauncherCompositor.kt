@@ -554,7 +554,7 @@ internal class NativeLauncherCompositor(
 
     companion object {
         private const val INPUT_RECORD_BYTES = 6 * Int.SIZE_BYTES
-        const val PRESENTATION_COMPONENTS = 32
+        const val PRESENTATION_COMPONENTS = 34
         const val RESULT_CLOSED = -1
         const val FLAG_CLIENT_CONNECTED = 1
         const val FLAG_FRAME_PRESENTED = 1 shl 1
