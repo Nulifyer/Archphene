@@ -1,10 +1,14 @@
 #define _GNU_SOURCE
 
+#include <errno.h>
 #include <dlfcn.h>
 #include <gio/gio.h>
 #include <glib-object.h>
+#include <glib-unix.h>
 #include <glib.h>
 #include <gmodule.h>
+#include <sys/inotify.h>
+#include <unistd.h>
 
 typedef gpointer (*GtkSettingsGetDefault)(void);
 typedef gpointer (*GdkScreenGetDefault)(void);
@@ -49,7 +53,6 @@ typedef gboolean (*GtkFileChooserSelectFile)(
 typedef void (*GtkFileChooserUnselectAll)(gpointer chooser);
 
 static gchar *settings_path;
-static gchar *settings_css_path;
 static gchar *active_theme;
 static gchar *active_font;
 static gchar *active_css;
@@ -57,8 +60,11 @@ static gboolean active_dark;
 static gboolean have_active_settings;
 static gpointer active_css_provider;
 static gboolean refresh_started;
-static GFileMonitor *settings_monitor;
 static guint refresh_source;
+static gint settings_watch_fd = -1;
+static gint settings_watch = -1;
+static GDBusConnection *settings_bus;
+static guint settings_bus_watch;
 static gpointer portal_file_chooser;
 static GSList *portal_files;
 
@@ -371,8 +377,11 @@ static gboolean refresh_settings(gpointer unused)
     active_css = css;
     active_dark = dark;
     have_active_settings = TRUE;
-    gchar *status = g_strdup_printf("applied theme=%s dark=%s font=%s\n",
-            theme, dark ? "true" : "false", font);
+    gchar *status = g_strdup_printf(
+            "applied theme=%s dark=%s font=%s monitor=%d/%d portal=%s\n",
+            theme, dark ? "true" : "false", font,
+            settings_watch_fd, settings_watch,
+            settings_bus_watch == 0 ? "false" : "true");
     write_diagnostic(status);
     g_free(status);
     g_free(css_path);
@@ -380,59 +389,158 @@ static gboolean refresh_settings(gpointer unused)
     return G_SOURCE_REMOVE;
 }
 
-static void settings_changed(GFileMonitor *monitor, GFile *file,
-        GFile *other_file, GFileMonitorEvent event, gpointer unused)
+static gboolean settings_watch_ready(
+        gint descriptor, GIOCondition condition, gpointer unused)
 {
-    (void)monitor;
     (void)unused;
-    if (settings_path == NULL || file == NULL) return;
-    switch (event) {
-    case G_FILE_MONITOR_EVENT_CHANGED:
-    case G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT:
-    case G_FILE_MONITOR_EVENT_CREATED:
-    case G_FILE_MONITOR_EVENT_MOVED_IN:
-    case G_FILE_MONITOR_EVENT_RENAMED:
-        break;
-    default:
-        return;
+    if ((condition & (G_IO_ERR | G_IO_HUP | G_IO_NVAL)) != 0) {
+        write_diagnostic("settings monitor descriptor failed\n");
+        return G_SOURCE_REMOVE;
     }
-    const gchar *path = g_file_peek_path(file);
-    const gchar *other_path =
-            other_file == NULL ? NULL : g_file_peek_path(other_file);
-    if (g_strcmp0(path, settings_path) != 0
-            && g_strcmp0(other_path, settings_path) != 0
-            && g_strcmp0(path, settings_css_path) != 0
-            && g_strcmp0(other_path, settings_css_path) != 0) return;
-    if (refresh_source == 0) refresh_source = g_idle_add(refresh_settings, NULL);
+    /*
+     * One fixed buffer is sufficient because every event is only an
+     * invalidation signal. Overflow also invalidates the complete appearance
+     * snapshot, so dropping individual event identities is safe.
+     */
+    char buffer[4096]
+            __attribute__((aligned(__alignof__(struct inotify_event))));
+    gboolean relevant = FALSE;
+    while (TRUE) {
+        ssize_t count = read(descriptor, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        if (count <= 0) {
+            write_diagnostic("settings monitor read failed\n");
+            return G_SOURCE_REMOVE;
+        }
+        for (size_t offset = 0;
+                offset + sizeof(struct inotify_event) <= (size_t)count;) {
+            struct inotify_event *event =
+                    (struct inotify_event *)(buffer + offset);
+            size_t event_size = sizeof(*event) + event->len;
+            if (event_size > (size_t)count - offset) {
+                relevant = TRUE;
+                break;
+            }
+            if ((event->mask & IN_Q_OVERFLOW) != 0
+                    || (event->len > 0
+                        && (g_strcmp0(event->name, "settings.ini") == 0
+                            || g_strcmp0(event->name, "gtk.css") == 0))) {
+                relevant = TRUE;
+            }
+            offset += event_size;
+        }
+    }
+    if (relevant && refresh_source == 0) {
+        refresh_source = g_idle_add(refresh_settings, NULL);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void portal_settings_changed(
+        GDBusConnection *connection,
+        const gchar *sender_name,
+        const gchar *object_path,
+        const gchar *interface_name,
+        const gchar *signal_name,
+        GVariant *parameters,
+        gpointer unused)
+{
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    (void)unused;
+    const gchar *name = NULL;
+    const gchar *key = NULL;
+    GVariant *value = NULL;
+    g_variant_get(parameters, "(&s&sv)", &name, &key, &value);
+    gboolean appearance = g_strcmp0(name, "org.freedesktop.appearance") == 0;
+    g_variant_unref(value);
+    if (!appearance) return;
+
+    /*
+     * GDBus dispatches signals on the subscribing thread's main context, so
+     * applying here keeps the update ordered after the portal publication and
+     * avoids depending on a later idle turn. One signal may be emitted for
+     * each changed key; refresh_settings is idempotent over the exact files.
+     */
+    refresh_settings(NULL);
 }
 
 static void start_refresh(void)
 {
-    if (refresh_started) return;
+    if (refresh_started) {
+        if (refresh_source == 0) {
+            refresh_source = g_idle_add(refresh_settings, NULL);
+        }
+        return;
+    }
     const gchar *configured = g_getenv("ARCHPHENE_GTK_SETTINGS_FILE");
     if (configured == NULL || !g_path_is_absolute(configured)) return;
     refresh_started = TRUE;
     settings_path = g_strdup(configured);
     gchar *directory = g_path_get_dirname(settings_path);
-    settings_css_path = g_build_filename(directory, "gtk.css", NULL);
     write_diagnostic("initialized\n");
-    refresh_settings(NULL);
-    GFile *directory_file = g_file_new_for_path(directory);
-    GError *error = NULL;
-    settings_monitor = g_file_monitor_directory(
-            directory_file, G_FILE_MONITOR_WATCH_MOVES, NULL, &error);
-    g_object_unref(directory_file);
-    g_free(directory);
-    if (settings_monitor == NULL) {
-        gchar *status = g_strdup_printf("settings monitor failed: %s\n",
-                error == NULL ? "unknown error" : error->message);
+    settings_watch_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    gint watch_error = settings_watch_fd < 0 ? errno : 0;
+    if (settings_watch_fd >= 0) {
+        settings_watch = inotify_add_watch(
+                settings_watch_fd, directory,
+                IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_ATTRIB);
+        if (settings_watch < 0) watch_error = errno;
+    }
+    GError *bus_error = NULL;
+    settings_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &bus_error);
+    if (settings_bus != NULL) {
+        settings_bus_watch = g_dbus_connection_signal_subscribe(
+                settings_bus,
+                /*
+                 * Match the standard Settings probe by path/interface/member.
+                 * The private bus is per-launcher, and the daemon attaches a
+                 * unique sender name to signals even when the service owns the
+                 * well-known portal name.
+                 */
+                NULL,
+                "org.freedesktop.portal.Settings",
+                "SettingChanged",
+                "/org/freedesktop/portal/desktop",
+                NULL,
+                G_DBUS_SIGNAL_FLAGS_NONE,
+                portal_settings_changed,
+                NULL,
+                NULL);
+    }
+    if (settings_watch_fd < 0 || settings_watch < 0) {
+        if (settings_watch_fd >= 0) close(settings_watch_fd);
+        settings_watch_fd = -1;
+        settings_watch = -1;
+    } else {
+        g_unix_fd_add(
+                settings_watch_fd,
+                G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL,
+                settings_watch_ready,
+                NULL);
+    }
+    /*
+     * Arm the monitors before the initial read. A preload constructor runs
+     * before GTK has necessarily created GtkSettings, so apply on the first
+     * main-context idle turn instead of permanently recording an unavailable
+     * toolkit. Manager publication can race startup; monitoring first keeps
+     * an atomic replacement observable.
+     */
+    refresh_source = g_idle_add(refresh_settings, NULL);
+    if (settings_watch < 0 && settings_bus_watch == 0) {
+        gchar *status = g_strdup_printf(
+                "settings monitors failed: inotify=%s portal=%s\n",
+                g_strerror(watch_error),
+                bus_error == NULL ? "unknown" : bus_error->message);
         write_diagnostic(status);
         g_free(status);
-        g_clear_error(&error);
-        return;
     }
-    g_signal_connect(settings_monitor, "changed",
-            G_CALLBACK(settings_changed), NULL);
+    g_clear_error(&bus_error);
+    g_free(directory);
 }
 
 /*

@@ -54,6 +54,10 @@ import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.LauncherAuthorization
 
 class LauncherSessionService : Service() {
+    private val preferenceAppearanceListener =
+        ArchphenePreferences.AppearanceListener {
+            surfaceHandler.post { publishPortalAppearance() }
+        }
     private data class PendingDocumentRequest(
         val id: Int,
         val operation: Int,
@@ -213,6 +217,7 @@ class LauncherSessionService : Service() {
         super.onCreate()
         surfaceThread = HandlerThread("ArchpheneLauncherSurface").apply { start() }
         surfaceHandler = Handler(surfaceThread.looper)
+        ArchphenePreferences.setAppearanceListener(preferenceAppearanceListener)
         clipboardThread = HandlerThread("ArchpheneLauncherClipboard").apply { start() }
         clipboardHandler = Handler(clipboardThread.looper)
         /*
@@ -282,6 +287,7 @@ class LauncherSessionService : Service() {
     }
 
     override fun onDestroy() {
+        ArchphenePreferences.clearAppearanceListener(preferenceAppearanceListener)
         LauncherSessionDebugBridge.detach(this)
         wallpaperManager?.removeOnColorsChangedListener(wallpaperColorsChanged)
         wallpaperManager = null
@@ -987,6 +993,7 @@ class LauncherSessionService : Service() {
             if (current) {
                 session.portalBridge?.let { bridge ->
                     val appearance = resolvedAppearance(session)
+                    notifyAppearance(session, appearance)
                     bridge.updateAppearance(appearance.dark, appearance.accent)
                 }
                 session.compositor?.detach()
@@ -2321,9 +2328,15 @@ class LauncherSessionService : Service() {
 
     private fun resolvedAppearance(session: Session): ResolvedAppearance {
         val configuration = resources.configuration
-        val dark =
+        val systemDark =
             configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
                 Configuration.UI_MODE_NIGHT_YES
+        val liveOverrides = ArchphenePreferences.snapshot().appearance
+        val dark =
+            LinuxAppearancePreferences.resolveDark(
+                systemDark,
+                liveOverrides.themeMode,
+            )
         val shortPixels = minOf(session.surfaceWidth, session.surfaceHeight).coerceAtLeast(1)
         val densityForMinimum = shortPixels.toLong().times(160).div(432).toInt()
         val effectiveDensity = minOf(session.densityDpi, densityForMinimum).coerceIn(72, 1_000)
@@ -2344,7 +2357,7 @@ class LauncherSessionService : Service() {
                         .div(10)
                 ).toInt().coerceIn(100, 200)
         val material =
-            if (Build.VERSION.SDK_INT >= 31) {
+            if (Build.VERSION.SDK_INT >= 31 && liveOverrides.materialYou) {
                 intArrayOf(
                     getColor(
                         if (dark) {
@@ -2379,7 +2392,9 @@ class LauncherSessionService : Service() {
             TAG,
             "Resolved launcher appearance session=${session.id} " +
                 "geometry=${session.appearanceOverrides.geometryPercent.takeIf { it != 0 } ?: "auto"} " +
-                "dark=$dark font=$fontPercent controls=${visualDp}dp target=${targetDp}dp",
+                "theme=${liveOverrides.themeMode} dark=$dark " +
+                "materialYou=${liveOverrides.materialYou} " +
+                "font=$fontPercent controls=${visualDp}dp target=${targetDp}dp",
         )
         return ResolvedAppearance(
             dark,
@@ -2397,6 +2412,7 @@ class LauncherSessionService : Service() {
         val session = sessions.values.firstOrNull() ?: return
         val appearance = resolvedAppearance(session)
         for (activeSession in sessions.values) {
+            notifyAppearance(activeSession, appearance)
             activeSession.portalBridge?.updateAppearance(appearance.dark, appearance.accent)
         }
         if (
@@ -2918,6 +2934,36 @@ class LauncherSessionService : Service() {
             session.clientToken.transact(CALLBACK_STATUS, data, null, IBinder.FLAG_ONEWAY)
         } catch (error: RemoteException) {
             Log.w(TAG, "Could not deliver launcher status session=${session.id}", error)
+        } finally {
+            data.recycle()
+        }
+    }
+
+    private fun notifyAppearance(
+        session: Session,
+        appearance: ResolvedAppearance,
+    ) {
+        if (!session.active) return
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(if (appearance.dark) 1 else 0)
+            data.writeInt(appearance.background)
+            data.writeInt(appearance.foreground)
+            session.clientToken.transact(
+                CALLBACK_APPEARANCE,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(
+                TAG,
+                "Could not deliver launcher appearance session=${session.id}",
+                error,
+            )
         } finally {
             data.recycle()
         }
@@ -3801,7 +3847,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 12
+        private const val PROTOCOL_VERSION = 13
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3824,6 +3870,7 @@ class LauncherSessionService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 9
         private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
         private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
+        private const val CALLBACK_APPEARANCE = IBinder.FIRST_CALL_TRANSACTION + 12
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3

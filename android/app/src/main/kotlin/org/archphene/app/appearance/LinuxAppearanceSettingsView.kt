@@ -20,7 +20,8 @@ internal class LinuxAppearanceSettingsView(
     initialOverrides: LinuxAppearanceOverrides,
     initialReducedIsolationElectron: Boolean,
 ) : ScrollView(context) {
-    private val preferenceControls = arrayOfNulls<SeekBar>(3)
+    private val preferenceControls = arrayOfNulls<SeekBar>(4)
+    private val materialYou = Switch(context)
     private val reducedIsolationElectron = Switch(context)
 
     init {
@@ -43,6 +44,64 @@ internal class LinuxAppearanceSettingsView(
                         setTextColor(context.getColor(R.color.archphene_on_surface_muted))
                         textSize = 15f
                         setPadding(dp(4), 0, dp(4), dp(12))
+                    },
+                )
+                addAppearanceSlider(
+                    R.string.linux_color_scheme,
+                    R.string.linux_color_scheme_description,
+                    LinuxAppearancePreferences.THEME_MODE,
+                    LinuxAppearancePreferences.themeValues,
+                    initialOverrides.themeMode,
+                    R.string.appearance_light,
+                ) { value ->
+                    context.getString(
+                        when (value) {
+                            LinuxAppearancePreferences.LIGHT -> R.string.appearance_light
+                            LinuxAppearancePreferences.DARK -> R.string.appearance_dark
+                            else -> R.string.appearance_automatic
+                        },
+                    )
+                }
+                addView(
+                    LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(16), dp(12), dp(16), dp(12))
+                        background =
+                            GradientDrawable().apply {
+                                cornerRadius = dp(20).toFloat()
+                                setColor(context.getColor(R.color.archphene_surface))
+                            }
+                        addView(
+                            materialYou.apply {
+                                setText(R.string.material_you_colors)
+                                setTextColor(context.getColor(R.color.archphene_on_surface))
+                                textSize = 17f
+                                isChecked = initialOverrides.materialYou
+                                setOnClickListener {
+                                    ArchphenePreferences.setMaterialYou(isChecked)
+                                }
+                            },
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                dp(48),
+                            ),
+                        )
+                        addView(
+                            TextView(context).apply {
+                                setText(R.string.material_you_colors_description)
+                                setTextColor(
+                                    context.getColor(R.color.archphene_on_surface_muted),
+                                )
+                                textSize = 14f
+                                setPadding(0, dp(4), 0, 0)
+                            },
+                        )
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply {
+                        topMargin = dp(10)
                     },
                 )
                 addAppearanceSlider(
@@ -184,6 +243,7 @@ internal class LinuxAppearanceSettingsView(
         preferenceKey: String,
         values: IntArray,
         initialValue: Int,
+        middleLabelResource: Int? = null,
         formatValue: (Int) -> String,
     ) {
         val valueView =
@@ -307,11 +367,41 @@ internal class LinuxAppearanceSettingsView(
                                 1f,
                             ),
                         )
+                        if (middleLabelResource != null) {
+                            addView(
+                                TextView(context).apply {
+                                    setText(middleLabelResource)
+                                    setTextColor(
+                                        context.getColor(R.color.archphene_on_surface_muted),
+                                    )
+                                    textSize = 12f
+                                    gravity = Gravity.CENTER
+                                },
+                                LinearLayout.LayoutParams(
+                                    0,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    1f,
+                                ),
+                            )
+                        }
                         addView(
                             TextView(context).apply {
                                 text = formatValue(values.last())
                                 setTextColor(context.getColor(R.color.archphene_on_surface_muted))
                                 textSize = 12f
+                                gravity = Gravity.END
+                            },
+                            if (middleLabelResource == null) {
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                )
+                            } else {
+                                LinearLayout.LayoutParams(
+                                    0,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    1f,
+                                )
                             },
                         )
                     },
@@ -345,6 +435,14 @@ internal class LinuxAppearanceSettingsView(
             LinuxAppearancePreferences.controlValues,
             overrides.controlVisualDp,
         )
+        updateControl(
+            preferenceControls[3],
+            LinuxAppearancePreferences.themeValues,
+            overrides.themeMode,
+        )
+        if (materialYou.isChecked != overrides.materialYou) {
+            materialYou.isChecked = overrides.materialYou
+        }
         if (this.reducedIsolationElectron.isChecked != reducedIsolationElectron) {
             this.reducedIsolationElectron.isChecked = reducedIsolationElectron
         }
@@ -366,6 +464,7 @@ internal class LinuxAppearanceSettingsView(
             LinuxAppearancePreferences.GEOMETRY_PERCENT -> 0
             LinuxAppearancePreferences.FONT_PERCENT -> 1
             LinuxAppearancePreferences.CONTROL_VISUAL_DP -> 2
+            LinuxAppearancePreferences.THEME_MODE -> 3
             else -> throw IllegalArgumentException("Unknown appearance preference")
         }
 

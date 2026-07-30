@@ -11,7 +11,7 @@ import org.archphene.app.appearance.LinuxAppearancePreferences
 internal data class ArchphenePreferenceSnapshot(
     val managerSection: Int = 0,
     val terminalTextSp: Int = 0,
-    val appearance: LinuxAppearanceOverrides = LinuxAppearanceOverrides(0, 0, 0),
+    val appearance: LinuxAppearanceOverrides = LinuxAppearanceOverrides(0, 0, 0, 0, true),
     val reducedIsolationElectron: Boolean = false,
 )
 
@@ -20,6 +20,10 @@ internal data class ArchphenePreferenceSnapshot(
  * immutable, allocation-light snapshot to UI construction and launchers.
  */
 internal object ArchphenePreferences {
+    internal fun interface AppearanceListener {
+        fun onAppearanceChanged()
+    }
+
     private const val MANAGER_PREFERENCES = "manager_navigation"
     private const val MANAGER_SECTION = "selected_section"
     private const val TERMINAL_PREFERENCES = "terminal_display"
@@ -38,7 +42,9 @@ internal object ArchphenePreferences {
     private const val DIRTY_GEOMETRY = 1 shl 2
     private const val DIRTY_FONT = 1 shl 3
     private const val DIRTY_CONTROLS = 1 shl 4
-    private const val DIRTY_ELECTRON = 1 shl 5
+    private const val DIRTY_THEME = 1 shl 5
+    private const val DIRTY_MATERIAL_YOU = 1 shl 6
+    private const val DIRTY_ELECTRON = 1 shl 7
 
     private val lock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -49,6 +55,7 @@ internal object ArchphenePreferences {
     private val readyCallbacks = ArrayList<(ArchphenePreferenceSnapshot) -> Unit>(2)
 
     @Volatile private var current = ArchphenePreferenceSnapshot()
+    @Volatile private var appearanceListener: AppearanceListener? = null
     private var applicationContext: Context? = null
     private var started = false
     private var ready = false
@@ -78,7 +85,7 @@ internal object ArchphenePreferences {
                     LinuxAppearancePreferences.read(appContext)
                 } catch (error: RuntimeException) {
                     android.util.Log.e(TAG, "Could not read Linux appearance preferences", error)
-                    LinuxAppearanceOverrides(0, 0, 0)
+                    LinuxAppearanceOverrides(0, 0, 0, 0, true)
                 }
             val callbacks: Array<(ArchphenePreferenceSnapshot) -> Unit>
             val loaded: ArchphenePreferenceSnapshot
@@ -103,6 +110,16 @@ internal object ArchphenePreferences {
                                 appearance.controlVisualDp
                             } else {
                                 prior.appearance.controlVisualDp
+                            },
+                            if (dirty and DIRTY_THEME == 0) {
+                                appearance.themeMode
+                            } else {
+                                prior.appearance.themeMode
+                            },
+                            if (dirty and DIRTY_MATERIAL_YOU == 0) {
+                                appearance.materialYou
+                            } else {
+                                prior.appearance.materialYou
                             },
                         ),
                         if (dirty and DIRTY_ELECTRON == 0) {
@@ -172,6 +189,8 @@ internal object ArchphenePreferences {
                                 appearance.copy(fontPercent = value)
                             LinuxAppearancePreferences.CONTROL_VISUAL_DP ->
                                 appearance.copy(controlVisualDp = value)
+                            LinuxAppearancePreferences.THEME_MODE ->
+                                appearance.copy(themeMode = value)
                             else -> throw IllegalArgumentException("Unknown appearance preference")
                         },
                 )
@@ -180,10 +199,46 @@ internal object ArchphenePreferences {
                 when (key) {
                     LinuxAppearancePreferences.GEOMETRY_PERCENT -> DIRTY_GEOMETRY
                     LinuxAppearancePreferences.FONT_PERCENT -> DIRTY_FONT
-                    else -> DIRTY_CONTROLS
+                    LinuxAppearancePreferences.CONTROL_VISUAL_DP -> DIRTY_CONTROLS
+                    else -> DIRTY_THEME
                 }
         }
         writePreference(LinuxAppearancePreferences.PREFERENCES, key, value)
+        if (key == LinuxAppearancePreferences.THEME_MODE) {
+            notifyAppearanceChanged()
+        }
+    }
+
+    fun setMaterialYou(enabled: Boolean) {
+        synchronized(lock) {
+            current =
+                current.copy(
+                    appearance = current.appearance.copy(materialYou = enabled),
+                )
+            dirty = dirty or DIRTY_MATERIAL_YOU
+        }
+        writeDefaultTrueBooleanPreference(
+            LinuxAppearancePreferences.PREFERENCES,
+            LinuxAppearancePreferences.MATERIAL_YOU,
+            enabled,
+        )
+        notifyAppearanceChanged()
+    }
+
+    fun setAppearanceListener(listener: AppearanceListener) {
+        appearanceListener = listener
+    }
+
+    fun clearAppearanceListener(listener: AppearanceListener) {
+        if (appearanceListener === listener) {
+            appearanceListener = null
+        }
+    }
+
+    private fun notifyAppearanceChanged() {
+        mainHandler.post {
+            appearanceListener?.onAppearanceChanged()
+        }
     }
 
     fun setShellId(shellId: String) {
@@ -279,6 +334,28 @@ internal object ArchphenePreferences {
                     .putBoolean(key, value)
                     .commit()
             ) {
+                android.util.Log.e(TAG, "Could not persist $preferences/$key")
+            }
+        }
+    }
+
+    private fun writeDefaultTrueBooleanPreference(
+        preferences: String,
+        key: String,
+        value: Boolean,
+    ) {
+        val context = initializedContext()
+        io.execute {
+            val editor =
+                context
+                    .getSharedPreferences(preferences, Context.MODE_PRIVATE)
+                    .edit()
+            if (value) {
+                editor.remove(key)
+            } else {
+                editor.putBoolean(key, false)
+            }
+            if (!editor.commit()) {
                 android.util.Log.e(TAG, "Could not persist $preferences/$key")
             }
         }

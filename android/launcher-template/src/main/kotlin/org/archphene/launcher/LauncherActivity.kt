@@ -17,6 +17,7 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
@@ -128,12 +129,17 @@ class LauncherActivity :
     private val secretStore by lazy { LauncherSecretStore(filesDir) }
     private val cameraIntegrationDelegate = lazy { LauncherCameraIntegration(this) }
     private val cameraIntegration by cameraIntegrationDelegate
+    private val cameraLifecycleMonitor = Object()
+    @Volatile private var cameraLifecycleClosed = false
     @Volatile private var cameraPermissionRequestInFlight = false
     private var notificationPermissionRequestInFlight = false
     private val pendingNotifications =
         arrayOfNulls<PendingNotification>(LauncherNotificationPolicy.MAX_PENDING)
     private var managerUid = -1
     private var remoteStatus = STATUS_STARTING
+    private var linuxAppearanceDark: Boolean? = null
+    private var linuxAppearanceBackground = 0
+    private var linuxAppearanceForeground = 0
     private var attachedSurface: Surface? = null
     private var attachedWidth = 0
     private var attachedHeight = 0
@@ -199,7 +205,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_CAMERA ||
+                    code !in CALLBACK_STATUS..CALLBACK_APPEARANCE ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -593,6 +599,27 @@ class LauncherActivity :
                             reply.writeString(response)
                             true
                         }
+                        CALLBACK_APPEARANCE -> {
+                            val dark = data.readInt()
+                            val background = data.readInt()
+                            val foreground = data.readInt()
+                            if (
+                                dark !in 0..1 ||
+                                Color.alpha(background) != 0xff ||
+                                Color.alpha(foreground) != 0xff ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            handler.post {
+                                applyLinuxAppearance(
+                                    dark == 1,
+                                    background,
+                                    foreground,
+                                )
+                            }
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -625,6 +652,10 @@ class LauncherActivity :
                 pendingLinuxClipboardText = null
                 pendingDocumentRequestId = 0
                 pendingDocumentOperation = 0
+                linuxAppearanceDark = null
+                linuxAppearanceBackground = 0
+                linuxAppearanceForeground = 0
+                applySystemBarAppearance()
                 applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
                 status.setText(R.string.launcher_disconnected)
                 status.visibility = View.VISIBLE
@@ -726,10 +757,25 @@ class LauncherActivity :
 
     @Suppress("DEPRECATION")
     private fun applySystemBarAppearance() {
-        val light =
-            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
+        val systemDark =
+            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
                 Configuration.UI_MODE_NIGHT_YES
-        val background = getColor(R.color.launcher_background)
+        val dark = linuxAppearanceDark ?: systemDark
+        val light = !dark
+        val background =
+            if (linuxAppearanceDark == null) {
+                getColor(R.color.launcher_background)
+            } else {
+                linuxAppearanceBackground
+            }
+        val foreground =
+            if (linuxAppearanceDark == null) {
+                getColor(R.color.launcher_text)
+            } else {
+                linuxAppearanceForeground
+            }
+        status.setTextColor(foreground)
+        status.setBackgroundColor(background)
         content.setBackgroundColor(background)
         window.decorView.setBackgroundColor(background)
         window.statusBarColor = background
@@ -770,12 +816,20 @@ class LauncherActivity :
 
     override fun onResume() {
         super.onResume()
-        activityResumed = true
+        synchronized(cameraLifecycleMonitor) {
+            activityResumed = true
+            cameraLifecycleMonitor.notifyAll()
+        }
         maybeRequestNotificationPermission()
     }
 
     override fun onPause() {
-        activityResumed = false
+        synchronized(cameraLifecycleMonitor) {
+            activityResumed = false
+        }
+        if (cameraIntegrationDelegate.isInitialized()) {
+            cameraIntegration.stopStream()
+        }
         super.onPause()
     }
 
@@ -813,6 +867,17 @@ class LauncherActivity :
                 Log.i(TAG, "Linux camera permission ${if (granted) "granted" else "denied"}")
             }
         }
+    }
+
+    private fun applyLinuxAppearance(
+        dark: Boolean,
+        background: Int,
+        foreground: Int,
+    ) {
+        linuxAppearanceDark = dark
+        linuxAppearanceBackground = background
+        linuxAppearanceForeground = foreground
+        applySystemBarAppearance()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -993,6 +1058,10 @@ class LauncherActivity :
     }
 
     override fun onDestroy() {
+        synchronized(cameraLifecycleMonitor) {
+            cameraLifecycleClosed = true
+            cameraLifecycleMonitor.notifyAll()
+        }
         handler.removeCallbacksAndMessages(null)
         pendingNotifications.fill(null)
         stopClipboardListening()
@@ -1709,6 +1778,8 @@ class LauncherActivity :
                     PackageManager.PERMISSION_GRANTED
                 ) {
                     cameraPermissionState()
+                } else if (!awaitCameraForeground()) {
+                    "ERROR\tNOT_READY"
                 } else {
                     val file = checkNotNull(descriptor).fileDescriptor
                     val type = Os.fstat(file).st_mode and OsConstants.S_IFMT
@@ -1727,6 +1798,19 @@ class LauncherActivity :
                 }
             }
             else -> "ERROR\tINVALID_REQUEST"
+        }
+
+    private fun awaitCameraForeground(): Boolean =
+        synchronized(cameraLifecycleMonitor) {
+            try {
+                while (!activityResumed && !cameraLifecycleClosed) {
+                    cameraLifecycleMonitor.wait()
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return@synchronized false
+            }
+            activityResumed && !cameraLifecycleClosed
         }
 
     private fun requestCameraPermission(): String {
@@ -3902,7 +3986,7 @@ class LauncherActivity :
             "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,camera"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 12
+        private const val PROTOCOL_VERSION = 13
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3925,6 +4009,7 @@ class LauncherActivity :
             IBinder.FIRST_CALL_TRANSACTION + 9
         private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
         private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
+        private const val CALLBACK_APPEARANCE = IBinder.FIRST_CALL_TRANSACTION + 12
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3

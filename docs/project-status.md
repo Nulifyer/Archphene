@@ -80,26 +80,40 @@ the bounded runtime evidence used by lifecycle gates without placing it in the
 visible header. Reversible light/dark semantic and full-device visual gates,
 plus clean-data lifecycle gates, pass on the emulator and Samsung.
 
-Generated Linux launchers now repaint their Android decor and system-bar
-backgrounds when configuration changes. The shared Rust runtime republishes
-bounded GTK 3/4 and KDE colors through a primitive JNI call while retaining the
-current published geometry, font, and control dimensions. GTK 3
-uses the embedded Adwaita variant through standard settings rather than a
-process-pinned debug override; its checksum-pinned compatibility module watches
-atomic settings/CSS replacements with an event-driven directory monitor, so it
-does no steady-state appearance polling. Stock Mousepad passes live
-light-to-dark-to-light updates on the exact x86_64 emulator and AArch64 Samsung
-without launcher, manager, or Linux process restart. The gate checks portal
-signals/readback, GTK applied state, fatal logs, and measured full-device GTK
-content plus status/navigation-bar luminance. The Qt 6 platform-theme module
-now likewise watches `kdeglobals` through an event-driven exact-file watcher
-created after Qt's event dispatcher is ready; it re-arms after atomic
-replacement, uses a directory fallback only if the file is unexpectedly
-absent, and performs no steady-state polling. A native
-gate loads the production plugin and requires a same-process light-to-dark
-palette update (currently 25 ms). Both rebuilt plugin architectures are in the
-exact manager APKs installed on the emulator and Samsung; current shared-root
-KCalc device validation remains pending.
+The manager now exposes explicit Auto/Light/Dark Linux color policy and a
+default-on Material You switch alongside the three Auto-first geometry, text,
+and control sliders. Color and accent changes are live; geometry, font, visible
+control size, and touch targets remain predictable relaunch snapshots. Turning
+Material You off selects a stable Archphene accent. Binder protocol v13 sends
+the exact resolved opaque background and foreground to generated wrappers, so
+their content, status bar, and navigation bar repaint immediately even when an
+explicit Linux scheme opposes Android's current mode.
+
+The shared Rust runtime republishes bounded GTK 3/4 and KDE colors through a
+primitive JNI call while retaining the current published geometry, font, and
+control dimensions. The checksum-pinned GTK helper watches the physical
+manager-owned atomic settings file through inotify and retains the private
+Settings portal as an event-driven fallback. GTK 4 is activated through the
+generic preload path and defers its initial apply until `GtkSettings` exists;
+neither ABI performs steady-state polling. Stock Mousepad passes live
+light-to-dark-to-light updates on Samsung through the current GTK 3 wrapper,
+while current unmodified Snapshot proves the GTK 4 helper, portal state, and
+camera lifecycle on the exact x86_64 emulator and AArch64 Samsung without a
+launcher, manager, or Linux process restart. Snapshot's camera canvas remains
+intentionally black and is not treated as broad libadwaita visual evidence.
+The dual-device production gate checks the manager accessibility tree, exact
+preference state/restoration, helper diagnostics, stable processes, camera
+pause/resume while Settings is foreground, fatal logs, and measured
+full-device status/navigation-bar luminance.
+
+The Qt 6 platform-theme module likewise watches `kdeglobals` through an
+event-driven exact-file watcher created after Qt's event dispatcher is ready;
+it re-arms after atomic replacement, uses a directory fallback only if the file
+is unexpectedly absent, and performs no steady-state polling. A native gate
+loads the production plugin and requires a same-process light-to-dark palette
+update (currently 25 ms). Both rebuilt plugin architectures are in the exact
+manager APKs installed on the emulator and Samsung; current shared-root KCalc
+device validation remains pending.
 
 The dense single-screen manager scaffold has been split into focused Packages,
 Files, and Terminal sections with a persistent bottom navigation surface. The

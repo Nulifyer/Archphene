@@ -656,6 +656,22 @@ configuration and rendered Linux-app pixels:
 These tests restore the prior Android night mode and manager Linux-appearance
 preferences on exit.
 
+For the current manager and generated-wrapper contract, run the production
+appearance-policy gate once per maintained device:
+
+```bash
+./scripts/test-current-linux-appearance-policy.sh --serial emulator-5554
+./scripts/test-current-linux-appearance-policy.sh --serial RFCT90AEEFA
+```
+
+It drives the visible Auto/Light/Dark slider and Material You switch, verifies
+live GTK publication without process replacement, exercises camera
+pause/resume while the manager is foreground, measures generated-wrapper
+status/navigation-bar contrast from full-device screenshots, checks scoped
+logs, and restores the semantic Auto defaults. Snapshot's black camera canvas
+is app-specific; this gate does not replace broader GTK 4/libadwaita visual
+coverage.
+
 Theme propagation is not a visual-quality pass. Run the source contract and the
 focused artifact-producing geometry/render checks with:
 

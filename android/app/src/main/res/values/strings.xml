@@ -23,7 +23,11 @@
     <string name="terminal_heading">Shared Linux terminal</string>
     <string name="terminal_description">Start a shared Linux shell for terminal tools and development work.</string>
     <string name="appearance_heading">Linux app appearance</string>
-    <string name="appearance_description">Tune unmodified Linux apps for a phone, tablet, or connected display. Each setting starts in Auto.</string>
+    <string name="appearance_description">Tune unmodified Linux apps for a phone, tablet, or connected display. Color and scaling policies have safe automatic defaults.</string>
+    <string name="linux_color_scheme">Color scheme</string>
+    <string name="linux_color_scheme_description">Auto follows Android. Light or Dark overrides Linux apps and updates running apps when their toolkit supports live colors.</string>
+    <string name="material_you_colors">Material You colors</string>
+    <string name="material_you_colors_description">Use Android’s wallpaper accent in Linux apps. Turn this off for Archphene’s stable blue palette.</string>
     <string name="linux_geometry_scale">App scale</string>
     <string name="linux_geometry_scale_description" formatted="false">Changes the Linux workspace geometry. Auto prioritizes readable phone content; 75% fits more desktop panes. Text and controls stay separate where supported.</string>
     <string name="linux_text_scale">App text</string>
@@ -31,10 +35,12 @@
     <string name="linux_control_size">App controls</string>
     <string name="linux_control_size_description">Sets visible Qt and GTK controls in dp. Touch targets stay independently large enough to use.</string>
     <string name="appearance_automatic">Auto</string>
+    <string name="appearance_light">Light</string>
+    <string name="appearance_dark">Dark</string>
     <string name="appearance_automatic_phone_controls">Auto · 20dp phone</string>
     <string name="appearance_percent">%1$d%%</string>
     <string name="appearance_dp">%1$ddp</string>
-    <string name="appearance_relaunch_notice">Changes apply the next time a Linux app launches. Apps already running keep a consistent appearance until closed and reopened.</string>
+    <string name="appearance_relaunch_notice">App scale, text, and control changes apply on the next launch. Color scheme and accents update running apps when their toolkit supports it.</string>
     <string name="compatibility_heading">Compatibility</string>
     <string name="electron_compatibility">Reduced-isolation Electron mode</string>
     <string name="electron_compatibility_description">On the next launch, add the required compatibility flags only to apps verified as Electron or Chromium.</string>

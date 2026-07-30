@@ -66,7 +66,7 @@ const MAX_ELF_NEEDED_NAME_BYTES: usize = 255;
 const MAX_ELF_NEEDED_PER_OBJECT: usize = 256;
 const MAX_ELF_DEPENDENCY_OBJECTS: usize = 256;
 const MAX_ELF_PRIVATE_LIBRARY_PATHS: usize = 64;
-const GTK_SETTINGS_LOGICAL_PATH: &str = "/home/archphene/.config/gtk-3.0/settings.ini";
+const GTK_SETTINGS_ROOT_RELATIVE_PATH: &str = "home/archphene/.config/gtk-3.0/settings.ini";
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -728,7 +728,16 @@ impl CommandEnvironment {
             .env("XDG_SESSION_TYPE", "wayland")
             .env("XDG_CURRENT_DESKTOP", "Archphene")
             .env("GDK_BACKEND", "wayland")
-            .env("ARCHPHENE_GTK_SETTINGS_FILE", GTK_SETTINGS_LOGICAL_PATH)
+            /*
+             * This is an internal bridge path, not an application-facing
+             * Linux path. Kernel pathname consumers such as inotify do not
+             * pass through the preload path translator, so give the helper
+             * the exact manager-owned physical file below the verified root.
+             */
+            .env(
+                "ARCHPHENE_GTK_SETTINGS_FILE",
+                self.arch_root.join(GTK_SETTINGS_ROOT_RELATIVE_PATH),
+            )
             .env("GIO_USE_VFS", "local")
             .env("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
             .env("GSETTINGS_SCHEMA_DIR", "/usr/share/glib-2.0/schemas")
@@ -778,7 +787,14 @@ impl CommandEnvironment {
             preloads.push(module);
             command
                 .env("LD_PRELOAD", preloads)
-                .env("GTK_MODULES", module);
+                .env("GTK_MODULES", module)
+                /*
+                 * GTK 4 no longer invokes GTK 3's gtk_module_init entry point.
+                 * The same verified compatibility library is preloaded for
+                 * both generations, so explicitly activate its toolkit-
+                 * neutral appearance watcher during process startup.
+                 */
+                .env("ARCHPHENE_GTK_SETTINGS_PRELOAD", "1");
         } else {
             command.env("LD_PRELOAD", &self.path_bridge);
         }
@@ -3412,6 +3428,15 @@ mod tests {
                 .find_map(|(key, value)| (key == name).then_some(value).flatten())
         };
         assert_eq!(value("GTK_MODULES"), Some(gtk_alias.as_os_str()));
+        assert_eq!(
+            value("ARCHPHENE_GTK_SETTINGS_PRELOAD"),
+            Some(OsStr::new("1"))
+        );
+        let expected_settings = root.0.join(GTK_SETTINGS_ROOT_RELATIVE_PATH);
+        assert_eq!(
+            value("ARCHPHENE_GTK_SETTINGS_FILE"),
+            Some(expected_settings.as_os_str())
+        );
         let mut expected_preload = bridge.as_os_str().to_os_string();
         expected_preload.push(":");
         expected_preload.push(&gtk_alias);

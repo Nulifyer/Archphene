@@ -503,6 +503,10 @@ internal class LauncherCameraIntegration(
         activeStream.getAndSet(null)?.close()
     }
 
+    fun stopStream() {
+        activeStream.get()?.close()
+    }
+
     private fun checkOpen() {
         if (closed.get()) throw IOException("Camera integration is closed")
     }
