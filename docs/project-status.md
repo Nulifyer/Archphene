@@ -196,6 +196,17 @@ clipboard worker on both exact ABIs. Full-device editor captures show the exact
 text, and native MIME-routing, Android unit, lint, and exact-ABI build gates
 pass. Binary formats and a package-installed Linux HTML producer remain open.
 
+The current wide Code workspace also exposed a Samsung touch displacement
+during IME resize. Android had already resized the launcher Surface while the
+client's old buffer and root hit-test layout remained 432x881 until it
+acknowledged the pending 432x537 `xdg_toplevel` configure. The compositor now
+records each exact pending toplevel size and, only while it matches the current
+output, applies the visible Surface transform to hit testing as well. A
+held-client physical-device gate sustains and inspects that formerly transient
+state; exact stable prompt and terminal-action touches, IME transitions,
+full-device captures, native regressions, and exact-ABI builds pass on the
+Samsung and emulator.
+
 Active performance is now measured at the actual shared-runtime boundaries.
 Debug-only dormant counters distinguish Terminal and compositor JNI calls,
 direct-buffer traffic, JNI array copies, and explicit Kotlin payload copies;

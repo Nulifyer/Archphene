@@ -1052,6 +1052,7 @@ struct XdgSurfaceState {
 struct XdgConfigure {
     serial: u32,
     popup_geometry: Option<(i32, i32, i32, i32)>,
+    toplevel_size: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1063,6 +1064,14 @@ struct WindowGeometry {
 }
 
 impl XdgSurfaceState {
+    fn has_pending_toplevel_size(&self, width: i32, height: i32) -> bool {
+        self.pending_configures
+            .iter()
+            .rev()
+            .find_map(|configure| configure.toplevel_size)
+            == Some((width, height))
+    }
+
     fn commit_window_geometry(&mut self) -> bool {
         let Some(geometry) = self.pending_window_geometry.take() else {
             return false;
@@ -4160,6 +4169,7 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                         .push_back(XdgConfigure {
                             serial,
                             popup_geometry: Some(geometry),
+                            toplevel_size: None,
                         });
                 }
                 resource.repositioned(token);
@@ -7746,10 +7756,6 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             state.next_configure_serial =
                                 state.next_configure_serial.wrapping_add(1).max(1);
                             let serial = state.next_configure_serial;
-                            xdg_state.pending_configures.push_back(XdgConfigure {
-                                serial,
-                                popup_geometry: None,
-                            });
                             let parented = toplevel.data::<XdgToplevelData>().is_some_and(|data| {
                                 data.parent
                                     .lock()
@@ -7779,6 +7785,11 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             };
                             let (width, height) =
                                 constrain_toplevel_configure(toplevel, width, height);
+                            xdg_state.pending_configures.push_back(XdgConfigure {
+                                serial,
+                                popup_geometry: None,
+                                toplevel_size: Some((width, height)),
+                            });
                             toplevel.configure(width, height, states);
                             xdg_surface.configure(serial);
                         }
@@ -7837,6 +7848,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             xdg_state.pending_configures.push_back(XdgConfigure {
                                 serial,
                                 popup_geometry: Some(geometry),
+                                toplevel_size: None,
                             });
                             popup.configure(x, y, width, height);
                             xdg_surface.configure(serial);
@@ -8530,6 +8542,7 @@ fn queue_toplevel_configure(
         .push_back(XdgConfigure {
             serial,
             popup_geometry: None,
+            toplevel_size: Some((width, height)),
         });
     toplevel.configure(width, height, encode_xdg_toplevel_states(states));
     xdg_surface.configure(serial);
@@ -8605,7 +8618,42 @@ fn calculate_toplevel_layout(
     root_frame_height: u32,
     root_geometry: WindowGeometry,
     primary_size: Option<(u32, u32)>,
+    primary_resize_pending: bool,
 ) -> ToplevelLayout {
+    // Android resizes the Surface before a Wayland client can acknowledge and
+    // commit the matching xdg_toplevel size. During that bounded interval the
+    // old buffer is visibly stretched into the new Surface. Apply the same
+    // transform to hit testing so a touch cannot land above or below the
+    // control currently under the user's finger.
+    if primary_resize_pending
+        && (root_width != output_width.max(1) as u32 || root_height != output_height.max(1) as u32)
+    {
+        let output_width = output_width.max(1);
+        let output_height = output_height.max(1);
+        return ToplevelLayout {
+            output_width: output_width as u32,
+            output_height: output_height as u32,
+            root_x: scale_surface_coordinate(
+                root_geometry.x.saturating_neg(),
+                output_width,
+                root_width,
+            ),
+            root_y: scale_surface_coordinate(
+                root_geometry.y.saturating_neg(),
+                output_height,
+                root_height,
+            ),
+            root_width: scale_surface_coordinate(root_frame_width as i32, output_width, root_width)
+                .max(1),
+            root_height: scale_surface_coordinate(
+                root_frame_height as i32,
+                output_height,
+                root_height,
+            )
+            .max(1),
+            overlay_primary: false,
+        };
+    }
     let Some((_primary_width, _primary_height)) = primary_size else {
         let output_width = u32::try_from(output_width.max(1)).unwrap_or(1);
         let output_height = u32::try_from(output_height.max(1)).unwrap_or(1);
@@ -8730,6 +8778,31 @@ fn toplevel_layout(state: &CompositorState) -> Option<ToplevelLayout> {
             let frame = surface_frame(&primary)?;
             Some(surface_content_size(&primary, &frame))
         });
+    let primary_resize_pending = state
+        .primary_toplevel
+        .as_ref()
+        .and_then(toplevel_surface)
+        .filter(|primary| primary.id() == root_surface.id())
+        .and_then(|primary| {
+            primary
+                .data::<SurfaceData>()
+                .and_then(|data| {
+                    data.inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .xdg_surface
+                        .clone()
+                })
+                .and_then(|xdg_surface| {
+                    xdg_surface.data::<XdgSurfaceData>().map(|data| {
+                        data.state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .has_pending_toplevel_size(state.output_width, state.output_height)
+                    })
+                })
+        })
+        .unwrap_or(false);
     Some(calculate_toplevel_layout(
         state.output_width,
         state.output_height,
@@ -8739,6 +8812,7 @@ fn toplevel_layout(state: &CompositorState) -> Option<ToplevelLayout> {
         root_frame.height,
         root_geometry,
         primary_size,
+        primary_resize_pending,
     ))
 }
 fn root_surface_origin(state: &CompositorState) -> (i32, i32) {
@@ -9788,6 +9862,7 @@ fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Opti
                 .push_back(XdgConfigure {
                     serial,
                     popup_geometry: Some(geometry),
+                    toplevel_size: None,
                 });
         }
         popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
@@ -10420,6 +10495,7 @@ impl CompositorCore {
         };
         self.state.next_configure_serial = self.state.next_configure_serial.wrapping_add(1).max(1);
         let serial = self.state.next_configure_serial;
+        let (width, height) = constrain_toplevel_configure(&toplevel, width, height);
         xdg_data
             .state
             .lock()
@@ -10428,8 +10504,8 @@ impl CompositorCore {
             .push_back(XdgConfigure {
                 serial,
                 popup_geometry: None,
+                toplevel_size: Some((width, height)),
             });
-        let (width, height) = constrain_toplevel_configure(&toplevel, width, height);
         toplevel.configure(width, height, Vec::new());
         xdg_surface.configure(serial);
         serial
@@ -17948,6 +18024,7 @@ mod tests {
                 height: 185,
             },
             None,
+            false,
         );
         assert_eq!((layout.output_width, layout.output_height), (540, 1102));
         assert_eq!((layout.root_x, layout.root_y), (-8, 448));
@@ -17970,6 +18047,7 @@ mod tests {
                 height: 1102,
             },
             None,
+            false,
         );
         assert_eq!((main.output_width, main.output_height), (540, 1102));
         assert_eq!((main.root_x, main.root_y), (-26, -23));
@@ -17989,6 +18067,7 @@ mod tests {
                 height: 900,
             },
             Some((540, 1102)),
+            false,
         );
         assert_eq!((chooser.output_width, chooser.output_height), (540, 1102));
         assert_eq!((chooser.root_x, chooser.root_y), (0, 107));
@@ -18012,6 +18091,7 @@ mod tests {
                 height: 546,
             },
             Some((540, 1102)),
+            false,
         );
         assert_eq!((layout.output_width, layout.output_height), (540, 1102));
         assert_eq!((layout.root_x, layout.root_y), (73, 268));
@@ -18034,12 +18114,59 @@ mod tests {
                 height: 220,
             },
             Some((432, 537)),
+            false,
         );
         assert_eq!((layout.output_width, layout.output_height), (432, 881));
         assert_eq!((layout.root_x, layout.root_y), (14, 320));
         assert_eq!((layout.root_width, layout.root_height), (404, 240));
         assert!(layout.overlay_primary);
     }
+
+    #[test]
+    fn pending_primary_resize_keeps_visible_touch_transform_exact() {
+        let layout = calculate_toplevel_layout(
+            432,
+            537,
+            432,
+            881,
+            432,
+            881,
+            WindowGeometry {
+                x: 0,
+                y: 0,
+                width: 432,
+                height: 881,
+            },
+            None,
+            true,
+        );
+        assert_eq!((layout.output_width, layout.output_height), (432, 537));
+        assert_eq!((layout.root_x, layout.root_y), (0, 0));
+        assert_eq!((layout.root_width, layout.root_height), (432, 537));
+        assert!(!layout.overlay_primary);
+        assert!(
+            (scale_input_coordinate(268.5, layout.root_height, 881) - 440.5).abs() < 0.001
+        );
+    }
+
+    #[test]
+    fn pending_primary_resize_requires_the_current_output_size() {
+        let mut state = XdgSurfaceState::default();
+        state.pending_configures.push_back(XdgConfigure {
+            serial: 1,
+            popup_geometry: None,
+            toplevel_size: Some((432, 881)),
+        });
+        assert!(!state.has_pending_toplevel_size(432, 537));
+
+        state.pending_configures.push_back(XdgConfigure {
+            serial: 2,
+            popup_geometry: None,
+            toplevel_size: Some((432, 537)),
+        });
+        assert!(state.has_pending_toplevel_size(432, 537));
+    }
+
     #[test]
     fn only_wide_managed_secondary_windows_get_phone_canvas() {
         assert!(secondary_toplevel_needs_output_size(
@@ -18070,6 +18197,7 @@ mod tests {
                 height: 915,
             },
             Some((1080, 2205)),
+            false,
         );
         assert_eq!((layout.output_width, layout.output_height), (1080, 2205));
         assert_eq!((layout.root_x, layout.root_y), (0, 732));
@@ -18092,6 +18220,7 @@ mod tests {
                 height: 2205,
             },
             Some((1080, 2205)),
+            false,
         );
         assert_eq!((layout.output_width, layout.output_height), (1080, 2205));
         assert_eq!((layout.root_x, layout.root_y), (0, 665));
@@ -18115,6 +18244,7 @@ mod tests {
                 height: 2205,
             },
             Some((1080, 2205)),
+            false,
         );
         assert_eq!(
             (
