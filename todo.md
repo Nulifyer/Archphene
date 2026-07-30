@@ -322,9 +322,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Use a deterministic thin `MAIN`/`LAUNCHER` APK as each graphical application's primary Android identity. Current Mousepad and btop wrappers resolve from the app drawer on both maintained devices, retain stable icons/packages/tasks, and remain approximately 91/87 KiB because all Linux packages, processes, and files stay in the shared manager-owned root. A 1×1 widget is unsuitable as the primary identity because it is user-placed and absent from the app drawer; future widgets or shortcuts may route to the same wrapper as optional conveniences.
   - [ ] Complete the remaining per-launcher Android intent and notification brokers and their declaration/review policy without adding Linux state to wrappers.
 - [ ] Define supervision, background execution, daemons, resource limits, crash recovery, and shutdown.
-- [ ] Define trust for pacman, AUR builds, hooks, arbitrary executables, runtime content, and launcher signing.
+- [x] Define trust for pacman, AUR builds, hooks, arbitrary executables, runtime content, and launcher signing.
   - [x] Pin and seal the official pacman runtime, exact repository endpoints, Arch keyring, and bounded official signer trust used by the current install path.
-  - [ ] Define the remaining AUR, hook/scriptlet, arbitrary executable, and launcher-signing policies.
+  - [x] Publish one normative package and launcher trust policy covering the shared Linux trust domain, recursive AUR graph and separate-Builder boundary, verified official and exactly authorized AUR lifecycle scripts, disabled arbitrary hooks plus fixed maintenance adapters, contained executable/desktop ownership, APK-bound runtime content, AndroidKeyStore launcher signing, authenticated Binder identity, and fail-closed key-loss recovery. A source contract rejects stale documentation and binds the policy to its current Rust/Kotlin enforcement. Exact signed-scriptlet reverse rollback and real multi-base interruption remain explicit coverage tasks below rather than undefined policy.
 - [x] Document that packages inside the shared Arch environment intentionally share one Linux trust domain.
 - [x] Wipe the emulator and Samsung prototype installations only when the new base APK is ready; retain source and any explicitly requested evidence.
 

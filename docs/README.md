@@ -12,6 +12,7 @@ This directory contains current documentation for using, building, and developin
 - [Linux visual quality gate](linux-visual-quality.md)
 - [GPU acceleration](gpu-acceleration.md)
 - [Release APKs](releases.md)
+- [Package and launcher trust policy](trust-policy.md)
 - [Security model](security.md)
 - [Roadmap](roadmap.md)
 - [Current project status](project-status.md)

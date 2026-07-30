@@ -168,8 +168,10 @@ retained from the reviewed snapshot and must match the independently verified
 archive's `.INSTALL` bytes exactly. Rust authorizes those AUR lifecycle scripts
 with a mode-0600 package/version/archive/script capability outside the
 recipe-accessible shared root, rechecks the installed script before removal,
-and prunes authorization with package state. Official-package scriptlets remain
-disabled until their broader recovery policy is complete. The physical Samsung
+and prunes authorization with package state. Verified official-package
+scriptlets run in pacman's native lifecycle order, arbitrary libalpm hooks are
+disabled through a bounded private `HookDir`, and only fixed root-contained
+maintenance adapters run afterward. The physical Samsung
 gate completed current `visual-studio-code-bin` install, process-death
 reattachment, authorized removal, and capability pruning.
 
@@ -366,7 +368,8 @@ See [Linux home and Android storage](storage.md).
 6. Process groups, Binder death, and Service lifecycle provide deterministic
    cleanup without claiming that packages are isolated from one another.
 
-See [Security model](security.md).
+See the [package and launcher trust policy](trust-policy.md) and
+[security model](security.md).
 
 ## Historical prototype
 

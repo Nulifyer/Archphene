@@ -106,12 +106,14 @@ closed until their separate verification mechanism exists.
 The reviewed recipe's complete runtime `depends`, `makedepends`, and
 `checkdepends` are normalized only by removing validated version operators,
 then resolved together with the official `base-devel` package in one bounded
-pacman plan. An unavailable official target fails closed; recursive AUR
-dependencies are not yet accepted. Resolution uses an ephemeral manager-owned
-database containing the current sync catalogs and no local installed-package
-state; resolving against the shared root would incorrectly omit packages an
-empty Builder root needs. On the current Samsung AArch64 catalogs, the Code
-candidate resolves to 250 official packages and 321,419,288 archive bytes.
+plan. Unresolved AUR dependencies are recursively reviewed as a graph of at
+most 32 package bases and 256 edges; ambiguous virtual providers require an
+explicit selection. An unavailable target fails closed. Official resolution
+uses an ephemeral manager-owned database containing the current sync catalogs
+and no local installed-package state; resolving against the shared root would
+incorrectly omit packages a fresh Builder root needs. On the current Samsung
+AArch64 catalogs, the Code candidate resolves to 250 official packages and
+321,419,288 archive bytes.
 
 The manager downloads each exact archive and detached signature into its
 bounded package cache. Rust requires the pinned architecture signer and exact
@@ -150,8 +152,8 @@ transaction fails closed until no process remains runnable. This avoids
 signaling a reused PID and does not rely on a recipe-writable marker. A physical
 gate starts an orphaned same-UID process before the Builder service, then proves
 the service terminates it while the different-UID manager continues. The
-eventual build supervisor must additionally retain, cancel, and reap its live
-child process group on every normal and exceptional exit.
+build supervisor retains, cancels, and reaps its live child process group on
+normal completion, cancellation, timeout, and exceptional exit.
 
 This is an Android UID/SELinux build boundary, not a claim that the stock
 Samsung provides Linux user namespaces. Live kernel tests reject user, mount,
@@ -207,14 +209,21 @@ Only these reviewed AUR lifecycle scripts may run on install or upgrade.
 Removal rehashes the installed pacman-local script and requires the exact
 manager capability; missing authorization or changed bytes fail closed.
 Successful mutation reconciles stale entries, and removal deletes the final
-entry. Official-package scriptlets remain disabled pending their separate
-failure-recovery policy; normal pacman hooks still require a generic policy.
+entry. Verified official-package scriptlets run in pacman's native lifecycle
+order with a conventional virtual-root command path. Arbitrary libalpm hooks
+are disabled through a bounded private `HookDir`; after mutation, only the
+fixed root-contained maintenance adapters defined by the
+[trust policy](trust-policy.md) may run.
 The physical Samsung gate completed current `visual-studio-code-bin` install,
 manager death, authorized removal, and capability pruning with exact installed
 script SHA-256
 `c910a24270895767939b23194673d76641432aa107e6e81ca8ad6f7a8fc6e9b7`.
 The installed package is not isolated: it joins the shared Archphene Linux
 trust domain.
+
+The authoritative rules for official packages, AUR graphs, lifecycle code,
+executables, embedded runtime content, and generated launchers are collected
+in the [package and launcher trust policy](trust-policy.md).
 
 The manager does not treat a process-surviving filename as authority to install
 an AUR package. Rust persists one bounded capability manifest atomically beside

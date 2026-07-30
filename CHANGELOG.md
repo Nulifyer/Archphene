@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Added
 
+- Defined one normative package and launcher trust policy for official repositories, recursive AUR build graphs, lifecycle scripts, disabled arbitrary hooks, fixed maintenance adapters, contained executable discovery, APK-bound runtime content, Builder identity, AndroidKeyStore launcher signing, authenticated Binder calls, and key-loss recovery. A repository contract now rejects stale trust claims and requires the policy's Rust/Kotlin enforcement markers.
 - Added a JDK 26 Android source CI gate for manager, Builder, and launcher-template unit tests and lint. Its explicit source-validation mode skips native/runtime assembly and rejects APK assembly, while the release workflow now provisions the same JDK major required by the Gradle build.
 - Added a pinned Rust 1.88 workspace CI gate. Relevant pull requests and main-branch changes now require formatting, every locked workspace test—including the warmed zero-allocation core, job, and Terminal paths—and all-target warning-denied Clippy to pass.
 - Added an executable standalone-script device-mutation policy. It currently enforces explicit or exactly restored behavior across app-data resets, optional APK installation, device reboot, and permission/settings writes, and fails if its coverage unexpectedly shrinks.

@@ -16,6 +16,16 @@ and both exact-ABI APK builds pass. The APK contains one Kotlin Activity, one
 Service-owned native runtime, reusable direct buffers for batched input and
 status snapshots, and generation-checked bounded native handles.
 
+The package and launcher trust boundary is now normative rather than spread
+across implementation notes. It defines verified official packages, bounded
+recursive AUR graphs built by the separate no-network Builder UID, exact
+lifecycle-script authorization, disabled arbitrary libalpm hooks with fixed
+maintenance adapters, contained executable and desktop ownership, APK-bound
+native runtime content, AndroidKeyStore launcher signing, authenticated Binder
+identity, and explicit key-loss recovery. A source contract keeps these claims
+linked to their Rust/Kotlin enforcement. Signed-scriptlet reverse rollback and
+interruption between multiple real AUR bases remain device-coverage tasks.
+
 Release optimization is now an executable artifact gate rather than build-file
 intent. The manager, isolated Builder, and generated launcher each carry a
 small startup-only ART baseline profile; all three pass R8 and emit compiled

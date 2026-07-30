@@ -40,9 +40,10 @@ compatible userspace behavior, but does not replace or weaken those controls.
 - Android may deny Linux syscalls such as namespace creation or newer
   filesystem operations. The generic bridge handles only reviewed equivalents;
   it does not silently emulate privilege.
-- Package hooks and install scripts are not generally enabled yet. The current
-  manager runs only reviewed maintenance adapters and must fail closed when a
-  package requires unsupported mutation semantics.
+- Verified official-package scriptlets and exactly authorized reviewed AUR
+  lifecycle scripts run through pacman's native ordering. Arbitrary libalpm
+  hooks remain disabled; Archphene runs a fixed set of root-contained
+  maintenance adapters and fails closed on unsupported mutation semantics.
 - Daemons remain manager-supervised Android application processes. Android can
   stop them under lifecycle, battery, reboot, or memory-pressure rules; user
   initiated long work uses a visible foreground service where Android requires
@@ -80,3 +81,5 @@ The current validated applications and limitations are recorded in the
 [compatibility matrix](compatibility-matrix.md). Storage and uninstall
 consequences are documented in the [storage model](storage.md), and trust
 boundaries are documented in the [security model](security.md).
+The normative package, executable, runtime-content, and launcher rules are in
+the [package and launcher trust policy](trust-policy.md).
