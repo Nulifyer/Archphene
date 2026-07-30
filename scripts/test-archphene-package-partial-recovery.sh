@@ -4,6 +4,7 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+skip_install=true
 damage=filesystem
 target=foot
 target_file_relative=usr/bin/foot
@@ -13,20 +14,23 @@ while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     --damage) damage="${2:?missing value for --damage}"; shift 2 ;;
     --package) target="${2:?missing value for --package}"; shift 2 ;;
     --file) target_file_relative="${2:?missing value for --file}"; shift 2 ;;
     --repository) target_repository="${2:?missing value for --repository}"; shift 2 ;;
     --expected-scriptlet-log) expected_scriptlet_log="${2:?missing value for --expected-scriptlet-log}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH [--damage filesystem|database|database-multi] [--package NAME --file ROOT_RELATIVE_FILE --repository core|extra] [--expected-scriptlet-log TEXT]"
+      echo "usage: $0 --serial SERIAL [--apk PATH --install-apk] [--damage filesystem|database|database-multi] [--package NAME --file ROOT_RELATIVE_FILE --repository core|extra] [--expected-scriptlet-log TEXT]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 [[ "$damage" == filesystem || "$damage" == database || "$damage" == database-multi ]] ||
   archphene_die "--damage must be filesystem, database, or database-multi"
 [[ "$target" =~ ^[a-zA-Z0-9@._+-]{1,128}$ ]] ||
@@ -38,7 +42,6 @@ done
   archphene_die "--repository must be core or extra"
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 manager=org.archphene.app.debug
 activity="$manager/org.archphene.app.MainActivity"
 receiver="$manager/org.archphene.app.PackageJobTestReceiver"
@@ -57,7 +60,25 @@ base_database_backup="$backup_root/base-database"
 target_entry=
 base_entry=
 output_dir="$ARCHPHENE_ROOT/tooling/build/package-$damage-recovery"
+initially_running=false
+original_section=
 mkdir -p "$output_dir"
+
+restore_section() {
+  [[ -n "$original_section" ]] || return 0
+  local center ui x y
+  ui="$(archphene_capture_ui "partial-recovery-restore-$serial" 2>/dev/null || true)"
+  center="$(
+    archphene_ui_node_center \
+      "$ui" \
+      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+      "$original_section" 2>/dev/null || true
+  )"
+  if [[ "$center" =~ ^[0-9]+[[:space:]][0-9]+$ ]]; then
+    read -r x y <<<"$center"
+    archphene_adb_run shell input tap "$x" "$y" >/dev/null 2>&1 || true
+  fi
+}
 
 cleanup() {
   archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
@@ -104,18 +125,45 @@ cleanup() {
     "$base_database_backup/mtree" >/dev/null 2>&1 || true
   archphene_adb_run shell run-as "$manager" rmdir \
     "$database_backup" "$base_database_backup" "$backup_root" >/dev/null 2>&1 || true
+  archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+  restore_section >/dev/null 2>&1 || true
+  if [[ "$initially_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
-archphene_adb_run install -r "$apk" >/dev/null
-# A launcher-removal confirmation from an earlier package test can remain above
-# the manager on OEM builds. It is unrelated to this gate and would hide the
-# navigation tree from UI Automator.
-archphene_adb_run shell am force-stop com.google.android.packageinstaller >/dev/null 2>&1 || true
+if archphene_android_pid "$manager" >/dev/null 2>&1; then
+  initially_running=true
+fi
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "$manager is not installed; pass --install-apk with --apk"
+archphene_adb_run shell run-as "$manager" test ! -e "$backup_root" ||
+  archphene_die "partial-recovery backup path already exists"
 archphene_adb_run shell am force-stop "$manager" >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+initial_ui="$(archphene_capture_ui "partial-recovery-initial-$serial")"
+original_section="$(
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal", "Settings"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$initial_ui"
+)"
+[[ -n "$original_section" ]] ||
+  archphene_die "could not determine the original manager section"
 archphene_adb_run shell run-as "$manager" test -x "$target_file" ||
   archphene_die "$target must be installed before the partial-recovery gate"
 archphene_adb_run shell run-as "$manager" test ! -e "$intent" ||
@@ -363,6 +411,13 @@ fatal_log="$(
 
 trap - EXIT
 cleanup
+if [[ "$initially_running" == true ]]; then
+  archphene_android_pid "$manager" >/dev/null ||
+    archphene_die "partial recovery did not restore the running manager"
+else
+  ! archphene_android_pid "$manager" >/dev/null 2>&1 ||
+    archphene_die "partial recovery left a previously stopped manager running"
+fi
 archphene_note "Archphene partial-package repair passed on $serial"
 archphene_note "  Damage model: $damage"
 archphene_note "  Missing package state converged from retained signed archives"

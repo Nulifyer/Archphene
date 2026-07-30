@@ -192,6 +192,23 @@ replacement requires `--apk <path> --install-apk`. Both paths restore the exact
 compatibility cache, package job/recovery state, manager navigation/running
 state, and verify the complete pacman database and download-cache inventories.
 
+## Partial package repair
+
+Run retained signed-archive repair without replacing the installed manager:
+
+```bash
+./scripts/test-archphene-package-partial-recovery.sh \
+  --serial <adb-serial> \
+  --damage filesystem \
+  --package git --file usr/bin/git --repository extra
+```
+
+`database` and `database-multi` cover one and two missing pacman records.
+Manager replacement is a separate explicit action:
+`--apk <path> --install-apk`. The chosen package, exact installed version, and
+matching signed archive must already exist; the gate fails before damage when
+they do not.
+
 ## Main-thread I/O diagnostics
 
 Debug APKs enable StrictMode after framework application initialization. Run
