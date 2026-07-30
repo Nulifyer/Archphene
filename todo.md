@@ -664,6 +664,17 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] native Wayland/Foot — Samsung proves both the 150% explicit geometry workspace (288×587 logical output) and the restored automatic phone workspace (432×881), with full-device visual inspection and real shell input. The generic supervised-process bridge now recognizes Foot's `ptsname` → close-master → `setsid` → reopen-slave controlling-terminal sequence without releasing ordinary GUI descendants from manager supervision; exact host PTY regressions and the sealed AArch64 runtime pass.
   - [ ] SDL
   - [ ] Electron/Chromium
+    - [x] Prove current unmodified Visual Studio Code follows live explicit
+      Light→Dark→Light changes through Archphene's standard appearance portal
+      on the physical AArch64 Samsung. A state-preserving gate enables Code's
+      standard automatic color-scheme setting, retains the same manager,
+      wrapper, and Electron leader, measures a 249.9→29.7 luma transition
+      across 99.9% of the sampled Linux surface, restores exact Code
+      configuration and Auto preference, rejects scoped fatal logs, and keeps
+      inspected full-device evidence.
+    - [ ] Repeat the current Code appearance gate on x86_64. The emulator's
+      existing Code - OSS session is deliberately left intact instead of
+      force-stopping a potentially unsaved user workspace.
   - [ ] XWayland
 - [x] Keep geometry scale, text scale, visible control size, and touch target size distinct, documented, persisted, and predictable after relaunch.
 - [x] Evaluate safe live appearance updates per toolkit; keep relaunch semantics when a toolkit cannot update geometry, fonts, and controls consistently.
