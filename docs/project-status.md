@@ -2470,8 +2470,8 @@ application-visible dual-file results, exact nested/dot/empty folder content,
 folder collision numbering, full-device captures, scoped fatal logs, and the
 current x86_64/AArch64 wrapper ABIs pass on the emulator and Samsung. The folder
 contract was exercised from the portal probe inside an unmodified generated
-Mousepad launcher; a stock GTK folder-selecting application plus Qt 6 and GTK 4
-caller validation remain.
+Mousepad launcher; a stock GTK folder-selecting application, Qt 6 callers, and
+GTK 4 multiple-file/Save/folder callers remain.
 
 Electron Open and Save As now pass through the same portal with current Code
 launchers on both exact ABIs. Binder protocol v15 returns the Android provider's
@@ -2483,6 +2483,16 @@ following links. The state-preserving gate proves one-file and two-file Open,
 all three exact Linux imports, exact-name and byte-exact Linux Save staging,
 the byte-exact Android destination, process survival, configuration/lifecycle
 restoration, and inspected full-device results on the emulator and Samsung.
+
+Current unmodified Seahorse now supplies the first GTK 4/libadwaita caller
+proof. Its real **Import from file** action opens Android DocumentsUI with the
+toolkit's MIME filter and receives one exact-name, byte-exact snapshot under
+`~/Documents/Android`. The repeatable gate selects a MIME-eligible but
+intentionally invalid `.key`, so Seahorse visibly reviews and rejects the data
+without importing a secret. It requires unchanged keyring/dconf inventories,
+healthy manager/wrapper/Linux processes, no fatal logs, exact manager lifecycle
+restoration, complete fixture cleanup, and inspected full-device picker/result
+frames on the x86_64 emulator and AArch64 Samsung.
 
 Folder streaming also has a sliding 30-second boundary around provider queries,
 descriptor opens, and reads. It first cancels the SAF operation or closes the
