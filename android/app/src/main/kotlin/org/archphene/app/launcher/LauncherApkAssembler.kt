@@ -46,8 +46,8 @@ internal object LauncherApkAssembler {
     private const val TEMPLATE_SHA256 =
         "h:0000000000000000000000000000000000000000000000000000000000000000"
     private const val TEMPLATE_CAPABILITIES = "c:launcher-capabilities-placeholder"
-    internal const val CAPABILITIES_V3 =
-        "wayland,input,ime,clipboard,documents,open-uri"
+    internal const val CAPABILITIES_V4 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications"
     private const val TEMPLATE_ICON_SHA256 =
         "2babc12a8af9fa0f7018a7d20110f4436e128ddac876d6276b519daefeea0a56"
     private const val MANIFEST = "AndroidManifest.xml"
@@ -155,7 +155,7 @@ internal object LauncherApkAssembler {
         require(validLabel(request.label)) {
             "Invalid launcher label"
         }
-        require(request.capabilities == CAPABILITIES_V3) {
+        require(request.capabilities == CAPABILITIES_V4) {
             "Unsupported launcher capability contract"
         }
         require(

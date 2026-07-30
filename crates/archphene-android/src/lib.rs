@@ -131,7 +131,7 @@ mod android {
     use archphene_core::{Lifecycle, PROTOCOL_VERSION, RuntimeError, SNAPSHOT_SIZE};
     use archphene_jobs::{JobError, JobOperation, JobState};
     use archphene_launcher::{
-        LAUNCHER_CAPABILITIES_V3, LauncherReviewDecision, MAX_LAUNCHER_DESCRIPTORS,
+        LAUNCHER_CAPABILITIES_V4, LauncherReviewDecision, MAX_LAUNCHER_DESCRIPTORS,
     };
     use archphene_packages::{
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
@@ -4908,7 +4908,7 @@ mod android {
             PackageLauncherReviewStatus::Unavailable => "unavailable",
         };
         let encoded = format!(
-            "R3\t{status}\t{:x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:x}\t{}\t{}\t{:x}\t{}\t{}\t{LAUNCHER_CAPABILITIES_V3}\n",
+            "R3\t{status}\t{:x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:x}\t{}\t{}\t{:x}\t{}\t{}\t{LAUNCHER_CAPABILITIES_V4}\n",
             review.capabilities,
             u8::from(review.capabilities_analyzed),
             review.launchers,

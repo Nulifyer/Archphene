@@ -17,6 +17,7 @@ podman run --rm --network=none \
   -v archphene-cargo-registry:/opt/cargo/registry \
   -w /workspace \
   -e CARGO_TARGET_DIR=/workspace/tooling/build/rust-next \
+  -e RUSTUP_TOOLCHAIN=1.88.0 \
   "$image" \
   bash -lc 'ndk_bin=/opt/android-sdk-linux/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin
     export CC_x86_64_linux_android="$ndk_bin/x86_64-linux-android29-clang"

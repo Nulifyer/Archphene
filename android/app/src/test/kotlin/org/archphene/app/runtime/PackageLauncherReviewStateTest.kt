@@ -27,21 +27,21 @@ class PackageLauncherReviewStateTest {
                 incompleteObservations = 0,
             ),
             decodePackageLauncherReview(
-                "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t500\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n"
+                "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t500\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n"
                     .ascii(),
             ),
         )
         assertEquals(
             "pending",
             decodePackageLauncherReview(
-                "R3\tpending\tff\t1\t2\t2\t1\t1\t0\t0\t102\t2\t1\t100\t1\t1\twayland,input,ime,clipboard,documents,open-uri\n"
+                "R3\tpending\tff\t1\t2\t2\t1\t1\t0\t0\t102\t2\t1\t100\t1\t1\twayland,input,ime,clipboard,documents,open-uri,notifications\n"
                     .ascii(),
             ).status,
         )
         assertEquals(
             0xff,
             decodePackageLauncherReview(
-                "R3\tpending\tff\t1\t2\t2\t1\t1\t0\t0\t102\t2\t1\t100\t1\t1\twayland,input,ime,clipboard,documents,open-uri\n"
+                "R3\tpending\tff\t1\t2\t2\t1\t1\t0\t0\t102\t2\t1\t100\t1\t1\twayland,input,ime,clipboard,documents,open-uri,notifications\n"
                     .ascii(),
             ).capabilities,
         )
@@ -50,26 +50,26 @@ class PackageLauncherReviewStateTest {
     @Test
     fun rejectsContradictoryOrUnboundedLauncherReviews() {
         listOf(
-            "R3\tready\t3\t1\t2\t2\t1\t1\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tpending\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tfailed\t3\t1\t2\t2\t1\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tnot-installed\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t257\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t3\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t3\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t3\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t0\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t80\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t3\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t2\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t0\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t80\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
+            "R3\tready\t3\t1\t2\t2\t1\t1\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tpending\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tfailed\t3\t1\t2\t2\t1\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tnot-installed\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t257\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t3\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t3\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t3\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t0\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t80\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t3\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t2\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t0\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t80\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
             "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard\n",
-            "R3\tready\t3\t1\t02\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t03\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t100\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t0100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
-            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t0100\t1\t0\twayland,input,ime,clipboard,documents,open-uri\n",
+            "R3\tready\t3\t1\t02\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t03\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t100\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t0100\t2\t0\t100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
+            "R3\tready\t3\t1\t2\t2\t2\t0\t0\t0\t100\t2\t0\t0100\t1\t0\twayland,input,ime,clipboard,documents,open-uri,notifications\n",
         ).forEach { wire ->
             assertThrows(IllegalStateException::class.java) {
                 decodePackageLauncherReview(wire.ascii())

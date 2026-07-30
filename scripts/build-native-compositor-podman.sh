@@ -38,6 +38,7 @@ podman run --rm --network=none \
   -v archphene-cargo-registry:/opt/cargo/registry \
   -w /workspace/native/archphene-compositor \
   -e CARGO_TARGET_DIR=/workspace/native/archphene-compositor/target \
+  -e RUSTUP_TOOLCHAIN=1.88.0 \
   "$image" bash -lc "cargo${command}"
 
 library="$ARCHPHENE_ROOT/native/archphene-compositor/target/$target/$profile/libarchphene_compositor.so"

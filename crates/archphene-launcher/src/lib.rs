@@ -12,7 +12,8 @@ use archphene_packages::desktop::{
 
 pub const MAX_LAUNCHER_DESCRIPTORS: usize = 256;
 pub const MAX_LAUNCHER_REGISTRY_BYTES: usize = 4 * 1024 * 1024;
-pub const LAUNCHER_CAPABILITIES_V3: &str = "wayland,input,ime,clipboard,documents,open-uri";
+pub const LAUNCHER_CAPABILITIES_V4: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications";
 
 const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
 const REGISTRY_FILE: &str = "launcher-registry-v1";

@@ -1,12 +1,54 @@
 # Android capability broker
 
-Archphene Linux processes keep the Android UID, SELinux domain, lifecycle, and permission state of their wrapper APK. A Linux syscall cannot grant an Android permission. Operations that need Android services therefore cross an explicit, capability-gated broker owned by the wrapper Activity.
+Archphene Linux processes run under the manager's Android UID and lifecycle;
+each generated wrapper retains its own Android app identity, UI, and permission
+state. A Linux syscall cannot grant an Android permission. Operations that need
+wrapper-owned Android services therefore cross an explicit, capability-gated
+manager broker and an authenticated Binder callback to the wrapper Activity.
 
-## Validated APIs
+## Current production launcher contract
+
+Generated launchers publish the exact V4 capability set
+`wayland,input,ime,clipboard,documents,open-uri,notifications`. The manager owns
+the shared Linux process and one private D-Bus/broker pair per authenticated
+launcher session. The thin wrapper owns Android UI, permission prompts, and
+the resulting Android identity; it does not contain Linux packages or user
+files.
+
+The current notification path accepts the standard XDG Notification and
+freedesktop.org Notifications calls from unmodified Linux applications. The
+manager validates bounded IDs, titles, and bodies, then sends a versioned
+same-session Binder callback to the authenticated wrapper. The wrapper keeps
+at most 32 pending notifications in a fixed array. On Android 13 and newer,
+the first notification requests `POST_NOTIFICATIONS` only while that wrapper
+Activity is resumed. Consent posts the queued notification without requiring
+the Linux application to retry; denial discards the queue and is not
+re-prompted. Granting permission later in Android settings takes effect on the
+next notification.
+
+The wrapper APK owns the resulting Android notification, channel, app label,
+and content intent. Tapping it returns to that wrapper's existing task.
+Portal and classic IDs are separate notification tags, replacement is
+idempotent, and withdrawal removes both pending and already-posted entries.
+Every generated graphical launcher declares this standard desktop capability;
+Android's runtime dialog remains the explicit user review for the only
+permission involved.
+
+Exact AArch64 Samsung and x86_64 emulator gates cover first-use consent,
+portal/classic post, wrapper package attribution, notification-shade visuals,
+content-intent routing, withdrawal, and fatal logs. The reusable gate is
+`scripts/test-launcher-notifications.sh`.
+
+Inbound Android document/share intent filters are not part of V4 yet. They
+remain pending because a generated manifest must declare only MIME types that
+the verified desktop entry can actually open, and the received URI must cross
+SAF without exposing Android grants or paths to Linux.
+
+## Native client protocol surface
 
 The shared bridge starts a randomized abstract Unix socket for each wrapper launch and exports its name as `ARCHPHENE_ANDROID_BROKER`. The glibc runtime pack contains ABI-matched `libarchphene_android.so` clients for x86_64 and AArch64.
 
-Protocol version 1 currently supports:
+The native client library contains protocol entry points for:
 
 - `archphene_android_open_uri`: opens an ordinary host-bearing HTTP or HTTPS URI through Android `ACTION_VIEW`;
 - `archphene_android_notify`: requests Android 13+ notification permission on first use and posts a bounded wrapper-owned notification;
@@ -17,19 +59,32 @@ Protocol version 1 currently supports:
 - `archphene_android_publish_accessibility_tree`, `archphene_android_accessibility_event`, and `archphene_android_take_accessibility_action`: publish bounded app semantics and return Android click, focus, edit, and scroll actions to Linux;
 - `archphene_android_store_secret`, `archphene_android_read_secret`, `archphene_android_delete_secret`, and `archphene_android_list_secrets`: manage a wrapper-private encrypted secret collection through regular file descriptors.
 
-The Android intent behavior follows the platform's [common intent guidance](https://developer.android.com/guide/components/intents-common). Runtime notification permission follows the [Android notification permission model](https://developer.android.com/develop/ui/views/notifications/notification-permission).
+An entry point is production-available only when it is named in the current
+launcher contract and has a complete manager-to-wrapper broker. Unsupported
+requests fail closed. The Android intent behavior follows the platform's
+[common intent guidance](https://developer.android.com/guide/components/intents-common).
+Runtime notification permission follows the
+[Android notification permission model](https://developer.android.com/develop/ui/views/notifications/notification-permission).
 
 ## Security properties
 
-- Android peer credentials must report the wrapper's exact UID. Cross-UID callers are rejected before dispatch.
-- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, `audio-input`, `camera`, `accessibility`, or `secrets`; undeclared operations fail closed.
+- Broker peer credentials must report the manager's exact UID. The separate
+  Binder boundary authenticates the generated wrapper UID, signer, descriptor,
+  and generation; cross-UID callers are rejected before dispatch.
+- Wrapper metadata must match the exact current capability contract before it
+  can bind. Optional future permissions remain unavailable until their
+  production broker and review policy are complete.
 - Requests and every field have fixed size limits and strict UTF-8 validation.
 - URL opening rejects non-HTTP schemes, missing hosts, user information, and control characters.
-- Android remains the permission authority. The broker requests a permission in wrapper UI and reports requested or denied state to Linux; it does not bypass denial.
+- Android remains the permission authority. Notification delivery is
+  fire-and-forget at the desktop protocol boundary; the wrapper queues through
+  consent and drops on denial rather than bypassing or repeatedly prompting.
 - Socket names are random per process and logged only by debuggable wrappers.
 - Runtime-pack publication hashes the ABI-specific client as an immutable module.
 
-The emulator regression covers same-UID calls, first-use permission UI, notification post and withdrawal, HTTPS dispatch, unsafe-URI rejection, and cross-UID denial. A manager-built KCalc runtime pack was also inspected to prove that its manifest contains the exact `libarchphene_android.so` build hash.
+The current production regressions cover authenticated Binder calls,
+first-use notification permission UI, notification post and withdrawal,
+HTTPS dispatch, unsafe-URI rejection, and cross-UID denial.
 
 ## Standard desktop adapters
 

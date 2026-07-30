@@ -1,6 +1,11 @@
 package org.archphene.launcher
 
+import android.Manifest
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -77,6 +82,12 @@ class LauncherActivity :
         val descriptor: ParcelFileDescriptor,
     )
 
+    private data class PendingNotification(
+        val id: String,
+        val title: String,
+        val body: String,
+    )
+
     private lateinit var status: TextView
     private lateinit var directoryProgress: ProgressBar
     private lateinit var surfaceView: LauncherSurfaceView
@@ -88,6 +99,10 @@ class LauncherActivity :
     private var sessionId = 0
     private var attempts = 0
     private var binding = false
+    private var activityResumed = false
+    private var notificationPermissionRequestInFlight = false
+    private val pendingNotifications =
+        arrayOfNulls<PendingNotification>(LauncherNotificationPolicy.MAX_PENDING)
     private var managerUid = -1
     private var remoteStatus = STATUS_STARTING
     private var attachedSurface: Surface? = null
@@ -149,7 +164,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_OPEN_URI ||
+                    code !in CALLBACK_STATUS..CALLBACK_NOTIFICATION ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -345,6 +360,38 @@ class LauncherActivity :
                             handler.post { openAndroidUri(uri) }
                             true
                         }
+                        CALLBACK_NOTIFICATION -> {
+                            val operation = data.readInt()
+                            val id = data.readString()
+                            val title = data.readString()
+                            val body = data.readString()
+                            if (
+                                operation !in
+                                    NOTIFICATION_OPERATION_POST..NOTIFICATION_OPERATION_WITHDRAW ||
+                                id == null ||
+                                title == null ||
+                                body == null ||
+                                (
+                                    operation == NOTIFICATION_OPERATION_POST &&
+                                        !LauncherNotificationPolicy.valid(id, title, body)
+                                ) ||
+                                (
+                                    operation == NOTIFICATION_OPERATION_WITHDRAW &&
+                                        (
+                                            !LauncherNotificationPolicy.validId(id) ||
+                                                title.isNotEmpty() ||
+                                                body.isNotEmpty()
+                                        )
+                                ) ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            handler.post {
+                                handleLinuxNotification(operation, id, title, body)
+                            }
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -515,6 +562,41 @@ class LauncherActivity :
         bindManager()
     }
 
+    override fun onResume() {
+        super.onResume()
+        activityResumed = true
+        maybeRequestNotificationPermission()
+    }
+
+    override fun onPause() {
+        activityResumed = false
+        super.onPause()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != NOTIFICATION_PERMISSION_REQUEST) return
+        notificationPermissionRequestInFlight = false
+        val granted =
+            permissions.size == 1 &&
+                permissions[0] == Manifest.permission.POST_NOTIFICATIONS &&
+                grantResults.size == 1 &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            for (index in pendingNotifications.indices) {
+                pendingNotifications[index]?.let(::postLinuxNotification)
+                pendingNotifications[index] = null
+            }
+        } else {
+            pendingNotifications.fill(null)
+            Log.i(TAG, "Linux notification permission denied")
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (remoteStatus != STATUS_STOPPED) {
@@ -533,7 +615,7 @@ class LauncherActivity :
             return
         }
         val metadata = applicationMetadata()
-        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V3) {
+        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V4) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
             return
@@ -639,6 +721,7 @@ class LauncherActivity :
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        pendingNotifications.fill(null)
         stopClipboardListening()
         cancelPendingDocumentRequest()
         activeDirectoryWatchdog.getAndSet(null)?.close()
@@ -2751,6 +2834,122 @@ class LauncherActivity :
         }
     }
 
+    private fun handleLinuxNotification(
+        operation: Int,
+        id: String,
+        title: String,
+        body: String,
+    ) {
+        if (operation == NOTIFICATION_OPERATION_WITHDRAW) {
+            for (index in pendingNotifications.indices) {
+                if (pendingNotifications[index]?.id == id) {
+                    pendingNotifications[index] = null
+                }
+            }
+            getSystemService(NotificationManager::class.java)
+                ?.cancel(id, LINUX_NOTIFICATION_ID)
+            return
+        }
+        val pending = PendingNotification(id, title, body)
+        if (hasNotificationPermission()) {
+            postLinuxNotification(pending)
+            return
+        }
+        if (
+            getSharedPreferences(NOTIFICATION_PREFERENCES, MODE_PRIVATE)
+                .getBoolean(NOTIFICATION_PERMISSION_REQUESTED, false) &&
+            !notificationPermissionRequestInFlight
+        ) {
+            Log.i(TAG, "Dropped Linux notification after permission denial id=$id")
+            return
+        }
+        var empty = -1
+        for (index in pendingNotifications.indices) {
+            val existing = pendingNotifications[index]
+            if (existing?.id == id) {
+                pendingNotifications[index] = pending
+                maybeRequestNotificationPermission()
+                return
+            }
+            if (existing == null && empty < 0) empty = index
+        }
+        if (empty < 0) {
+            Log.w(TAG, "Linux notification queue is full")
+            return
+        }
+        pendingNotifications[empty] = pending
+        maybeRequestNotificationPermission()
+    }
+
+    private fun hasNotificationPermission(): Boolean =
+        Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun maybeRequestNotificationPermission() {
+        if (
+            Build.VERSION.SDK_INT < 33 ||
+            hasNotificationPermission() ||
+            !activityResumed ||
+            notificationPermissionRequestInFlight ||
+            pendingNotifications.none { it != null }
+        ) {
+            return
+        }
+        val preferences = getSharedPreferences(NOTIFICATION_PREFERENCES, MODE_PRIVATE)
+        if (preferences.getBoolean(NOTIFICATION_PERMISSION_REQUESTED, false)) {
+            pendingNotifications.fill(null)
+            return
+        }
+        notificationPermissionRequestInFlight = true
+        preferences.edit().putBoolean(NOTIFICATION_PERMISSION_REQUESTED, true).apply()
+        runCatching {
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIFICATION_PERMISSION_REQUEST,
+            )
+        }.onFailure { error ->
+            notificationPermissionRequestInFlight = false
+            pendingNotifications.fill(null)
+            Log.w(TAG, "Could not request Linux notification permission", error)
+        }
+    }
+
+    private fun postLinuxNotification(pending: PendingNotification) {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        manager.createNotificationChannel(
+            NotificationChannel(
+                LINUX_NOTIFICATION_CHANNEL,
+                getString(R.string.linux_notification_channel),
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ),
+        )
+        val launch =
+            Intent(this, LauncherActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+        val contentIntent =
+            PendingIntent.getActivity(
+                this,
+                LINUX_NOTIFICATION_ID,
+                launch,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            Notification.Builder(this, LINUX_NOTIFICATION_CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_notify_more)
+                .setContentTitle(pending.title)
+                .setContentText(pending.body)
+                .setStyle(Notification.BigTextStyle().bigText(pending.body))
+                .setContentIntent(contentIntent)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setCategory(Notification.CATEGORY_MESSAGE)
+                .build()
+        manager.notify(pending.id, LINUX_NOTIFICATION_ID, notification)
+        Log.i(TAG, "Posted Linux notification id=${pending.id}")
+    }
+
     private fun validBrowserUri(value: String): Boolean {
         if (
             value.isBlank() ||
@@ -2785,10 +2984,11 @@ class LauncherActivity :
         private const val TAG = "ArchpheneLauncher"
         private const val MANAGER_PACKAGE = "org.archphene.launcher.MANAGER_PACKAGE"
         private const val CAPABILITIES = "org.archphene.launcher.CAPABILITIES"
-        private const val CAPABILITIES_V3 = "c:wayland,input,ime,clipboard,documents,open-uri"
+        private const val CAPABILITIES_V4 =
+            "c:wayland,input,ime,clipboard,documents,open-uri,notifications"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 8
+        private const val PROTOCOL_VERSION = 9
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2805,6 +3005,14 @@ class LauncherActivity :
         private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val CALLBACK_CURSOR = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
+        private const val CALLBACK_NOTIFICATION = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val NOTIFICATION_OPERATION_POST = 1
+        private const val NOTIFICATION_OPERATION_WITHDRAW = 2
+        private const val NOTIFICATION_PERMISSION_REQUEST = 7_001
+        private const val NOTIFICATION_PREFERENCES = "archphene-notifications"
+        private const val NOTIFICATION_PERMISSION_REQUESTED = "permission-requested"
+        private const val LINUX_NOTIFICATION_CHANNEL = "linux-app"
+        private const val LINUX_NOTIFICATION_ID = 1
         private const val MAX_BROWSER_URI_BYTES = 4_096
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1

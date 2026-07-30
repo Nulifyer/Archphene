@@ -16,6 +16,7 @@ podman run --rm --network=none \
   -v archphene-cargo-registry:/opt/cargo/registry \
   -w /workspace \
   -e CARGO_TARGET_DIR=/workspace/tooling/build/compositor-next \
+  -e RUSTUP_TOOLCHAIN=1.88.0 \
   "$image" \
   bash -lc 'cargo build --release --locked --offline -p archphene-compositor --target x86_64-linux-android &&
     cargo build --release --locked --offline -p archphene-compositor --target aarch64-linux-android'

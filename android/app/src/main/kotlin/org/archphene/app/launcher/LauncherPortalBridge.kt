@@ -67,6 +67,8 @@ internal class LauncherPortalBridge(
     private val requestOpen: (String, String, Boolean) -> LauncherPortalOpenResult,
     private val requestDirectory: (String) -> LauncherPortalDirectoryResult,
     private val requestOpenUri: (String) -> Boolean,
+    private val requestNotification: (String, String, String) -> Boolean,
+    private val withdrawNotification: (String) -> Boolean,
     private val importDirectory: (String, ParcelFileDescriptor) -> String?,
     private val cancelDirectoryImport: () -> Unit,
 ) : Closeable {
@@ -311,6 +313,9 @@ internal class LauncherPortalBridge(
                 }
                 when (fields.getOrNull(1)) {
                     "OPEN_URI" -> handleOpenUriRequest(client, fields)
+                    "NOTIFY" -> handleNotificationRequest(client, fields)
+                    "WITHDRAW_NOTIFICATION" ->
+                        handleNotificationWithdrawal(client, fields)
                     "SAVE_FILE" -> handleSaveRequest(client, fields)
                     "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
                     "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
@@ -338,6 +343,53 @@ internal class LauncherPortalBridge(
             return
         }
         writeResponse(client, if (requestOpenUri(uri)) "OK" else "ERROR\tFAILED")
+    }
+
+    private fun handleNotificationRequest(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (fields.size != 5 || fields[0] != "ARCHPHENE/1") {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val id = decodeField(fields[2], MAX_NOTIFICATION_ID_BYTES)
+        val title = decodeField(fields[3], MAX_NOTIFICATION_TITLE_BYTES)
+        val body = decodeField(fields[4], MAX_NOTIFICATION_BODY_BYTES)
+        if (
+            id == null ||
+            title == null ||
+            body == null ||
+            !validNotificationText(id, MAX_NOTIFICATION_ID_CHARACTERS, false) ||
+            !validNotificationText(title, MAX_NOTIFICATION_TITLE_CHARACTERS, false) ||
+            !validNotificationText(body, MAX_NOTIFICATION_BODY_CHARACTERS, true)
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        writeResponse(
+            client,
+            if (requestNotification(id, title, body)) "OK" else "ERROR\tFAILED",
+        )
+    }
+
+    private fun handleNotificationWithdrawal(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (fields.size != 3 || fields[0] != "ARCHPHENE/1") {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val id = decodeField(fields[2], MAX_NOTIFICATION_ID_BYTES)
+        if (
+            id == null ||
+            !validNotificationText(id, MAX_NOTIFICATION_ID_CHARACTERS, false)
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        writeResponse(client, if (withdrawNotification(id)) "OK" else "ERROR\tFAILED")
     }
 
     private fun handleSaveRequest(
@@ -801,6 +853,21 @@ internal class LauncherPortalBridge(
                     character.code == 127
             }
 
+    private fun validNotificationText(
+        value: String,
+        maximumCharacters: Int,
+        allowWhitespace: Boolean,
+    ): Boolean =
+        value.isNotEmpty() &&
+            value.length <= maximumCharacters &&
+            value.none { character ->
+                character == '\u0000' ||
+                    (
+                        character.isISOControl() &&
+                            !(allowWhitespace && (character == '\n' || character == '\t'))
+                    )
+            }
+
     private fun randomHex(bytes: Int): String =
         ByteArray(bytes).also(random::nextBytes).joinToString("") { value ->
             "%02x".format(value.toInt() and 0xff)
@@ -873,6 +940,12 @@ internal class LauncherPortalBridge(
         private const val MAX_TITLE_BYTES = 512
         private const val MAX_NAME_BYTES = 512
         private const val MAX_MIME_BYTES = PortalMimePolicy.MAX_SPEC_UTF16
+        private const val MAX_NOTIFICATION_ID_BYTES = 512
+        private const val MAX_NOTIFICATION_TITLE_BYTES = 1_024
+        private const val MAX_NOTIFICATION_BODY_BYTES = 8_192
+        private const val MAX_NOTIFICATION_ID_CHARACTERS = 128
+        private const val MAX_NOTIFICATION_TITLE_CHARACTERS = 256
+        private const val MAX_NOTIFICATION_BODY_CHARACTERS = 4_096
         private const val MAX_ACTIVE_SAVES = 8
         private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_IMPORT_COLLISIONS = 1_000

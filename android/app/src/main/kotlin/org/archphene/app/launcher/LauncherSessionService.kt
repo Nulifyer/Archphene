@@ -1605,6 +1605,24 @@ class LauncherSessionService : Service() {
                         requestOpenUri = { uri ->
                             notifyOpenUri(session, uri)
                         },
+                        requestNotification = { id, title, body ->
+                            notifyLinuxNotification(
+                                session,
+                                NOTIFICATION_OPERATION_POST,
+                                id,
+                                title,
+                                body,
+                            )
+                        },
+                        withdrawNotification = { id ->
+                            notifyLinuxNotification(
+                                session,
+                                NOTIFICATION_OPERATION_WITHDRAW,
+                                id,
+                                "",
+                                "",
+                            )
+                        },
                         importDirectory = { displayName, descriptor ->
                             runtime.importPortalFolder(displayName, descriptor)
                         },
@@ -2681,6 +2699,42 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyLinuxNotification(
+        session: Session,
+        operation: Int,
+        id: String,
+        title: String,
+        body: String,
+    ): Boolean {
+        if (
+            !session.active ||
+            operation !in NOTIFICATION_OPERATION_POST..NOTIFICATION_OPERATION_WITHDRAW
+        ) {
+            return false
+        }
+        val data = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(operation)
+            data.writeString(id)
+            data.writeString(title)
+            data.writeString(body)
+            session.clientToken.transact(
+                CALLBACK_NOTIFICATION,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver Linux notification session=${session.id}", error)
+            false
+        } finally {
+            data.recycle()
+        }
+    }
+
     private fun writeCursorCallbackHeader(
         data: Parcel,
         session: Session,
@@ -2916,7 +2970,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 8
+        private const val PROTOCOL_VERSION = 9
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2933,6 +2987,9 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_POINTER_CAPTURE = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val CALLBACK_CURSOR = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
+        private const val CALLBACK_NOTIFICATION = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val NOTIFICATION_OPERATION_POST = 1
+        private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val MAX_SESSIONS = 16
         private const val MAX_SURFACE_DIMENSION = 8192
         private const val MAX_SURFACE_PIXELS = 33_554_432L

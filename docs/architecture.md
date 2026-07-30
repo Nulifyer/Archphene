@@ -37,9 +37,11 @@ owned.
 Every generated launcher also carries a versioned capability declaration.
 Rust supplies the exact bounded contract to deterministic APK assembly; Kotlin
 embeds and independently verifies it, and both the wrapper and manager require
-the same value before opening an authenticated Binder session. The V3
+the same value before opening an authenticated Binder session. The V4
 production contract contains the implemented Wayland, input, IME, plain-text
-clipboard, document, and bounded HTTP(S) OpenURI paths. A correctly signed
+clipboard, document, bounded HTTP(S) OpenURI, and wrapper-owned notification
+paths. Android 13+ notification consent remains a first-use wrapper decision.
+A correctly signed
 wrapper with an older contract is stale and can be updated through Android
 confirmation; a wrapper with untrusted identity or signer remains quarantined.
 Optional or dangerous capabilities must not be advertised until their complete
