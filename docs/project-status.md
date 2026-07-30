@@ -1120,7 +1120,10 @@ device screenshots also verify the responsive closure view and state-driven
 actions. Physical AArch64 and emulated x86_64 older-to-newer,
 changed-dependency, and reviewed replacement transactions now pass.
 Accepted replacement interruption and forward Repair also pass from a durable
-pre-pacman boundary on both devices. A separate post-pacman gate proves exact
+pre-pacman boundary on both devices. The gate is non-installing by default and
+restores the borrowed signed package, complete local database, package and
+compatibility caches, durable job/recovery state, navigation, and prior manager
+lifecycle after each run. A separate post-pacman gate proves exact
 signed rollback on both ABIs, including removal of AArch64's newly introduced
 `jemalloc` dependency and restoration of the prior dependency reason.
 The signed script-bearing reverse-scriptlet gate and whole-operation AUR
