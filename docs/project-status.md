@@ -689,14 +689,17 @@ capacity evidence and persistent Review state.
 
 A separate bounded emulator-only gate constrains the real app filesystem to
 48 MiB free using recognized unrelated package-cache artifacts. The normal
-signed `angle-grinder` closure reaches its actual 70 MiB preflight requirement,
-fails before mutation, selectively reclaims about 9.2 GiB without touching the
-verified closure, resolves Review into Retry, and installs `angle-grinder` plus
-`jemalloc` to completion with no journal, repair snapshot, or pacman lock.
-Cleanup traps remove fixtures on every exit and restore the target's original
-installed state. Full-device failure, recovery, and completion frames pass
-visual inspection; Samsung passes the corresponding typed recovery and
-state-preservation matrix without filling its large personal storage volume.
+signed two-package `base`/`strace` closure reaches its actual 66 MiB preflight
+requirement, fails before mutation, selectively reclaims about 5.4 GiB without
+touching the verified closure, resolves Review into Retry, and installs
+`strace` to completion with no journal, repair snapshot, or pacman lock. The
+gate is non-installing by default, refuses physical devices and active shared
+shells, isolates pre-existing package and compatibility caches, removes its
+fresh target through the normal manager flow, and byte-verifies restoration of
+the complete database, caches, durable job/recovery state, navigation, and
+prior manager lifecycle. Full-device failure, recovery, and completion frames
+pass visual inspection; Samsung passes the corresponding typed recovery and
+state-preservation matrix without filling its personal storage volume.
 The shared formatter now reports one decimal below ten units instead of
 overstating reclaimed capacity through whole-unit ceiling.
 
