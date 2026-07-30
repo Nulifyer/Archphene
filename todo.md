@@ -579,8 +579,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Define a generic overflow/panning policy for fixed desktop layouts and wide
   popup shortcut columns on phone displays without app-specific patches. Stock
   KCalc's primary Settings actions are visible and semantically actionable at
-  the automatic 100% text setting on a 432dp phone, but the right-aligned
-  keyboard-shortcut column remains clipped; 200% text also needs coverage.
+  the automatic 100% text setting on a 432dp phone. Qt shortcut columns now
+  disappear below the standard 600dp tablet breakpoint instead of clipping
+  against the phone edge, while wide menus retain them; 200% text and fixed
+  desktop layouts still need coverage.
 - [ ] Finish reproducible AArch64 Qt/KDE and GTK settings bridge builds by pinning the required KConfig and GLib development sysroots.
   - [x] Decouple unchanged-helper availability from rebuilding changed Qt modules. The existing AArch64 KF6Config helper may be retained only when its exact pinned checksum matches, while the cached checksum-pinned Qt sysroot rebuilds the platform-theme/style modules; missing or altered helpers fail closed without a download.
 - [ ] Complete secondary-window behavior for phone, tablet, freeform, and external displays.
@@ -620,9 +622,15 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       emulator and AArch64 Samsung. Explicit Light/Dark updates keep the same
       manager, wrapper, and Linux PIDs; both current APKs contain the rebuilt
       bridge, and Auto/Material You defaults were restored after testing.
-    - [ ] Resolve wide Qt popup/shortcut-column presentation on the 432dp phone
-      viewport, then repeat the font/control extremes and tablet/external-display
-      cases before closing Qt visual coverage.
+    - [x] Resolve wide Qt popup/shortcut-column presentation on the 432dp phone
+      viewport. The generic style normalizes Qt screen geometry by device-pixel
+      ratio, prioritizes primary action labels below the 600dp tablet breakpoint,
+      and retains accelerator text on wide menus. A real QMenu render gate proves
+      constrained and wide behavior; current-manager x86_64 emulator and AArch64
+      Samsung gates reject right-edge accelerator pixels and pass inspected
+      full-device light/dark captures.
+    - [ ] Repeat the Qt font/control extremes and tablet/external-display cases
+      before closing Qt visual coverage.
   - [x] GTK 3 — stock Mousepad now consumes the standard embedded Adwaita light/dark variant through the manager-owned settings file and an event-driven GTK module. The Rust runtime republishes only color fields without altering the current published font/control snapshot. Exact light→dark→light gates on Android 16 x86_64 and Samsung Android 15 AArch64 require unchanged launcher, manager, and Linux PIDs; GTK's applied state; fatal-log cleanliness; and measured full-device GTK content plus Android system-bar luminance.
   - [x] GTK 4/libadwaita
     - [x] Load the checksum-pinned GTK settings helper from the generic GTK 4 preload path, monitor the manager-owned physical settings file directly, and retain the Settings-portal signal fallback. Current unmodified Snapshot receives exact initial and live light/dark state on x86_64 and AArch64 without restarting its wrapper, manager, or Linux process. Snapshot's intentionally black camera canvas is not broader libadwaita visual-quality evidence.

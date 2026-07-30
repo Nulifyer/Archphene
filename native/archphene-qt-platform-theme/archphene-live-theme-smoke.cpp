@@ -1,11 +1,17 @@
+#include <QAction>
 #include <QApplication>
 #include <QColor>
 #include <QDir>
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
+#include <QKeySequence>
+#include <QMenu>
+#include <QPainter>
 #include <QPalette>
 #include <QSaveFile>
+#include <QStyle>
 #include <QTimer>
 
 #include <cstdio>
@@ -46,6 +52,47 @@ public:
     int changes = 0;
 };
 
+QImage renderMenu(QApplication &application, int width, bool withShortcut)
+{
+    QMenu menu;
+    menu.setAttribute(Qt::WA_DontShowOnScreen);
+    QAction *action = menu.addAction(
+            QStringLiteral("Configure Keyboard Shortcuts..."));
+    if (withShortcut) {
+        action->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+,")));
+    }
+    menu.ensurePolished();
+    menu.setFixedSize(width, qMax(64, menu.sizeHint().height()));
+    menu.setActiveAction(action);
+    menu.show();
+    application.processEvents();
+
+    QImage image(menu.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    menu.render(&painter);
+    return image;
+}
+
+bool menuFitWorks(QApplication &application)
+{
+    QFont font = application.font();
+    font.setPointSize(16);
+    application.setFont(font);
+
+    if (renderMenu(application, 360, true)
+            != renderMenu(application, 360, false)) {
+        std::fputs("constrained menu did not prioritize the action label\n", stderr);
+        return false;
+    }
+    if (renderMenu(application, 720, true)
+            == renderMenu(application, 720, false)) {
+        std::fputs("wide menu unexpectedly discarded its shortcut\n", stderr);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -62,6 +109,9 @@ int main(int argc, char **argv)
     }
 
     QApplication application(argc, argv);
+    if (!menuFitWorks(application)) {
+        return 8;
+    }
     PaletteObserver observer;
     application.installEventFilter(&observer);
 

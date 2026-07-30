@@ -16,12 +16,20 @@ done
 archphene_test_init "$serial"
 activity="$(archphene_launcher "$package")"
 tmp="$(archphene_mktemp_dir kcalc-calculation)"
+cleanup() {
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+kcalc_linux_pid() {
+  archphene_adb_run shell ps -A -o PID,PPID,ARGS |
+    awk '/--argv0 kcalc / { print $1; exit }'
+}
 archphene_adb_run shell am force-stop "$package"
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 sleep 8
 before_pid="$(archphene_android_pid "$package")"
-before_child="$(archphene_linux_loader_pid "$before_pid")"
+before_child="$(kcalc_linux_pid)"
 [[ -n "$before_pid" && -n "$before_child" ]] \
   || archphene_die 'KCalc Linux process tree is missing'
 tap_control() {
@@ -54,7 +62,7 @@ for control in One Add Two Equals; do
 done
 sleep 2
 after_pid="$(archphene_android_pid "$package")"
-after_child="$(archphene_linux_loader_pid "$after_pid")"
+after_child="$(kcalc_linux_pid)"
 [[ "$after_pid" == "$before_pid" && "$after_child" == "$before_child" ]] \
   || archphene_die 'KCalc restarted while calculating 1 + 2'
 ui="$(archphene_capture_ui kcalc-calculation-after)"

@@ -61,6 +61,9 @@ archphene_adb_run exec-out screencap >"$artifact_dir/settings-menu.raw"
 archphene_adb_run exec-out screencap -p >"$artifact_dir/settings-menu.png"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/frame-health-check.py" \
   "$artifact_dir/settings-menu.raw" --luma-tail-percent 1
+python3 "$ARCHPHENE_SCRIPTS_DIR/lib/menu-shortcut-edge-check.py" \
+  "$artifact_dir/settings-menu.raw" "$artifact_dir/settings-ui.xml" \
+  --action 'Show History'
 config="$(archphene_adb_run shell run-as "$manager" \
   cat files/arch-root/home/archphene/.config/kdeglobals)"
 printf '%s\n' "$config" >"$artifact_dir/kdeglobals"
