@@ -60,6 +60,18 @@ internal object LauncherApkAssembler {
         "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input"
     internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_V7 =
         "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing"
+    internal const val CAPABILITIES_SECRETS_V8 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,secrets"
+    internal const val CAPABILITIES_PRINTING_SECRETS_V8 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,secrets"
+    internal const val CAPABILITIES_AUDIO_SECRETS_V8 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,secrets"
+    internal const val CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,secrets"
+    internal const val CAPABILITIES_AUDIO_INPUT_SECRETS_V8 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets"
+    internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets"
 
     internal fun validCapabilities(value: String): Boolean =
         value == CAPABILITIES_V4 ||
@@ -67,7 +79,13 @@ internal object LauncherApkAssembler {
             value == CAPABILITIES_AUDIO_V6 ||
             value == CAPABILITIES_AUDIO_PRINTING_V6 ||
             value == CAPABILITIES_AUDIO_INPUT_V7 ||
-            value == CAPABILITIES_AUDIO_INPUT_PRINTING_V7
+            value == CAPABILITIES_AUDIO_INPUT_PRINTING_V7 ||
+            value == CAPABILITIES_SECRETS_V8 ||
+            value == CAPABILITIES_PRINTING_SECRETS_V8 ||
+            value == CAPABILITIES_AUDIO_SECRETS_V8 ||
+            value == CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 ||
+            value == CAPABILITIES_AUDIO_INPUT_SECRETS_V8 ||
+            value == CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8
 
     internal fun validMetadataCapabilities(value: String?): Boolean =
         value?.startsWith("c:") == true && validCapabilities(value.drop(2))

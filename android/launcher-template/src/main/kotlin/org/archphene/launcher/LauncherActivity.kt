@@ -40,6 +40,7 @@ import android.system.OsConstants
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
+import android.util.Base64
 import android.util.Log
 import android.view.Gravity
 import android.view.InputDevice
@@ -122,6 +123,8 @@ class LauncherActivity :
     @Volatile private var activityResumed = false
     @Volatile private var printingEnabled = false
     @Volatile private var microphoneEnabled = false
+    @Volatile private var secretsEnabled = false
+    private val secretStore by lazy { LauncherSecretStore(filesDir) }
     private var notificationPermissionRequestInFlight = false
     private val pendingNotifications =
         arrayOfNulls<PendingNotification>(LauncherNotificationPolicy.MAX_PENDING)
@@ -192,7 +195,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_MICROPHONE_PERMISSION ||
+                    code !in CALLBACK_STATUS..CALLBACK_SECRET ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -460,6 +463,69 @@ class LauncherActivity :
                             }
                             true
                         }
+                        CALLBACK_SECRET -> {
+                            if (!secretsEnabled || reply == null) {
+                                return@runCatching false
+                            }
+                            val operation = data.readInt()
+                            val argumentCount = data.readInt()
+                            if (argumentCount !in 0..MAX_SECRET_ARGUMENTS) {
+                                return@runCatching false
+                            }
+                            val arguments = ArrayList<String>(argumentCount)
+                            repeat(argumentCount) {
+                                val argument = data.readString()
+                                if (
+                                    argument == null ||
+                                    argument.length > MAX_SECRET_ARGUMENT_UTF16
+                                ) {
+                                    return@runCatching false
+                                }
+                                arguments.add(argument)
+                            }
+                            val descriptorPresent = data.readInt()
+                            val descriptor =
+                                if (descriptorPresent == 1) {
+                                    runCatching {
+                                        ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                                    }.getOrNull()
+                                } else {
+                                    null
+                                }
+                            if (
+                                descriptorPresent !in 0..1 ||
+                                (descriptorPresent == 1 && descriptor == null) ||
+                                data.dataAvail() != 0 ||
+                                !validSecretCallback(operation, arguments, descriptor)
+                            ) {
+                                runCatching { descriptor?.close() }
+                                return@runCatching false
+                            }
+                            val response =
+                                descriptor.use {
+                                    runCatching {
+                                        handleSecretCallback(operation, arguments, it)
+                                    }.getOrElse { error ->
+                                        if (error is IllegalArgumentException) {
+                                            Log.w(
+                                                TAG,
+                                                "Rejected invalid secret operation=$operation",
+                                            )
+                                            "ERROR\tINVALID_REQUEST"
+                                        } else {
+                                            Log.e(
+                                                TAG,
+                                                "Secret operation failed operation=$operation",
+                                                error,
+                                            )
+                                            "ERROR\tFAILED"
+                                        }
+                                    }
+                                }
+                            reply.writeNoException()
+                            reply.writeString(response)
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -713,19 +779,21 @@ class LauncherActivity :
             capabilities != CAPABILITIES_AUDIO_V6 &&
             capabilities != CAPABILITIES_AUDIO_PRINTING_V6 &&
             capabilities != CAPABILITIES_AUDIO_INPUT_V7 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_V7
+            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_V7 &&
+            capabilities != CAPABILITIES_SECRETS_V8 &&
+            capabilities != CAPABILITIES_PRINTING_SECRETS_V8 &&
+            capabilities != CAPABILITIES_AUDIO_SECRETS_V8 &&
+            capabilities != CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_SECRETS_V8 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8
         ) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
             return
         }
-        printingEnabled =
-            capabilities == CAPABILITIES_PRINTING_V5 ||
-                capabilities == CAPABILITIES_AUDIO_PRINTING_V6 ||
-                capabilities == CAPABILITIES_AUDIO_INPUT_PRINTING_V7
-        microphoneEnabled =
-            capabilities == CAPABILITIES_AUDIO_INPUT_V7 ||
-                capabilities == CAPABILITIES_AUDIO_INPUT_PRINTING_V7
+        printingEnabled = capabilities.contains(",printing")
+        microphoneEnabled = capabilities.contains(",audio-input")
+        secretsEnabled = capabilities.endsWith(",secrets")
         val manager = metadata.getString(MANAGER_PACKAGE).orEmpty()
         if (!SAFE_PACKAGE.matches(manager)) {
             status.setText(R.string.launcher_invalid)
@@ -1422,6 +1490,65 @@ class LauncherActivity :
             false
         }
     }
+
+    private fun validSecretCallback(
+        operation: Int,
+        arguments: List<String>,
+        descriptor: ParcelFileDescriptor?,
+    ): Boolean =
+        when (operation) {
+            SECRET_OPERATION_STORE -> arguments.size == 4 && descriptor != null
+            SECRET_OPERATION_READ -> arguments.size == 1 && descriptor != null
+            SECRET_OPERATION_DELETE -> arguments.size == 1 && descriptor == null
+            SECRET_OPERATION_LIST,
+            SECRET_OPERATION_CATALOG,
+            -> arguments.isEmpty() && descriptor != null
+            else -> false
+        }
+
+    private fun handleSecretCallback(
+        operation: Int,
+        arguments: List<String>,
+        descriptor: ParcelFileDescriptor?,
+    ): String =
+        when (operation) {
+            SECRET_OPERATION_STORE -> {
+                secretStore.store(
+                    arguments[0],
+                    arguments[1],
+                    arguments[2],
+                    arguments[3],
+                    checkNotNull(descriptor).fileDescriptor,
+                )
+                "OK"
+            }
+            SECRET_OPERATION_READ -> {
+                val result =
+                    secretStore.read(
+                        arguments[0],
+                        checkNotNull(descriptor).fileDescriptor,
+                    )
+                if (result == null) {
+                    "ERROR\tNOT_FOUND"
+                } else {
+                    "OK\t${encodeSecretField(result.label)}\t" +
+                        "${encodeSecretField(result.attributes)}\t${result.secretBytes}"
+                }
+            }
+            SECRET_OPERATION_DELETE ->
+                if (secretStore.delete(arguments[0])) "OK" else "ERROR\tFAILED"
+            SECRET_OPERATION_LIST ->
+                "OK\t${secretStore.list(checkNotNull(descriptor).fileDescriptor)}"
+            SECRET_OPERATION_CATALOG ->
+                "OK\t${secretStore.catalog(checkNotNull(descriptor).fileDescriptor)}"
+            else -> "ERROR\tINVALID_REQUEST"
+        }
+
+    private fun encodeSecretField(value: String): String =
+        Base64.encodeToString(
+            value.toByteArray(StandardCharsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+        )
 
     private fun openSession() {
         val service = remote ?: return
@@ -3481,6 +3608,18 @@ class LauncherActivity :
             "$CAPABILITIES_V4,audio-output,audio-input"
         private const val CAPABILITIES_AUDIO_INPUT_PRINTING_V7 =
             "$CAPABILITIES_V4,audio-output,audio-input,printing"
+        private const val CAPABILITIES_SECRETS_V8 =
+            "$CAPABILITIES_V4,secrets"
+        private const val CAPABILITIES_PRINTING_SECRETS_V8 =
+            "$CAPABILITIES_V4,printing,secrets"
+        private const val CAPABILITIES_AUDIO_SECRETS_V8 =
+            "$CAPABILITIES_V4,audio-output,secrets"
+        private const val CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 =
+            "$CAPABILITIES_V4,audio-output,printing,secrets"
+        private const val CAPABILITIES_AUDIO_INPUT_SECRETS_V8 =
+            "$CAPABILITIES_V4,audio-output,audio-input,secrets"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 =
+            "$CAPABILITIES_V4,audio-output,audio-input,printing,secrets"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
         private const val PROTOCOL_VERSION = 11
@@ -3504,6 +3643,14 @@ class LauncherActivity :
         private const val CALLBACK_PRINT_PDF = IBinder.FIRST_CALL_TRANSACTION + 8
         private const val CALLBACK_MICROPHONE_PERMISSION =
             IBinder.FIRST_CALL_TRANSACTION + 9
+        private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
+        private const val SECRET_OPERATION_STORE = 1
+        private const val SECRET_OPERATION_READ = 2
+        private const val SECRET_OPERATION_DELETE = 3
+        private const val SECRET_OPERATION_LIST = 4
+        private const val SECRET_OPERATION_CATALOG = 5
+        private const val MAX_SECRET_ARGUMENTS = 4
+        private const val MAX_SECRET_ARGUMENT_UTF16 = 8 * 1_024
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val NOTIFICATION_PERMISSION_REQUEST = 7_001

@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::ops::Range;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
@@ -384,8 +384,15 @@ pub struct CompositorCore {
     state: CompositorState,
     listener: Option<UnixListener>,
     socket_path: Option<PathBuf>,
+    socket_identity: Option<SocketIdentity>,
     accepted_client_count: u32,
     stopping: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
 }
 
 #[derive(Default)]
@@ -2363,11 +2370,7 @@ impl LauncherSurfaceCompositor {
 impl Drop for LauncherSurfaceCompositor {
     fn drop(&mut self) {
         self.detach_surface();
-        // Unlink while the launcher owner is still explicit. CompositorCore
-        // repeats this idempotently after its listener field is dropped.
-        if let Some(path) = self.core.socket_path.as_ref() {
-            let _ = std::fs::remove_file(path);
-        }
+        self.core.close_socket();
     }
 }
 
@@ -9706,6 +9709,7 @@ impl CompositorCore {
             state,
             listener: None,
             socket_path: None,
+            socket_identity: None,
             accepted_client_count: 0,
             stopping: AtomicBool::new(false),
         })
@@ -9723,9 +9727,36 @@ impl CompositorCore {
         }
         let listener = UnixListener::bind(path)?;
         listener.set_nonblocking(true)?;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::other(
+                "Wayland listener path is not a Unix socket",
+            ));
+        }
         self.listener = Some(listener);
         self.socket_path = Some(path.to_owned());
+        self.socket_identity = Some(SocketIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        });
         Ok(())
+    }
+
+    fn close_socket(&mut self) {
+        self.listener = None;
+        let path = self.socket_path.take();
+        let identity = self.socket_identity.take();
+        let (Some(path), Some(identity)) = (path, identity) else {
+            return;
+        };
+        let owned = std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+            metadata.file_type().is_socket()
+                && metadata.dev() == identity.device
+                && metadata.ino() == identity.inode
+        });
+        if owned {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     fn accept_pending_clients(&mut self) -> std::io::Result<usize> {
@@ -12193,10 +12224,7 @@ fn send_probe_shm_pool_request(
 
 impl Drop for CompositorCore {
     fn drop(&mut self) {
-        self.listener = None;
-        if let Some(path) = self.socket_path.take() {
-            let _ = std::fs::remove_file(path);
-        }
+        self.close_socket();
     }
 }
 
@@ -17560,6 +17588,29 @@ mod tests {
         assert!(core.dispatch_once().expect("accept client") >= 1);
         assert_eq!(core.accepted_client_count(), 1);
         drop(core);
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn stale_compositor_cannot_unlink_a_replacement_socket() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-compositor-replacement-{}.sock",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let mut stale = CompositorCore::new().expect("stale Wayland display");
+        stale.bind_socket(&socket).expect("bind stale socket");
+        let mut replacement = CompositorCore::new().expect("replacement Wayland display");
+        replacement
+            .bind_socket(&socket)
+            .expect("bind replacement socket");
+
+        drop(stale);
+        assert!(socket.exists());
+        let _client = UnixStream::connect(&socket).expect("connect replacement client");
+        assert!(replacement.dispatch_once().expect("accept replacement client") >= 1);
+
+        drop(replacement);
         assert!(!socket.exists());
     }
 

@@ -11450,12 +11450,15 @@ class ArchpheneRuntimeService : Service() {
         }
 
     private fun packageBridgeConsentSummary(review: PackageLauncherReview): String {
-        val labels = ArrayList<String>(2)
+        val labels = ArrayList<String>(3)
         if (review.bridgeCapabilities and BRIDGE_AUDIO_INPUT != 0) {
             labels.add("microphone consent when recording begins")
         }
         if (review.bridgeCapabilities and BRIDGE_CAMERA != 0) {
             labels.add("camera consent when requested")
+        }
+        if (review.bridgeCapabilities and BRIDGE_SECRETS != 0) {
+            labels.add("encrypted secrets private to each launcher")
         }
         return if (labels.isEmpty()) "" else " · ${labels.joinToString(" · ")}"
     }

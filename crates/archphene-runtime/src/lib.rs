@@ -159,7 +159,8 @@ pub struct PackageLauncherReview {
 pub const AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES: u8 =
     archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT
         | archphene_packages::elf_profile::BRIDGE_AUDIO_INPUT
-        | archphene_packages::elf_profile::BRIDGE_PRINTING;
+        | archphene_packages::elf_profile::BRIDGE_PRINTING
+        | archphene_packages::elf_profile::BRIDGE_SECRETS;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPublishWork {

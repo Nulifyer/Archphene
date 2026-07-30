@@ -75,6 +75,8 @@ internal class LauncherPortalBridge(
     private val requestAudioInput: (Boolean) -> String,
     private val printingEnabled: Boolean,
     private val requestPrint: (String, ParcelFileDescriptor) -> Boolean,
+    private val secretsEnabled: Boolean,
+    private val requestSecret: (String, List<String>, ParcelFileDescriptor?) -> String,
     private val importDirectory: (String, ParcelFileDescriptor) -> String?,
     private val cancelDirectoryImport: () -> Unit,
 ) : Closeable {
@@ -218,7 +220,8 @@ internal class LauncherPortalBridge(
                         if (publishedDark) "dark" else "light"
                     environment()["ARCHPHENE_ACCENT_RGB"] =
                         String.format(Locale.ROOT, "%06x", publishedAccent)
-                    environment()["ARCHPHENE_ENABLE_SECRETS"] = "0"
+                    environment()["ARCHPHENE_ENABLE_SECRETS"] =
+                        if (secretsEnabled) "1" else "0"
                     environment()["ARCHPHENE_ENABLE_CAMERA"] = "0"
                     environment()["ARCHPHENE_ENABLE_ACCESSIBILITY"] = "0"
                 }.start()
@@ -389,7 +392,10 @@ internal class LauncherPortalBridge(
                         writeResponse(client, "ERROR\tUNSUPPORTED")
                         return
                     }
-                    if (fields.getOrNull(1) != "PRINT_PDF" && descriptors.isNotEmpty()) {
+                    if (
+                        fields.getOrNull(1) !in DESCRIPTOR_OPERATIONS &&
+                        descriptors.isNotEmpty()
+                    ) {
                         writeResponse(client, "ERROR\tINVALID_REQUEST")
                         return
                     }
@@ -403,6 +409,12 @@ internal class LauncherPortalBridge(
                         "CHECK_AUDIO_INPUT" ->
                             handleAudioInputRequest(client, fields, request = false)
                         "PRINT_PDF" -> handlePrintRequest(client, fields, descriptors)
+                        "STORE_SECRET",
+                        "READ_SECRET",
+                        "DELETE_SECRET",
+                        "LIST_SECRETS",
+                        "CATALOG_SECRETS",
+                        -> handleSecretRequest(client, fields, descriptors)
                         "SAVE_FILE" -> handleSaveRequest(client, fields)
                         "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
                         "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
@@ -542,6 +554,136 @@ internal class LauncherPortalBridge(
                 false
             }
         writeResponse(client, if (accepted) "OK" else "ERROR\tFAILED")
+    }
+
+    private fun handleSecretRequest(
+        client: LocalSocket,
+        fields: List<String>,
+        descriptors: Array<FileDescriptor>,
+    ) {
+        if (!secretsEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        if (fields.getOrNull(0) != "ARCHPHENE/1") {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val operation = fields.getOrNull(1).orEmpty()
+        val decoded =
+            when (operation) {
+                "STORE_SECRET" -> {
+                    if (
+                        fields.size !in 5..6 ||
+                        descriptors.size != 1 ||
+                        !descriptors[0].valid()
+                    ) {
+                        null
+                    } else {
+                        val id = decodeField(fields[2], MAX_SECRET_ID_BYTES)
+                        val label =
+                            decodeFieldAllowEmpty(fields[3], MAX_SECRET_LABEL_BYTES)
+                        val attributes =
+                            decodeField(fields[4], MAX_SECRET_ATTRIBUTES_BYTES)
+                        val contentType =
+                            if (fields.size == 6) {
+                                decodeField(fields[5], MAX_SECRET_CONTENT_TYPE_BYTES)
+                            } else {
+                                "text/plain"
+                            }
+                        if (
+                            id == null ||
+                            label == null ||
+                            attributes == null ||
+                            contentType == null ||
+                            !validSecretText(id, MAX_SECRET_ID_CHARACTERS, allowEmpty = false) ||
+                            !validSecretText(
+                                label,
+                                MAX_SECRET_LABEL_CHARACTERS,
+                                allowEmpty = true,
+                            ) ||
+                            !validSecretText(
+                                contentType,
+                                MAX_SECRET_CONTENT_TYPE_CHARACTERS,
+                                allowEmpty = false,
+                            )
+                        ) {
+                            null
+                        } else {
+                            listOf(id, label, attributes, contentType)
+                        }
+                    }
+                }
+                "READ_SECRET",
+                "DELETE_SECRET",
+                -> {
+                    val expectedDescriptors = if (operation == "READ_SECRET") 1 else 0
+                    if (
+                        fields.size != 3 ||
+                        descriptors.size != expectedDescriptors ||
+                        descriptors.any { !it.valid() }
+                    ) {
+                        null
+                    } else {
+                        val id = decodeField(fields[2], MAX_SECRET_ID_BYTES)
+                        if (
+                            id == null ||
+                            !validSecretText(id, MAX_SECRET_ID_CHARACTERS, allowEmpty = false)
+                        ) {
+                            null
+                        } else {
+                            listOf(id)
+                        }
+                    }
+                }
+                "LIST_SECRETS",
+                "CATALOG_SECRETS",
+                ->
+                    if (
+                        fields.size == 2 &&
+                        descriptors.size == 1 &&
+                        descriptors[0].valid()
+                    ) {
+                        emptyList()
+                    } else {
+                        null
+                    }
+                else -> null
+            }
+        if (decoded == null) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val descriptor =
+            descriptors.singleOrNull()?.let { source ->
+                runCatching { ParcelFileDescriptor.dup(source) }.getOrNull()
+            }
+        if (descriptors.isNotEmpty() && descriptor == null) {
+            writeResponse(client, "ERROR\tFAILED")
+            return
+        }
+        val response =
+            descriptor.use {
+                runCatching {
+                    requestSecret(operation, decoded, it)
+                }.getOrElse { error ->
+                    Log.w(
+                        TAG,
+                        "Could not relay Linux secret request session=$sessionId operation=$operation",
+                        error,
+                    )
+                    "ERROR\tFAILED"
+                }
+            }
+        if (!validSecretResponse(operation, response)) {
+            Log.e(
+                TAG,
+                "Rejected invalid secret response session=$sessionId operation=$operation",
+            )
+            writeResponse(client, "ERROR\tFAILED")
+            return
+        }
+        writeResponse(client, response)
     }
 
     private fun handleSaveRequest(
@@ -988,6 +1130,16 @@ internal class LauncherPortalBridge(
                 .toString()
         }.getOrNull()
 
+    private fun decodeFieldAllowEmpty(
+        field: String,
+        maximumBytes: Int,
+    ): String? =
+        if (field.isEmpty()) {
+            ""
+        } else {
+            decodeField(field, maximumBytes)
+        }
+
     private fun encodeField(field: String): String =
         Base64.encodeToString(
             field.toByteArray(StandardCharsets.UTF_8),
@@ -1020,6 +1172,58 @@ internal class LauncherPortalBridge(
                             !(allowWhitespace && (character == '\n' || character == '\t'))
                     )
             }
+
+    private fun validSecretText(
+        value: String,
+        maximumCharacters: Int,
+        allowEmpty: Boolean,
+    ): Boolean =
+        value.length <= maximumCharacters &&
+            (allowEmpty || value.isNotEmpty()) &&
+            value.none(Char::isISOControl)
+
+    private fun validSecretResponse(
+        operation: String,
+        response: String,
+    ): Boolean {
+        if (
+            response.length > MAX_SECRET_RESPONSE_BYTES ||
+            response.any { character ->
+                character.code !in 0x20..0x7e && character != '\t'
+            }
+        ) {
+            return false
+        }
+        if (response == "ERROR\tFAILED" || response == "ERROR\tINVALID_REQUEST") {
+            return true
+        }
+        return when (operation) {
+            "STORE_SECRET",
+            "DELETE_SECRET",
+            -> response == "OK"
+            "READ_SECRET" -> {
+                if (response == "ERROR\tNOT_FOUND") {
+                    true
+                } else {
+                    val fields = response.split('\t')
+                    fields.size == 4 &&
+                        fields[0] == "OK" &&
+                        decodeFieldAllowEmpty(fields[1], MAX_SECRET_LABEL_BYTES) != null &&
+                        decodeField(fields[2], MAX_SECRET_ATTRIBUTES_BYTES) != null &&
+                        fields[3].toIntOrNull() in 0..MAX_SECRET_VALUE_BYTES
+                }
+            }
+            "LIST_SECRETS",
+            "CATALOG_SECRETS",
+            -> {
+                val fields = response.split('\t')
+                fields.size == 2 &&
+                    fields[0] == "OK" &&
+                    fields[1].toIntOrNull() in 0..MAX_SECRET_ITEMS
+            }
+            else -> false
+        }
+    }
 
     private fun randomHex(bytes: Int): String =
         ByteArray(bytes).also(random::nextBytes).joinToString("") { value ->
@@ -1100,6 +1304,16 @@ internal class LauncherPortalBridge(
         private const val MAX_NOTIFICATION_TITLE_CHARACTERS = 256
         private const val MAX_NOTIFICATION_BODY_CHARACTERS = 4_096
         private const val MAX_PRINT_TITLE_CHARACTERS = 256
+        private const val MAX_SECRET_ID_BYTES = 512
+        private const val MAX_SECRET_LABEL_BYTES = 1_024
+        private const val MAX_SECRET_ATTRIBUTES_BYTES = 8 * 1_024
+        private const val MAX_SECRET_CONTENT_TYPE_BYTES = 512
+        private const val MAX_SECRET_ID_CHARACTERS = 128
+        private const val MAX_SECRET_LABEL_CHARACTERS = 256
+        private const val MAX_SECRET_CONTENT_TYPE_CHARACTERS = 128
+        private const val MAX_SECRET_VALUE_BYTES = 64 * 1_024
+        private const val MAX_SECRET_RESPONSE_BYTES = 16 * 1_024
+        private const val MAX_SECRET_ITEMS = 256
         private const val MAX_DEBUG_PRINT_BYTES = 65_536
         private const val MAX_ACTIVE_SAVES = 8
         private const val MAX_OPEN_DOCUMENTS = 32
@@ -1121,6 +1335,14 @@ internal class LauncherPortalBridge(
                 "ERROR\tPERMISSION_NOT_REQUESTED",
                 "ERROR\tUNAVAILABLE",
                 "ERROR\tFAILED",
+            )
+        private val DESCRIPTOR_OPERATIONS =
+            setOf(
+                "PRINT_PDF",
+                "STORE_SECRET",
+                "READ_SECRET",
+                "LIST_SECRETS",
+                "CATALOG_SECRETS",
             )
         private val STALE_SAVE_DIRECTORY_NAME =
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")

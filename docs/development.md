@@ -412,6 +412,24 @@ fork/exec, inherited-FD, wait, and bounded child-output boundary on Android.
 
 ### Secrets desktop-client fixture
 
+For the current generated-wrapper path, first install a package whose verified
+closure declares `secrets` through the manager (Seahorse is the maintained
+representative). With the manager build's native probes already staged under
+`tooling/build`, run the state-preserving gate against the existing wrapper:
+
+```bash
+./scripts/test-current-secrets-bridge.sh --serial emulator-5554
+./scripts/test-current-secrets-bridge.sh --serial <samsung-serial>
+```
+
+The gate does not install an APK, package, or tool and does not clear app data.
+It uses unique test attributes, preserves pre-existing records, exercises
+unmodified shared-root `secret-tool`, restarts the wrapper, and removes only
+its own device files and records.
+
+The older isolated KWallet compatibility fixture remains available for broader
+client-protocol coverage:
+
 Rebuild the KWallet compatibility daemon and official Arch desktop-client
 closure before assembling the full x86_64 secrets probe:
 

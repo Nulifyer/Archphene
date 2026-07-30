@@ -96,6 +96,7 @@ class LauncherSessionService : Service() {
         val authorization: LauncherAuthorization,
         val appearanceOverrides: LinuxAppearanceOverrides,
         val reducedIsolationElectron: Boolean,
+        val compositorSocketName: String,
     ) {
         var surface: Surface? = null
         @Volatile var active = true
@@ -363,11 +364,7 @@ class LauncherSessionService : Service() {
                 session.audioBridge = null
                 compositor?.close()
                 session.compositor = null
-                val socket = session.compositorSocket
                 session.compositorSocket = null
-                if (socket != null && socket.exists() && !socket.delete()) {
-                    Log.w(TAG, "Could not remove compositor socket session=${session.id}")
-                }
                 session.pumpStarted = false
             } else {
                 session.compositor?.setHostActive(false)
@@ -934,6 +931,7 @@ class LauncherSessionService : Service() {
                 authorization,
                 preferences.appearance,
                 preferences.reducedIsolationElectron,
+                newCompositorSocketName(sessionId),
             )
         session.inputDrain = Runnable { drainInput(session) }
         session.imeDrain = Runnable { drainIme(session) }
@@ -1734,7 +1732,7 @@ class LauncherSessionService : Service() {
                 session.compositor
                     ?: File(
                             filesDir,
-                            "arch-root/run/launcher-${session.id}.sock",
+                            "arch-root/run/${session.compositorSocketName}",
                         ).let { socket ->
                             NativeLauncherCompositor(
                                 socket.absolutePath,
@@ -1787,7 +1785,6 @@ class LauncherSessionService : Service() {
         } catch (error: Exception) {
             session.compositor?.close()
             session.compositor = null
-            session.compositorSocket?.delete()
             session.compositorSocket = null
             session.pumpStarted = false
             notifyStatus(
@@ -1868,6 +1865,11 @@ class LauncherSessionService : Service() {
                             session.authorization.bridgeCapabilities and BRIDGE_PRINTING != 0,
                         requestPrint = { title, descriptor ->
                             notifyPrintPdf(session, title, descriptor)
+                        },
+                        secretsEnabled =
+                            session.authorization.bridgeCapabilities and BRIDGE_SECRETS != 0,
+                        requestSecret = { operation, arguments, descriptor ->
+                            notifySecret(session, operation, arguments, descriptor)
                         },
                         importDirectory = { displayName, descriptor ->
                             runtime.importPortalFolder(displayName, descriptor)
@@ -2830,11 +2832,7 @@ class LauncherSessionService : Service() {
     private fun stopCompositor(session: Session) {
         session.compositor?.close()
         session.compositor = null
-        val socket = session.compositorSocket
         session.compositorSocket = null
-        if (socket != null && socket.exists() && !socket.delete()) {
-            Log.w(TAG, "Could not remove stopped compositor socket session=${session.id}")
-        }
         session.pumpStarted = false
     }
 
@@ -3341,6 +3339,78 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifySecret(
+        session: Session,
+        operation: String,
+        arguments: List<String>,
+        descriptor: ParcelFileDescriptor?,
+    ): String {
+        if (
+            !session.active ||
+            session.authorization.bridgeCapabilities and BRIDGE_SECRETS == 0
+        ) {
+            return "ERROR\tFAILED"
+        }
+        val operationCode =
+            when (operation) {
+                "STORE_SECRET" -> SECRET_OPERATION_STORE
+                "READ_SECRET" -> SECRET_OPERATION_READ
+                "DELETE_SECRET" -> SECRET_OPERATION_DELETE
+                "LIST_SECRETS" -> SECRET_OPERATION_LIST
+                "CATALOG_SECRETS" -> SECRET_OPERATION_CATALOG
+                else -> return "ERROR\tINVALID_REQUEST"
+            }
+        val descriptorRequired = operationCode != SECRET_OPERATION_DELETE
+        if (
+            descriptorRequired != (descriptor != null) ||
+            arguments.size > MAX_SECRET_ARGUMENTS ||
+            arguments.any { it.length > MAX_SECRET_ARGUMENT_UTF16 }
+        ) {
+            return "ERROR\tINVALID_REQUEST"
+        }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(operationCode)
+            data.writeInt(arguments.size)
+            for (argument in arguments) data.writeString(argument)
+            data.writeInt(if (descriptor == null) 0 else 1)
+            descriptor?.writeToParcel(data, 0)
+            if (
+                data.dataSize() > MAX_SECRET_CALLBACK_PARCEL_BYTES ||
+                !session.clientToken.transact(CALLBACK_SECRET, data, reply, 0)
+            ) {
+                "ERROR\tFAILED"
+            } else {
+                reply.readException()
+                val response = reply.readString()
+                if (
+                    response == null ||
+                    response.length > MAX_SECRET_RESPONSE_BYTES ||
+                    reply.dataAvail() != 0
+                ) {
+                    "ERROR\tFAILED"
+                } else {
+                    response
+                }
+            }
+        } catch (error: RemoteException) {
+            Log.w(
+                TAG,
+                "Could not deliver Linux secret request session=${session.id} " +
+                    "operation=$operation",
+                error,
+            )
+            "ERROR\tFAILED"
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
     private fun writeCursorCallbackHeader(
         data: Parcel,
         session: Session,
@@ -3510,6 +3580,18 @@ class LauncherSessionService : Service() {
             } &&
             hasWellFormedUtf16(name)
 
+    private fun newCompositorSocketName(sessionId: Int): String {
+        val randomBytes = ByteArray(COMPOSITOR_SOCKET_TOKEN_BYTES)
+        permissionRandom.nextBytes(randomBytes)
+        val token = CharArray(randomBytes.size * 2)
+        for (index in randomBytes.indices) {
+            val value = randomBytes[index].toInt() and 0xff
+            token[index * 2] = HEX_DIGITS[value ushr 4]
+            token[index * 2 + 1] = HEX_DIGITS[value and 0x0f]
+        }
+        return "launcher-$sessionId-${String(token)}.sock"
+    }
+
     private fun utf8OffsetToUtf16(
         text: String,
         byteOffset: Int,
@@ -3597,14 +3679,27 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_PRINT_PDF = IBinder.FIRST_CALL_TRANSACTION + 8
         private const val CALLBACK_MICROPHONE_PERMISSION =
             IBinder.FIRST_CALL_TRANSACTION + 9
+        private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
+        private const val SECRET_OPERATION_STORE = 1
+        private const val SECRET_OPERATION_READ = 2
+        private const val SECRET_OPERATION_DELETE = 3
+        private const val SECRET_OPERATION_LIST = 4
+        private const val SECRET_OPERATION_CATALOG = 5
+        private const val MAX_SECRET_ARGUMENTS = 4
+        private const val MAX_SECRET_ARGUMENT_UTF16 = 8 * 1_024
+        private const val MAX_SECRET_CALLBACK_PARCEL_BYTES = 48 * 1_024
+        private const val MAX_SECRET_RESPONSE_BYTES = 16 * 1_024
         private const val BRIDGE_AUDIO_OUTPUT = 1 shl 0
         private const val BRIDGE_PRINTING = 1 shl 1
+        private const val BRIDGE_SECRETS = 1 shl 3
         private const val BRIDGE_AUDIO_INPUT = 1 shl 4
         private const val MICROPHONE_PERMISSION_NONE = 0
         private const val MICROPHONE_PERMISSION_PENDING = 1
         private const val MICROPHONE_PERMISSION_DENIED = 2
         private const val MICROPHONE_PERMISSION_GRANTED = 3
         private const val MICROPHONE_TOKEN_BYTES = 16
+        private const val COMPOSITOR_SOCKET_TOKEN_BYTES = 8
+        private const val HEX_DIGITS = "0123456789abcdef"
         private const val MICROPHONE_NOTIFICATION_ID = 7_202
         private const val MICROPHONE_NOTIFICATION_CHANNEL = "linux-microphone"
         private const val DEBUG_MICROPHONE_MINIMUM_BYTES = 76_800

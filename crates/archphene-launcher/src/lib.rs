@@ -24,21 +24,39 @@ pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6: &str =
 pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7: &str =
     "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input";
 pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing";
+pub const LAUNCHER_CAPABILITIES_SECRETS_V8: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,secrets";
+pub const LAUNCHER_CAPABILITIES_PRINTING_SECRETS_V8: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,secrets";
+pub const LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V8: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,secrets";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,secrets";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V8: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets";
 
 pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
     let audio = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT != 0;
     let audio_input =
         bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_INPUT != 0;
     let printing = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_PRINTING != 0;
+    let secrets = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_SECRETS != 0;
     debug_assert!(!audio_input || audio);
-    match (audio, audio_input, printing) {
-        (false, false, false) => LAUNCHER_CAPABILITIES_V4,
-        (false, false, true) => LAUNCHER_CAPABILITIES_PRINTING_V5,
-        (true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
-        (true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
-        (true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
-        (true, true, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
-        (false, true, _) => LAUNCHER_CAPABILITIES_V4,
+    match (audio, audio_input, printing, secrets) {
+        (false, false, false, false) => LAUNCHER_CAPABILITIES_V4,
+        (false, false, true, false) => LAUNCHER_CAPABILITIES_PRINTING_V5,
+        (true, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
+        (true, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
+        (true, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
+        (true, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
+        (false, false, false, true) => LAUNCHER_CAPABILITIES_SECRETS_V8,
+        (false, false, true, true) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_V8,
+        (true, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V8,
+        (true, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,
+        (true, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V8,
+        (true, true, true, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,
+        (false, true, _, _) => LAUNCHER_CAPABILITIES_V4,
     }
 }
 
@@ -2172,7 +2190,7 @@ mod tests {
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_CAMERA | BRIDGE_SECRETS,),
-            LAUNCHER_CAPABILITIES_AUDIO_V6,
+            LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V8,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING),
@@ -2185,6 +2203,14 @@ mod tests {
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT | BRIDGE_PRINTING),
             LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
+        );
+        assert_eq!(
+            launcher_capabilities(BRIDGE_SECRETS),
+            LAUNCHER_CAPABILITIES_SECRETS_V8,
+        );
+        assert_eq!(
+            launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING | BRIDGE_SECRETS),
+            LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,
         );
     }
 

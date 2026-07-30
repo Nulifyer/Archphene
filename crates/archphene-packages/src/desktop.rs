@@ -497,10 +497,10 @@ fn parse_mime_types(value: Option<&str>) -> Result<Vec<String>, DesktopEntryErro
     };
     let mut result = Vec::with_capacity(4);
     for candidate in value.split(';').filter(|candidate| !candidate.is_empty()) {
-        if result.len() >= MAX_MIME_TYPES || !valid_mime_type(candidate) {
+        if !valid_mime_type(candidate) {
             return Err(DesktopEntryError::InvalidField);
         }
-        if !result.iter().any(|known| known == candidate) {
+        if result.len() < MAX_MIME_TYPES && !result.iter().any(|known| known == candidate) {
             result.push(candidate.to_owned());
         }
     }
@@ -817,6 +817,27 @@ Terminal=false\n",
         assert_eq!(entry.icon.as_deref(), Some("kate"));
         assert_eq!(entry.mime_types, ["text/plain", "application/json"]);
         assert!(!entry.terminal);
+    }
+
+    #[test]
+    fn retains_launcher_when_valid_mime_handlers_exceed_android_bound() {
+        let mime_types = (0..MAX_MIME_TYPES + 7)
+            .map(|index| format!("application/x-archphene-{index}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        let source = format!(
+            "[Desktop Entry]\nType=Application\nName=Many handlers\nExec=kate\n\
+                 MimeType={mime_types};\n",
+        );
+        let entry = parse_desktop_entry("many.desktop", source.as_bytes(), resolve)
+            .expect("valid bounded desktop entry")
+            .expect("visible application");
+        assert_eq!(entry.mime_types.len(), MAX_MIME_TYPES);
+        assert_eq!(entry.mime_types[0], "application/x-archphene-0");
+        assert_eq!(
+            entry.mime_types[MAX_MIME_TYPES - 1],
+            format!("application/x-archphene-{}", MAX_MIME_TYPES - 1),
+        );
     }
 
     #[test]
