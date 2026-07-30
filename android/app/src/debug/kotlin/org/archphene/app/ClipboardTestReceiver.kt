@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.util.Base64
+import android.util.Log
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 
@@ -14,6 +15,10 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
+        if (intent.action == ACTION_RESTORE_CLIPBOARD) {
+            restoreClipboard(context)
+            return
+        }
         if (intent.action != ACTION_SET_CLIPBOARD) {
             return
         }
@@ -27,9 +32,36 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
         if (text.length > MAX_TEXT_CHARACTERS) {
             return
         }
-        context
-            .getSystemService(ClipboardManager::class.java)
-            ?.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text))
+        val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+        if (intent.getBooleanExtra(EXTRA_SAVE_EXISTING, false) && !clipboardSaved) {
+            val existing =
+                runCatching {
+                    SavedClipboard(
+                        hadPrimaryClip = clipboard.hasPrimaryClip(),
+                        clip = clipboard.primaryClip,
+                    )
+                }.getOrNull() ?: return
+            savedClipboard = existing
+            clipboardSaved = true
+            Log.i(TAG, "Saved Android clipboard before debug test")
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text))
+    }
+
+    private fun restoreClipboard(context: Context) {
+        if (!clipboardSaved) {
+            return
+        }
+        val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+        val saved = savedClipboard
+        if (saved?.hadPrimaryClip == true && saved.clip != null) {
+            clipboard.setPrimaryClip(saved.clip)
+        } else {
+            clipboard.clearPrimaryClip()
+        }
+        savedClipboard = null
+        clipboardSaved = false
+        Log.i(TAG, "Restored Android clipboard after debug test")
     }
 
     private fun decodeUtf8(encoded: String): String? {
@@ -51,11 +83,22 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
     private companion object {
         private const val ACTION_SET_CLIPBOARD =
             "org.archphene.app.debug.action.SET_TEST_CLIPBOARD"
+        private const val ACTION_RESTORE_CLIPBOARD =
+            "org.archphene.app.debug.action.RESTORE_TEST_CLIPBOARD"
         private const val EXTRA_TEXT = "text"
         private const val EXTRA_TEXT_BASE64 = "text_base64"
+        private const val EXTRA_SAVE_EXISTING = "save_existing"
         private const val MAX_TEXT_CHARACTERS = 2 * 1024
         private const val MAX_TEXT_BYTES = 8 * 1024
         private const val MAX_BASE64_CHARACTERS = 12 * 1024
         private const val CLIP_LABEL = "Archphene debug test"
+        private const val TAG = "ArchpheneClipboardProbe"
+        private var savedClipboard: SavedClipboard? = null
+        private var clipboardSaved = false
     }
+
+    private data class SavedClipboard(
+        val hadPrimaryClip: Boolean,
+        val clip: ClipData?,
+    )
 }

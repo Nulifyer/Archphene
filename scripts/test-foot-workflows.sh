@@ -7,26 +7,29 @@ serial=
 apk=
 package=
 artifact_dir=
+skip_install=true
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --package) package="${2:?missing value for --package}"; shift 2 ;;
     --artifact-dir) artifact_dir="${2:?missing value for --artifact-dir}"; shift 2 ;;
+    --install-apk) skip_install=false; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --package CURRENT_FOOT_LAUNCHER [--artifact-dir PATH]"
+      echo "usage: $0 --serial SERIAL --package CURRENT_FOOT_LAUNCHER [--apk PATH --install-apk] [--artifact-dir PATH]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
-[[ -n "$apk" ]] || archphene_die "--apk is required"
+if [[ "$skip_install" == false ]]; then
+  [[ -n "$apk" ]] || archphene_die "--apk is required with --install-apk"
+fi
 [[ "$package" =~ ^org\.archphene\.linux\.p[0-9a-f]{32}$ ]] ||
   archphene_die "--package must be a generated Archphene launcher"
 
 archphene_test_init "$serial"
-archphene_require_file "$apk"
 manager=org.archphene.app.debug
 manager_activity="$manager/org.archphene.app.MainActivity"
 activity="$(archphene_launcher "$package")"
@@ -46,6 +49,15 @@ screen_size="$(archphene_adb_run shell wm size | tr -d '\r')"
 override_size="$(sed -n 's/^Override size: //p' <<<"$screen_size")"
 physical_size="$(sed -n 's/^Physical size: //p' <<<"$screen_size")"
 size_changed=false
+fixtures_owned=false
+clipboard_saved=false
+manager_was_running=false
+if archphene_android_pid "$manager" >/dev/null 2>&1; then
+  manager_was_running=true
+fi
+if archphene_android_pid "$package" >/dev/null 2>&1; then
+  archphene_die "refusing to replace an active Foot launcher"
+fi
 
 restore_size() {
   if [[ "$size_changed" != true ]]; then
@@ -59,18 +71,67 @@ restore_size() {
   size_changed=false
 }
 
-cleanup() {
-  restore_size
+stop_foot_session() {
+  local linux_pid linux_pgid deadline tree
+  tree="$(
+    archphene_adb_run shell ps -A -o PID,PPID,PGID,NAME,ARGS |
+      tr -d '\r'
+  )"
+  linux_pid="$(awk '/--argv0 foot / { print $1; exit }' <<<"$tree")"
+  linux_pgid="$(
+    awk -v pid="$linux_pid" '$1 == pid { print $3; exit }' <<<"$tree"
+  )"
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
-  archphene_adb_run shell run-as "$manager" rm -f \
-    "$manager_home/$ime_file" \
-    "$manager_home/$composition_file" \
-    "$manager_home/$clipboard_file" \
-    "$manager_home/$selection_file" \
-    "$manager_home/$selection_render_file" \
-    "$manager_home/$scroll_file" \
-    "$manager_home/$lifecycle_file" \
-    >/dev/null 2>&1 || true
+  if [[ "$linux_pgid" =~ ^[1-9][0-9]*$ ]]; then
+    deadline=$((SECONDS + 20))
+    while ((SECONDS < deadline)); do
+      tree="$(
+        archphene_adb_run shell ps -A -o PID,PPID,PGID,NAME,ARGS |
+          tr -d '\r'
+      )"
+      if ! awk -v pgid="$linux_pgid" '$3 == pgid { found = 1 } END { exit !found }' \
+        <<<"$tree"; then
+        sleep 0.5
+        return 0
+      fi
+      sleep 0.25
+    done
+    archphene_die "Foot process group did not stop during cleanup"
+  fi
+}
+
+cleanup() {
+  if [[ "$clipboard_saved" == true ]]; then
+    archphene_adb_run logcat -c
+    archphene_adb_run shell am broadcast \
+      -n "$manager/org.archphene.app.ClipboardTestReceiver" \
+      -a org.archphene.app.debug.action.RESTORE_TEST_CLIPBOARD \
+      >/dev/null
+    archphene_wait_log \
+      'Restored Android clipboard after debug test' \
+      10 'ArchpheneClipboardProbe:I AndroidRuntime:E *:S' >/dev/null
+    clipboard_saved=false
+  fi
+  restore_size
+  stop_foot_session
+  if [[ "$fixtures_owned" == true ]]; then
+    archphene_adb_run shell run-as "$manager" rm -f \
+      "$manager_home/$ime_file" \
+      "$manager_home/$composition_file" \
+      "$manager_home/$clipboard_file" \
+      "$manager_home/$selection_file" \
+      "$manager_home/$selection_render_file" \
+      "$manager_home/$scroll_file" \
+      "$manager_home/$lifecycle_file" \
+      >/dev/null 2>&1 || true
+    fixtures_owned=false
+  fi
+  if [[ "$manager_was_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$manager_activity" \
+      >/dev/null 2>&1 || true
+  else
+    archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -211,7 +272,28 @@ close_with_back() {
   return 1
 }
 
-archphene_adb_run install -r "$apk" >/dev/null
+if [[ "$skip_install" == false ]]; then
+  archphene_require_file "$apk"
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "$manager is not installed; pass --install-apk with --apk"
+archphene_adb_run shell pm path "$package" >/dev/null ||
+  archphene_die "Foot launcher is not installed: $package"
+[[ -z "$(foot_pid)" ]] ||
+  archphene_die "refusing to interrupt an active manager-owned Foot process"
+for fixture in \
+  "$ime_file" \
+  "$composition_file" \
+  "$clipboard_file" \
+  "$selection_file" \
+  "$selection_render_file" \
+  "$scroll_file" \
+  "$lifecycle_file"; do
+  archphene_adb_run shell run-as "$manager" test ! -e "$manager_home/$fixture" ||
+    archphene_die "refusing to replace pre-existing Foot fixture: $fixture"
+done
+fixtures_owned=true
 archphene_adb_run shell am force-stop "$manager" >/dev/null
 archphene_adb_run logcat -b crash -c
 archphene_adb_run logcat -c
@@ -220,14 +302,6 @@ archphene_wait_log \
   'Package runtime ready:.*Pacman v[0-9]' 30 \
   'ArchpheneRuntime:V AndroidRuntime:E *:S' >/dev/null
 
-archphene_adb_run shell run-as "$manager" rm -f \
-  "$manager_home/$ime_file" \
-  "$manager_home/$composition_file" \
-  "$manager_home/$clipboard_file" \
-  "$manager_home/$selection_file" \
-  "$manager_home/$selection_render_file" \
-  "$manager_home/$scroll_file" \
-  "$manager_home/$lifecycle_file"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
@@ -277,7 +351,12 @@ archphene_adb_run logcat -c
 archphene_adb_run shell am broadcast \
   -n "$manager/org.archphene.app.ClipboardTestReceiver" \
   -a org.archphene.app.debug.action.SET_TEST_CLIPBOARD \
+  --ez save_existing true \
   --es text_base64 "$clipboard_command_base64" >/dev/null
+clipboard_saved=true
+archphene_wait_log \
+  'Saved Android clipboard before debug test' \
+  10 'ArchpheneClipboardProbe:I AndroidRuntime:E *:S' >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 wait_foreground "$package"
 read -r resumed_wrapper_pid resumed_linux_pid < <(current_pids)

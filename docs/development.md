@@ -148,23 +148,25 @@ are smoke tests and do not replace the default sustained gate.
 
 ## Foot manager-session workflow
 
-Run the complete current-architecture Foot workflow with the matching APK and
-the installed manager-generated Foot package:
+Run the complete current-architecture Foot workflow against the installed
+manager and manager-generated Foot package:
 
 ```bash
 ./scripts/test-foot-workflows.sh \
   --serial emulator-5554 \
-  --apk tooling/build/apk/app-debug-x86_64.apk \
   --package <generated-foot-package>
 ./scripts/test-foot-workflows.sh \
   --serial <adb-serial> \
-  --apk tooling/build/apk/app-debug-arm64-v8a.apk \
   --package <generated-foot-package>
 ```
 
-The gate updates the manager without clearing its private Arch root and requires
-a current generated launcher. Unicode IME control enters through a debug-only
-manager-session boundary; the launcher itself has no test intent. The sequence
+The gate is non-installing by default. To replace the manager explicitly, add
+the matching `--apk <path> --install-apk`; this does not clear its private Arch
+root. The gate refuses active Foot sessions and pre-existing fixture paths,
+preserves the prior Android clipboard, display override, and manager running
+state, and requires a current generated launcher. Unicode IME control enters
+through a debug-only manager-session boundary; the launcher itself has no test
+intent. The sequence
 replaces three successive Japanese preedit candidates without committing them,
 then requires an exact Japanese/CJK/emoji-modifier/ZWJ value in the shared
 Linux home. Selection uses real wrapper mouse input, clipboard transfer uses
