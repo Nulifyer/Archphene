@@ -1,0 +1,51 @@
+name: Validate Rust workspace
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".cargo/**"
+      - ".github/workflows/validate-rust.yml"
+      - "crates/**"
+      - "native/archphene-compositor/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+  pull_request:
+    paths:
+      - ".cargo/**"
+      - ".github/workflows/validate-rust.yml"
+      - "crates/**"
+      - "native/archphene-compositor/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  workspace:
+    name: Format, test, and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Reject Clippy warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

@@ -2824,6 +2824,12 @@ promote any topology into a compatibility claim.
 
 Local debug builds can remain multi-ABI. Release builds emit independently signed x86_64 and arm64-v8a manager APKs whose embedded Terminal, package runtime, trust data, and wrapper templates contain only the selected ABI. Both variants launch pacman on matching devices, and the ARM manager has generated, installed, and launched a real KCalc wrapper on the Samsung test device.
 
+The pinned Rust 1.88 workspace is now a separate pull-request and main-branch
+gate. It checks formatting, all locked host tests (including the warmed
+zero-allocation core, job, and Terminal paths), and all-target Clippy with
+warnings denied. Exact Android performance soaks remain local until a maintained
+physical-device runner is available.
+
 1. **Architecture support**
    - maintain the validated exact-ABI release workflow and production self-update regressions;
    - use official Arch Linux packages only for x86_64 and Arch Linux ARM packages/trust roots for AArch64;
