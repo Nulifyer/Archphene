@@ -2554,6 +2554,7 @@ impl PackageRuntime {
         for entry in &mut catalog.entries {
             let profile = profiler.profile(&entry.executable);
             entry.integration_topology = profile.topology;
+            entry.bridge_capabilities = profile.bridge_capabilities;
             entry.integration_profiled = profile.profiled;
             entry.integration_complete = profile.complete;
         }

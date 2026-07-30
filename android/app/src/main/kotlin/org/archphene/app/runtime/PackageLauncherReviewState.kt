@@ -19,9 +19,12 @@ internal data class PackageLauncherReview(
     val observedTopology: Int,
     val observedLaunchers: Int,
     val incompleteObservations: Int,
+    val bridgeCapabilities: Int,
+    val unavailableBridgeCapabilities: Int,
 )
 
 private const val INTEGRATION_TOPOLOGY_MASK = 0x0f7f
+private const val BRIDGE_CAPABILITY_MASK = 0x0f
 
 internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherReview {
     val text = String(bytes, StandardCharsets.US_ASCII)
@@ -49,6 +52,9 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
     val observedTopology = reviewHex(fields.getOrNull(13), 4, 0xffff)
     val observedLaunchers = reviewCount(fields.getOrNull(14))
     val incompleteObservations = reviewCount(fields.getOrNull(15))
+    val bridgeCapabilities = reviewHex(fields.getOrNull(16), 2, BRIDGE_CAPABILITY_MASK)
+    val unavailableBridgeCapabilities =
+        reviewHex(fields.getOrNull(17), 2, BRIDGE_CAPABILITY_MASK)
     val validStatus =
         when (status) {
             "not-installed",
@@ -62,8 +68,8 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
             else -> false
         }
     if (
-        fields.size != 17 ||
-        fields[0] != "R3" ||
+        fields.size != 19 ||
+        fields[0] != "R4" ||
         !validStatus ||
         capabilities == null ||
         analyzed == null ||
@@ -79,7 +85,10 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
         observedTopology == null ||
         observedLaunchers == null ||
         incompleteObservations == null ||
-        fields[16] != LauncherApkAssembler.CAPABILITIES_V4 ||
+        bridgeCapabilities == null ||
+        unavailableBridgeCapabilities == null ||
+        unavailableBridgeCapabilities and bridgeCapabilities != unavailableBridgeCapabilities ||
+        fields[18] != LauncherApkAssembler.CAPABILITIES_V4 ||
         verifiedExecutables > launchers ||
         profiledExecutables > launchers ||
         incompleteProfiles > profiledExecutables ||
@@ -101,7 +110,9 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
                     incompleteProfiles != 0 ||
                     observedTopology != 0 ||
                     observedLaunchers != 0 ||
-                    incompleteObservations != 0
+                    incompleteObservations != 0 ||
+                    bridgeCapabilities != 0 ||
+                    unavailableBridgeCapabilities != 0
             ) ||
         status == "no-launcher" &&
             (
@@ -111,7 +122,9 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
                     incompleteProfiles != 0 ||
                     observedTopology != 0 ||
                     observedLaunchers != 0 ||
-                    incompleteObservations != 0
+                    incompleteObservations != 0 ||
+                    bridgeCapabilities != 0 ||
+                    unavailableBridgeCapabilities != 0
             ) ||
         status == "ready" &&
             (
@@ -144,6 +157,8 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
         observedTopology = observedTopology,
         observedLaunchers = observedLaunchers,
         incompleteObservations = incompleteObservations,
+        bridgeCapabilities = bridgeCapabilities,
+        unavailableBridgeCapabilities = unavailableBridgeCapabilities,
     )
 }
 

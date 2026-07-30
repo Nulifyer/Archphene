@@ -2412,6 +2412,10 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val PACKAGE_CAPABILITY_COMMAND_LINE = 2
+        private const val BRIDGE_AUDIO_OUTPUT = 1 shl 0
+        private const val BRIDGE_PRINTING = 1 shl 1
+        private const val BRIDGE_CAMERA = 1 shl 2
+        private const val BRIDGE_SECRETS = 1 shl 3
         private const val INTEGRATION_QT5 = 1 shl 0
         private const val INTEGRATION_QT6 = 1 shl 1
         private const val INTEGRATION_GTK3 = 1 shl 2
@@ -7528,6 +7532,19 @@ class ArchpheneRuntimeService : Service() {
                                 }.getOrDefault("")
                             }
                         if (installedOrigin == "aur") {
+                            val launcherSummary =
+                                runCatching {
+                                    packageLauncherReviewSummary(
+                                        packageLauncherReview(activeHandle, normalized),
+                                    )
+                                }.getOrElse { reviewError ->
+                                    Log.e(
+                                        TAG,
+                                        "Could not review installed AUR launchers for $normalized",
+                                        reviewError,
+                                    )
+                                    "Integration: Launcher review unavailable"
+                                }
                             lastResolvedPackage = normalized
                             lastResolvedRepository = "aur"
                             lastResolvedInstalledVersion = installedVersion
@@ -7548,6 +7565,7 @@ class ArchpheneRuntimeService : Service() {
                             searchStatus =
                                 "aur/$normalized $installedVersion\n" +
                                     "Installed from a locally verified AUR build\n" +
+                                    "$launcherSummary\n" +
                                     "Review AUR to check the current available version"
                             Log.i(
                                 TAG,
@@ -11384,7 +11402,8 @@ class ArchpheneRuntimeService : Service() {
                 "Integration: Ready · ${review.current} Android " +
                     (if (review.current == 1) "launcher" else "launchers") +
                     " · ${packageIntegrationStack(review)}" +
-                    " · ownership and broker contract verified"
+                    " · ownership and core broker contract verified" +
+                    packageBridgeLimitSummary(review)
             "pending" ->
                 "Integration: ${review.pending} Android launcher " +
                     (if (review.pending == 1) "change" else "changes") +
@@ -11401,6 +11420,31 @@ class ArchpheneRuntimeService : Service() {
                 "Integration: Launcher review unavailable · package ownership is incomplete"
             else -> throw IllegalStateException("Invalid package launcher review")
         }
+
+    private fun packageBridgeLimitSummary(review: PackageLauncherReview): String {
+        if (review.unavailableBridgeCapabilities == 0) {
+            return ""
+        }
+        val labels = ArrayList<String>(4)
+        if (review.unavailableBridgeCapabilities and BRIDGE_AUDIO_OUTPUT != 0) {
+            labels.add("audio output")
+        }
+        if (review.unavailableBridgeCapabilities and BRIDGE_PRINTING != 0) {
+            labels.add("printing")
+        }
+        if (review.unavailableBridgeCapabilities and BRIDGE_CAMERA != 0) {
+            labels.add("camera")
+        }
+        if (review.unavailableBridgeCapabilities and BRIDGE_SECRETS != 0) {
+            labels.add("secret storage")
+        }
+        return " · unavailable bridge: ${labels.joinToString(", ")}" +
+            if (review.incompleteProfiles != 0) {
+                " (partial dependency graph; more features may be affected)"
+            } else {
+                ""
+            }
+    }
 
     private fun packageIntegrationStack(review: PackageLauncherReview): String {
         if (review.profiledExecutables == 0 && review.observedLaunchers == 0) {

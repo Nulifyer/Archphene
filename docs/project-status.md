@@ -2844,6 +2844,21 @@ observations on current x86_64 and AArch64 installs; package details retain
 static, observed, partial-scan, and launcher-coverage provenance and do not
 promote any topology into a compatibility claim.
 
+Optional bridge evidence is now similarly fail-closed. The bounded verified ELF
+walk recognizes exact Pulse, CUPS, PipeWire, libsecret, and KWallet SONAMEs and
+binds their audio-output, printing, camera, and secret-storage bits into
+launcher registry v6. A changed closure advances the existing Android launcher
+identity for review; v5 migration starts with no invented capability evidence.
+Package launcher review R4 carries both detected and unavailable masks, rejects
+overclaims, and names unavailable functions in official and installed-AUR
+details. The generated APK still advertises only the implemented V4 core
+contract: optional bits do not grant Android authority and will not enter a
+wrapper manifest until the corresponding Kotlin broker and permission review
+are complete. Workspace tests and warning-denied Clippy pass. Full-device
+Samsung validation migrated one pending launcher update and returned to four
+current launchers; Mousepad and installed-AUR VS Code details render the revised
+integration result. The emulator remained five-for-five current.
+
 ## Validated
 
 | Area | Evidence |

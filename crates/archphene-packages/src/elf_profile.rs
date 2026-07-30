@@ -30,9 +30,17 @@ const MAX_RUNTIME_HINT_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 const RUNTIME_HINT_CHUNK_BYTES: usize = 8192;
 const ELECTRON_NODE_MARKER: &[u8] = b"ELECTRON_RUN_AS_NODE=1";
 
+pub const BRIDGE_AUDIO_OUTPUT: u8 = 1 << 0;
+pub const BRIDGE_PRINTING: u8 = 1 << 1;
+pub const BRIDGE_CAMERA: u8 = 1 << 2;
+pub const BRIDGE_SECRETS: u8 = 1 << 3;
+pub const BRIDGE_CAPABILITY_MASK: u8 =
+    BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING | BRIDGE_CAMERA | BRIDGE_SECRETS;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IntegrationProfile {
     pub topology: u16,
+    pub bridge_capabilities: u8,
     pub profiled: bool,
     pub complete: bool,
 }
@@ -84,6 +92,7 @@ impl<'a> IntegrationProfiler<'a> {
         let mut queue = VecDeque::from([executable]);
         let mut visited = BTreeSet::new();
         let mut topology = 0_u16;
+        let mut bridge_capabilities = 0_u8;
         let mut complete = true;
         let mut edges = 0_usize;
         let mut root_profiled = false;
@@ -145,6 +154,7 @@ impl<'a> IntegrationProfiler<'a> {
             };
             for name in needed {
                 topology |= classify_library(&name);
+                bridge_capabilities |= classify_bridge_library(&name);
                 match self.resolve_library(&logical_path, &name) {
                     Some(path) => queue.push_back(path),
                     None => complete = false,
@@ -153,6 +163,7 @@ impl<'a> IntegrationProfiler<'a> {
         }
         IntegrationProfile {
             topology,
+            bridge_capabilities,
             profiled: root_profiled && (!root_script || topology != 0),
             complete: root_profiled && complete,
         }
@@ -206,6 +217,17 @@ impl<'a> IntegrationProfiler<'a> {
             .ok_or(io::ErrorKind::InvalidData)?;
         self.runtime_hints.insert(logical_path.to_owned(), topology);
         Ok(topology)
+    }
+}
+
+fn classify_bridge_library(name: &str) -> u8 {
+    match name {
+        "libpulse.so" | "libpulse.so.0" => BRIDGE_AUDIO_OUTPUT,
+        "libcups.so" | "libcups.so.2" => BRIDGE_PRINTING,
+        "libpipewire-0.3.so" | "libpipewire-0.3.so.0" => BRIDGE_CAMERA,
+        "libsecret-1.so" | "libsecret-1.so.0" | "libKF6Wallet.so" | "libKF6Wallet.so.6"
+        | "libKF5Wallet.so" | "libKF5Wallet.so.5" => BRIDGE_SECRETS,
+        _ => 0,
     }
 }
 
@@ -661,6 +683,18 @@ mod tests {
         assert_eq!(classify_library("libunrelated.so.1"), 0);
         assert_eq!(classify_library("libgtk-3.something"), 0);
         assert_eq!(classify_library("libwayland-client.soevil"), 0);
+        assert_eq!(
+            classify_bridge_library("libpulse.so.0"),
+            BRIDGE_AUDIO_OUTPUT
+        );
+        assert_eq!(classify_bridge_library("libcups.so.2"), BRIDGE_PRINTING);
+        assert_eq!(
+            classify_bridge_library("libpipewire-0.3.so.0"),
+            BRIDGE_CAMERA,
+        );
+        assert_eq!(classify_bridge_library("libsecret-1.so.0"), BRIDGE_SECRETS);
+        assert_eq!(classify_bridge_library("libpulse-mainloop-glib.so.0"), 0);
+        assert_eq!(classify_bridge_library("libcups.so.evil"), 0);
     }
 
     #[test]
@@ -695,6 +729,36 @@ mod tests {
         assert!(profile.profiled);
         assert!(profile.complete);
         assert_eq!(profile.topology, TOPOLOGY_QT6 | TOPOLOGY_WAYLAND);
+        assert_eq!(profile.bridge_capabilities, 0);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn derives_optional_bridge_needs_from_the_exact_verified_closure() {
+        let root = test_root();
+        let executable = root.join("usr/bin/app");
+        let library_root = root.join("usr/lib");
+        fs::create_dir_all(executable.parent().expect("binary parent")).expect("binary directory");
+        fs::create_dir_all(&library_root).expect("library directory");
+        fs::write(
+            &executable,
+            elf_fixture(&["libpulse.so.0", "libcups.so.2", "libunrelated.so.1"]),
+        )
+        .expect("application ELF");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("executable permissions");
+        for library in ["libpulse.so.0", "libcups.so.2", "libunrelated.so.1"] {
+            fs::write(library_root.join(library), elf_fixture(&[])).expect("dependency ELF");
+        }
+
+        let profile = IntegrationProfiler::new(&root).profile("/usr/bin/app");
+        assert!(profile.profiled);
+        assert!(profile.complete);
+        assert_eq!(
+            profile.bridge_capabilities,
+            BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING,
+        );
+        assert_eq!(profile.bridge_capabilities & !BRIDGE_CAPABILITY_MASK, 0);
         fs::remove_dir_all(root).expect("cleanup");
     }
 

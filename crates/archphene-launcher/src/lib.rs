@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use archphene_packages::desktop::{
     DesktopCatalog, DesktopEntry, ExecArgument, resolve_desktop_icon,
 };
+use archphene_packages::elf_profile::BRIDGE_CAPABILITY_MASK;
 
 pub const MAX_LAUNCHER_DESCRIPTORS: usize = 256;
 pub const MAX_LAUNCHER_REGISTRY_BYTES: usize = 4 * 1024 * 1024;
@@ -19,7 +20,8 @@ const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
 const REGISTRY_FILE: &str = "launcher-registry-v1";
 const REGISTRY_TEMP_FILE: &str = ".launcher-registry-v1.tmp";
 const REGISTRY_MAGIC: &[u8; 8] = b"ARCHLREG";
-const REGISTRY_VERSION: u32 = 5;
+const REGISTRY_VERSION: u32 = 6;
+const OBSERVATION_REGISTRY_VERSION: u32 = 5;
 const EXECUTABLE_PACKAGE_REGISTRY_VERSION: u32 = 4;
 const PREVIOUS_REGISTRY_VERSION: u32 = 3;
 const ICON_REGISTRY_VERSION: u32 = 2;
@@ -80,6 +82,7 @@ pub struct LauncherDescriptor {
     icon_digest: Option<[u8; 32]>,
     pub mime_types: Vec<String>,
     pub terminal: bool,
+    pub bridge_capabilities: u8,
     pub observed_topology: u16,
     pub integration_observed: bool,
     pub integration_observation_complete: bool,
@@ -109,6 +112,7 @@ impl LauncherDescriptor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherRegistry {
+    schema_version: u32,
     generation: u64,
     descriptors: Vec<LauncherDescriptor>,
 }
@@ -181,6 +185,7 @@ impl From<io::Error> for LauncherRegistryError {
 impl LauncherRegistry {
     pub fn empty() -> Self {
         Self {
+            schema_version: REGISTRY_VERSION,
             generation: 0,
             descriptors: Vec::new(),
         }
@@ -237,6 +242,7 @@ impl LauncherRegistry {
             return Err(LauncherRegistryError::IncompleteCatalog);
         }
         let mut registry = Self::load(arch_root)?;
+        let schema_upgrade = registry.schema_version != REGISTRY_VERSION;
         // Terminal=true asks a desktop environment to start the command inside a
         // terminal emulator. The generated Android wrapper owns a Wayland surface,
         // not a terminal renderer, so publishing such an entry would create an app
@@ -385,7 +391,8 @@ impl LauncherRegistry {
                 .ok_or(LauncherRegistryError::LimitExceeded)?;
         }
         registry.descriptors = next;
-        if mutated || !registry_file_exists(arch_root)? {
+        registry.schema_version = REGISTRY_VERSION;
+        if mutated || schema_upgrade || !registry_file_exists(arch_root)? {
             registry.store(arch_root)?;
         }
         let generation = registry.generation;
@@ -1099,6 +1106,7 @@ fn descriptor_from_entry(
         icon_digest,
         mime_types: entry.mime_types.clone(),
         terminal: entry.terminal,
+        bridge_capabilities: entry.bridge_capabilities,
         observed_topology: 0,
         integration_observed: false,
         integration_observation_complete: false,
@@ -1134,6 +1142,7 @@ fn descriptor_content_digest(entry: &DesktopEntry, icon_digest: Option<&[u8; 32]
         icon_digest,
         &entry.mime_types,
         entry.terminal,
+        entry.bridge_capabilities,
     )
 }
 
@@ -1150,6 +1159,7 @@ fn descriptor_digest(descriptor: &LauncherDescriptor) -> [u8; 32] {
         descriptor.icon_digest.as_ref(),
         &descriptor.mime_types,
         descriptor.terminal,
+        descriptor.bridge_capabilities,
     )
 }
 
@@ -1166,15 +1176,71 @@ fn descriptor_content_digest_fields(
     icon_digest: Option<&[u8; 32]>,
     mime_types: &[String],
     terminal: bool,
+    bridge_capabilities: u8,
+) -> [u8; 32] {
+    descriptor_content_digest_fields_version(
+        desktop_id,
+        source_package,
+        executable_package,
+        name,
+        executable,
+        arguments,
+        try_exec,
+        icon,
+        icon_digest,
+        mime_types,
+        terminal,
+        Some(bridge_capabilities),
+    )
+}
+
+fn observation_descriptor_digest(descriptor: &LauncherDescriptor) -> [u8; 32] {
+    descriptor_content_digest_fields_version(
+        &descriptor.desktop_id,
+        descriptor.source_package.as_deref(),
+        descriptor.executable_package.as_deref(),
+        &descriptor.name,
+        &descriptor.executable,
+        &descriptor.arguments,
+        descriptor.try_exec.as_deref(),
+        descriptor.icon.as_deref(),
+        descriptor.icon_digest.as_ref(),
+        &descriptor.mime_types,
+        descriptor.terminal,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn descriptor_content_digest_fields_version(
+    desktop_id: &str,
+    source_package: Option<&str>,
+    executable_package: Option<&str>,
+    name: &str,
+    executable: &str,
+    arguments: &[ExecArgument],
+    try_exec: Option<&str>,
+    icon: Option<&str>,
+    icon_digest: Option<&[u8; 32]>,
+    mime_types: &[String],
+    terminal: bool,
+    bridge_capabilities: Option<u8>,
 ) -> [u8; 32] {
     let mut bytes = Vec::with_capacity(2048);
-    bytes.extend_from_slice(b"org.archphene.launcher-content.v3\0");
+    bytes.extend_from_slice(if bridge_capabilities.is_some() {
+        b"org.archphene.launcher-content.v4\0"
+    } else {
+        b"org.archphene.launcher-content.v3\0"
+    });
     push_digest_field(&mut bytes, desktop_id.as_bytes());
     push_digest_optional(&mut bytes, source_package);
     push_digest_optional(&mut bytes, executable_package);
     push_digest_field(&mut bytes, name.as_bytes());
     push_digest_field(&mut bytes, executable.as_bytes());
     bytes.push(u8::from(terminal));
+    if let Some(bridge_capabilities) = bridge_capabilities {
+        bytes.push(bridge_capabilities);
+    }
     push_digest_optional(&mut bytes, try_exec);
     push_digest_optional(&mut bytes, icon);
     match icon_digest {
@@ -1386,6 +1452,7 @@ fn encode_registry_version(
             | ICON_REGISTRY_VERSION
             | PREVIOUS_REGISTRY_VERSION
             | EXECUTABLE_PACKAGE_REGISTRY_VERSION
+            | OBSERVATION_REGISTRY_VERSION
             | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
@@ -1398,7 +1465,10 @@ fn encode_registry_version(
             ICON_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION => {
                 previous_descriptor_digest(descriptor)
             }
-            EXECUTABLE_PACKAGE_REGISTRY_VERSION | REGISTRY_VERSION => descriptor.content_digest,
+            EXECUTABLE_PACKAGE_REGISTRY_VERSION | OBSERVATION_REGISTRY_VERSION => {
+                observation_descriptor_digest(descriptor)
+            }
+            REGISTRY_VERSION => descriptor.content_digest,
             _ => return Err(LauncherRegistryError::Corrupt),
         };
         body.extend_from_slice(&content_digest);
@@ -1415,6 +1485,9 @@ fn encode_registry_version(
             push_optional_string(&mut body, descriptor.executable_package.as_deref())?;
         }
         if version >= REGISTRY_VERSION {
+            body.push(descriptor.bridge_capabilities);
+        }
+        if version >= OBSERVATION_REGISTRY_VERSION {
             body.extend_from_slice(&descriptor.observed_topology.to_le_bytes());
             body.push(u8::from(descriptor.integration_observed));
             body.push(u8::from(descriptor.integration_observation_complete));
@@ -1495,6 +1568,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
             | ICON_REGISTRY_VERSION
             | PREVIOUS_REGISTRY_VERSION
             | EXECUTABLE_PACKAGE_REGISTRY_VERSION
+            | OBSERVATION_REGISTRY_VERSION
             | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
@@ -1528,8 +1602,13 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
         } else {
             None
         };
+        let bridge_capabilities = if version >= REGISTRY_VERSION {
+            cursor.byte()?
+        } else {
+            0
+        };
         let (observed_topology, integration_observed, integration_observation_complete) =
-            if version >= REGISTRY_VERSION {
+            if version >= OBSERVATION_REGISTRY_VERSION {
                 (cursor.u16()?, cursor.boolean()?, cursor.boolean()?)
             } else {
                 (0, false, false)
@@ -1587,6 +1666,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
             icon_digest,
             mime_types,
             terminal,
+            bridge_capabilities,
             observed_topology,
             integration_observed,
             integration_observation_complete,
@@ -1610,7 +1690,13 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
                 }
                 descriptor.content_digest = descriptor_digest(&descriptor);
             }
-            EXECUTABLE_PACKAGE_REGISTRY_VERSION | REGISTRY_VERSION => {}
+            EXECUTABLE_PACKAGE_REGISTRY_VERSION | OBSERVATION_REGISTRY_VERSION => {
+                if descriptor.content_digest != observation_descriptor_digest(&descriptor) {
+                    return Err(LauncherRegistryError::Corrupt);
+                }
+                descriptor.content_digest = descriptor_digest(&descriptor);
+            }
+            REGISTRY_VERSION => {}
             _ => return Err(LauncherRegistryError::Corrupt),
         }
         descriptors.push(descriptor);
@@ -1619,6 +1705,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
         return Err(LauncherRegistryError::Corrupt);
     }
     let registry = LauncherRegistry {
+        schema_version: version,
         generation,
         descriptors,
     };
@@ -1637,6 +1724,7 @@ fn validate_registry(registry: &LauncherRegistry) -> Result<(), LauncherRegistry
             || descriptor.descriptor_id != descriptor_identity(&descriptor.desktop_id)
             || descriptor.android_package != android_package(&descriptor.descriptor_id)
             || descriptor.content_digest != descriptor_digest(descriptor)
+            || descriptor.bridge_capabilities & !BRIDGE_CAPABILITY_MASK != 0
             || !valid_descriptor_strings(descriptor)
             || !descriptor.integration_observed
                 && (descriptor.observed_topology != 0
@@ -2068,6 +2156,7 @@ mod tests {
             source_package: Some("kate".to_owned()),
             executable_package: Some("kate".to_owned()),
             integration_topology: 0,
+            bridge_capabilities: 0,
             integration_profiled: false,
             integration_complete: false,
             name: name.to_owned(),
@@ -2331,6 +2420,66 @@ mod tests {
         assert!(!loaded.descriptors[0].integration_observed);
         assert_eq!(loaded.descriptors[0].observed_topology, 0);
         assert!(!loaded.descriptors[0].integration_observation_complete);
+    }
+
+    #[test]
+    fn observation_registry_rebinds_verified_bridge_capabilities() {
+        let root = TestRoot::new();
+        let mut application = entry("org.kde.kate.desktop", "Kate");
+        application.bridge_capabilities = archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT;
+        let source = catalog(vec![application]);
+        let (registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("current registry");
+        assert_eq!(
+            registry.descriptors[0].bridge_capabilities,
+            archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT,
+        );
+        let previous = encode_registry_version(&registry, OBSERVATION_REGISTRY_VERSION)
+            .expect("observation registry");
+        fs::write(
+            root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE),
+            previous,
+        )
+        .expect("replace with observation registry");
+
+        let loaded = LauncherRegistry::load(&root.path).expect("load observation registry");
+        assert_eq!(loaded.descriptors[0].bridge_capabilities, 0);
+        let (reconciled, report) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("bind bridge capabilities");
+        assert_eq!(report.changed, 1);
+        assert_eq!(reconciled.descriptors[0].desired_generation, 2);
+        assert_eq!(
+            reconciled.descriptors[0].bridge_capabilities,
+            archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT,
+        );
+    }
+
+    #[test]
+    fn observation_registry_schema_upgrade_does_not_republish_unchanged_launcher() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("current registry");
+        let previous = encode_registry_version(&registry, OBSERVATION_REGISTRY_VERSION)
+            .expect("observation registry");
+        fs::write(
+            root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE),
+            previous,
+        )
+        .expect("replace with observation registry");
+
+        let (reconciled, report) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("upgrade registry");
+        assert_eq!(report.changed, 0);
+        assert_eq!(report.unchanged, 1);
+        assert_eq!(reconciled.generation(), 1);
+        assert_eq!(reconciled.descriptors[0].desired_generation, 1);
+        let stored = fs::read(root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE))
+            .expect("upgraded registry");
+        assert_eq!(
+            u32::from_le_bytes(stored[8..12].try_into().expect("registry version")),
+            REGISTRY_VERSION,
+        );
     }
 
     #[test]

@@ -149,7 +149,14 @@ pub struct PackageLauncherReview {
     pub observed_topology: u16,
     pub observed_launchers: u16,
     pub incomplete_observations: u16,
+    pub bridge_capabilities: u8,
+    pub unavailable_bridge_capabilities: u8,
 }
+
+// Optional helpers remain unavailable until their Kotlin broker endpoints are
+// present and exact-device tested. Never infer Android authority from a linked
+// Linux library.
+pub const AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES: u8 = 0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPublishWork {
@@ -1024,6 +1031,8 @@ impl RuntimeHost {
                     observed_topology: 0,
                     observed_launchers: 0,
                     incomplete_observations: 0,
+                    bridge_capabilities: 0,
+                    unavailable_bridge_capabilities: 0,
                 });
             }
         };
@@ -1049,6 +1058,8 @@ impl RuntimeHost {
             observed_topology: 0,
             observed_launchers: 0,
             incomplete_observations: 0,
+            bridge_capabilities: 0,
+            unavailable_bridge_capabilities: 0,
         };
         for entry in catalog
             .entries
@@ -1060,6 +1071,7 @@ impl RuntimeHost {
                 review.verified_executables = review.verified_executables.saturating_add(1);
             }
             review.integration_topology |= entry.integration_topology;
+            review.bridge_capabilities |= entry.bridge_capabilities;
             if entry.integration_profiled {
                 review.profiled_executables = review.profiled_executables.saturating_add(1);
                 if !entry.integration_complete {
@@ -1078,6 +1090,7 @@ impl RuntimeHost {
             };
             if descriptor.source_package != entry.source_package
                 || descriptor.executable_package != entry.executable_package
+                || descriptor.bridge_capabilities != entry.bridge_capabilities
                 || !descriptor.desired_present
             {
                 review.status = PackageLauncherReviewStatus::Unavailable;
@@ -1109,8 +1122,12 @@ impl RuntimeHost {
             }
         }
         if review.status == PackageLauncherReviewStatus::Unavailable || review.launchers == 0 {
+            review.unavailable_bridge_capabilities =
+                review.bridge_capabilities & !AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES;
             return Some(review);
         }
+        review.unavailable_bridge_capabilities =
+            review.bridge_capabilities & !AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES;
         review.status = if review.verified_executables != review.launchers {
             PackageLauncherReviewStatus::Unavailable
         } else if review.failed != 0 {
