@@ -20,6 +20,11 @@ import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.TimeUnit
 
+internal data class DebugMicrophoneCapture(
+    val bytes: Int,
+    val nonzeroBytes: Int,
+)
+
 /**
  * Session-scoped PulseAudio server backed by Android AAudio, with an OpenSL ES fallback.
  *
@@ -29,13 +34,17 @@ import java.util.concurrent.TimeUnit
 internal class LauncherAudioBridge(
     context: Context,
     private val sessionId: Int,
+    private val inputEnabled: Boolean,
+    private val brokerAddress: String,
 ) : Closeable {
     private val nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir)
     private val runtimeDirectory = File(context.cacheDir, "audio-$sessionId")
     private val moduleDirectory = File(runtimeDirectory, "modules")
     private val stateDirectory = File(runtimeDirectory, "state")
     private val socket = File(runtimeDirectory, "pulse")
+    private val inputFifo = File(runtimeDirectory, "input")
     private var server: Process? = null
+    private var input: Process? = null
 
     val serverAddress: String
         get() = "unix:${socket.absolutePath}"
@@ -57,6 +66,13 @@ internal class LauncherAudioBridge(
         linkModule(AAUDIO_MODULE, "module-aaudio-sink.so")
         linkModule(SLES_MODULE, "module-sles-sink.so")
         linkModule(NATIVE_PROTOCOL_MODULE, "module-native-protocol-unix.so")
+        if (inputEnabled) {
+            if (!brokerAddress.startsWith("@") || brokerAddress.length > MAX_BROKER_BYTES) {
+                throw IOException("Android microphone broker is unavailable")
+            }
+            linkModule(PIPE_SOURCE_MODULE, "module-pipe-source.so")
+            unlinkIfPresent(inputFifo, "microphone input FIFO")
+        }
         val socketPath = socket.canonicalPath
         if (socketPath.toByteArray(StandardCharsets.UTF_8).size >= UNIX_SOCKET_PATH_LIMIT) {
             throw IOException("PulseAudio socket path is too long")
@@ -83,7 +99,10 @@ internal class LauncherAudioBridge(
     }
 
     @Synchronized
-    fun isReady(): Boolean = server?.isAlive == true && socket.exists()
+    fun isReady(): Boolean =
+        server?.isAlive == true &&
+            socket.exists() &&
+            (!inputEnabled || input?.isAlive == true)
 
     @Synchronized
     fun playDebugTone(): Boolean {
@@ -134,6 +153,65 @@ internal class LauncherAudioBridge(
     }
 
     @Synchronized
+    fun captureDebugMicrophone(): DebugMicrophoneCapture {
+        if (!inputEnabled || !isReady()) return DebugMicrophoneCapture(0, 0)
+        val probe = requireHelper(PROBE)
+        val process =
+            ProcessBuilder(
+                    probe.absolutePath,
+                    "--record",
+                    "--raw",
+                    "--device=archphene_input",
+                    "--rate=48000",
+                    "--channels=1",
+                    "--format=s16le",
+                    "--client-name=Archphene microphone probe",
+                )
+                .apply {
+                    environment()["LD_LIBRARY_PATH"] = nativeLibraryDir.absolutePath
+                    environment()["PULSE_SERVER"] = serverAddress
+                    environment()["PULSE_RUNTIME_PATH"] = runtimeDirectory.absolutePath
+                }.start()
+        drainError(process, "microphone-probe")
+        val buffer = ByteArray(DEBUG_CAPTURE_BUFFER_BYTES)
+        var captured = 0
+        var nonzero = 0
+        val deadline =
+            android.os.SystemClock.uptimeMillis() + DEBUG_CAPTURE_TIMEOUT_MILLIS
+        try {
+            while (
+                captured < DEBUG_CAPTURE_TARGET_BYTES &&
+                    process.isAlive &&
+                    android.os.SystemClock.uptimeMillis() < deadline
+            ) {
+                val available = process.inputStream.available()
+                if (available <= 0) {
+                    android.os.SystemClock.sleep(DEBUG_CAPTURE_POLL_MILLIS)
+                    continue
+                }
+                val count =
+                    process.inputStream.read(
+                        buffer,
+                        0,
+                        minOf(
+                            buffer.size,
+                            available,
+                            DEBUG_CAPTURE_TARGET_BYTES - captured,
+                        ),
+                    )
+                if (count < 0) break
+                for (index in 0 until count) {
+                    if (buffer[index].toInt() != 0) nonzero++
+                }
+                captured += count
+            }
+        } finally {
+            stopProcess(process, "microphone probe")
+        }
+        return DebugMicrophoneCapture(captured, nonzero)
+    }
+
+    @Synchronized
     override fun close() {
         stopServer()
         unlinkIfPresentQuietly(socket)
@@ -148,7 +226,13 @@ internal class LauncherAudioBridge(
         val config = File(runtimeDirectory, "default.pa")
         val configuration =
             "load-module $sinkModule sink_name=archphene_output\n" +
-                "load-module module-native-protocol-unix socket=$socketPath auth-anonymous=1\n"
+                "load-module module-native-protocol-unix socket=$socketPath auth-anonymous=1\n" +
+                if (inputEnabled) {
+                    "load-module module-pipe-source source_name=archphene_input " +
+                        "file=${inputFifo.absolutePath} format=s16le rate=48000 channels=1\n"
+                } else {
+                    ""
+                }
         FileOutputStream(config, false).use { output ->
             output.write(configuration.toByteArray(StandardCharsets.UTF_8))
         }
@@ -190,6 +274,30 @@ internal class LauncherAudioBridge(
         if (!socket.exists() || !process.isAlive) {
             throw IOException("Private PulseAudio server did not become ready")
         }
+        if (inputEnabled) {
+            launchInput()
+        }
+    }
+
+    private fun launchInput() {
+        val helper = requireHelper(INPUT_HELPER)
+        val process =
+            ProcessBuilder(helper.absolutePath, inputFifo.absolutePath)
+                .redirectErrorStream(true)
+                .apply {
+                    environment()["LD_LIBRARY_PATH"] = nativeLibraryDir.absolutePath
+                    environment()["PULSE_SERVER"] = serverAddress
+                    environment()["PULSE_RUNTIME_PATH"] = runtimeDirectory.absolutePath
+                    environment()["ARCHPHENE_ANDROID_BROKER"] = brokerAddress
+                    environment()["ARCHPHENE_ANDROID_PROTOCOL"] = "1"
+                }.start()
+        input = process
+        drain(process, "microphone")
+        android.os.SystemClock.sleep(INPUT_START_DELAY_MILLIS)
+        if (!process.isAlive) {
+            throw IOException("Android microphone bridge exited during startup")
+        }
+        Log.i(TAG, "Private PulseAudio microphone bridge ready session=$sessionId")
     }
 
     private fun linkModule(
@@ -213,14 +321,24 @@ internal class LauncherAudioBridge(
 
     @Synchronized
     private fun stopServer() {
-        val process = server ?: return
+        stopProcess(input, "microphone bridge")
+        input = null
+        val process = server
         server = null
+        stopProcess(process, "audio server")
+    }
+
+    private fun stopProcess(
+        process: Process?,
+        label: String,
+    ) {
+        if (process == null) return
         process.destroy()
         try {
             if (!process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 process.destroyForcibly()
                 if (!process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                    Log.w(TAG, "Audio server did not report exit after forced termination")
+                    Log.w(TAG, "$label did not report exit after forced termination")
                 }
             }
         } catch (_: InterruptedException) {
@@ -255,6 +373,32 @@ internal class LauncherAudioBridge(
             .start()
     }
 
+    private fun drainError(
+        process: Process,
+        label: String,
+    ) {
+        Thread(
+                {
+                    try {
+                        BufferedReader(
+                                InputStreamReader(
+                                    process.errorStream,
+                                    StandardCharsets.UTF_8,
+                                ),
+                            )
+                            .useLines { lines ->
+                                lines.forEach { line -> Log.i(TAG, "$label: $line") }
+                            }
+                    } catch (error: IOException) {
+                        Log.d(TAG, "$label error stream closed: ${error.message}")
+                    }
+                },
+                "ArchpheneAudioErrorLog",
+            )
+            .apply { isDaemon = true }
+            .start()
+    }
+
     private fun unlinkIfPresent(
         path: File,
         label: String,
@@ -281,10 +425,15 @@ internal class LauncherAudioBridge(
         private const val SLES_MODULE = "libarchphene_pulse_module_sles_sink.so"
         private const val NATIVE_PROTOCOL_MODULE =
             "libarchphene_pulse_module_native_protocol_unix.so"
+        private const val PIPE_SOURCE_MODULE =
+            "libarchphene_pulse_module_pipe_source.so"
+        private const val INPUT_HELPER = "libarchphene_audio_input.so"
         private const val PROBE = "libarchphene_pulse_probe.so"
         private const val UNIX_SOCKET_PATH_LIMIT = 100
+        private const val MAX_BROKER_BYTES = 128
         private const val START_TIMEOUT_MILLIS = 5_000L
         private const val START_POLL_MILLIS = 25L
+        private const val INPUT_START_DELAY_MILLIS = 100L
         private const val STOP_TIMEOUT_SECONDS = 2L
         private const val DEBUG_PROBE_TIMEOUT_SECONDS = 5L
         private const val DEBUG_TONE_SAMPLE_RATE = 48_000
@@ -293,6 +442,10 @@ internal class LauncherAudioBridge(
         private const val DEBUG_TONE_FRAMES_PER_CHUNK = 480
         private const val DEBUG_TONE_FRAME_BYTES = 4
         private const val DEBUG_TONE_CHUNKS = 25
+        private const val DEBUG_CAPTURE_BUFFER_BYTES = 4_096
+        private const val DEBUG_CAPTURE_TARGET_BYTES = 96_000
+        private const val DEBUG_CAPTURE_TIMEOUT_MILLIS = 90_000L
+        private const val DEBUG_CAPTURE_POLL_MILLIS = 10L
 
         fun cleanupStaleRuntimeDirectories(context: Context) {
             context.cacheDir

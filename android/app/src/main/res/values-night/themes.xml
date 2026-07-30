@@ -11,4 +11,12 @@
         <item name="android:statusBarColor">@color/archphene_background</item>
         <item name="android:windowBackground">@color/archphene_background</item>
     </style>
+
+    <style name="Theme.Archphene.Permission" parent="@style/Theme.Archphene">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

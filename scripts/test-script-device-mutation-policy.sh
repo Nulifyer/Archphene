@@ -29,7 +29,7 @@ settings_count=0
 for script in "${test_scripts[@]}"; do
   [[ "$script" != "$self" ]] || continue
 
-  if rg -q 'shell pm clear' "$script"; then
+  if rg -q 'shell pm clear[[:space:]]' "$script"; then
     clear_count=$((clear_count + 1))
     if [[ "${script##*/}" == test-generated-camera-app.sh ]]; then
       rg -q 'preserve_archive=' "$script" &&

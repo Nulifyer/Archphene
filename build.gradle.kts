@@ -146,6 +146,9 @@ val buildArchpheneAndroidAudioX86 =
         )
         inputs.files(
             file("native/archphene-audio/termux-pulse-packages.tsv"),
+            file("native/archphene-audio/archphene_audio_input.c"),
+            file("native/archphene-android-capability/archphene_android.c"),
+            file("native/archphene-android-capability/archphene_android.h"),
             file("scripts/build-android-pulse.sh"),
             file("scripts/build-android-pulse-podman.sh"),
             file("containers/android-native.Containerfile"),
@@ -164,6 +167,9 @@ val buildArchpheneAndroidAudioArm =
         )
         inputs.files(
             file("native/archphene-audio/termux-pulse-packages.tsv"),
+            file("native/archphene-audio/archphene_audio_input.c"),
+            file("native/archphene-android-capability/archphene_android.c"),
+            file("native/archphene-android-capability/archphene_android.h"),
             file("scripts/build-android-pulse.sh"),
             file("scripts/build-android-pulse-podman.sh"),
             file("containers/android-native.Containerfile"),

@@ -13,6 +13,8 @@ payload=(
   libarchphene_pulse_module_aaudio_sink.so
   libarchphene_pulse_module_sles_sink.so
   libarchphene_pulse_module_native_protocol_unix.so
+  libarchphene_pulse_module_pipe_source.so
+  libarchphene_audio_input.so
   libarchphene_pulse_probe.so
   libprotocol-native.so
   libpulsecore-17.0.so

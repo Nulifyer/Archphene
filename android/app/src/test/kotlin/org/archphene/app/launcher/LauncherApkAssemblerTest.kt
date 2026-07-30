@@ -27,6 +27,16 @@ class LauncherApkAssemblerTest {
                 LauncherApkAssembler.CAPABILITIES_AUDIO_PRINTING_V6,
             ),
         )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_V7,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
+            ),
+        )
         assertFalse(
             LauncherApkAssembler.validCapabilities(
                 "${LauncherApkAssembler.CAPABILITIES_V4},camera",

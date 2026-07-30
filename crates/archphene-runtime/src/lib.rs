@@ -158,6 +158,7 @@ pub struct PackageLauncherReview {
 // Never infer Android authority from a linked Linux library alone.
 pub const AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES: u8 =
     archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT
+        | archphene_packages::elf_profile::BRIDGE_AUDIO_INPUT
         | archphene_packages::elf_profile::BRIDGE_PRINTING;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

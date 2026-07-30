@@ -2435,8 +2435,13 @@ class ArchpheneRuntimeService : Service() {
         private const val BRIDGE_PRINTING = 1 shl 1
         private const val BRIDGE_CAMERA = 1 shl 2
         private const val BRIDGE_SECRETS = 1 shl 3
+        private const val BRIDGE_AUDIO_INPUT = 1 shl 4
         private const val BRIDGE_CAPABILITY_MASK =
-            BRIDGE_AUDIO_OUTPUT or BRIDGE_PRINTING or BRIDGE_CAMERA or BRIDGE_SECRETS
+            BRIDGE_AUDIO_OUTPUT or
+                BRIDGE_PRINTING or
+                BRIDGE_CAMERA or
+                BRIDGE_SECRETS or
+                BRIDGE_AUDIO_INPUT
         private const val INTEGRATION_QT5 = 1 shl 0
         private const val INTEGRATION_QT6 = 1 shl 1
         private const val INTEGRATION_GTK3 = 1 shl 2
@@ -11425,6 +11430,7 @@ class ArchpheneRuntimeService : Service() {
                     (if (review.current == 1) "launcher" else "launchers") +
                     " · ${packageIntegrationStack(review)}" +
                     " · ownership and core broker contract verified" +
+                    packageBridgeConsentSummary(review) +
                     packageBridgeLimitSummary(review)
             "pending" ->
                 "Integration: ${review.pending} Android launcher " +
@@ -11443,6 +11449,17 @@ class ArchpheneRuntimeService : Service() {
             else -> throw IllegalStateException("Invalid package launcher review")
         }
 
+    private fun packageBridgeConsentSummary(review: PackageLauncherReview): String {
+        val labels = ArrayList<String>(2)
+        if (review.bridgeCapabilities and BRIDGE_AUDIO_INPUT != 0) {
+            labels.add("microphone consent when recording begins")
+        }
+        if (review.bridgeCapabilities and BRIDGE_CAMERA != 0) {
+            labels.add("camera consent when requested")
+        }
+        return if (labels.isEmpty()) "" else " · ${labels.joinToString(" · ")}"
+    }
+
     private fun packageBridgeLimitSummary(review: PackageLauncherReview): String {
         if (review.unavailableBridgeCapabilities == 0) {
             return ""
@@ -11450,6 +11467,9 @@ class ArchpheneRuntimeService : Service() {
         val labels = ArrayList<String>(4)
         if (review.unavailableBridgeCapabilities and BRIDGE_AUDIO_OUTPUT != 0) {
             labels.add("audio output")
+        }
+        if (review.unavailableBridgeCapabilities and BRIDGE_AUDIO_INPUT != 0) {
+            labels.add("microphone input")
         }
         if (review.unavailableBridgeCapabilities and BRIDGE_PRINTING != 0) {
             labels.add("printing")

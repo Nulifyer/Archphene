@@ -57,6 +57,10 @@ internal object LauncherSessionDebugBridge {
     fun playAudio(androidPackage: String): LauncherSessionDebugResult =
         service?.debugPlayAudio(androidPackage)
             ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
+
+    fun captureMicrophone(androidPackage: String): LauncherSessionDebugResult =
+        service?.debugCaptureMicrophone(androidPackage)
+            ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
 }
 
 internal data class LauncherSessionDebugResult(

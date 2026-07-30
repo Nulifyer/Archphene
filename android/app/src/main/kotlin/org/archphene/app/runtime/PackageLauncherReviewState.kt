@@ -24,7 +24,7 @@ internal data class PackageLauncherReview(
 )
 
 private const val INTEGRATION_TOPOLOGY_MASK = 0x0f7f
-private const val BRIDGE_CAPABILITY_MASK = 0x0f
+private const val BRIDGE_CAPABILITY_MASK = 0x1f
 
 internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherReview {
     val text = String(bytes, StandardCharsets.US_ASCII)

@@ -41,6 +41,13 @@
     <string name="electron_compatibility_confirm_title">Use reduced Electron isolation?</string>
     <string name="electron_compatibility_warning">Electron and Chromium normally isolate renderer processes with a second Linux sandbox. Android does not allow that sandbox inside Archphene on this device. This mode adds --no-sandbox and --disable-dev-shm-usage only to verified Electron/Chromium launchers. The app remains inside Archphene’s Android sandbox, but its renderer processes are not separately isolated.</string>
     <string name="enable">Enable</string>
+    <string name="continue_action">Continue</string>
+    <string name="not_now">Not now</string>
+    <string name="microphone_permission_title">Allow microphone for %1$s?</string>
+    <string name="microphone_permission_message">This Linux app started recording. Android grants microphone access to Archphene’s shared Linux environment; Archphene exposes it only to reviewed launchers with microphone input. Android’s microphone privacy control remains authoritative.</string>
+    <string name="microphone_notification_channel">Linux microphone</string>
+    <string name="microphone_notification_title">Linux microphone active</string>
+    <string name="microphone_notification_message">%1$s can record through Archphene</string>
     <string name="appearance_slider_accessibility">%1$s, %2$s</string>
     <string name="package_catalog_unavailable">Package catalog unavailable</string>
     <string name="package_search_unavailable">Package search unavailable</string>

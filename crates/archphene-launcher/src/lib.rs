@@ -21,15 +21,24 @@ pub const LAUNCHER_CAPABILITIES_AUDIO_V6: &str =
     "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output";
 pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6: &str =
     "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing";
 
 pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
     let audio = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT != 0;
+    let audio_input =
+        bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_INPUT != 0;
     let printing = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_PRINTING != 0;
-    match (audio, printing) {
-        (false, false) => LAUNCHER_CAPABILITIES_V4,
-        (false, true) => LAUNCHER_CAPABILITIES_PRINTING_V5,
-        (true, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
-        (true, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
+    debug_assert!(!audio_input || audio);
+    match (audio, audio_input, printing) {
+        (false, false, false) => LAUNCHER_CAPABILITIES_V4,
+        (false, false, true) => LAUNCHER_CAPABILITIES_PRINTING_V5,
+        (true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
+        (true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
+        (true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
+        (true, true, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
+        (false, true, _) => LAUNCHER_CAPABILITIES_V4,
     }
 }
 
@@ -1742,6 +1751,11 @@ fn validate_registry(registry: &LauncherRegistry) -> Result<(), LauncherRegistry
             || descriptor.android_package != android_package(&descriptor.descriptor_id)
             || descriptor.content_digest != descriptor_digest(descriptor)
             || descriptor.bridge_capabilities & !BRIDGE_CAPABILITY_MASK != 0
+            || descriptor.bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_INPUT
+                != 0
+                && descriptor.bridge_capabilities
+                    & archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT
+                    == 0
             || !valid_descriptor_strings(descriptor)
             || !descriptor.integration_observed
                 && (descriptor.observed_topology != 0
@@ -2148,7 +2162,7 @@ mod tests {
     #[test]
     fn launcher_contract_exposes_only_implemented_brokers() {
         use archphene_packages::elf_profile::{
-            BRIDGE_AUDIO_OUTPUT, BRIDGE_CAMERA, BRIDGE_PRINTING, BRIDGE_SECRETS,
+            BRIDGE_AUDIO_INPUT, BRIDGE_AUDIO_OUTPUT, BRIDGE_CAMERA, BRIDGE_PRINTING, BRIDGE_SECRETS,
         };
 
         assert_eq!(launcher_capabilities(0), LAUNCHER_CAPABILITIES_V4);
@@ -2163,6 +2177,14 @@ mod tests {
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING),
             LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
+        );
+        assert_eq!(
+            launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT),
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
+        );
+        assert_eq!(
+            launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT | BRIDGE_PRINTING),
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
         );
     }
 

@@ -59,6 +59,14 @@ class PackageLauncherReviewStateTest {
         assertEquals(3, review.bridgeCapabilities)
         assertEquals(3, review.unavailableBridgeCapabilities)
 
+        val audioInput =
+            decodePackageLauncherReview(
+                "R4\tready\t3\t1\t1\t1\t1\t0\t0\t0\t4\t1\t0\t4\t1\t0\t11\t10\twayland,input,ime,clipboard,documents,open-uri,notifications\n"
+                    .ascii(),
+            )
+        assertEquals(0x11, audioInput.bridgeCapabilities)
+        assertEquals(0x10, audioInput.unavailableBridgeCapabilities)
+
         assertThrows(IllegalStateException::class.java) {
             decodePackageLauncherReview(
                 "R4\tready\t3\t1\t1\t1\t1\t0\t0\t0\t4\t1\t0\t4\t1\t0\t1\t2\twayland,input,ime,clipboard,documents,open-uri,notifications\n"

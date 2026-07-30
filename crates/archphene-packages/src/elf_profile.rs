@@ -34,8 +34,9 @@ pub const BRIDGE_AUDIO_OUTPUT: u8 = 1 << 0;
 pub const BRIDGE_PRINTING: u8 = 1 << 1;
 pub const BRIDGE_CAMERA: u8 = 1 << 2;
 pub const BRIDGE_SECRETS: u8 = 1 << 3;
+pub const BRIDGE_AUDIO_INPUT: u8 = 1 << 4;
 pub const BRIDGE_CAPABILITY_MASK: u8 =
-    BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING | BRIDGE_CAMERA | BRIDGE_SECRETS;
+    BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING | BRIDGE_CAMERA | BRIDGE_SECRETS | BRIDGE_AUDIO_INPUT;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IntegrationProfile {
@@ -222,7 +223,7 @@ impl<'a> IntegrationProfiler<'a> {
 
 fn classify_bridge_library(name: &str) -> u8 {
     match name {
-        "libpulse.so" | "libpulse.so.0" => BRIDGE_AUDIO_OUTPUT,
+        "libpulse.so" | "libpulse.so.0" => BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT,
         "libcups.so" | "libcups.so.2" => BRIDGE_PRINTING,
         "libpipewire-0.3.so" | "libpipewire-0.3.so.0" => BRIDGE_CAMERA,
         "libsecret-1.so" | "libsecret-1.so.0" | "libKF6Wallet.so" | "libKF6Wallet.so.6"
@@ -685,7 +686,7 @@ mod tests {
         assert_eq!(classify_library("libwayland-client.soevil"), 0);
         assert_eq!(
             classify_bridge_library("libpulse.so.0"),
-            BRIDGE_AUDIO_OUTPUT
+            BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT
         );
         assert_eq!(classify_bridge_library("libcups.so.2"), BRIDGE_PRINTING);
         assert_eq!(
@@ -756,7 +757,7 @@ mod tests {
         assert!(profile.complete);
         assert_eq!(
             profile.bridge_capabilities,
-            BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING,
+            BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT | BRIDGE_PRINTING,
         );
         assert_eq!(profile.bridge_capabilities & !BRIDGE_CAPABILITY_MASK, 0);
         fs::remove_dir_all(root).expect("cleanup");

@@ -1,5 +1,11 @@
 package org.archphene.app.launcher
 
+import android.Manifest
+import android.app.ActivityOptions
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.app.WallpaperManager
 import android.content.ComponentName
@@ -7,9 +13,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -32,11 +41,15 @@ import java.nio.ByteOrder
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import org.archphene.app.ArchphenePreferences
+import org.archphene.app.MainActivity
+import org.archphene.app.R
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.LauncherAuthorization
 
@@ -95,6 +108,8 @@ class LauncherSessionService : Service() {
         var audioBridge: LauncherAudioBridge? = null
         var audioStartInProgress = false
         var audioStartComplete = false
+        var microphonePermissionState = MICROPHONE_PERMISSION_NONE
+        var microphonePermissionToken: String? = null
         var gpuRecoveryStage = 0
         var nextProcessStatusMillis = 0L
         var pumpStarted = false
@@ -159,12 +174,14 @@ class LauncherSessionService : Service() {
     private val sessions = HashMap<Int, Session>(MAX_SESSIONS)
     private val nextSessionId = AtomicInteger(1)
     private val nextDocumentRequestId = AtomicInteger(1)
+    private val permissionRandom = SecureRandom()
     private val sessionBinder = SessionBinder()
     private lateinit var surfaceThread: HandlerThread
     private lateinit var surfaceHandler: Handler
     private lateinit var clipboardThread: HandlerThread
     private lateinit var clipboardHandler: Handler
     private var wallpaperManager: WallpaperManager? = null
+    private val microphoneForegroundSessions = HashSet<Int>()
     @Volatile private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
     private var runtimeBound = false
     private val wallpaperColorsChanged =
@@ -231,6 +248,23 @@ class LauncherSessionService : Service() {
             null
         }
 
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int,
+    ): Int {
+        if (intent?.action != ACTION_MICROPHONE_RESULT) {
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+        val sessionId = intent.getIntExtra(EXTRA_MICROPHONE_SESSION, 0)
+        val token = intent.getStringExtra(EXTRA_MICROPHONE_TOKEN).orEmpty()
+        val granted = intent.getBooleanExtra(EXTRA_MICROPHONE_GRANTED, false)
+        completeMicrophonePermission(sessionId, token, granted)
+        stopSelfResult(startId)
+        return START_NOT_STICKY
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         surfaceHandler.post { publishPortalAppearance() }
@@ -260,6 +294,7 @@ class LauncherSessionService : Service() {
     @Synchronized
     private fun clearSessions() {
         for (session in sessions.values) {
+            releaseMicrophoneForeground(session)
             session.clientToken.unlinkToDeath(sessionBinder, 0)
             session.active = false
             releaseSessionResources(session, session.surface, closeCompositor = true)
@@ -271,6 +306,7 @@ class LauncherSessionService : Service() {
     @Synchronized
     private fun removeSession(sessionId: Int) {
         val session = sessions.remove(sessionId) ?: return
+        releaseMicrophoneForeground(session)
         session.clientToken.unlinkToDeath(sessionBinder, 0)
         session.active = false
         releaseSessionResources(session, session.surface, closeCompositor = true)
@@ -1459,6 +1495,54 @@ class LauncherSessionService : Service() {
         }
     }
 
+    internal fun debugCaptureMicrophone(androidPackage: String): LauncherSessionDebugResult {
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+                !isValidLauncherPackage(androidPackage)
+        ) {
+            return LauncherSessionDebugResult(false, 0, "invalid-microphone-probe")
+        }
+        val activeSession =
+            synchronized(this) {
+                sessions.values.singleOrNull { session ->
+                    session.active &&
+                        session.identity.androidPackage == androidPackage
+                }
+            } ?: return LauncherSessionDebugResult(false, 0, "microphone-session-not-ready")
+        if (activeSession.authorization.bridgeCapabilities and BRIDGE_AUDIO_INPUT == 0) {
+            return LauncherSessionDebugResult(
+                false,
+                activeSession.id,
+                "microphone-capability-denied",
+            )
+        }
+        val bridge =
+            synchronized(this) {
+                activeSession.audioBridge?.takeIf { it.isReady() }
+            } ?: return LauncherSessionDebugResult(
+                false,
+                activeSession.id,
+                "microphone-bridge-not-ready",
+            )
+        val capture =
+            runCatching { bridge.captureDebugMicrophone() }
+                .getOrElse {
+                    return LauncherSessionDebugResult(
+                        false,
+                        activeSession.id,
+                        "microphone-capture-failed",
+                    )
+                }
+        val accepted =
+            capture.bytes >= DEBUG_MICROPHONE_MINIMUM_BYTES &&
+                capture.nonzeroBytes >= DEBUG_MICROPHONE_MINIMUM_NONZERO_BYTES
+        return LauncherSessionDebugResult(
+            accepted,
+            activeSession.id,
+            "captured-${capture.bytes}-${capture.nonzeroBytes}",
+        )
+    }
+
     private fun isValidLauncherPackage(androidPackage: String): Boolean {
         if (
             androidPackage.length != 53 ||
@@ -1729,7 +1813,6 @@ class LauncherSessionService : Service() {
             Log.e(TAG, "Shared runtime unavailable for Linux session=${session.id}")
             return
         }
-        if (!prepareAudioBridge(session, attachedSurface)) return
         val appearance = resolvedAppearance(session)
         val portalBridge =
             session.portalBridge
@@ -1776,6 +1859,11 @@ class LauncherSessionService : Service() {
                                 "",
                             )
                         },
+                        audioInputEnabled =
+                            session.authorization.bridgeCapabilities and BRIDGE_AUDIO_INPUT != 0,
+                        requestAudioInput = { request ->
+                            microphonePermissionResponse(session, request)
+                        },
                         printingEnabled =
                             session.authorization.bridgeCapabilities and BRIDGE_PRINTING != 0,
                         requestPrint = { title, descriptor ->
@@ -1800,6 +1888,7 @@ class LauncherSessionService : Service() {
                     )
                     return
                 }
+        if (!prepareAudioBridge(session, attachedSurface, portalBridge.brokerAddress)) return
         val pendingLaunchDocument = session.pendingLaunchDocument
         if (pendingLaunchDocument != null && session.launchDocumentPath == null) {
             if (session.launchDocumentImportStarted) return
@@ -1903,6 +1992,7 @@ class LauncherSessionService : Service() {
     private fun prepareAudioBridge(
         session: Session,
         attachedSurface: Surface,
+        brokerAddress: String,
     ): Boolean {
         if (session.authorization.bridgeCapabilities and BRIDGE_AUDIO_OUTPUT == 0) return true
         session.audioBridge?.let { bridge ->
@@ -1918,7 +2008,13 @@ class LauncherSessionService : Service() {
                 {
                     val started =
                         runCatching {
-                            LauncherAudioBridge(this, session.id).also { bridge ->
+                            LauncherAudioBridge(
+                                this,
+                                session.id,
+                                session.authorization.bridgeCapabilities and
+                                    BRIDGE_AUDIO_INPUT != 0,
+                                brokerAddress,
+                            ).also { bridge ->
                                 bridge.start()
                             }
                         }
@@ -2929,6 +3025,214 @@ class LauncherSessionService : Service() {
         }
     }
 
+    @Synchronized
+    private fun microphonePermissionResponse(
+        session: Session,
+        request: Boolean,
+    ): String {
+        if (
+            !session.active ||
+            session.authorization.bridgeCapabilities and BRIDGE_AUDIO_INPUT == 0
+        ) {
+            return "ERROR\tUNSUPPORTED"
+        }
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE)) {
+            return "ERROR\tUNAVAILABLE"
+        }
+        if (
+            session.microphonePermissionState == MICROPHONE_PERMISSION_GRANTED &&
+            microphoneForegroundSessions.contains(session.id) &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            synchronized(this) {
+                session.microphonePermissionToken = null
+            }
+            return "OK"
+        }
+        synchronized(this) {
+            when (session.microphonePermissionState) {
+                MICROPHONE_PERMISSION_PENDING -> return "ERROR\tPERMISSION_REQUESTED"
+                MICROPHONE_PERMISSION_DENIED -> return "ERROR\tPERMISSION_DENIED"
+            }
+            if (!request) return "ERROR\tPERMISSION_NOT_REQUESTED"
+            val token = randomPermissionToken()
+            session.microphonePermissionState = MICROPHONE_PERMISSION_PENDING
+            session.microphonePermissionToken = token
+            val permissionIntent =
+                Intent(this, MicrophonePermissionActivity::class.java)
+                    .setAction(ACTION_MICROPHONE_PERMISSION)
+                    .setData(Uri.parse("archphene://microphone/$token"))
+                    .putExtra(EXTRA_MICROPHONE_SESSION, session.id)
+                    .putExtra(EXTRA_MICROPHONE_TOKEN, token)
+                    .putExtra(EXTRA_MICROPHONE_LABEL, session.authorization.label)
+            val pendingIntent =
+                PendingIntent.getActivity(
+                    this,
+                    session.id,
+                    permissionIntent,
+                    PendingIntent.FLAG_ONE_SHOT or
+                        PendingIntent.FLAG_CANCEL_CURRENT or
+                        PendingIntent.FLAG_IMMUTABLE,
+                    microphonePermissionCreatorOptions(),
+                )
+            if (!notifyMicrophonePermission(session, pendingIntent)) {
+                pendingIntent.cancel()
+                session.microphonePermissionState = MICROPHONE_PERMISSION_NONE
+                session.microphonePermissionToken = null
+                return "ERROR\tFAILED"
+            }
+        }
+        Log.i(TAG, "Requested manager microphone consent session=${session.id}")
+        return "ERROR\tPERMISSION_REQUESTED"
+    }
+
+    @Synchronized
+    private fun completeMicrophonePermission(
+        sessionId: Int,
+        token: String,
+        reportedGranted: Boolean,
+    ) {
+        val session = sessions[sessionId] ?: return
+        val expected = session.microphonePermissionToken ?: return
+        val matching =
+            MessageDigest.isEqual(
+                token.toByteArray(StandardCharsets.US_ASCII),
+                expected.toByteArray(StandardCharsets.US_ASCII),
+            )
+        if (
+            !matching ||
+            session.microphonePermissionState != MICROPHONE_PERMISSION_PENDING
+        ) {
+            Log.e(TAG, "Rejected stale microphone result session=$sessionId")
+            return
+        }
+        var granted =
+            reportedGranted &&
+                checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            granted =
+                runCatching {
+                    startMicrophoneForeground(session)
+                    true
+                }.getOrElse { error ->
+                    Log.e(TAG, "Could not start microphone foreground session=$sessionId", error)
+                    false
+                }
+        }
+        session.microphonePermissionState =
+            if (granted) {
+                MICROPHONE_PERMISSION_GRANTED
+            } else {
+                MICROPHONE_PERMISSION_DENIED
+            }
+        session.microphonePermissionToken = null
+        Log.i(
+            TAG,
+            "Manager microphone consent session=$sessionId " +
+                "result=${if (granted) "granted" else "denied"}",
+        )
+    }
+
+    private fun startMicrophoneForeground(session: Session) {
+        val channel =
+            NotificationChannel(
+                MICROPHONE_NOTIFICATION_CHANNEL,
+                getString(R.string.microphone_notification_channel),
+                NotificationManager.IMPORTANCE_LOW,
+            )
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+        val openManager =
+            PendingIntent.getActivity(
+                this,
+                0,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            Notification.Builder(this, MICROPHONE_NOTIFICATION_CHANNEL)
+                .setSmallIcon(R.drawable.ic_archphene)
+                .setContentTitle(getString(R.string.microphone_notification_title))
+                .setContentText(
+                    getString(
+                        R.string.microphone_notification_message,
+                        session.authorization.label,
+                    ),
+                ).setContentIntent(openManager)
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .setOngoing(true)
+                .build()
+        startForeground(
+            MICROPHONE_NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+        )
+        microphoneForegroundSessions.add(session.id)
+        Log.i(TAG, "Microphone foreground active session=${session.id}")
+    }
+
+    private fun releaseMicrophoneForeground(session: Session) {
+        if (!microphoneForegroundSessions.remove(session.id)) return
+        session.microphonePermissionState = MICROPHONE_PERMISSION_NONE
+        session.microphonePermissionToken = null
+        if (microphoneForegroundSessions.isEmpty()) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            Log.i(TAG, "Microphone foreground stopped")
+        }
+    }
+
+    private fun notifyMicrophonePermission(
+        session: Session,
+        permissionIntent: PendingIntent,
+    ): Boolean {
+        if (
+            !session.active ||
+            session.authorization.bridgeCapabilities and BRIDGE_AUDIO_INPUT == 0
+        ) {
+            return false
+        }
+        val data = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            permissionIntent.writeToParcel(data, 0)
+            session.clientToken.transact(
+                CALLBACK_MICROPHONE_PERMISSION,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver microphone consent session=${session.id}", error)
+            false
+        } finally {
+            data.recycle()
+        }
+    }
+
+    private fun randomPermissionToken(): String =
+        ByteArray(MICROPHONE_TOKEN_BYTES).also(permissionRandom::nextBytes)
+            .joinToString("") { value ->
+                "%02x".format(value.toInt() and 0xff)
+            }
+
+    @Suppress("DEPRECATION")
+    private fun microphonePermissionCreatorOptions() =
+        if (Build.VERSION.SDK_INT >= 34) {
+            ActivityOptions.makeBasic()
+                .setPendingIntentCreatorBackgroundActivityStartMode(
+                    if (Build.VERSION.SDK_INT >= 36) {
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+                    } else {
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                    },
+                ).toBundle()
+        } else {
+            null
+        }
+
     private fun notifyOpenUri(
         session: Session,
         uri: String,
@@ -3267,7 +3571,7 @@ class LauncherSessionService : Service() {
         return RESULT_OK
     }
 
-    private companion object {
+    companion object {
         private const val TAG = "ArchpheneLauncherSession"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
@@ -3291,8 +3595,32 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val CALLBACK_NOTIFICATION = IBinder.FIRST_CALL_TRANSACTION + 7
         private const val CALLBACK_PRINT_PDF = IBinder.FIRST_CALL_TRANSACTION + 8
+        private const val CALLBACK_MICROPHONE_PERMISSION =
+            IBinder.FIRST_CALL_TRANSACTION + 9
         private const val BRIDGE_AUDIO_OUTPUT = 1 shl 0
         private const val BRIDGE_PRINTING = 1 shl 1
+        private const val BRIDGE_AUDIO_INPUT = 1 shl 4
+        private const val MICROPHONE_PERMISSION_NONE = 0
+        private const val MICROPHONE_PERMISSION_PENDING = 1
+        private const val MICROPHONE_PERMISSION_DENIED = 2
+        private const val MICROPHONE_PERMISSION_GRANTED = 3
+        private const val MICROPHONE_TOKEN_BYTES = 16
+        private const val MICROPHONE_NOTIFICATION_ID = 7_202
+        private const val MICROPHONE_NOTIFICATION_CHANNEL = "linux-microphone"
+        private const val DEBUG_MICROPHONE_MINIMUM_BYTES = 76_800
+        private const val DEBUG_MICROPHONE_MINIMUM_NONZERO_BYTES = 1_000
+        internal const val ACTION_MICROPHONE_PERMISSION =
+            "org.archphene.action.MICROPHONE_PERMISSION"
+        internal const val ACTION_MICROPHONE_RESULT =
+            "org.archphene.action.MICROPHONE_RESULT"
+        internal const val EXTRA_MICROPHONE_SESSION =
+            "org.archphene.extra.MICROPHONE_SESSION"
+        internal const val EXTRA_MICROPHONE_TOKEN =
+            "org.archphene.extra.MICROPHONE_TOKEN"
+        internal const val EXTRA_MICROPHONE_LABEL =
+            "org.archphene.extra.MICROPHONE_LABEL"
+        internal const val EXTRA_MICROPHONE_GRANTED =
+            "org.archphene.extra.MICROPHONE_GRANTED"
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val MAX_SESSIONS = 16

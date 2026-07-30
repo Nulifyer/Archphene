@@ -2,6 +2,7 @@ package org.archphene.launcher
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityOptions
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -120,6 +121,7 @@ class LauncherActivity :
     private var binding = false
     @Volatile private var activityResumed = false
     @Volatile private var printingEnabled = false
+    @Volatile private var microphoneEnabled = false
     private var notificationPermissionRequestInFlight = false
     private val pendingNotifications =
         arrayOfNulls<PendingNotification>(LauncherNotificationPolicy.MAX_PENDING)
@@ -190,7 +192,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_PRINT_PDF ||
+                    code !in CALLBACK_STATUS..CALLBACK_MICROPHONE_PERMISSION ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -439,6 +441,24 @@ class LauncherActivity :
                             reply?.writeNoException()
                             reply?.writeInt(if (accepted) RESULT_OK else RESULT_NOT_READY)
                             valid
+                        }
+                        CALLBACK_MICROPHONE_PERMISSION -> {
+                            val permissionIntent =
+                                runCatching {
+                                    PendingIntent.CREATOR.createFromParcel(data)
+                                }.getOrNull()
+                            if (
+                                !microphoneEnabled ||
+                                permissionIntent == null ||
+                                data.dataAvail() != 0
+                            ) {
+                                permissionIntent?.cancel()
+                                return@runCatching false
+                            }
+                            handler.post {
+                                beginMicrophonePermission(permissionIntent)
+                            }
+                            true
                         }
                         else -> false
                     }
@@ -691,7 +711,9 @@ class LauncherActivity :
             capabilities != CAPABILITIES_V4 &&
             capabilities != CAPABILITIES_PRINTING_V5 &&
             capabilities != CAPABILITIES_AUDIO_V6 &&
-            capabilities != CAPABILITIES_AUDIO_PRINTING_V6
+            capabilities != CAPABILITIES_AUDIO_PRINTING_V6 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_V7 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_V7
         ) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
@@ -699,7 +721,11 @@ class LauncherActivity :
         }
         printingEnabled =
             capabilities == CAPABILITIES_PRINTING_V5 ||
-                capabilities == CAPABILITIES_AUDIO_PRINTING_V6
+                capabilities == CAPABILITIES_AUDIO_PRINTING_V6 ||
+                capabilities == CAPABILITIES_AUDIO_INPUT_PRINTING_V7
+        microphoneEnabled =
+            capabilities == CAPABILITIES_AUDIO_INPUT_V7 ||
+                capabilities == CAPABILITIES_AUDIO_INPUT_PRINTING_V7
         val manager = metadata.getString(MANAGER_PACKAGE).orEmpty()
         if (!SAFE_PACKAGE.matches(manager)) {
             status.setText(R.string.launcher_invalid)
@@ -3027,6 +3053,49 @@ class LauncherActivity :
         }
     }
 
+    private fun beginMicrophonePermission(permissionIntent: PendingIntent) {
+        if (
+            !microphoneEnabled ||
+            !activityResumed ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            permissionIntent.cancel()
+            Log.w(TAG, "Dropped Linux microphone request without a visible launcher")
+            return
+        }
+        runCatching {
+            permissionIntent.send(
+                this,
+                0,
+                null,
+                null,
+                null,
+                null,
+                microphonePermissionSenderOptions(),
+            )
+        }.onSuccess {
+            Log.i(TAG, "Opened Archphene microphone consent for Linux input")
+        }.onFailure { error ->
+            Log.w(TAG, "Could not open Archphene microphone consent", error)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun microphonePermissionSenderOptions() =
+        if (Build.VERSION.SDK_INT >= 34) {
+            ActivityOptions.makeBasic()
+                .setPendingIntentBackgroundActivityStartMode(
+                    if (Build.VERSION.SDK_INT >= 36) {
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_IF_VISIBLE
+                    } else {
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                    },
+                ).toBundle()
+        } else {
+            null
+        }
+
     private fun handleLinuxNotification(
         operation: Int,
         id: String,
@@ -3408,6 +3477,10 @@ class LauncherActivity :
         private const val CAPABILITIES_AUDIO_V6 = "$CAPABILITIES_V4,audio-output"
         private const val CAPABILITIES_AUDIO_PRINTING_V6 =
             "$CAPABILITIES_V4,audio-output,printing"
+        private const val CAPABILITIES_AUDIO_INPUT_V7 =
+            "$CAPABILITIES_V4,audio-output,audio-input"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_V7 =
+            "$CAPABILITIES_V4,audio-output,audio-input,printing"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
         private const val PROTOCOL_VERSION = 11
@@ -3429,6 +3502,8 @@ class LauncherActivity :
         private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val CALLBACK_NOTIFICATION = IBinder.FIRST_CALL_TRANSACTION + 7
         private const val CALLBACK_PRINT_PDF = IBinder.FIRST_CALL_TRANSACTION + 8
+        private const val CALLBACK_MICROPHONE_PERMISSION =
+            IBinder.FIRST_CALL_TRANSACTION + 9
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val NOTIFICATION_PERMISSION_REQUEST = 7_001

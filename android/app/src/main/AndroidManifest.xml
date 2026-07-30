@@ -17,9 +17,14 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="org.archphene.permission.BIND_BUILDER" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
 
     <queries>
         <package android:name="org.archphene.builder" />
@@ -58,6 +63,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".launcher.MicrophonePermissionActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Archphene.Permission" />
+
         <service
             android:name=".runtime.ArchpheneRuntimeService"
             android:exported="false"
@@ -70,7 +82,8 @@
 
         <service
             android:name=".launcher.LauncherSessionService"
-            android:exported="true">
+            android:exported="true"
+            android:foregroundServiceType="microphone">
             <intent-filter>
                 <action android:name="org.archphene.action.BIND_LAUNCHER" />
             </intent-filter>

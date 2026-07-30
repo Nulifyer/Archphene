@@ -71,6 +71,8 @@ internal class LauncherPortalBridge(
     private val requestOpenUri: (String) -> Boolean,
     private val requestNotification: (String, String, String) -> Boolean,
     private val withdrawNotification: (String) -> Boolean,
+    private val audioInputEnabled: Boolean,
+    private val requestAudioInput: (Boolean) -> String,
     private val printingEnabled: Boolean,
     private val requestPrint: (String, ParcelFileDescriptor) -> Boolean,
     private val importDirectory: (String, ParcelFileDescriptor) -> String?,
@@ -121,6 +123,8 @@ internal class LauncherPortalBridge(
 
     lateinit var busAddress: String
         private set
+    val brokerAddress: String
+        get() = "@$brokerSocketName"
 
     fun importLaunchDocument(document: LauncherPortalOpenDocument): String {
         val uri = beginOpen(listOf(document), multiple = false).single()
@@ -394,6 +398,10 @@ internal class LauncherPortalBridge(
                         "NOTIFY" -> handleNotificationRequest(client, fields)
                         "WITHDRAW_NOTIFICATION" ->
                             handleNotificationWithdrawal(client, fields)
+                        "REQUEST_AUDIO_INPUT" ->
+                            handleAudioInputRequest(client, fields, request = true)
+                        "CHECK_AUDIO_INPUT" ->
+                            handleAudioInputRequest(client, fields, request = false)
                         "PRINT_PDF" -> handlePrintRequest(client, fields, descriptors)
                         "SAVE_FILE" -> handleSaveRequest(client, fields)
                         "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
@@ -474,6 +482,28 @@ internal class LauncherPortalBridge(
             return
         }
         writeResponse(client, if (withdrawNotification(id)) "OK" else "ERROR\tFAILED")
+    }
+
+    private fun handleAudioInputRequest(
+        client: LocalSocket,
+        fields: List<String>,
+        request: Boolean,
+    ) {
+        if (!audioInputEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        if (fields.size != 2 || fields[0] != "ARCHPHENE/1") {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val response = requestAudioInput(request)
+        if (response !in AUDIO_INPUT_RESPONSES) {
+            Log.e(TAG, "Rejected invalid microphone response session=$sessionId")
+            writeResponse(client, "ERROR\tFAILED")
+            return
+        }
+        writeResponse(client, response)
     }
 
     private fun handlePrintRequest(
@@ -1083,6 +1113,15 @@ internal class LauncherPortalBridge(
         private const val MAX_RECOVERED_SAVE_DIRECTORIES = 128
         private const val MAX_RUNTIME_ENTRIES = 4
         private const val HEX = "0123456789abcdef"
+        private val AUDIO_INPUT_RESPONSES =
+            setOf(
+                "OK",
+                "ERROR\tPERMISSION_REQUESTED",
+                "ERROR\tPERMISSION_DENIED",
+                "ERROR\tPERMISSION_NOT_REQUESTED",
+                "ERROR\tUNAVAILABLE",
+                "ERROR\tFAILED",
+            )
         private val STALE_SAVE_DIRECTORY_NAME =
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")
         private val STALE_RUNTIME_DIRECTORY_NAME =
