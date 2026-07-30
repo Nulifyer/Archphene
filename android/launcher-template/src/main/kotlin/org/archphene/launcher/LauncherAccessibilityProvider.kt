@@ -98,6 +98,7 @@ internal class LauncherAccessibilityProvider(
                     }
                     frames++
                     if (frames >= POST_TRANSITION_BOUNDS_FRAMES) {
+                        submitAction(0, "refresh", "")
                         sendEvent(0, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
                     } else {
                         currentHost.postOnAnimation(this)

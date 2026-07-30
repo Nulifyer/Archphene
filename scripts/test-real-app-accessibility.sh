@@ -26,9 +26,10 @@ while (($#)); do
 done
 [[ -n "$serial" && -n "$target" ]] \
   || archphene_die '--serial and --target-package are required'
-archphene_validate_choice "$profile" profile KCalc Kate Mousepad Seahorse TextEditor
+archphene_validate_choice "$profile" profile KCalc Kate Mousepad Qt5Settings Seahorse TextEditor
 profile_label="$profile"
 [[ "$profile" != TextEditor ]] || profile_label='Text Editor'
+[[ "$profile" != Qt5Settings ]] || profile_label='Qt5 Configuration Tool'
 [[ "$profile" != Seahorse ]] || profile_label='Passwords and Keys'
 [[ -z "$adb_path" ]] || ARCHPHENE_ADB="$adb_path"
 archphene_test_init "$serial"
@@ -512,6 +513,26 @@ test_seahorse() {
   wait_target_tree '|Password keyring|' '|Passwords and Keys|' >/dev/null
 }
 
+test_qt5_settings() {
+  local tree
+  tree="$(wait_target_tree '' '|Qt5 Configuration Tool|' '|Appearance|' \
+    '|Fonts|' '|OK|' '|Cancel|' '|Apply|')"
+  assert_current_bounds "$tree"
+  if [[ "$tree" == *'|Hide|'* ]]; then
+    invoke_accessibility_action Hide
+    tree="$(wait_target_tree '|Hide|' '|Qt5 Configuration Tool|' '|Appearance|' '|Fonts|')"
+    assert_current_bounds "$tree"
+  fi
+  invoke_accessibility_action Fonts
+  tree="$(wait_target_tree '|Style:|' '|Qt5 Configuration Tool|' '|General:|' \
+    '|Fixed width:|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Appearance
+  tree="$(wait_target_tree '|General:|' '|Qt5 Configuration Tool|' '|Style:|' \
+    '|Color scheme:|')"
+  assert_current_bounds "$tree"
+}
+
 archphene_adb_run shell am start -W -n \
   "$probe/org.archphene.bridge.AccessibilityProbeActivity" >/dev/null
 archphene_adb_run shell run-as "$probe" rm -f \
@@ -529,6 +550,7 @@ case "$profile" in
   KCalc) test_kcalc ;;
   Kate) test_kate ;;
   Mousepad) test_mousepad ;;
+  Qt5Settings) test_qt5_settings ;;
   Seahorse) test_seahorse ;;
   TextEditor) test_text_editor ;;
 esac
@@ -562,6 +584,26 @@ log="$(archphene_adb_run logcat -d -s ArchpheneAccessibilityProbe:I ArchpheneInp
 printf '%s\n' "$log" >"$artifact_dir/logcat.txt"
 [[ "$log" != *'FATAL EXCEPTION'* ]] || archphene_die 'target or accessibility probe crashed'
 archphene_adb_run logcat -c
+idle_deadline=$((SECONDS + timeout))
+settling_log=
+while true; do
+  sleep 2
+  idle_log="$(
+    archphene_adb_run logcat -d \
+      -s ArchpheneAccessibilityProbe:I AndroidRuntime:E '*:S'
+  )"
+  [[ "$idle_log" != *'FATAL EXCEPTION'* ]] \
+    || archphene_die 'target or accessibility probe crashed while settling'
+  if [[ "$idle_log" != *"Accessibility event package=$target type=2048"* ]]; then
+    break
+  fi
+  settling_log+="$idle_log"$'\n'
+  ((SECONDS < idle_deadline)) \
+    || archphene_die "$profile accessibility tree did not become idle"
+  archphene_adb_run logcat -c
+done
+printf '%s\n' "$settling_log" >"$artifact_dir/settling-logcat.txt"
+archphene_adb_run logcat -c
 sleep 3
 idle_log="$(
   archphene_adb_run logcat -d \
@@ -580,6 +622,7 @@ manifest_args=(
   --artifact "$artifact_dir/initial-full-device.png"
   --artifact "$artifact_dir/full-device.png"
   --artifact "$artifact_dir/logcat.txt"
+  --artifact "$artifact_dir/settling-logcat.txt"
   --artifact "$artifact_dir/idle-logcat.txt"
 )
 if [[ -f "$artifact_dir/android-open-picker.png" ]]; then

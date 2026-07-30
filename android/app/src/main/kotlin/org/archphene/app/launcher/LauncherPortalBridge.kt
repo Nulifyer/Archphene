@@ -675,10 +675,13 @@ internal class LauncherPortalBridge(
         val nodeId = fields.getOrNull(1)?.toIntOrNull()
         val action = fields.getOrNull(2).orEmpty()
         val encoded = fields.getOrNull(3).orEmpty()
+        val internalRefresh = nodeId == 0 && action == "refresh"
         if (
             fields.size != 4 ||
             fields[0] != "OK" ||
-            nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID ||
+            (!internalRefresh && nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID) ||
+            (action == "refresh" && !internalRefresh) ||
+            (internalRefresh && encoded.isNotEmpty()) ||
             action !in ACCESSIBILITY_ACTIONS ||
             encoded.length > MAX_ACCESSIBILITY_ACTION_ENCODED_BYTES
         ) {
@@ -1758,7 +1761,14 @@ internal class LauncherPortalBridge(
         private val ACCESSIBILITY_EVENTS =
             setOf("focus", "selected", "text", "clicked", "window", "content")
         private val ACCESSIBILITY_ACTIONS =
-            setOf("click", "focus", "set-text", "scroll-forward", "scroll-backward")
+            setOf(
+                "click",
+                "focus",
+                "set-text",
+                "scroll-forward",
+                "scroll-backward",
+                "refresh",
+            )
         private val CONCURRENT_OPERATIONS =
             setOf(
                 "PUBLISH_ACCESSIBILITY_TREE",

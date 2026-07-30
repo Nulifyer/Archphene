@@ -437,17 +437,61 @@ static bool update_cached_text_locked(const char *bus, const char *path,
     return false;
 }
 
-static bool invalidate_cached_metadata_locked(
-        const char *bus, const char *path) {
-    for (size_t index = 0; index < state.cached_accessible_count; index++) {
-        CachedAccessible *cached = &state.cached_accessibles[index];
-        if (!transient_reference_matches(
-                &cached->node.reference, bus, path)) continue;
-        cached->metadata_hydrated = false;
-        wake_worker();
-        return true;
+static bool cached_descends_from_locked(
+        size_t candidate, size_t ancestor, const size_t *parents) {
+    size_t current = candidate;
+    for (size_t depth = 0;
+            depth < state.cached_accessible_count; depth++) {
+        if (current == ancestor) return true;
+        size_t parent = parents[current];
+        if (parent >= state.cached_accessible_count || parent == current) {
+            return false;
+        }
+        current = parent;
     }
     return false;
+}
+
+static bool invalidate_cached_metadata_locked(
+        const char *bus, const char *path) {
+    size_t ancestor = state.cached_accessible_count;
+    size_t parents[MAX_CACHED_ACCESSIBLES];
+    for (size_t candidate = 0;
+            candidate < state.cached_accessible_count; candidate++) {
+        const CachedAccessible *cached =
+                &state.cached_accessibles[candidate];
+        if (transient_reference_matches(
+                &cached->node.reference, bus, path)) {
+            ancestor = candidate;
+        }
+        parents[candidate] = state.cached_accessible_count;
+        if (cached->parent.bus[0] == '\0'
+                || cached->parent.path[0] == '\0') continue;
+        for (size_t parent = 0;
+                parent < state.cached_accessible_count; parent++) {
+            if (!transient_reference_matches(
+                    &state.cached_accessibles[parent].node.reference,
+                    cached->parent.bus, cached->parent.path)) continue;
+            parents[candidate] = parent;
+            break;
+        }
+    }
+    if (ancestor >= state.cached_accessible_count) return false;
+    bool invalidated = false;
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        if (!cached_descends_from_locked(index, ancestor, parents)) continue;
+        state.cached_accessibles[index].metadata_hydrated = false;
+        invalidated = true;
+    }
+    if (invalidated) wake_worker();
+    return invalidated;
+}
+
+static void invalidate_all_cached_metadata_locked(void) {
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        state.cached_accessibles[index].metadata_hydrated = false;
+    }
+    wake_worker();
 }
 static void remove_transient_root_locked(size_t index) {
     size_t remaining = state.transient_root_count - index - 1;
@@ -746,7 +790,10 @@ static int parse_action(char *response, int *id,
     errno = 0;
     long parsed = strtol(id_text, &end, 10);
     if (errno != 0 || end == id_text || *end != '\0'
-            || parsed < 1 || parsed > 1000000) return -1;
+            || parsed < 0 || parsed > 1000000
+            || (parsed == 0 && (strcmp(*action, "refresh") != 0
+                    || **encoded_text != '\0'))
+            || (parsed != 0 && strcmp(*action, "refresh") == 0)) return -1;
     *id = (int)parsed;
     return 0;
 }
@@ -817,6 +864,13 @@ static void process_action(DBusConnection *connection) {
     char *action = NULL;
     char *encoded_text = NULL;
     if (parse_action(response, &id, &action, &encoded_text) != 0) return;
+    if (id == 0 && strcmp(action, "refresh") == 0
+            && encoded_text[0] == '\0') {
+        pthread_mutex_lock(&state.mutex);
+        invalidate_all_cached_metadata_locked();
+        pthread_mutex_unlock(&state.mutex);
+        return;
+    }
     ArchpheneAtspiNode node;
     bool found_node = false;
     bool menu_bar_child = false;
@@ -1092,8 +1146,10 @@ static void store_hydrated_metadata(const CachedAccessible *hydrated) {
 /*
  * AT-SPI Cache items intentionally omit Component extents and exact Action
  * metadata. Hydrate a reference once when it first becomes visible, then let
- * cache signals update its hierarchy, state, and text. BoundsChanged and cache
- * additions explicitly invalidate only the affected metadata. Re-querying
+ * cache signals update its hierarchy, state, and text. BoundsChanged
+ * invalidates the affected subtree because descendant screen coordinates move
+ * with an ancestor even when the toolkit emits no child event. Cache additions
+ * explicitly invalidate only the new object's metadata. Re-querying
  * every cached GTK object during each update races widget destruction and can
  * make GTK 3 dereference a defunct ATK object. New or moved controls still
  * receive a live query and can contribute children which arrived before their

@@ -151,6 +151,24 @@ class LauncherActivity :
     private var attachedHeight = 0
     private var attachedDensityDpi = 0
     private var attachedFontScaleMillis = 0
+    private var configurationSurfaceAttachFrames = 0
+    private val attachSurfaceAfterConfigurationChange =
+        object : Runnable {
+            override fun run() {
+                if (
+                    configurationSurfaceAttachFrames <= 0 ||
+                    isFinishing ||
+                    isDestroyed
+                ) {
+                    return
+                }
+                configurationSurfaceAttachFrames--
+                attachSurface()
+                if (configurationSurfaceAttachFrames > 0) {
+                    surfaceView.postOnAnimation(this)
+                }
+            }
+        }
     private var managerDeathSurfaceReset = false
     private var pointerButtonState = 0
     private var pointerCaptureRequested = false
@@ -1082,6 +1100,8 @@ class LauncherActivity :
     }
 
     override fun onStop() {
+        configurationSurfaceAttachFrames = 0
+        surfaceView.removeCallbacks(attachSurfaceAfterConfigurationChange)
         handler.removeCallbacksAndMessages(null)
         if (
             cameraPermissionRequestInFlight &&
@@ -1230,6 +1250,9 @@ class LauncherActivity :
         applyStatusAppearance()
         applySystemBarAppearance()
         attachSurface()
+        configurationSurfaceAttachFrames = CONFIGURATION_SURFACE_ATTACH_FRAMES
+        surfaceView.removeCallbacks(attachSurfaceAfterConfigurationChange)
+        surfaceView.postOnAnimation(attachSurfaceAfterConfigurationChange)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -1712,9 +1735,12 @@ class LauncherActivity :
         text: String,
     ): Boolean {
         val service = remote ?: return false
+        val internalRefresh = nodeId == 0 && action == "refresh"
         if (
             sessionId <= 0 ||
-            nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID ||
+            (!internalRefresh && nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID) ||
+            (action == "refresh" && !internalRefresh) ||
+            (internalRefresh && text.isNotEmpty()) ||
             action !in ACCESSIBILITY_ACTIONS ||
             text.length > MAX_ACCESSIBILITY_TEXT_UTF16 ||
             text.toByteArray(StandardCharsets.UTF_8).size >
@@ -2228,6 +2254,7 @@ class LauncherActivity :
                     attachedDensityDpi = densityDpi
                     attachedFontScaleMillis = fontScaleMillis
                     Log.i(TAG, "Attached Surface session=$activeSession size=${width}x$height")
+                    accessibilityProvider.refreshBoundsAfterTransition()
                     submitHostActive(hasWindowFocus())
                     if (hasWindowFocus()) {
                         submitAndroidClipboard()
@@ -4223,8 +4250,16 @@ class LauncherActivity :
         private const val MAX_ACCESSIBILITY_TEXT_BYTES = 4_096
         private const val ACCESSIBILITY_TOUCH_ID = 31
         private const val ACCESSIBILITY_MENU_HOLD_MILLIS = 40
+        private const val CONFIGURATION_SURFACE_ATTACH_FRAMES = 12
         private val ACCESSIBILITY_ACTIONS =
-            setOf("click", "focus", "set-text", "scroll-forward", "scroll-backward")
+            setOf(
+                "click",
+                "focus",
+                "set-text",
+                "scroll-forward",
+                "scroll-backward",
+                "refresh",
+            )
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3

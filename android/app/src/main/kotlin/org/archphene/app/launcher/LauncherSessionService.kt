@@ -893,10 +893,13 @@ class LauncherSessionService : Service() {
                     val nodeId = data.readInt()
                     val action = data.readString().orEmpty()
                     val text = data.readString().orEmpty()
+                    val internalRefresh = nodeId == 0 && action == "refresh"
                     if (
                         version != PROTOCOL_VERSION ||
                         sessionId <= 0 ||
-                        nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID ||
+                        (!internalRefresh && nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID) ||
+                        (action == "refresh" && !internalRefresh) ||
+                        (internalRefresh && text.isNotEmpty()) ||
                         action !in ACCESSIBILITY_ACTIONS ||
                         text.length > MAX_ACCESSIBILITY_TEXT_UTF16 ||
                         text.toByteArray(StandardCharsets.UTF_8).size >
@@ -4118,7 +4121,14 @@ class LauncherSessionService : Service() {
         private const val MAX_ACCESSIBILITY_ACTION_PARCEL_BYTES = 16 * 1_024
         private const val MAX_ACCESSIBILITY_CALLBACK_PARCEL_BYTES = 1_024
         private val ACCESSIBILITY_ACTIONS =
-            setOf("click", "focus", "set-text", "scroll-forward", "scroll-backward")
+            setOf(
+                "click",
+                "focus",
+                "set-text",
+                "scroll-forward",
+                "scroll-backward",
+                "refresh",
+            )
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3
