@@ -4,6 +4,7 @@
     <string name="launcher_connected">Starting %1$s…</string>
     <string name="launcher_preparing">Preparing the shared Archphene environment…</string>
     <string name="launcher_rejected">This Linux launcher is no longer trusted. Open Archphene to repair it.</string>
+    <string name="launcher_document_rejected">This Linux app cannot open that Android document.</string>
     <string name="launcher_disconnected">Archphene stopped the Linux session.</string>
     <string name="launcher_invalid">This launcher has invalid Archphene metadata.</string>
     <string name="launcher_capabilities_invalid">This Linux launcher uses an incompatible Archphene capability contract. Open Archphene to update it.</string>

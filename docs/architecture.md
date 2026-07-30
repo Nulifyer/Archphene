@@ -41,6 +41,10 @@ the same value before opening an authenticated Binder session. The V4
 production contract contains the implemented Wayland, input, IME, plain-text
 clipboard, document, bounded HTTP(S) OpenURI, and wrapper-owned notification
 paths. Android 13+ notification consent remains a first-use wrapper decision.
+A separate signed metadata field carries only registry-derived desktop MIME
+types whose `Exec` accepts files or URLs. Binder protocol v10 reauthorizes that
+exact set before one matching Android `content://` descriptor can be copied
+into the shared Arch home and supplied to the stock desktop process.
 A correctly signed
 wrapper with an older contract is stale and can be updated through Android
 confirmation; a wrapper with untrusted identity or signer remains quarantined.

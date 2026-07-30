@@ -31,6 +31,7 @@ jobs:
           python3 scripts/test-trust-policy-contract.py
           python3 scripts/test-runtime-lifecycle-contract.py
           python3 scripts/test-launcher-notification-contract.py
+          python3 scripts/test-launcher-intent-contract.py
       - name: Validate private AT-SPI source contract
         run: python3 scripts/test-atspi-source-contract.py
       - name: Validate runtime-pack source contract

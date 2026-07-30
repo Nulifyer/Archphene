@@ -21,7 +21,8 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
             intent.action != ACTION_CREATE_IMPORT_SOURCE &&
             intent.action != ACTION_CLEAN_IMPORT_SOURCE &&
             intent.action != ACTION_VERIFY_IMPORTS &&
-            intent.action != ACTION_SEND_MULTIPLE_IMPORT
+            intent.action != ACTION_SEND_MULTIPLE_IMPORT &&
+            intent.action != ACTION_SEND_LAUNCHER_DOCUMENT
         ) {
             return
         }
@@ -59,6 +60,17 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
                         ACTION_SEND_MULTIPLE_IMPORT -> {
                             sendMultipleImport(context, token)
                             Log.i(TAG, "Document multi-import dispatched token=$token")
+                        }
+                        ACTION_SEND_LAUNCHER_DOCUMENT -> {
+                            sendLauncherDocument(
+                                context,
+                                token,
+                                checkNotNull(intent.getStringExtra(EXTRA_LAUNCHER_PACKAGE)),
+                                intent.getStringExtra(EXTRA_PROVIDER_MODE) ?: "normal",
+                                intent.getStringExtra(EXTRA_MIME_TYPE) ?: "text/plain",
+                                intent.getStringExtra(EXTRA_INTENT_ACTION) ?: "view",
+                            )
+                            Log.i(TAG, "Launcher document dispatched token=$token")
                         }
                         else -> {
                             runProbe(
@@ -518,6 +530,48 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         )
     }
 
+    private fun sendLauncherDocument(
+        context: Context,
+        token: String,
+        launcherPackage: String,
+        providerMode: String,
+        mimeType: String,
+        intentAction: String,
+    ) {
+        check(LAUNCHER_PACKAGE.matches(launcherPackage))
+        check(
+            (providerMode == "normal" && mimeType == "text/plain") ||
+                (
+                    providerMode == "code-workspace" &&
+                        mimeType == "application/x-code-oss-workspace"
+                ),
+        )
+        val uri =
+            Uri.Builder()
+                .scheme("content")
+                .authority("${context.packageName}.import-test")
+                .appendPath(providerMode)
+                .appendPath(token)
+                .build()
+        val launch =
+            if (intentAction == "view") {
+                Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType)
+            } else {
+                check(intentAction == "send")
+                Intent(Intent.ACTION_SEND)
+                    .setType(mimeType)
+                    .putExtra(Intent.EXTRA_STREAM, uri)
+            }
+        context.startActivity(
+            launch
+                .setClassName(launcherPackage, "org.archphene.launcher.LauncherActivity")
+                .addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                ),
+        )
+    }
+
     private fun File.isSymbolicLink(): Boolean =
         runCatching { android.system.Os.readlink(absolutePath) }.isSuccess
 
@@ -562,7 +616,13 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.VERIFY_DOCUMENT_IMPORTS"
         private const val ACTION_SEND_MULTIPLE_IMPORT =
             "org.archphene.app.debug.action.SEND_MULTIPLE_DOCUMENT_IMPORT"
+        private const val ACTION_SEND_LAUNCHER_DOCUMENT =
+            "org.archphene.app.debug.action.SEND_LAUNCHER_DOCUMENT"
         private const val EXTRA_TOKEN = "token"
+        private const val EXTRA_LAUNCHER_PACKAGE = "launcher_package"
+        private const val EXTRA_PROVIDER_MODE = "provider_mode"
+        private const val EXTRA_MIME_TYPE = "mime_type"
+        private const val EXTRA_INTENT_ACTION = "intent_action"
         private const val EXTRA_RETAIN_VISUAL = "retain_visual"
         private const val EXTRA_EXPECT_MULTIPLE = "expect_multiple"
         private const val EXTRA_EXPECT_PROVIDER_DEADLINES = "expect_provider_deadlines"
@@ -582,6 +642,8 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private const val IMPORT_SOURCE_PREFIX = "Archphene-Import-Source-"
         private const val IMPORT_MARKER_REPETITIONS = 131_072
         private val TOKEN = Regex("[a-f0-9]{8}")
+        private val LAUNCHER_PACKAGE =
+            Regex("org\\.archphene\\.linux\\.p[0-9a-f]{32}")
         private val MARKER = "Archphene provider exact read/write\n".toByteArray(StandardCharsets.UTF_8)
         private val COLLISION_MARKER =
             "Archphene existing destination\n".toByteArray(StandardCharsets.UTF_8)

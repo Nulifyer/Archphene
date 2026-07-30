@@ -148,6 +148,9 @@ class LauncherSessionService : Service() {
         var lastImeChangeSerial = Int.MIN_VALUE
         var imeLogged = false
         var pendingDocumentRequest: PendingDocumentRequest? = null
+        var pendingLaunchDocument: LauncherPortalOpenDocument? = null
+        var launchDocumentImportStarted = false
+        var launchDocumentPath: String? = null
     }
 
     private val sessions = HashMap<Int, Session>(MAX_SESSIONS)
@@ -288,6 +291,8 @@ class LauncherSessionService : Service() {
                     "",
                 )
                 session.pendingDocumentRequest = null
+                session.pendingLaunchDocument?.descriptor?.close()
+                session.pendingLaunchDocument = null
             }
         }
         val runtime = runtimeBinder
@@ -409,14 +414,37 @@ class LauncherSessionService : Service() {
                     data.enforceInterface(INTERFACE)
                     val version = data.readInt()
                     val token = data.readStrongBinder()
+                    val hasDocument = data.readInt()
+                    val document =
+                        if (hasDocument == 1) {
+                            val displayName = data.readString().orEmpty()
+                            val mimeType = data.readString().orEmpty()
+                            val descriptor = ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                            if (
+                                !safeDocumentName(displayName) ||
+                                !LauncherIntentMimePolicy.valid(mimeType)
+                            ) {
+                                descriptor.close()
+                                return@runCatching OpenResult(RESULT_INVALID, 0, null)
+                            }
+                            PendingLaunchDocument(
+                                LauncherPortalOpenDocument(descriptor, displayName, false),
+                                mimeType,
+                            )
+                        } else if (hasDocument == 0) {
+                            null
+                        } else {
+                            return@runCatching OpenResult(RESULT_INVALID, 0, null)
+                        }
                     if (
                         version != PROTOCOL_VERSION ||
                         token == null ||
                         data.dataAvail() != 0
                     ) {
+                        document?.document?.descriptor?.close()
                         return@runCatching OpenResult(RESULT_INVALID, 0, null)
                     }
-                    openSession(Binder.getCallingUid(), token)
+                    openSession(Binder.getCallingUid(), token, document)
                 }.getOrElse { error ->
                     Log.w(TAG, "Rejected malformed launcher open", error)
                     OpenResult(RESULT_INVALID, 0, null)
@@ -785,23 +813,33 @@ class LauncherSessionService : Service() {
         val authorization: LauncherAuthorization?,
     )
 
+    private data class PendingLaunchDocument(
+        val document: LauncherPortalOpenDocument,
+        val mimeType: String,
+    )
+
     @Synchronized
     private fun openSession(
         callingUid: Int,
         clientToken: IBinder,
+        pendingDocument: PendingLaunchDocument?,
     ): OpenResult {
+        fun reject(result: Int): OpenResult {
+            pendingDocument?.document?.descriptor?.close()
+            return OpenResult(result, 0, null)
+        }
         val identity =
             LauncherIdentityVerifier.verify(this, callingUid)
                 ?: run {
                     Log.w(TAG, "Rejected launcher UID=$callingUid before registry lookup")
-                    return OpenResult(RESULT_UNAUTHORIZED, 0, null)
+                    return reject(RESULT_UNAUTHORIZED)
                 }
-        val runtime = runtimeBinder ?: return OpenResult(RESULT_NOT_READY, 0, null)
+        val runtime = runtimeBinder ?: return reject(RESULT_NOT_READY)
         if (runtime.runtimeHandle == 0L) {
-            return OpenResult(RESULT_NOT_READY, 0, null)
+            return reject(RESULT_NOT_READY)
         }
         if (!ArchphenePreferences.isReady()) {
-            return OpenResult(RESULT_NOT_READY, 0, null)
+            return reject(RESULT_NOT_READY)
         }
         val authorization =
             runtime.authorizeLauncher(
@@ -814,21 +852,35 @@ class LauncherSessionService : Service() {
                     "Rejected non-current registry descriptor package=${identity.androidPackage} " +
                         "generation=${identity.generation}",
                 )
-                return OpenResult(RESULT_UNAUTHORIZED, 0, null)
+                return reject(RESULT_UNAUTHORIZED)
             }
+        if (identity.mimeTypes != authorization.mimeTypes) {
+            Log.w(TAG, "Rejected launcher whose signed MIME declaration is stale")
+            return reject(RESULT_UNAUTHORIZED)
+        }
+        if (
+            pendingDocument != null &&
+            !LauncherIntentMimePolicy.matches(
+                authorization.mimeTypes,
+                pendingDocument.mimeType,
+            )
+        ) {
+            return reject(RESULT_UNAUTHORIZED)
+        }
         val existing =
             sessions.values.firstOrNull { session ->
                 session.uid == callingUid && session.clientToken === clientToken
             }
         if (existing != null) {
+            pendingDocument?.document?.descriptor?.close()
             return OpenResult(RESULT_OK, existing.id, authorization)
         }
         if (sessions.size >= MAX_SESSIONS) {
-            return OpenResult(RESULT_BUSY, 0, null)
+            return reject(RESULT_BUSY)
         }
         val sessionId = nextSessionId.getAndUpdate { value -> if (value == Int.MAX_VALUE) 1 else value + 1 }
         if (sessionId <= 0 || sessions.containsKey(sessionId)) {
-            return OpenResult(RESULT_BUSY, 0, null)
+            return reject(RESULT_BUSY)
         }
         val preferences = ArchphenePreferences.snapshot()
         val session =
@@ -846,9 +898,10 @@ class LauncherSessionService : Service() {
         try {
             clientToken.linkToDeath(sessionBinder, 0)
         } catch (_: RemoteException) {
-            return OpenResult(RESULT_INVALID, 0, null)
+            return reject(RESULT_INVALID)
         }
         sessions[sessionId] = session
+        session.pendingLaunchDocument = pendingDocument?.document
         Log.i(
             TAG,
             "Authorized launcher package=${identity.androidPackage} " +
@@ -1642,6 +1695,50 @@ class LauncherSessionService : Service() {
                     )
                     return
                 }
+        val pendingLaunchDocument = session.pendingLaunchDocument
+        if (pendingLaunchDocument != null && session.launchDocumentPath == null) {
+            if (session.launchDocumentImportStarted) return
+            session.launchDocumentImportStarted = true
+            Thread(
+                    {
+                        val imported =
+                            runCatching {
+                                portalBridge.importLaunchDocument(pendingLaunchDocument)
+                            }
+                        surfaceHandler.post {
+                            session.pendingLaunchDocument = null
+                            if (!session.active || session.portalBridge !== portalBridge) {
+                                imported.getOrNull()?.let { path ->
+                                    Log.i(TAG, "Discarded completed import for closed session path=$path")
+                                }
+                                return@post
+                            }
+                            imported
+                                .onSuccess { path ->
+                                    session.launchDocumentPath = path
+                                    Log.i(
+                                        TAG,
+                                        "Imported Android launch document session=${session.id}",
+                                    )
+                                    startLinuxProcess(session, attachedSurface, allowGpuBridge)
+                                }.onFailure { error ->
+                                    Log.e(
+                                        TAG,
+                                        "Could not import Android launch document session=${session.id}",
+                                        error,
+                                    )
+                                    stopCompositorForStatus(
+                                        session,
+                                        attachedSurface,
+                                        "Could not open the Android document.",
+                                    )
+                                }
+                        }
+                    },
+                    "ArchpheneLaunchImport-${session.id}",
+                ).start()
+            return
+        }
         val gpuSocket =
             if (allowGpuBridge && session.authorization.usesGraphicsBridge) {
                 val bridge =
@@ -1674,6 +1771,7 @@ class LauncherSessionService : Service() {
                 portalBridge.busAddress,
                 session.reducedIsolationElectron,
                 gpuSocket?.absolutePath,
+                session.launchDocumentPath,
             )
         if (linuxHandle == 0L) {
             session.portalBridge?.close()
@@ -2970,7 +3068,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 9
+        private const val PROTOCOL_VERSION = 10
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2

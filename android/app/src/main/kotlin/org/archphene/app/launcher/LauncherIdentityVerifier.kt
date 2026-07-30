@@ -8,6 +8,7 @@ internal data class VerifiedLauncherIdentity(
     val androidPackage: String,
     val descriptorIdHex: String,
     val generation: Long,
+    val mimeTypes: List<String>,
 )
 
 internal object LauncherIdentityVerifier {
@@ -17,6 +18,7 @@ internal object LauncherIdentityVerifier {
     private const val MANAGER_PACKAGE = "org.archphene.launcher.MANAGER_PACKAGE"
     private const val TEMPLATE_SHA256 = "org.archphene.launcher.TEMPLATE_SHA256"
     private const val CAPABILITIES = "org.archphene.launcher.CAPABILITIES"
+    private const val MIME_TYPES = "org.archphene.launcher.MIME_TYPES"
 
     @Suppress("DEPRECATION")
     fun verify(
@@ -72,6 +74,13 @@ internal object LauncherIdentityVerifier {
                 ?.takeIf { value -> value in 1..Int.MAX_VALUE.toLong() }
                 ?: return null
         val signers = info.signingInfo?.apkContentsSigners ?: return null
+        val mimeTypes =
+            metadata
+                .getString(MIME_TYPES)
+                ?.takeIf { value -> value.startsWith("m:") }
+                ?.drop(2)
+                ?.let(LauncherIntentMimePolicy::parseSpec)
+                ?: return null
         if (
             info.packageName != androidPackage ||
             info.longVersionCode != generation ||
@@ -91,6 +100,6 @@ internal object LauncherIdentityVerifier {
         if (!MessageDigest.isEqual(actualSigner, LauncherApkSigner.signerSha256())) {
             return null
         }
-        return VerifiedLauncherIdentity(androidPackage, descriptor, generation)
+        return VerifiedLauncherIdentity(androidPackage, descriptor, generation, mimeTypes)
     }
 }

@@ -117,6 +117,11 @@ internal class LauncherPortalBridge(
     lateinit var busAddress: String
         private set
 
+    fun importLaunchDocument(document: LauncherPortalOpenDocument): String {
+        val uri = beginOpen(listOf(document), multiple = false).single()
+        return Uri.parse(uri).path ?: error("Imported document URI has no path")
+    }
+
     @Synchronized
     fun start() {
         check(!running) { "Portal bridge is already running" }
@@ -565,6 +570,7 @@ internal class LauncherPortalBridge(
                 ParcelFileDescriptor.AutoCloseInputStream(document.descriptor).use { input ->
                     FileOutputStream(target, false).use { output ->
                         while (true) {
+                            check(running) { "Portal session closed during document import" }
                             val count = input.read(buffer)
                             if (count < 0) break
                             totalCopied += count

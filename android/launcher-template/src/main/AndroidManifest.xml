@@ -25,6 +25,9 @@
         <meta-data
             android:name="org.archphene.launcher.CAPABILITIES"
             android:value="c:launcher-capabilities-placeholder" />
+        <meta-data
+            android:name="org.archphene.launcher.MIME_TYPES"
+            android:value="m:launcher-mime-types-placeholder" />
 
         <activity
             android:name="org.archphene.launcher.LauncherActivity"
@@ -37,6 +40,51 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:scheme="content" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-00" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-01" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-02" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-03" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-04" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-05" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-06" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-07" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-08" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-09" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-10" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-11" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-12" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-13" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-14" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-15" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="application/x-archphene-mime-placeholder-00" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-01" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-02" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-03" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-04" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-05" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-06" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-07" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-08" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-09" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-10" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-11" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-12" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-13" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-14" />
+                <data android:mimeType="application/x-archphene-mime-placeholder-15" />
             </intent-filter>
         </activity>
     </application>

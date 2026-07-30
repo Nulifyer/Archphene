@@ -23,6 +23,7 @@ internal data class LauncherApkRequest(
     val generation: Long,
     val label: String,
     val capabilities: String,
+    val mimeTypes: List<String>,
     val iconPng: ByteArray? = null,
     val iconSha256: ByteArray? = null,
 )
@@ -46,6 +47,7 @@ internal object LauncherApkAssembler {
     private const val TEMPLATE_SHA256 =
         "h:0000000000000000000000000000000000000000000000000000000000000000"
     private const val TEMPLATE_CAPABILITIES = "c:launcher-capabilities-placeholder"
+    private const val TEMPLATE_MIME_TYPES = "m:launcher-mime-types-placeholder"
     internal const val CAPABILITIES_V4 =
         "wayland,input,ime,clipboard,documents,open-uri,notifications"
     private const val TEMPLATE_ICON_SHA256 =
@@ -63,6 +65,10 @@ internal object LauncherApkAssembler {
     private val DESCRIPTOR = Regex("[0-9a-f]{64}")
     private val MANAGER_PACKAGE =
         Regex("[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*){2,7}")
+    private val TEMPLATE_MIME_PLACEHOLDERS =
+        Array(LauncherIntentMimePolicy.MAX_TYPES) { index ->
+            "application/x-archphene-mime-placeholder-${index.toString().padStart(2, '0')}"
+        }
     private val PNG_SIGNATURE =
         byteArrayOf(
             0x89.toByte(),
@@ -159,6 +165,13 @@ internal object LauncherApkAssembler {
             "Unsupported launcher capability contract"
         }
         require(
+            request.mimeTypes.size <= LauncherIntentMimePolicy.MAX_TYPES &&
+                request.mimeTypes.distinct().size == request.mimeTypes.size &&
+                request.mimeTypes.all(LauncherIntentMimePolicy::valid),
+        ) {
+            "Invalid launcher MIME types"
+        }
+        require(
             (request.iconPng == null && request.iconSha256 == null) ||
                 (
                     request.iconPng != null &&
@@ -220,7 +233,7 @@ internal object LauncherApkAssembler {
                         }
                         var value = readBounded(input)
                         if (name == MANIFEST) {
-                            value =
+                            var manifest =
                                 BinaryAndroidManifest(value)
                                     .replaceString(TEMPLATE_PACKAGE, request.androidPackage)
                                     .replaceString(
@@ -237,6 +250,21 @@ internal object LauncherApkAssembler {
                                         TEMPLATE_CAPABILITIES,
                                         "c:${request.capabilities}",
                                     )
+                                    .replaceString(
+                                        TEMPLATE_MIME_TYPES,
+                                        "m:${request.mimeTypes.joinToString(";")}",
+                                    )
+                            for (index in TEMPLATE_MIME_PLACEHOLDERS.indices) {
+                                manifest =
+                                    manifest.replaceString(
+                                        TEMPLATE_MIME_PLACEHOLDERS[index],
+                                        request.mimeTypes.getOrNull(index)
+                                            ?: request.mimeTypes.firstOrNull()
+                                            ?: "application/x-archphene-disabled-$index",
+                                    )
+                            }
+                            value =
+                                manifest
                                     .setVersionCode(request.generation.toInt())
                                     .bytes
                             manifestFound = true
@@ -405,7 +433,9 @@ internal object LauncherApkAssembler {
                 metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") ==
                 "h:${templateDigestHex(context)}" &&
                 metadata.getString("org.archphene.launcher.CAPABILITIES") ==
-                "c:${request.capabilities}",
+                "c:${request.capabilities}" &&
+                metadata.getString("org.archphene.launcher.MIME_TYPES") ==
+                "m:${request.mimeTypes.joinToString(";")}",
         ) {
             "Generated launcher metadata changed"
         }

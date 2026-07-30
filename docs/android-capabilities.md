@@ -39,10 +39,17 @@ portal/classic post, wrapper package attribution, notification-shade visuals,
 content-intent routing, withdrawal, and fatal logs. The reusable gate is
 `scripts/test-launcher-notifications.sh`.
 
-Inbound Android document/share intent filters are not part of V4 yet. They
-remain pending because a generated manifest must declare only MIME types that
-the verified desktop entry can actually open, and the received URI must cross
-SAF without exposing Android grants or paths to Linux.
+Generated launchers also declare bounded `ACTION_VIEW` and `ACTION_SEND`
+filters derived from the current desktop entry's `MimeType` values, but only
+when its `Exec` consumes a file or URL field code. The signed MIME declaration
+must exactly match the manager registry during Binder authorization. A wrapper
+accepts one matching `content://` document or file-share stream, opens it
+through SAF off the main thread, and transfers only the descriptor and safe
+display name to the manager. The manager copies it into a non-replacing
+`~/Documents/Android` file before process start. Linux receives a normal path
+for `%f`/`%F` or a percent-encoded local `file://` URI for `%u`/`%U`; the
+Android URI and grant never cross the boundary. Plain-text-only shares and
+multi-file `SEND_MULTIPLE` remain undeclared.
 
 ## Native client protocol surface
 
@@ -84,7 +91,9 @@ Runtime notification permission follows the
 
 The current production regressions cover authenticated Binder calls,
 first-use notification permission UI, notification post and withdrawal,
-HTTPS dispatch, unsafe-URI rejection, and cross-UID denial.
+HTTPS dispatch, unsafe-URI rejection, cross-UID denial, exact MIME-derived
+Android document intake, unsupported-MIME rejection, and imported-file launch
+through stock Mousepad and Code OSS.
 
 ## Standard desktop adapters
 

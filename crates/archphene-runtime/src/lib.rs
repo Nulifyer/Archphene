@@ -118,6 +118,7 @@ pub struct LauncherProcessOptions<'a> {
     pub portal_bus_address: Option<&'a str>,
     pub reduced_isolation_electron: bool,
     pub virgl_socket_path: Option<&'a Path>,
+    pub launch_document_path: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +158,7 @@ pub struct LauncherPublishWork {
     pub generation: u64,
     pub label: String,
     pub capabilities: &'static str,
+    pub mime_types: Vec<String>,
     pub icon_path: Option<String>,
     pub icon_sha256: Option<[u8; 32]>,
 }
@@ -172,6 +174,7 @@ pub struct LauncherAuthorization {
     pub label: String,
     pub terminal: bool,
     pub integration_topology: u16,
+    pub mime_types: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -205,6 +208,56 @@ impl From<ProcessError> for LauncherProcessError {
     fn from(error: ProcessError) -> Self {
         Self::Process(error)
     }
+}
+
+fn launcher_mime_types(descriptor: &LauncherDescriptor) -> &[String] {
+    if descriptor.arguments.iter().any(|argument| {
+        matches!(
+            argument,
+            ExecArgument::SingleFile
+                | ExecArgument::MultipleFiles
+                | ExecArgument::SingleUrl
+                | ExecArgument::MultipleUrls
+        )
+    }) {
+        &descriptor.mime_types
+    } else {
+        &[]
+    }
+}
+
+fn validate_launch_document_path(path: &str) -> Result<&str, LauncherProcessError> {
+    const PREFIX: &str = "/home/archphene/Documents/Android/";
+    let name = path
+        .strip_prefix(PREFIX)
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 255
+                && *name != "."
+                && *name != ".."
+                && !name.chars().any(|character| {
+                    character.is_control() || matches!(character, '/' | '\\' | '\0')
+                })
+        })
+        .ok_or(LauncherProcessError::InvalidDescriptor)?;
+    debug_assert!(!name.is_empty());
+    Ok(path)
+}
+
+fn file_uri(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut uri = String::with_capacity(path.len().saturating_add(7));
+    uri.push_str("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push('%');
+            uri.push(char::from(HEX[usize::from(byte >> 4)]));
+            uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    uri
 }
 
 #[derive(Debug)]
@@ -1087,6 +1140,7 @@ impl RuntimeHost {
             label: descriptor.name.clone(),
             terminal: descriptor.terminal,
             integration_topology: self.launcher_integration_topology(descriptor),
+            mime_types: launcher_mime_types(descriptor).to_vec(),
         })
     }
 
@@ -1140,6 +1194,13 @@ impl RuntimeHost {
                 .ok_or(LauncherProcessError::InvalidDescriptor)?
                 .to_owned();
             let mut arguments = Vec::with_capacity(descriptor.arguments.len().saturating_add(3));
+            let launch_document_path = options
+                .launch_document_path
+                .map(validate_launch_document_path)
+                .transpose()?;
+            if launch_document_path.is_some() && launcher_mime_types(descriptor).is_empty() {
+                return Err(LauncherProcessError::InvalidDescriptor);
+            }
             for argument in &descriptor.arguments {
                 match argument {
                     ExecArgument::Literal(value) => arguments.push(value.clone()),
@@ -1152,10 +1213,16 @@ impl RuntimeHost {
                     ExecArgument::DisplayName => arguments.push(descriptor.name.clone()),
                     ExecArgument::DesktopFile => arguments
                         .push(format!("/usr/share/applications/{}", descriptor.desktop_id,)),
-                    ExecArgument::SingleFile
-                    | ExecArgument::MultipleFiles
-                    | ExecArgument::SingleUrl
-                    | ExecArgument::MultipleUrls => {}
+                    ExecArgument::SingleFile | ExecArgument::MultipleFiles => {
+                        if let Some(path) = launch_document_path {
+                            arguments.push(path.to_owned());
+                        }
+                    }
+                    ExecArgument::SingleUrl | ExecArgument::MultipleUrls => {
+                        if let Some(path) = launch_document_path {
+                            arguments.push(file_uri(path));
+                        }
+                    }
                 }
             }
             (
@@ -1356,6 +1423,7 @@ impl RuntimeHost {
             generation: descriptor.desired_generation,
             label: descriptor.name.clone(),
             capabilities: LAUNCHER_CAPABILITIES_V4,
+            mime_types: launcher_mime_types(descriptor).to_vec(),
             icon_path,
             icon_sha256,
         };
@@ -2318,6 +2386,27 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn android_launch_document_paths_are_bounded_and_uri_encoded() {
+        let path = "/home/archphene/Documents/Android/report #1.txt";
+        assert_eq!(
+            validate_launch_document_path(path).expect("valid import path"),
+            path,
+        );
+        assert_eq!(
+            file_uri(path),
+            "file:///home/archphene/Documents/Android/report%20%231.txt",
+        );
+        for invalid in [
+            "/home/archphene/Documents/report.txt",
+            "/home/archphene/Documents/Android/../report.txt",
+            "/home/archphene/Documents/Android/a/b.txt",
+            "/home/archphene/Documents/Android/\n",
+        ] {
+            assert!(validate_launch_document_path(invalid).is_err());
+        }
+    }
 
     #[test]
     fn electron_compatibility_requires_both_verified_topology_and_consent() {

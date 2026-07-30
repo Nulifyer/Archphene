@@ -83,7 +83,7 @@ fn parse_launcher_reduced_isolation(
     version: &str,
     fields: &mut std::str::Split<'_, char>,
 ) -> Result<bool, ()> {
-    if version != "G4" && version != "G5" {
+    if version != "G4" && version != "G5" && version != "G6" {
         return Ok(false);
     }
     match fields.next() {
@@ -91,6 +91,20 @@ fn parse_launcher_reduced_isolation(
         Some("1") => Ok(true),
         _ => Err(()),
     }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn decode_hex_utf8(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > 1_024 || !value.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut decoded = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = char::from(pair[0]).to_digit(16)?;
+        let low = char::from(pair[1]).to_digit(16)?;
+        decoded.push(u8::try_from((high << 4) | low).ok()?);
+    }
+    String::from_utf8(decoded).ok()
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -5097,7 +5111,7 @@ mod android {
         };
         let mut fields = request.split('\t');
         let (
-            Some(version @ ("A1" | "A2")),
+            Some(version @ ("A1" | "A2" | "A3")),
             Some(android_package),
             Some(descriptor_id),
             Some(generation),
@@ -5143,7 +5157,15 @@ mod android {
         if authorization.label.contains(['\t', '\n', '\r', '\0']) {
             return ERROR_INTERNAL;
         }
-        let encoded = if version == "A2" {
+        let encoded = if version == "A3" {
+            format!(
+                "A3\t{}\t{}\t{}\t{}\n",
+                u8::from(authorization.terminal),
+                authorization.integration_topology,
+                authorization.label,
+                authorization.mime_types.join(";"),
+            )
+        } else if version == "A2" {
             format!(
                 "A2\t{}\t{}\t{}\n",
                 u8::from(authorization.terminal),
@@ -5187,7 +5209,7 @@ mod android {
         };
         if request_length == 0
             || request_length > request_capacity
-            || request_length > 1024
+            || request_length > 3_072
             || output_capacity < 512
         {
             return i64::from(ERROR_INVALID_ARGUMENT);
@@ -5218,115 +5240,136 @@ mod android {
         else {
             return i64::from(ERROR_INVALID_ARGUMENT);
         };
-        let (appearance, portal_bus_address, reduced_isolation_electron, virgl_socket_path) =
-            if version == "G1" {
-                if fields.next().is_some() {
-                    return i64::from(ERROR_INVALID_ARGUMENT);
-                }
-                (GuiAppearance::default(), None, false, None)
-            } else if version == "G2" || version == "G3" || version == "G4" || version == "G5" {
-                let (
-                    Some(dark),
-                    Some(font_percent),
-                    Some(control_visual_dp),
-                    Some(control_target_dp),
-                    Some(accent),
-                    Some(background),
-                    Some(foreground),
-                ) = (
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                    fields.next(),
-                )
-                else {
-                    return i64::from(ERROR_INVALID_ARGUMENT);
-                };
-                let portal_bus_address = if version == "G3" || version == "G4" || version == "G5" {
-                    let Some(address) = fields.next() else {
-                        return i64::from(ERROR_INVALID_ARGUMENT);
-                    };
-                    if address.len() > 256
-                        || !address.starts_with("unix:path=/data/")
-                        || address
-                            .bytes()
-                            .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
-                    {
-                        return i64::from(ERROR_INVALID_ARGUMENT);
-                    }
-                    Some(address)
-                } else {
-                    None
-                };
-                let Ok(reduced_isolation_electron) =
-                    super::parse_launcher_reduced_isolation(version, &mut fields)
-                else {
-                    return i64::from(ERROR_INVALID_ARGUMENT);
-                };
-                let virgl_socket_path = if version == "G5" {
-                    let Some(socket) = fields.next() else {
-                        return i64::from(ERROR_INVALID_ARGUMENT);
-                    };
-                    if socket == "-" {
-                        None
-                    } else if socket.len() >= 104
-                        || !socket.starts_with("/data/")
-                        || socket
-                            .bytes()
-                            .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
-                    {
-                        return i64::from(ERROR_INVALID_ARGUMENT);
-                    } else {
-                        Some(socket)
-                    }
-                } else {
-                    None
-                };
-                if fields.next().is_some() {
-                    return i64::from(ERROR_INVALID_ARGUMENT);
-                }
-                let dark = match dark {
-                    "0" => false,
-                    "1" => true,
-                    _ => return i64::from(ERROR_INVALID_ARGUMENT),
-                };
-                let (Ok(font_percent), Ok(control_visual_dp), Ok(control_target_dp)) = (
-                    font_percent.parse::<u16>(),
-                    control_visual_dp.parse::<u16>(),
-                    control_target_dp.parse::<u16>(),
-                ) else {
-                    return i64::from(ERROR_INVALID_ARGUMENT);
-                };
-                let (Some(accent), Some(background), Some(foreground)) = (
-                    parse_rgb_hex(accent),
-                    parse_rgb_hex(background),
-                    parse_rgb_hex(foreground),
-                ) else {
-                    return i64::from(ERROR_INVALID_ARGUMENT);
-                };
-                match GuiAppearance::new(
-                    dark,
-                    font_percent,
-                    control_visual_dp,
-                    control_target_dp,
-                    accent,
-                    background,
-                    foreground,
-                ) {
-                    Ok(appearance) => (
-                        appearance,
-                        portal_bus_address,
-                        reduced_isolation_electron,
-                        virgl_socket_path,
-                    ),
-                    Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
-                }
-            } else {
+        let (
+            appearance,
+            portal_bus_address,
+            reduced_isolation_electron,
+            virgl_socket_path,
+            launch_document_path,
+        ) = if version == "G1" {
+            if fields.next().is_some() {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            }
+            (GuiAppearance::default(), None, false, None, None)
+        } else if matches!(version, "G2" | "G3" | "G4" | "G5" | "G6") {
+            let (
+                Some(dark),
+                Some(font_percent),
+                Some(control_visual_dp),
+                Some(control_target_dp),
+                Some(accent),
+                Some(background),
+                Some(foreground),
+            ) = (
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+            )
+            else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
+            let portal_bus_address = if matches!(version, "G3" | "G4" | "G5" | "G6") {
+                let Some(address) = fields.next() else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                if address.len() > 256
+                    || !address.starts_with("unix:path=/data/")
+                    || address
+                        .bytes()
+                        .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+                {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                }
+                Some(address)
+            } else {
+                None
+            };
+            let Ok(reduced_isolation_electron) =
+                super::parse_launcher_reduced_isolation(version, &mut fields)
+            else {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            };
+            let virgl_socket_path = if version == "G5" || version == "G6" {
+                let Some(socket) = fields.next() else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                if socket == "-" {
+                    None
+                } else if socket.len() >= 104
+                    || !socket.starts_with("/data/")
+                    || socket
+                        .bytes()
+                        .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+                {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                } else {
+                    Some(socket)
+                }
+            } else {
+                None
+            };
+            let launch_document_path = if version == "G6" {
+                let Some(encoded_path) = fields.next() else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                if encoded_path == "-" {
+                    None
+                } else {
+                    let Some(decoded) = super::decode_hex_utf8(encoded_path) else {
+                        return i64::from(ERROR_INVALID_ARGUMENT);
+                    };
+                    Some(decoded)
+                }
+            } else {
+                None
+            };
+            if fields.next().is_some() {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            }
+            let dark = match dark {
+                "0" => false,
+                "1" => true,
+                _ => return i64::from(ERROR_INVALID_ARGUMENT),
+            };
+            let (Ok(font_percent), Ok(control_visual_dp), Ok(control_target_dp)) = (
+                font_percent.parse::<u16>(),
+                control_visual_dp.parse::<u16>(),
+                control_target_dp.parse::<u16>(),
+            ) else {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            };
+            let (Some(accent), Some(background), Some(foreground)) = (
+                parse_rgb_hex(accent),
+                parse_rgb_hex(background),
+                parse_rgb_hex(foreground),
+            ) else {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            };
+            match GuiAppearance::new(
+                dark,
+                font_percent,
+                control_visual_dp,
+                control_target_dp,
+                accent,
+                background,
+                foreground,
+            ) {
+                Ok(appearance) => (
+                    appearance,
+                    portal_bus_address,
+                    reduced_isolation_electron,
+                    virgl_socket_path,
+                    launch_document_path,
+                ),
+                Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
+            }
+        } else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
         if android_package.len() != 53
             || !android_package.starts_with("org.archphene.linux.p")
             || !android_package
@@ -5365,6 +5408,7 @@ mod android {
                     portal_bus_address,
                     reduced_isolation_electron,
                     virgl_socket_path: virgl_socket_path.map(Path::new),
+                    launch_document_path: launch_document_path.as_deref(),
                 },
             )
         };
@@ -5556,7 +5600,7 @@ mod android {
             encoded
         });
         let encoded = format!(
-            "W3\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "W4\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             work.android_package,
             descriptor_id,
             work.generation,
@@ -5564,6 +5608,7 @@ mod android {
             work.capabilities,
             work.icon_path.as_deref().unwrap_or(""),
             icon_sha256.as_deref().unwrap_or(""),
+            work.mime_types.join(";"),
         );
         if encoded.len() > output_capacity {
             return ERROR_INTERNAL;
@@ -7282,5 +7327,17 @@ mod tests {
             current.next(),
             Some("/data/user/0/org.archphene.app/cache/gpu/.vg"),
         );
+
+        let mut document = "1".split('\t');
+        assert_eq!(
+            parse_launcher_reduced_isolation("G6", &mut document),
+            Ok(true),
+        );
+        assert_eq!(
+            decode_hex_utf8("2f686f6d652f617263687068656e652f446f63756d656e7473"),
+            Some("/home/archphene/Documents".to_owned()),
+        );
+        assert_eq!(decode_hex_utf8("0"), None);
+        assert_eq!(decode_hex_utf8("zz"), None);
     }
 }

@@ -16,7 +16,12 @@ import java.nio.charset.StandardCharsets
 internal class DocumentImportTestProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
 
-    override fun getType(uri: Uri): String = "text/plain"
+    override fun getType(uri: Uri): String =
+        if (fixture(uri).mode == MODE_CODE_WORKSPACE) {
+            "application/x-code-oss-workspace"
+        } else {
+            "text/plain"
+        }
 
     override fun query(
         uri: Uri,
@@ -83,6 +88,8 @@ internal class DocumentImportTestProvider : ContentProvider() {
                                         }
                                     }
                                 }
+                                MODE_CODE_WORKSPACE ->
+                                    output.write("{\"folders\":[]}\n".toByteArray(StandardCharsets.UTF_8))
                                 else -> output.write(providerContent(fixture.token))
                             }
                         }
@@ -133,7 +140,9 @@ internal class DocumentImportTestProvider : ContentProvider() {
                 columns.map { column ->
                     when (column) {
                         OpenableColumns.DISPLAY_NAME -> fixture.displayName
-                        OpenableColumns.SIZE -> providerContent(fixture.token).size.toLong()
+                        OpenableColumns.SIZE ->
+                            if (fixture.mode == MODE_CODE_WORKSPACE) 15L else
+                                providerContent(fixture.token).size.toLong()
                         else -> null
                     }
                 },
@@ -154,9 +163,11 @@ internal class DocumentImportTestProvider : ContentProvider() {
                 MODE_IGNORE_OPEN -> "Provider-ignore-"
                 MODE_STALL_READ -> "Provider-read-"
                 MODE_PACED_READ -> "Provider-paced-"
+                MODE_CODE_WORKSPACE -> "Provider-"
                 else -> "Provider-"
             }
-        return Fixture(mode, token, "$prefix$token.txt")
+        val extension = if (mode == MODE_CODE_WORKSPACE) ".code-workspace" else ".txt"
+        return Fixture(mode, token, "$prefix$token$extension")
     }
 
     private data class Fixture(
@@ -172,6 +183,7 @@ internal class DocumentImportTestProvider : ContentProvider() {
         private const val MODE_IGNORE_OPEN = "ignore-open"
         private const val MODE_STALL_READ = "stall-read"
         private const val MODE_PACED_READ = "paced-read"
+        private const val MODE_CODE_WORKSPACE = "code-workspace"
         private val MODES =
             setOf(
                 MODE_NORMAL,
@@ -179,6 +191,7 @@ internal class DocumentImportTestProvider : ContentProvider() {
                 MODE_IGNORE_OPEN,
                 MODE_STALL_READ,
                 MODE_PACED_READ,
+                MODE_CODE_WORKSPACE,
             )
         private val TOKEN = Regex("[a-f0-9]{8}")
         private const val STALL_MILLIS = 2_000L

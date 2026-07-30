@@ -21,10 +21,11 @@ manager's ordinary Android app domain, creates its socket in a manager-private
 cache directory, and gains no Android permissions. Other Android UIDs cannot
 reach the socket through the private parent directory.
 
-Launcher authorization A2 carries the registry-derived integration topology.
+Launcher authorization A3 carries the registry-derived integration topology
+alongside the signed launcher MIME declaration.
 Only a current descriptor with verified OpenGL/EGL topology can request the
 bridge. The manager waits for the helper socket and sends its bounded path
-through launch protocol G5; Rust reauthorizes the descriptor, verifies that
+through launch protocol G6; Rust reauthorizes the descriptor, verifies that
 the path is an actual Unix socket, and selects Mesa `virpipe` through
 `GALLIUM_DRIVER` and `VTEST_SOCKET_NAME`. Startup failure selects `llvmpipe`
 with Mesa's explicit software-rendering switch.

@@ -82,6 +82,17 @@ class LauncherActivity :
         val descriptor: ParcelFileDescriptor,
     )
 
+    private data class IncomingDocumentRequest(
+        val uri: Uri,
+        val mimeType: String,
+    )
+
+    private data class PreparedIncomingDocument(
+        val displayName: String,
+        val mimeType: String,
+        val descriptor: ParcelFileDescriptor,
+    )
+
     private data class PendingNotification(
         val id: String,
         val title: String,
@@ -127,6 +138,12 @@ class LauncherActivity :
     private var pendingLinuxClipboardText: String? = null
     private var pendingDocumentRequestId = 0
     private var pendingDocumentOperation = 0
+    private var incomingDocumentRequest: IncomingDocumentRequest? = null
+    private var preparedIncomingDocument: PreparedIncomingDocument? = null
+    private var preparingIncomingDocument = false
+    private var incomingDocumentRejected = false
+    private var incomingDocumentGeneration = 0
+    private var incomingDocumentCancellation: CancellationSignal? = null
     private val activeDirectoryWatchdog =
         AtomicReference<DirectoryProviderWatchdog?>()
     private val directoryStreamActive = AtomicBoolean(false)
@@ -446,6 +463,7 @@ class LauncherActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        acceptIncomingIntent(intent)
         surfaceView = createSurfaceView()
         status =
             TextView(this).apply {
@@ -599,6 +617,24 @@ class LauncherActivity :
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_VIEW || intent.action == Intent.ACTION_SEND) {
+            closeSession()
+            preparedIncomingDocument?.descriptor?.close()
+            preparedIncomingDocument = null
+            preparingIncomingDocument = false
+            acceptIncomingIntent(intent)
+            attempts = 0
+            remoteStatus = STATUS_STARTING
+            if (incomingDocumentRejected) {
+                status.setText(R.string.launcher_document_rejected)
+                status.visibility = View.VISIBLE
+            } else {
+                status.text = getString(R.string.launcher_opening, appLabel())
+                status.visibility = View.VISIBLE
+                openSession()
+            }
+            return
+        }
         if (remoteStatus != STATUS_STOPPED) {
             return
         }
@@ -727,6 +763,11 @@ class LauncherActivity :
         activeDirectoryWatchdog.getAndSet(null)?.close()
         detachSurface()
         closeSession()
+        incomingDocumentCancellation?.cancel()
+        incomingDocumentCancellation = null
+        incomingDocumentGeneration++
+        preparedIncomingDocument?.descriptor?.close()
+        preparedIncomingDocument = null
         remote = null
         if (binding) {
             unbindService(connection)
@@ -1314,6 +1355,15 @@ class LauncherActivity :
 
     private fun openSession() {
         val service = remote ?: return
+        if (incomingDocumentRejected) {
+            status.setText(R.string.launcher_document_rejected)
+            status.visibility = View.VISIBLE
+            return
+        }
+        if (incomingDocumentRequest != null && preparedIncomingDocument == null) {
+            prepareIncomingDocument()
+            return
+        }
         remoteStatus = STATUS_STARTING
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
@@ -1321,6 +1371,13 @@ class LauncherActivity :
             data.writeInterfaceToken(INTERFACE)
             data.writeInt(PROTOCOL_VERSION)
             data.writeStrongBinder(clientToken)
+            val incoming = preparedIncomingDocument
+            data.writeInt(if (incoming == null) 0 else 1)
+            if (incoming != null) {
+                data.writeString(incoming.displayName)
+                data.writeString(incoming.mimeType)
+                incoming.descriptor.writeToParcel(data, 0)
+            }
             if (!service.transact(TRANSACTION_OPEN, data, reply, 0)) {
                 showUnavailable()
                 return
@@ -1328,6 +1385,9 @@ class LauncherActivity :
             reply.readException()
             when (reply.readInt()) {
                 RESULT_OK -> {
+                    preparedIncomingDocument?.descriptor?.close()
+                    preparedIncomingDocument = null
+                    incomingDocumentRequest = null
                     sessionId = reply.readInt()
                     val label = reply.readString().orEmpty().take(256)
                     reply.readInt()
@@ -1362,6 +1422,95 @@ class LauncherActivity :
         } finally {
             reply.recycle()
             data.recycle()
+        }
+    }
+
+    private fun acceptIncomingIntent(value: Intent) {
+        incomingDocumentCancellation?.cancel()
+        incomingDocumentCancellation = null
+        incomingDocumentGeneration++
+        incomingDocumentRejected = false
+        if (value.action != Intent.ACTION_VIEW && value.action != Intent.ACTION_SEND) {
+            incomingDocumentRequest = null
+            return
+        }
+        val declared =
+            applicationMetadata()
+                .getString(MIME_TYPES)
+                ?.takeIf { spec -> spec.startsWith("m:") }
+                ?.drop(2)
+                ?.let(LauncherIntentMimePolicy::parseSpec)
+        val mimeType = value.type.orEmpty()
+        @Suppress("DEPRECATION")
+        val uri =
+            if (value.action == Intent.ACTION_VIEW) {
+                value.data
+            } else {
+                value.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+            }
+        if (
+            declared == null ||
+            uri?.scheme != "content" ||
+            !LauncherIntentMimePolicy.matches(declared, mimeType)
+        ) {
+            incomingDocumentRequest = null
+            incomingDocumentRejected = true
+            return
+        }
+        incomingDocumentRequest = IncomingDocumentRequest(uri, mimeType)
+    }
+
+    private fun prepareIncomingDocument() {
+        val request = incomingDocumentRequest ?: return
+        if (preparingIncomingDocument) return
+        preparingIncomingDocument = true
+        val generation = incomingDocumentGeneration
+        val cancellation = CancellationSignal()
+        incomingDocumentCancellation = cancellation
+        documentHandler.post {
+            val prepared =
+                runCatching {
+                    val providerType = contentResolver.getType(request.uri)
+                    val declared =
+                        applicationMetadata()
+                            .getString(MIME_TYPES)
+                            ?.removePrefix("m:")
+                            ?.let(LauncherIntentMimePolicy::parseSpec)
+                            ?: error("Missing signed MIME policy")
+                    if (
+                        providerType != null &&
+                        !LauncherIntentMimePolicy.matches(declared, providerType)
+                    ) {
+                        error("Provider MIME type is not declared")
+                    }
+                    val name =
+                        queryDocumentName(request.uri)
+                            ?: "Android document"
+                    val descriptor =
+                        contentResolver.openFileDescriptor(request.uri, "r", cancellation)
+                            ?: error("Provider returned no descriptor")
+                    PreparedIncomingDocument(name, request.mimeType, descriptor)
+                }.getOrNull()
+            handler.post {
+                if (
+                    generation != incomingDocumentGeneration ||
+                    incomingDocumentRequest != request
+                ) {
+                    prepared?.descriptor?.close()
+                    return@post
+                }
+                incomingDocumentCancellation = null
+                preparingIncomingDocument = false
+                if (prepared == null || isFinishing || isDestroyed) {
+                    prepared?.descriptor?.close()
+                    incomingDocumentRejected = true
+                    status.setText(R.string.launcher_document_rejected)
+                    status.visibility = View.VISIBLE
+                } else {
+                    preparedIncomingDocument = prepared
+                    openSession()
+                }
+            }
         }
     }
 
@@ -2984,11 +3133,12 @@ class LauncherActivity :
         private const val TAG = "ArchpheneLauncher"
         private const val MANAGER_PACKAGE = "org.archphene.launcher.MANAGER_PACKAGE"
         private const val CAPABILITIES = "org.archphene.launcher.CAPABILITIES"
+        private const val MIME_TYPES = "org.archphene.launcher.MIME_TYPES"
         private const val CAPABILITIES_V4 =
             "c:wayland,input,ime,clipboard,documents,open-uri,notifications"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 9
+        private const val PROTOCOL_VERSION = 10
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2

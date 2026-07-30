@@ -58,6 +58,7 @@ import org.archphene.app.R
 import org.archphene.app.launcher.LauncherApkAssembler
 import org.archphene.app.launcher.LauncherApkRequest
 import org.archphene.app.launcher.LauncherApkSigner
+import org.archphene.app.launcher.LauncherIntentMimePolicy
 import org.archphene.app.launcher.LauncherPackageInstaller
 import org.archphene.app.performance.PerformanceMetrics
 
@@ -157,6 +158,7 @@ internal data class LauncherAuthorization(
     val label: String,
     val terminal: Boolean,
     val integrationTopology: Int,
+    val mimeTypes: List<String>,
 ) {
     val usesGraphicsBridge: Boolean
         get() = integrationTopology and GRAPHICS_BRIDGE_TOPOLOGY != 0
@@ -365,6 +367,7 @@ class ArchpheneRuntimeService : Service() {
             portalBusAddress: String,
             reducedIsolationElectron: Boolean,
             virglSocketPath: String?,
+            launchDocumentPath: String?,
         ): Long =
             this@ArchpheneRuntimeService.openLauncherProcess(
                 androidPackage,
@@ -381,6 +384,7 @@ class ArchpheneRuntimeService : Service() {
                 portalBusAddress,
                 reducedIsolationElectron,
                 virglSocketPath,
+                launchDocumentPath,
             )
 
         internal fun updateGuiColors(
@@ -1340,9 +1344,9 @@ class ArchpheneRuntimeService : Service() {
             .order(ByteOrder.LITTLE_ENDIAN)
     }
     private val aurTransferBuffer = ByteArray(64 * 1024)
-    private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(512)
-    private val launcherAuthorizationOutputBuffer = ByteBuffer.allocateDirect(512)
-    private val launcherAuthorizationOutputBytes = ByteArray(512)
+    private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(3_072)
+    private val launcherAuthorizationOutputBuffer = ByteBuffer.allocateDirect(3_072)
+    private val launcherAuthorizationOutputBytes = ByteArray(3_072)
     private val launcherProcessLogBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.LAUNCHER_PROCESS_LOG_SIZE)
     private val launcherProcessLogBytes = ByteArray(NativeRuntime.LAUNCHER_PROCESS_LOG_SIZE)
@@ -1828,7 +1832,7 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return null
         }
-        val request = "A2\t$androidPackage\t$descriptorIdHex\t$generation\n"
+        val request = "A3\t$androidPackage\t$descriptorIdHex\t$generation\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return null
@@ -1855,14 +1859,16 @@ class ArchpheneRuntimeService : Service() {
                 length,
                 StandardCharsets.UTF_8,
             )
-        val fields = response.removeSuffix("\n").split('\t', limit = 4)
+        val fields = response.removeSuffix("\n").split('\t', limit = 5)
+        val mimeTypes = fields.getOrNull(4)?.let(LauncherIntentMimePolicy::parseSpec)
         if (
-            fields.size != 4 ||
-            fields[0] != "A2" ||
+            fields.size != 5 ||
+            fields[0] != "A3" ||
             fields[1] !in setOf("0", "1") ||
             fields[2].toIntOrNull() !in 0..UShort.MAX_VALUE.toInt() ||
             fields[3].isEmpty() ||
-            fields[3].length > 256
+            fields[3].length > 256 ||
+            mimeTypes == null
         ) {
             return null
         }
@@ -1870,6 +1876,7 @@ class ArchpheneRuntimeService : Service() {
             fields[3],
             fields[1] == "1",
             fields[2].toInt(),
+            mimeTypes,
         )
     }
 
@@ -1889,6 +1896,7 @@ class ArchpheneRuntimeService : Service() {
         portalBusAddress: String,
         reducedIsolationElectron: Boolean,
         virglSocketPath: String?,
+        launchDocumentPath: String?,
     ): Long {
         val activeHandle = readyHandle
         if (
@@ -1918,6 +1926,20 @@ class ArchpheneRuntimeService : Service() {
                             character == '\u0000'
                     }
             } == true ||
+            launchDocumentPath?.let { path ->
+                val prefix = "/home/archphene/Documents/Android/"
+                val name = path.removePrefix(prefix)
+                !path.startsWith(prefix) ||
+                    name.length !in 1..255 ||
+                    name == "." ||
+                    name == ".." ||
+                    name.any { character ->
+                        character == '/' ||
+                            character == '\\' ||
+                            character == '\u0000' ||
+                            character.isISOControl()
+                    }
+            } == true ||
             waylandDisplay.isEmpty() ||
             waylandDisplay.length > 64 ||
             !waylandDisplay.all { character ->
@@ -1931,12 +1953,14 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return 0L
         }
+        val encodedDocumentPath =
+            launchDocumentPath?.toByteArray(StandardCharsets.UTF_8)?.let(::encodeHex) ?: "-"
         val request =
-            "G5\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
+            "G6\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
                 "${if (dark) 1 else 0}\t$fontPercent\t$controlVisualDp\t$controlTargetDp\t" +
                 "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\t" +
                 "$portalBusAddress\t${if (reducedIsolationElectron) 1 else 0}\t" +
-                "${virglSocketPath ?: "-"}\n"
+                "${virglSocketPath ?: "-"}\t$encodedDocumentPath\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return 0L
@@ -1985,6 +2009,17 @@ class ArchpheneRuntimeService : Service() {
             color shr 8 and 0xff,
             color and 0xff,
         )
+
+    private fun encodeHex(value: ByteArray): String {
+        val digits = "0123456789abcdef"
+        return CharArray(value.size * 2).also { output ->
+            for (index in value.indices) {
+                val byte = value[index].toInt() and 0xff
+                output[index * 2] = digits[byte ushr 4]
+                output[index * 2 + 1] = digits[byte and 0x0f]
+            }
+        }.concatToString()
+    }
 
     @Synchronized
     private fun updateGuiColors(
@@ -6028,8 +6063,8 @@ class ArchpheneRuntimeService : Service() {
                 var claimedPackage = ""
                 var claimedGeneration = 0L
                 try {
-                    val output = ByteBuffer.allocateDirect(1024)
-                    val bytes = ByteArray(1024)
+                    val output = ByteBuffer.allocateDirect(4_096)
+                    val bytes = ByteArray(4_096)
                     val removalLength =
                         NativeRuntime.nativeClaimLauncherRemoval(
                             activeHandle,
@@ -6125,13 +6160,16 @@ class ArchpheneRuntimeService : Service() {
                     val fields =
                         String(bytes, 0, length, StandardCharsets.UTF_8)
                             .trimEnd('\n')
-                            .split('\t', limit = 8)
+                            .split('\t', limit = 9)
+                    val mimeTypes =
+                        fields.getOrNull(8)?.let(LauncherIntentMimePolicy::parseSpec)
                     check(
-                        fields.size == 8 &&
-                            fields[0] == "W3" &&
+                        fields.size == 9 &&
+                            fields[0] == "W4" &&
                             LAUNCHER_PACKAGE.matches(fields[1]) &&
                             LAUNCHER_DESCRIPTOR.matches(fields[2]) &&
-                            fields[5] == LauncherApkAssembler.CAPABILITIES_V4,
+                            fields[5] == LauncherApkAssembler.CAPABILITIES_V4 &&
+                            mimeTypes != null,
                     ) {
                         "Invalid native launcher publication"
                     }
@@ -6168,6 +6206,7 @@ class ArchpheneRuntimeService : Service() {
                                 claimedGeneration,
                                 fields[4],
                                 fields[5],
+                                mimeTypes,
                                 iconPng,
                                 iconDigest,
                             ),
