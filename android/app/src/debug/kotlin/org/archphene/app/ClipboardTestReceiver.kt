@@ -15,6 +15,26 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
+        if (!ClipboardTestController.supports(intent.action)) {
+            return
+        }
+        context.startActivity(
+            Intent(context, ClipboardTestActivity::class.java)
+                .setAction(intent.action)
+                .putExtras(intent)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
+        )
+    }
+}
+
+internal object ClipboardTestController {
+    fun supports(action: String?): Boolean =
+        action == ACTION_SET_CLIPBOARD || action == ACTION_RESTORE_CLIPBOARD
+
+    fun handle(
+        context: Context,
+        intent: Intent,
+    ) {
         if (intent.action == ACTION_RESTORE_CLIPBOARD) {
             restoreClipboard(context)
             return
@@ -32,6 +52,16 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
         if (text.length > MAX_TEXT_CHARACTERS) {
             return
         }
+        val encodedHtml = intent.getStringExtra(EXTRA_HTML_BASE64)
+        val html =
+            if (encodedHtml == null) {
+                intent.getStringExtra(EXTRA_HTML)
+            } else {
+                decodeUtf8(encodedHtml) ?: return
+            }
+        if (html != null && html.length > MAX_TEXT_CHARACTERS) {
+            return
+        }
         val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
         if (intent.getBooleanExtra(EXTRA_SAVE_EXISTING, false) && !clipboardSaved) {
             val existing =
@@ -45,7 +75,17 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
             clipboardSaved = true
             Log.i(TAG, "Saved Android clipboard before debug test")
         }
-        clipboard.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text))
+        clipboard.setPrimaryClip(
+            if (html == null) {
+                ClipData.newPlainText(CLIP_LABEL, text)
+            } else {
+                ClipData.newHtmlText(CLIP_LABEL, text, html)
+            },
+        )
+        Log.i(
+            TAG,
+            "Set Android debug clipboard textChars=${text.length} htmlChars=${html?.length ?: 0}",
+        )
     }
 
     private fun restoreClipboard(context: Context) {
@@ -80,22 +120,22 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
         return runCatching { decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString() }.getOrNull()
     }
 
-    private companion object {
-        private const val ACTION_SET_CLIPBOARD =
-            "org.archphene.app.debug.action.SET_TEST_CLIPBOARD"
-        private const val ACTION_RESTORE_CLIPBOARD =
-            "org.archphene.app.debug.action.RESTORE_TEST_CLIPBOARD"
-        private const val EXTRA_TEXT = "text"
-        private const val EXTRA_TEXT_BASE64 = "text_base64"
-        private const val EXTRA_SAVE_EXISTING = "save_existing"
-        private const val MAX_TEXT_CHARACTERS = 2 * 1024
-        private const val MAX_TEXT_BYTES = 8 * 1024
-        private const val MAX_BASE64_CHARACTERS = 12 * 1024
-        private const val CLIP_LABEL = "Archphene debug test"
-        private const val TAG = "ArchpheneClipboardProbe"
-        private var savedClipboard: SavedClipboard? = null
-        private var clipboardSaved = false
-    }
+    private const val ACTION_SET_CLIPBOARD =
+        "org.archphene.app.debug.action.SET_TEST_CLIPBOARD"
+    private const val ACTION_RESTORE_CLIPBOARD =
+        "org.archphene.app.debug.action.RESTORE_TEST_CLIPBOARD"
+    private const val EXTRA_TEXT = "text"
+    private const val EXTRA_TEXT_BASE64 = "text_base64"
+    private const val EXTRA_HTML = "html"
+    private const val EXTRA_HTML_BASE64 = "html_base64"
+    private const val EXTRA_SAVE_EXISTING = "save_existing"
+    private const val MAX_TEXT_CHARACTERS = 2 * 1024
+    private const val MAX_TEXT_BYTES = 8 * 1024
+    private const val MAX_BASE64_CHARACTERS = 12 * 1024
+    private const val CLIP_LABEL = "Archphene debug test"
+    private const val TAG = "ArchpheneClipboardProbe"
+    private var savedClipboard: SavedClipboard? = null
+    private var clipboardSaved = false
 
     private data class SavedClipboard(
         val hadPrimaryClip: Boolean,

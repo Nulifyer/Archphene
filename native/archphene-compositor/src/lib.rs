@@ -494,8 +494,9 @@ pub struct CompositorState {
     selection_source: Option<WlDataSource>,
     clipboard_active: bool,
     android_clipboard_offered: bool,
-    pending_android_paste_fds: VecDeque<File>,
-    pending_linux_copy_fds: VecDeque<File>,
+    android_clipboard_has_html: bool,
+    pending_android_paste_fds: VecDeque<ClipboardTransfer>,
+    pending_linux_copy_fds: VecDeque<ClipboardTransfer>,
     pending_linux_clipboard_clear: bool,
     pending_linux_drag_fds: VecDeque<File>,
     pending_linux_drag_mime_types: VecDeque<String>,
@@ -654,6 +655,26 @@ struct AndroidDragState {
 struct DataOfferData {
     source: ClipboardOfferSource,
     mime_types: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClipboardFormat {
+    PlainText,
+    Html,
+}
+
+impl ClipboardFormat {
+    const fn code(self) -> i32 {
+        match self {
+            Self::PlainText => 1,
+            Self::Html => 2,
+        }
+    }
+}
+
+struct ClipboardTransfer {
+    descriptor: File,
+    format: ClipboardFormat,
 }
 struct TextInputData {
     seat: WlSeat,
@@ -4482,6 +4503,7 @@ fn set_keyboard_focus(state: &mut CompositorState, mut surface: Option<WlSurface
     }
 }
 const TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "text/plain"];
+const HTML_MIME_TYPE: &str = "text/html";
 const URI_LIST_MIME_TYPE: &str = "text/uri-list";
 const ANDROID_DRAG_MIME_TYPES: [&str; 3] =
     [TEXT_MIME_TYPES[0], TEXT_MIME_TYPES[1], URI_LIST_MIME_TYPE];
@@ -4565,11 +4587,21 @@ fn publish_wayland_selection(
     }
 }
 
+fn android_clipboard_mime_types(has_html: bool) -> Vec<String> {
+    let mut mime_types = Vec::with_capacity(TEXT_MIME_TYPES.len() + usize::from(has_html));
+    if has_html {
+        mime_types.push(HTML_MIME_TYPE.to_owned());
+    }
+    mime_types.extend(
+        TEXT_MIME_TYPES
+            .iter()
+            .map(|mime_type| (*mime_type).to_owned()),
+    );
+    mime_types
+}
+
 fn publish_android_selection(state: &mut CompositorState, handle: &DisplayHandle) {
-    let mime_types = TEXT_MIME_TYPES
-        .iter()
-        .map(|mime_type| (*mime_type).to_owned())
-        .collect::<Vec<_>>();
+    let mime_types = android_clipboard_mime_types(state.android_clipboard_has_html);
     let devices = state.data_devices.clone();
     let focused_surface = state.keyboard_focus_surface.clone();
     for device in devices.iter().filter(|device| {
@@ -4605,16 +4637,29 @@ fn sync_focused_selection(state: &mut CompositorState, handle: &DisplayHandle) {
     }
 }
 
-fn source_text_mime(source: &WlDataSource) -> Option<String> {
+fn clipboard_format_for_mime(mime_type: &str) -> Option<ClipboardFormat> {
+    if mime_type == HTML_MIME_TYPE {
+        Some(ClipboardFormat::Html)
+    } else if TEXT_MIME_TYPES.contains(&mime_type) {
+        Some(ClipboardFormat::PlainText)
+    } else {
+        None
+    }
+}
+
+fn source_clipboard_mime(source: &WlDataSource) -> Option<(String, ClipboardFormat)> {
     let source_data = source.data::<DataSourceData>()?;
     let mime_types = source_data
         .mime_types
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    if mime_types.iter().any(|offered| offered == HTML_MIME_TYPE) {
+        return Some((HTML_MIME_TYPE.to_owned(), ClipboardFormat::Html));
+    }
     TEXT_MIME_TYPES
         .iter()
         .find(|candidate| mime_types.iter().any(|offered| offered == **candidate))
-        .map(|mime_type| (*mime_type).to_owned())
+        .map(|mime_type| ((*mime_type).to_owned(), ClipboardFormat::PlainText))
 }
 
 fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
@@ -4624,14 +4669,17 @@ fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
     {
         return;
     }
-    let Some(mime_type) = source_text_mime(source) else {
+    let Some((mime_type, format)) = source_clipboard_mime(source) else {
         return;
     };
     let Ok((read_end, write_end)) = create_cloexec_pipe() else {
         return;
     };
     source.send(mime_type, write_end.as_fd());
-    state.pending_linux_copy_fds.push_back(read_end);
+    state.pending_linux_copy_fds.push_back(ClipboardTransfer {
+        descriptor: read_end,
+        format,
+    });
 }
 
 fn source_drag_mime(source: &WlDataSource) -> Option<String> {
@@ -6035,10 +6083,7 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
                         handle,
                         &device,
                         ClipboardOfferSource::AndroidClipboard,
-                        TEXT_MIME_TYPES
-                            .iter()
-                            .map(|mime_type| (*mime_type).to_owned())
-                            .collect(),
+                        android_clipboard_mime_types(state.android_clipboard_has_html),
                     );
                 }
             }
@@ -6146,6 +6191,7 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
                     }
                 }
                 state.android_clipboard_offered = false;
+                state.android_clipboard_has_html = false;
                 state.pending_android_paste_fds.clear();
                 state.pending_linux_copy_fds.clear();
                 state.pending_linux_clipboard_clear = false;
@@ -6234,8 +6280,15 @@ impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
                         source.send(mime_type, fd.as_fd());
                     }
                     ClipboardOfferSource::AndroidClipboard if state.clipboard_active => {
-                        if state.pending_android_paste_fds.len() < MAX_PENDING_CLIPBOARD_TRANSFERS {
-                            state.pending_android_paste_fds.push_back(File::from(fd));
+                        if state.pending_android_paste_fds.len() < MAX_PENDING_CLIPBOARD_TRANSFERS
+                            && let Some(format) = clipboard_format_for_mime(&mime_type)
+                        {
+                            state
+                                .pending_android_paste_fds
+                                .push_back(ClipboardTransfer {
+                                    descriptor: File::from(fd),
+                                    format,
+                                });
                         }
                     }
                     ClipboardOfferSource::AndroidDrag(payloads) => {
@@ -10565,6 +10618,7 @@ impl CompositorCore {
             }
             if self.state.android_clipboard_offered {
                 self.state.android_clipboard_offered = false;
+                self.state.android_clipboard_has_html = false;
                 for device in self
                     .state
                     .data_devices
@@ -10578,7 +10632,7 @@ impl CompositorCore {
         u32::from(active)
     }
 
-    pub fn offer_android_clipboard_text(&mut self) -> u32 {
+    pub fn offer_android_clipboard(&mut self, has_html: bool) -> u32 {
         if !self.state.clipboard_active {
             return 0;
         }
@@ -10589,6 +10643,7 @@ impl CompositorCore {
         }
         self.state.pending_android_paste_fds.clear();
         self.state.android_clipboard_offered = true;
+        self.state.android_clipboard_has_html = has_html;
         self.state.pending_linux_clipboard_clear = false;
         let handle = self.display.handle();
         publish_android_selection(&mut self.state, &handle);
@@ -10602,6 +10657,10 @@ impl CompositorCore {
         .unwrap_or(u32::MAX)
     }
 
+    pub fn offer_android_clipboard_text(&mut self) -> u32 {
+        self.offer_android_clipboard(false)
+    }
+
     pub fn clear_android_clipboard(&mut self) -> u32 {
         let mut changed = false;
         if let Some(previous) = self.state.selection_source.take()
@@ -10612,6 +10671,7 @@ impl CompositorCore {
         }
         changed |= self.state.android_clipboard_offered;
         self.state.android_clipboard_offered = false;
+        self.state.android_clipboard_has_html = false;
         self.state.pending_android_paste_fds.clear();
         self.state.pending_linux_clipboard_clear = false;
         for device in self
@@ -10629,14 +10689,28 @@ impl CompositorCore {
         self.state
             .pending_android_paste_fds
             .pop_front()
-            .map_or(-1, IntoRawFd::into_raw_fd)
+            .map_or(-1, |transfer| transfer.descriptor.into_raw_fd())
+    }
+
+    pub fn android_paste_format(&self) -> i32 {
+        self.state
+            .pending_android_paste_fds
+            .front()
+            .map_or(0, |transfer| transfer.format.code())
     }
 
     pub fn take_linux_copy_fd(&mut self) -> RawFd {
         self.state
             .pending_linux_copy_fds
             .pop_front()
-            .map_or(-1, IntoRawFd::into_raw_fd)
+            .map_or(-1, |transfer| transfer.descriptor.into_raw_fd())
+    }
+
+    pub fn linux_copy_format(&self) -> i32 {
+        self.state
+            .pending_linux_copy_fds
+            .front()
+            .map_or(0, |transfer| transfer.format.code())
     }
 
     pub fn take_linux_clipboard_clear(&mut self) -> bool {
@@ -14759,11 +14833,12 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _environment: *mut std::ffi::c_void,
     _owner: *mut std::ffi::c_void,
     handle: i64,
+    has_html: jboolean,
 ) -> i32 {
     let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
-    i32::try_from(compositor.core.offer_android_clipboard_text()).unwrap_or(i32::MAX)
+    i32::try_from(compositor.core.offer_android_clipboard(has_html != 0)).unwrap_or(i32::MAX)
 }
 
 #[cfg(target_os = "android")]
@@ -14794,6 +14869,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeAndroidPasteFormat(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    compositor.core.android_paste_format()
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeTakeLinuxCopyFd(
     _environment: *mut std::ffi::c_void,
     _owner: *mut std::ffi::c_void,
@@ -14803,6 +14891,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return -1;
     };
     compositor.core.take_linux_copy_fd()
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeLinuxCopyFormat(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    compositor.core.linux_copy_format()
 }
 
 #[cfg(target_os = "android")]
@@ -18268,6 +18369,29 @@ mod tests {
             .read_exact(&mut received)
             .expect("read written text");
         assert_eq!(&received, b"android");
+    }
+
+    #[test]
+    fn clipboard_mime_contract_prefers_html_and_preserves_plain_fallbacks() {
+        assert_eq!(
+            clipboard_format_for_mime(HTML_MIME_TYPE),
+            Some(ClipboardFormat::Html),
+        );
+        for mime_type in TEXT_MIME_TYPES {
+            assert_eq!(
+                clipboard_format_for_mime(mime_type),
+                Some(ClipboardFormat::PlainText),
+            );
+        }
+        assert_eq!(clipboard_format_for_mime("image/png"), None);
+        assert_eq!(
+            android_clipboard_mime_types(false),
+            vec![TEXT_MIME_TYPES[0], TEXT_MIME_TYPES[1]],
+        );
+        assert_eq!(
+            android_clipboard_mime_types(true),
+            vec![HTML_MIME_TYPE, TEXT_MIME_TYPES[0], TEXT_MIME_TYPES[1]],
+        );
     }
 
     #[test]

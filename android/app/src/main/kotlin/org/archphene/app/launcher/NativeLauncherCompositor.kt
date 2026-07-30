@@ -95,12 +95,12 @@ internal class NativeLauncherCompositor(
         }
     }
 
-    fun offerAndroidClipboardText(): Int {
+    fun offerAndroidClipboardText(hasHtml: Boolean): Int {
         val current = ownerHandle()
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeOfferAndroidClipboardText(current).also {
+            nativeOfferAndroidClipboardText(current, hasHtml).also {
                 PerformanceMetrics.recordCompositorJni()
             }
         }
@@ -128,12 +128,34 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun androidPasteFormat(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeAndroidPasteFormat(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
+        }
+    }
+
     fun takeLinuxCopyFd(): Int {
         val current = ownerHandle()
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
             nativeTakeLinuxCopyFd(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
+        }
+    }
+
+    fun linuxCopyFormat(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeLinuxCopyFormat(current).also {
                 PerformanceMetrics.recordCompositorJni()
             }
         }
@@ -429,13 +451,20 @@ internal class NativeLauncherCompositor(
         active: Boolean,
     )
 
-    private external fun nativeOfferAndroidClipboardText(handle: Long): Int
+    private external fun nativeOfferAndroidClipboardText(
+        handle: Long,
+        hasHtml: Boolean,
+    ): Int
 
     private external fun nativeClearAndroidClipboard(handle: Long): Int
 
     private external fun nativeTakeAndroidPasteFd(handle: Long): Int
 
+    private external fun nativeAndroidPasteFormat(handle: Long): Int
+
     private external fun nativeTakeLinuxCopyFd(handle: Long): Int
+
+    private external fun nativeLinuxCopyFormat(handle: Long): Int
 
     private external fun nativeTakeLinuxClipboardClear(handle: Long): Boolean
 
@@ -533,6 +562,8 @@ internal class NativeLauncherCompositor(
         const val FLAG_LINUX_CLIPBOARD_CLEAR = 1 shl 3
         const val FLAG_LINUX_COPY_PENDING = 1 shl 4
         const val FLAG_ANDROID_PASTE_PENDING = 1 shl 5
+        const val CLIPBOARD_FORMAT_PLAIN_TEXT = 1
+        const val CLIPBOARD_FORMAT_HTML = 2
         const val FLAG_IME_CHANGED = 1 shl 6
         const val FLAG_POINTER_CAPTURE_CHANGED = 1 shl 7
         const val FLAG_CURSOR_CHANGED = 1 shl 8

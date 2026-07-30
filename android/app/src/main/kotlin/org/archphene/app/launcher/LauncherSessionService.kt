@@ -29,6 +29,7 @@ import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.SystemClock
+import android.text.Html
 import android.util.Base64
 import android.util.Log
 import android.view.Surface
@@ -100,6 +101,20 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private class ClipboardPayload(
+        val plainText: ByteArray,
+        val html: ByteArray?,
+    ) {
+        fun contentEquals(other: ClipboardPayload?): Boolean =
+            other != null &&
+                plainText.contentEquals(other.plainText) &&
+                when {
+                    html == null -> other.html == null
+                    other.html == null -> false
+                    else -> html.contentEquals(other.html)
+                }
+    }
+
     private class Session(
         val id: Int,
         val uid: Int,
@@ -152,7 +167,8 @@ class LauncherSessionService : Service() {
         var inputCount = 0
         var inputPosted = false
         var inputDrain: Runnable? = null
-        var androidClipboard: ByteArray? = null
+        var androidClipboard: ClipboardPayload? = null
+        var offeredAndroidClipboard: ClipboardPayload? = null
         val clipboardReadBuffer = ByteBuffer.allocateDirect(MAX_CLIPBOARD_BYTES)
         val clipboardWriteBuffer = ByteBuffer.allocateDirect(MAX_CLIPBOARD_BYTES)
         var linuxCopyInFlight = false
@@ -679,11 +695,17 @@ class LauncherSessionService : Service() {
                     val sessionId = data.readInt()
                     val present = data.readInt()
                     val text = if (present == 1) data.readString() else null
+                    val htmlPresent = if (present == 1) data.readInt() else 0
+                    val html = if (htmlPresent == 1) data.readString() else null
                     if (
                         version != PROTOCOL_VERSION ||
                         sessionId <= 0 ||
                         present !in 0..1 ||
+                        htmlPresent !in 0..1 ||
                         (present == 1 && (text == null || text.length > MAX_CLIPBOARD_UTF16)) ||
+                        (present == 0 && htmlPresent != 0) ||
+                        (htmlPresent == 1 &&
+                            (html == null || html.length > MAX_CLIPBOARD_UTF16)) ||
                         data.dataAvail() != 0
                     ) {
                         return@runCatching RESULT_INVALID
@@ -692,6 +714,7 @@ class LauncherSessionService : Service() {
                         Binder.getCallingUid(),
                         sessionId,
                         text,
+                        html,
                     )
                 }.getOrElse { error ->
                     Log.w(TAG, "Rejected malformed launcher clipboard", error)
@@ -1190,29 +1213,34 @@ class LauncherSessionService : Service() {
         callingUid: Int,
         sessionId: Int,
         text: String?,
+        html: String?,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
         if (session.surface == null) {
             return RESULT_NOT_READY
         }
         val bytes = text?.toByteArray(StandardCharsets.UTF_8)
-        if (bytes != null && bytes.size > MAX_CLIPBOARD_BYTES) {
+        val htmlBytes = html?.toByteArray(StandardCharsets.UTF_8)
+        if (
+            (bytes != null && bytes.size > MAX_CLIPBOARD_BYTES) ||
+            (htmlBytes != null && htmlBytes.size > MAX_CLIPBOARD_BYTES) ||
+            (bytes == null && htmlBytes != null)
+        ) {
             return RESULT_INVALID
         }
+        val payload = bytes?.let { ClipboardPayload(it, htmlBytes) }
         val previous = session.androidClipboard
-        if (
-            (previous == null && bytes == null) ||
-            (previous != null && bytes != null && previous.contentEquals(bytes))
-        ) {
+        if ((previous == null && payload == null) || payload?.contentEquals(previous) == true) {
             return RESULT_OK
         }
-        session.androidClipboard = bytes
+        session.androidClipboard = payload
         if (!session.clipboardLogged) {
             session.clipboardLogged = true
             Log.i(
                 TAG,
-                "Accepted first bounded Android clipboard session=$sessionId " +
-                    "present=${bytes != null} bytes=${bytes?.size ?: 0}",
+                    "Accepted first bounded Android clipboard session=$sessionId " +
+                    "present=${payload != null} textBytes=${bytes?.size ?: 0} " +
+                    "htmlBytes=${htmlBytes?.size ?: 0}",
             )
         }
         surfaceHandler.post {
@@ -1221,10 +1249,11 @@ class LauncherSessionService : Service() {
             }
             val compositor = session.compositor ?: return@post
             session.clipboardRevision = session.clipboardRevision.inc().coerceAtLeast(1)
+            session.offeredAndroidClipboard = payload
             if (bytes == null) {
                 compositor.clearAndroidClipboard()
             } else {
-                compositor.offerAndroidClipboardText()
+                compositor.offerAndroidClipboardText(htmlBytes != null)
             }
         }
         return RESULT_OK
@@ -1870,10 +1899,11 @@ class LauncherSessionService : Service() {
             compositor.setClipboardActive(true)
             session.clipboardRevision = session.clipboardRevision.inc().coerceAtLeast(1)
             val clipboard = synchronized(this) { session.androidClipboard }
+            session.offeredAndroidClipboard = clipboard
             if (clipboard == null) {
                 compositor.clearAndroidClipboard()
             } else {
-                compositor.offerAndroidClipboardText()
+                compositor.offerAndroidClipboardText(clipboard.html != null)
             }
             if (!session.pumpStarted) {
                 session.pumpStarted = true
@@ -2689,14 +2719,20 @@ class LauncherSessionService : Service() {
         ) {
             val revision = session.clipboardRevision.inc().coerceAtLeast(1)
             session.clipboardRevision = revision
-            publishLinuxClipboard(session, compositor, revision, null)
+            publishLinuxClipboard(session, compositor, revision, null, null)
         }
         if (
             !session.linuxCopyInFlight &&
             events and NativeLauncherCompositor.FLAG_LINUX_COPY_PENDING != 0
         ) {
+            val format = compositor.linuxCopyFormat()
             val descriptor = compositor.takeLinuxCopyFd()
-            if (descriptor >= 0) {
+            if (
+                descriptor >= 0 &&
+                format in
+                    NativeLauncherCompositor.CLIPBOARD_FORMAT_PLAIN_TEXT..
+                    NativeLauncherCompositor.CLIPBOARD_FORMAT_HTML
+            ) {
                 val revision = session.clipboardRevision.inc().coerceAtLeast(1)
                 session.clipboardRevision = revision
                 session.linuxCopyInFlight = true
@@ -2710,7 +2746,7 @@ class LauncherSessionService : Service() {
                             CLIPBOARD_IO_TIMEOUT_MILLIS,
                         )
                     val transferThread = Thread.currentThread().name
-                    val text =
+                    val content =
                         if (length >= 0) {
                             session.clipboardReadBuffer.position(0)
                             ByteArray(length)
@@ -2726,7 +2762,7 @@ class LauncherSessionService : Service() {
                                 TAG,
                                 "Linux clipboard read failed session=${session.id} result=$length",
                             )
-                        } else if (text == null) {
+                        } else if (content == null) {
                             Log.w(TAG, "Rejected invalid Linux clipboard text session=${session.id}")
                         } else {
                             if (!session.linuxCopyLogged) {
@@ -2734,10 +2770,34 @@ class LauncherSessionService : Service() {
                                 Log.i(
                                     TAG,
                                     "Read first Linux clipboard transfer session=${session.id} " +
-                                        "bytes=$length on $transferThread",
+                                        "format=$format bytes=$length on $transferThread",
                                 )
                             }
-                            publishLinuxClipboard(session, compositor, revision, text)
+                            if (format == NativeLauncherCompositor.CLIPBOARD_FORMAT_HTML) {
+                                val plainText = plainTextFromHtml(content)
+                                if (plainText == null) {
+                                    Log.w(
+                                        TAG,
+                                        "Rejected Linux HTML clipboard fallback session=${session.id}",
+                                    )
+                                } else {
+                                    publishLinuxClipboard(
+                                        session,
+                                        compositor,
+                                        revision,
+                                        plainText,
+                                        content,
+                                    )
+                                }
+                            } else {
+                                publishLinuxClipboard(
+                                    session,
+                                    compositor,
+                                    revision,
+                                    content,
+                                    null,
+                                )
+                            }
                         }
                     }
                 }
@@ -2748,12 +2808,20 @@ class LauncherSessionService : Service() {
             !session.androidPasteInFlight &&
             events and NativeLauncherCompositor.FLAG_ANDROID_PASTE_PENDING != 0
         ) {
-            val clipboard = synchronized(this) { session.androidClipboard }
+            val clipboard = session.offeredAndroidClipboard
             if (clipboard != null) {
+                val format = compositor.androidPasteFormat()
                 val descriptor = compositor.takeAndroidPasteFd()
-                if (descriptor >= 0) {
+                val bytes =
+                    when (format) {
+                        NativeLauncherCompositor.CLIPBOARD_FORMAT_PLAIN_TEXT ->
+                            clipboard.plainText
+                        NativeLauncherCompositor.CLIPBOARD_FORMAT_HTML -> clipboard.html
+                        else -> null
+                    }
+                if (descriptor >= 0 && bytes != null) {
                     session.clipboardWriteBuffer.clear()
-                    session.clipboardWriteBuffer.put(clipboard)
+                    session.clipboardWriteBuffer.put(bytes)
                     session.clipboardWriteBuffer.position(0)
                     session.androidPasteInFlight = true
                     clipboardHandler.post {
@@ -2761,13 +2829,13 @@ class LauncherSessionService : Service() {
                             compositor.writeClipboardFd(
                                 descriptor,
                                 session.clipboardWriteBuffer,
-                                clipboard.size,
+                                bytes.size,
                                 CLIPBOARD_IO_TIMEOUT_MILLIS,
                             )
                         val transferThread = Thread.currentThread().name
                         surfaceHandler.post {
                             session.androidPasteInFlight = false
-                            if (result != clipboard.size) {
+                            if (result != bytes.size) {
                                 Log.w(
                                     TAG,
                                     "Android clipboard write failed session=${session.id} " +
@@ -2778,7 +2846,7 @@ class LauncherSessionService : Service() {
                                 Log.i(
                                     TAG,
                                     "Wrote first Android clipboard transfer session=${session.id} " +
-                                        "bytes=$result on $transferThread",
+                                        "format=$format bytes=$result on $transferThread",
                                 )
                             }
                         }
@@ -2878,13 +2946,34 @@ class LauncherSessionService : Service() {
             text.takeIf { it.length <= MAX_CLIPBOARD_UTF16 }
         }.getOrNull()
 
+    private fun plainTextFromHtml(html: String): String? =
+        runCatching {
+            Html
+                .fromHtml(html, Html.FROM_HTML_MODE_LEGACY)
+                .toString()
+                .takeIf {
+                    it.length <= MAX_CLIPBOARD_UTF16 &&
+                        it.toByteArray(StandardCharsets.UTF_8).size <= MAX_CLIPBOARD_BYTES
+                }
+        }.getOrNull()
+
     private fun publishLinuxClipboard(
         session: Session,
         compositor: NativeLauncherCompositor,
         revision: Int,
         text: String?,
+        html: String?,
     ) {
         val bytes = text?.toByteArray(StandardCharsets.UTF_8)
+        val htmlBytes = html?.toByteArray(StandardCharsets.UTF_8)
+        if (
+            (bytes != null && bytes.size > MAX_CLIPBOARD_BYTES) ||
+            (htmlBytes != null && htmlBytes.size > MAX_CLIPBOARD_BYTES) ||
+            (bytes == null && htmlBytes != null)
+        ) {
+            return
+        }
+        val payload = bytes?.let { ClipboardPayload(it, htmlBytes) }
         val current =
             synchronized(this) {
                 if (
@@ -2895,7 +2984,7 @@ class LauncherSessionService : Service() {
                 ) {
                     false
                 } else {
-                    session.androidClipboard = bytes
+                    session.androidClipboard = payload
                     true
                 }
             }
@@ -2903,9 +2992,10 @@ class LauncherSessionService : Service() {
             Log.i(
                 TAG,
                 "Accepted bounded Linux clipboard session=${session.id} " +
-                    "present=${bytes != null} bytes=${bytes?.size ?: 0}",
+                    "present=${payload != null} textBytes=${bytes?.size ?: 0} " +
+                    "htmlBytes=${htmlBytes?.size ?: 0}",
             )
-            notifyClipboard(session, text)
+            notifyClipboard(session, text, html)
         }
     }
 
@@ -3075,8 +3165,14 @@ class LauncherSessionService : Service() {
     private fun notifyClipboard(
         session: Session,
         text: String?,
+        html: String?,
     ) {
-        if (!session.active || (text != null && text.length > MAX_CLIPBOARD_UTF16)) {
+        if (
+            !session.active ||
+            (text != null && text.length > MAX_CLIPBOARD_UTF16) ||
+            (html != null && html.length > MAX_CLIPBOARD_UTF16) ||
+            (text == null && html != null)
+        ) {
             return
         }
         val data = Parcel.obtain()
@@ -3087,6 +3183,10 @@ class LauncherSessionService : Service() {
             data.writeInt(if (text == null) 0 else 1)
             if (text != null) {
                 data.writeString(text)
+                data.writeInt(if (html == null) 0 else 1)
+                if (html != null) {
+                    data.writeString(html)
+                }
             }
             session.clientToken.transact(CALLBACK_CLIPBOARD, data, null, IBinder.FLAG_ONEWAY)
         } catch (error: RemoteException) {
@@ -4096,7 +4196,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 15
+        private const val PROTOCOL_VERSION = 16
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2

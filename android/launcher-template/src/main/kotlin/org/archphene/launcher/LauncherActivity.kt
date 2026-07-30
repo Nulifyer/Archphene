@@ -184,6 +184,7 @@ class LauncherActivity :
         }
     private var hasPendingLinuxClipboard = false
     private var pendingLinuxClipboardText: String? = null
+    private var pendingLinuxClipboardHtml: String? = null
     private var pendingDocumentRequestId = 0
     private var pendingDocumentOperation = 0
     private var incomingDocumentRequest: IncomingDocumentRequest? = null
@@ -218,6 +219,12 @@ class LauncherActivity :
         ClipboardManager.OnPrimaryClipChangedListener {
             if (hasWindowFocus()) {
                 submitAndroidClipboard()
+            }
+        }
+    private val clipboardRetry =
+        Runnable {
+            if (hasWindowFocus()) {
+                submitAndroidClipboard(retryOnUnavailable = false)
             }
         }
     private val clientToken =
@@ -265,15 +272,21 @@ class LauncherActivity :
                         CALLBACK_CLIPBOARD -> {
                             val present = data.readInt()
                             val text = if (present == 1) data.readString() else null
+                            val htmlPresent = if (present == 1) data.readInt() else 0
+                            val html = if (htmlPresent == 1) data.readString() else null
                             if (
                                 present !in 0..1 ||
+                                htmlPresent !in 0..1 ||
                                 (present == 1 &&
                                     (text == null || text.length > MAX_CLIPBOARD_UTF16)) ||
+                                (present == 0 && htmlPresent != 0) ||
+                                (htmlPresent == 1 &&
+                                    (html == null || html.length > MAX_CLIPBOARD_UTF16)) ||
                                 data.dataAvail() != 0
                             ) {
                                 return@runCatching false
                             }
-                            handler.post { applyLinuxClipboard(text) }
+                            handler.post { applyLinuxClipboard(text, html) }
                             true
                         }
                         CALLBACK_IME_STATE -> {
@@ -726,6 +739,7 @@ class LauncherActivity :
                 softImeRequested = false
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
+                pendingLinuxClipboardHtml = null
                 pendingDocumentRequestId = 0
                 pendingDocumentOperation = 0
                 linuxAppearanceDark = null
@@ -1044,6 +1058,7 @@ class LauncherActivity :
         softImeRequested = false
         hasPendingLinuxClipboard = false
         pendingLinuxClipboardText = null
+        pendingLinuxClipboardHtml = null
         applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
         if (binding) {
             runCatching { unbindService(connection) }
@@ -1276,7 +1291,8 @@ class LauncherActivity :
             }
             startClipboardListening()
             if (!applyPendingLinuxClipboard()) {
-                submitAndroidClipboard()
+                handler.removeCallbacks(clipboardRetry)
+                handler.postDelayed(clipboardRetry, CLIPBOARD_FOCUS_RETRY_MILLIS)
             }
             if (imeState.active && softImeRequested) {
                 showIme(restart = true)
@@ -2340,13 +2356,14 @@ class LauncherActivity :
     }
 
     private fun stopClipboardListening() {
+        handler.removeCallbacks(clipboardRetry)
         if (clipboardListening) {
             clipboardManager.removePrimaryClipChangedListener(clipboardListener)
             clipboardListening = false
         }
     }
 
-    private fun submitAndroidClipboard() {
+    private fun submitAndroidClipboard(retryOnUnavailable: Boolean = true) {
         val service = remote ?: return
         val activeSession = sessionId
         if (activeSession <= 0 || !hasWindowFocus()) {
@@ -2356,19 +2373,34 @@ class LauncherActivity :
             runCatching { clipboardManager.primaryClip }
                 .getOrElse {
                     Log.w(TAG, "Android clipboard is unavailable while launcher is focused", it)
+                    if (retryOnUnavailable && hasWindowFocus()) {
+                        handler.removeCallbacks(clipboardRetry)
+                        handler.postDelayed(clipboardRetry, CLIPBOARD_FOCUS_RETRY_MILLIS)
+                    }
                     return
                 }
-        val text =
+        val item =
             if (clip != null && clip.itemCount > 0) {
-                clip.getItemAt(0).text?.toString()
+                clip.getItemAt(0)
             } else {
                 null
             }
+        val text = item?.text?.toString()
+        val html = item?.htmlText
         val boundedText =
             if (text == null || text.length <= MAX_CLIPBOARD_UTF16) {
                 text
             } else {
                 Log.w(TAG, "Android clipboard text exceeds launcher limit")
+                null
+            }
+        val boundedHtml =
+            if (boundedText != null && html != null && html.length <= MAX_CLIPBOARD_UTF16) {
+                html
+            } else {
+                if (html != null && html.length > MAX_CLIPBOARD_UTF16) {
+                    Log.w(TAG, "Android clipboard HTML exceeds launcher limit")
+                }
                 null
             }
         val data = Parcel.obtain()
@@ -2380,6 +2412,10 @@ class LauncherActivity :
             data.writeInt(if (boundedText == null) 0 else 1)
             if (boundedText != null) {
                 data.writeString(boundedText)
+                data.writeInt(if (boundedHtml == null) 0 else 1)
+                if (boundedHtml != null) {
+                    data.writeString(boundedHtml)
+                }
             }
             if (service.transact(TRANSACTION_CLIPBOARD, data, reply, 0)) {
                 reply.readException()
@@ -2396,13 +2432,17 @@ class LauncherActivity :
         }
     }
 
-    private fun applyLinuxClipboard(text: String?) {
+    private fun applyLinuxClipboard(
+        text: String?,
+        html: String?,
+    ) {
         if (!hasWindowFocus()) {
             hasPendingLinuxClipboard = true
             pendingLinuxClipboardText = text
+            pendingLinuxClipboardHtml = html
             return
         }
-        publishLinuxClipboard(text)
+        publishLinuxClipboard(text, html)
     }
 
     private fun applyPendingLinuxClipboard(): Boolean {
@@ -2410,16 +2450,23 @@ class LauncherActivity :
             return false
         }
         val text = pendingLinuxClipboardText
+        val html = pendingLinuxClipboardHtml
         hasPendingLinuxClipboard = false
         pendingLinuxClipboardText = null
-        publishLinuxClipboard(text)
+        pendingLinuxClipboardHtml = null
+        publishLinuxClipboard(text, html)
         return true
     }
 
-    private fun publishLinuxClipboard(text: String?) {
+    private fun publishLinuxClipboard(
+        text: String?,
+        html: String?,
+    ) {
         runCatching {
             if (text == null) {
                 clipboardManager.clearPrimaryClip()
+            } else if (html != null) {
+                clipboardManager.setPrimaryClip(ClipData.newHtmlText(appLabel(), text, html))
             } else {
                 clipboardManager.setPrimaryClip(ClipData.newPlainText(appLabel(), text))
             }
@@ -4236,7 +4283,7 @@ class LauncherActivity :
             )
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 15
+        private const val PROTOCOL_VERSION = 16
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -4360,6 +4407,7 @@ class LauncherActivity :
         private const val RELATIVE_FIXED_SCALE = 1000f
         private const val MAX_RELATIVE_PIXELS = 16_384f
         private const val MAX_CLIPBOARD_UTF16 = 16_384
+        private const val CLIPBOARD_FOCUS_RETRY_MILLIS = 150L
         private const val MAX_IME_UTF16 = 4_096
         private const val MAX_IME_BYTES = 16_384
         // Activity results retain only the low 16 request-code bits on some
