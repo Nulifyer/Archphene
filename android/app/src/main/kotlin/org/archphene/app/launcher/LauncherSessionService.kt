@@ -1360,6 +1360,67 @@ class LauncherSessionService : Service() {
         return LauncherSessionDebugResult(true, activeSession.id, "accepted")
     }
 
+    @Synchronized
+    internal fun debugPrintPdf(
+        androidPackage: String,
+        title: String,
+        payload: ByteArray,
+        nonRegular: Boolean,
+    ): LauncherSessionDebugResult {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return LauncherSessionDebugResult(false, 0, "release-build")
+        }
+        if (
+            !isValidLauncherPackage(androidPackage) ||
+            title.isBlank() ||
+            title.length > MAX_PRINT_TITLE_UTF16 ||
+            title.toByteArray(StandardCharsets.UTF_8).size > MAX_PRINT_TITLE_BYTES ||
+            payload.size > MAX_DEBUG_DOCUMENT_BYTES
+        ) {
+            return LauncherSessionDebugResult(false, 0, "invalid-print")
+        }
+        var session: Session? = null
+        var matching = 0
+        for (candidate in sessions.values) {
+            if (candidate.active && candidate.identity.androidPackage == androidPackage) {
+                session = candidate
+                matching++
+            }
+        }
+        if (matching != 1) {
+            return LauncherSessionDebugResult(
+                false,
+                0,
+                "active-session-count-$matching",
+            )
+        }
+        val activeSession = checkNotNull(session)
+        if (
+            activeSession.surface == null ||
+            activeSession.authorization.bridgeCapabilities and BRIDGE_PRINTING == 0
+        ) {
+            return LauncherSessionDebugResult(false, activeSession.id, "printing-not-ready")
+        }
+        val bridge =
+            activeSession.portalBridge
+                ?: return LauncherSessionDebugResult(
+                    false,
+                    activeSession.id,
+                    "portal-not-ready",
+                )
+        val response =
+            runCatching { bridge.debugPrintPdf(title, payload, nonRegular) }
+                .getOrElse { error ->
+                    Log.e(TAG, "Debug print probe failed session=${activeSession.id}", error)
+                    return LauncherSessionDebugResult(
+                        false,
+                        activeSession.id,
+                        "probe-failed",
+                    )
+                }
+        return LauncherSessionDebugResult(response == "OK", activeSession.id, response)
+    }
+
     private fun isValidLauncherPackage(androidPackage: String): Boolean {
         if (
             androidPackage.length != 53 ||
@@ -1675,6 +1736,11 @@ class LauncherSessionService : Service() {
                                 "",
                                 "",
                             )
+                        },
+                        printingEnabled =
+                            session.authorization.bridgeCapabilities and BRIDGE_PRINTING != 0,
+                        requestPrint = { title, descriptor ->
+                            notifyPrintPdf(session, title, descriptor)
                         },
                         importDirectory = { displayName, descriptor ->
                             runtime.importPortalFolder(displayName, descriptor)
@@ -2833,6 +2899,51 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyPrintPdf(
+        session: Session,
+        title: String,
+        descriptor: ParcelFileDescriptor,
+    ): Boolean {
+        if (
+            !session.active ||
+            session.authorization.bridgeCapabilities and BRIDGE_PRINTING == 0 ||
+            title.isBlank() ||
+            title.length > MAX_PRINT_TITLE_UTF16 ||
+            title.toByteArray(StandardCharsets.UTF_8).size > MAX_PRINT_TITLE_BYTES ||
+            title.any { character -> character.isISOControl() }
+        ) {
+            return false
+        }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeString(title)
+            descriptor.writeToParcel(data, 0)
+            if (
+                !session.clientToken.transact(
+                    CALLBACK_PRINT_PDF,
+                    data,
+                    reply,
+                    0,
+                )
+            ) {
+                false
+            } else {
+                reply.readException()
+                reply.readInt() == RESULT_OK && reply.dataAvail() == 0
+            }
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver Linux print request session=${session.id}", error)
+            false
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
     private fun writeCursorCallbackHeader(
         data: Parcel,
         session: Session,
@@ -3068,7 +3179,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 10
+        private const val PROTOCOL_VERSION = 11
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3086,9 +3197,13 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_CURSOR = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val CALLBACK_NOTIFICATION = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val CALLBACK_PRINT_PDF = IBinder.FIRST_CALL_TRANSACTION + 8
+        private const val BRIDGE_PRINTING = 1 shl 1
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val MAX_SESSIONS = 16
+        private const val MAX_PRINT_TITLE_UTF16 = 256
+        private const val MAX_PRINT_TITLE_BYTES = 512
         private const val MAX_SURFACE_DIMENSION = 8192
         private const val MAX_SURFACE_PIXELS = 33_554_432L
         private const val DEFAULT_DENSITY_DPI = 160

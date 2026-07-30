@@ -15,6 +15,16 @@ pub const MAX_LAUNCHER_DESCRIPTORS: usize = 256;
 pub const MAX_LAUNCHER_REGISTRY_BYTES: usize = 4 * 1024 * 1024;
 pub const LAUNCHER_CAPABILITIES_V4: &str =
     "wayland,input,ime,clipboard,documents,open-uri,notifications";
+pub const LAUNCHER_CAPABILITIES_PRINTING_V5: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,printing";
+
+pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
+    if bridge_capabilities & archphene_packages::elf_profile::BRIDGE_PRINTING != 0 {
+        LAUNCHER_CAPABILITIES_PRINTING_V5
+    } else {
+        LAUNCHER_CAPABILITIES_V4
+    }
+}
 
 const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
 const REGISTRY_FILE: &str = "launcher-registry-v1";
@@ -2127,6 +2137,23 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn launcher_contract_exposes_only_the_implemented_printing_broker() {
+        use archphene_packages::elf_profile::{
+            BRIDGE_AUDIO_OUTPUT, BRIDGE_CAMERA, BRIDGE_PRINTING, BRIDGE_SECRETS,
+        };
+
+        assert_eq!(launcher_capabilities(0), LAUNCHER_CAPABILITIES_V4);
+        assert_eq!(
+            launcher_capabilities(BRIDGE_PRINTING),
+            LAUNCHER_CAPABILITIES_PRINTING_V5,
+        );
+        assert_eq!(
+            launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_CAMERA | BRIDGE_SECRETS,),
+            LAUNCHER_CAPABILITIES_V4,
+        );
+    }
 
     struct TestRoot {
         path: PathBuf,

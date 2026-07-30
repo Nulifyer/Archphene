@@ -16,6 +16,7 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.Binder
@@ -30,8 +31,11 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.RemoteException
 import android.os.SystemClock
+import android.print.PrintManager
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.system.Os
+import android.system.OsConstants
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -57,9 +61,13 @@ import android.widget.TextView
 import android.widget.Toast
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
@@ -110,7 +118,8 @@ class LauncherActivity :
     private var sessionId = 0
     private var attempts = 0
     private var binding = false
-    private var activityResumed = false
+    @Volatile private var activityResumed = false
+    @Volatile private var printingEnabled = false
     private var notificationPermissionRequestInFlight = false
     private val pendingNotifications =
         arrayOfNulls<PendingNotification>(LauncherNotificationPolicy.MAX_PENDING)
@@ -181,7 +190,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_NOTIFICATION ||
+                    code !in CALLBACK_STATUS..CALLBACK_PRINT_PDF ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -409,6 +418,28 @@ class LauncherActivity :
                             }
                             true
                         }
+                        CALLBACK_PRINT_PDF -> {
+                            val title = data.readString()
+                            val descriptor =
+                                runCatching {
+                                    ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                                }.getOrNull()
+                            val valid =
+                                title != null &&
+                                    descriptor != null &&
+                                    data.dataAvail() == 0 &&
+                                    reply != null
+                            val accepted =
+                                if (valid) {
+                                    stagePrintPdf(title!!, descriptor!!)
+                                } else {
+                                    runCatching { descriptor?.close() }
+                                    false
+                                }
+                            reply?.writeNoException()
+                            reply?.writeInt(if (accepted) RESULT_OK else RESULT_NOT_READY)
+                            valid
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -463,6 +494,10 @@ class LauncherActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        runCatching { cleanupStalePrintFiles() }
+            .onFailure { error ->
+                Log.w(TAG, "Could not clean private print staging", error)
+            }
         acceptIncomingIntent(intent)
         surfaceView = createSurfaceView()
         status =
@@ -651,11 +686,16 @@ class LauncherActivity :
             return
         }
         val metadata = applicationMetadata()
-        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V4) {
+        val capabilities = metadata.getString(CAPABILITIES)
+        if (
+            capabilities != CAPABILITIES_V4 &&
+            capabilities != CAPABILITIES_PRINTING_V5
+        ) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
             return
         }
+        printingEnabled = capabilities == CAPABILITIES_PRINTING_V5
         val manager = metadata.getString(MANAGER_PACKAGE).orEmpty()
         if (!SAFE_PACKAGE.matches(manager)) {
             status.setText(R.string.launcher_invalid)
@@ -3099,6 +3139,230 @@ class LauncherActivity :
         Log.i(TAG, "Posted Linux notification id=${pending.id}")
     }
 
+    private fun stagePrintPdf(
+        title: String,
+        descriptor: ParcelFileDescriptor,
+    ): Boolean {
+        if (
+            !printingEnabled ||
+            !activityResumed ||
+            isFinishing ||
+            isDestroyed ||
+            title.isBlank() ||
+            title.length > MAX_PRINT_TITLE_UTF16 ||
+            title.toByteArray(StandardCharsets.UTF_8).size > MAX_PRINT_TITLE_BYTES ||
+            title.any { character -> character.isISOControl() } ||
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_PRINTING)
+        ) {
+            descriptor.close()
+            return false
+        }
+        val stat =
+            runCatching { Os.fstat(descriptor.fileDescriptor) }
+                .getOrElse {
+                    descriptor.close()
+                    return false
+                }
+        if (
+            stat.st_mode and OsConstants.S_IFMT != OsConstants.S_IFREG ||
+            stat.st_size !in MIN_PRINT_BYTES..MAX_PRINT_BYTES
+        ) {
+            descriptor.close()
+            return false
+        }
+        runCatching {
+            Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_SET)
+        }.getOrElse {
+            descriptor.close()
+            return false
+        }
+        val directory =
+            runCatching { preparePrintDirectory() }
+                .getOrElse { error ->
+                    descriptor.close()
+                    Log.w(TAG, "Private print directory is unavailable", error)
+                    return false
+                }
+        val document =
+            runCatching {
+                File.createTempFile("linux-", ".pdf", directory).canonicalFile.also { file ->
+                    check(file.parentFile == directory)
+                    check(!Files.isSymbolicLink(file.toPath()))
+                }
+            }.getOrElse { error ->
+                descriptor.close()
+                Log.w(TAG, "Could not reserve private print document", error)
+                return false
+            }
+        synchronized(ACTIVE_PRINT_FILES) {
+            if (ACTIVE_PRINT_FILES.size >= MAX_PENDING_PRINTS) {
+                descriptor.close()
+                document.delete()
+                return false
+            }
+            ACTIVE_PRINT_FILES += document
+        }
+        var accepted = false
+        try {
+            copyPrintPdf(descriptor, document)
+            validatePrintPdf(document)
+            if (!activityResumed || isFinishing || isDestroyed) return false
+            handler.post { openPrintUi(document, title) }
+            accepted = true
+            Log.i(TAG, "Accepted Linux print document bytes=${document.length()}")
+            return true
+        } catch (error: Exception) {
+            Log.w(TAG, "Rejected Linux print document", error)
+            return false
+        } finally {
+            if (!accepted) finishPrint(document)
+        }
+    }
+
+    private fun validatePrintPdf(document: File) {
+        ParcelFileDescriptor.open(document, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+            PdfRenderer(descriptor).use { renderer ->
+                check(renderer.pageCount in 1..MAX_PRINT_PAGES) {
+                    "Print document page count is invalid"
+                }
+                renderer.openPage(0).use { page ->
+                    check(
+                        page.width in 1..MAX_PRINT_PAGE_DIMENSION &&
+                            page.height in 1..MAX_PRINT_PAGE_DIMENSION,
+                    ) {
+                        "Print document page geometry is invalid"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun copyPrintPdf(
+        descriptor: ParcelFileDescriptor,
+        target: File,
+    ) {
+        descriptor.use { owned ->
+            ParcelFileDescriptor.dup(owned.fileDescriptor).use { duplicate ->
+                ParcelFileDescriptor.AutoCloseInputStream(duplicate).use { input ->
+                    FileOutputStream(target, false).use { output ->
+                        val header = ByteArray(PDF_HEADER.size)
+                        var headerLength = 0
+                        while (headerLength < header.size) {
+                            val count =
+                                input.read(
+                                    header,
+                                    headerLength,
+                                    header.size - headerLength,
+                                )
+                            if (count < 0) break
+                            headerLength += count
+                        }
+                        check(
+                            headerLength == header.size &&
+                                header.contentEquals(PDF_HEADER),
+                        ) {
+                            "Print document is not a PDF"
+                        }
+                        output.write(header)
+                        var total = header.size.toLong()
+                        val buffer = ByteArray(PRINT_COPY_BUFFER_BYTES)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total = Math.addExact(total, count.toLong())
+                            check(total <= MAX_PRINT_BYTES) {
+                                "Print document exceeds the size limit"
+                            }
+                            output.write(buffer, 0, count)
+                        }
+                        check(total >= MIN_PRINT_BYTES)
+                        output.fd.sync()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun openPrintUi(
+        document: File,
+        title: String,
+    ) {
+        if (
+            !activityResumed ||
+            isFinishing ||
+            isDestroyed ||
+            !document.isFile ||
+            Files.isSymbolicLink(document.toPath())
+        ) {
+            finishPrint(document)
+            return
+        }
+        runCatching {
+            val manager =
+                getSystemService(PrintManager::class.java)
+                    ?: error("Android print manager is unavailable")
+            manager.print(
+                title,
+                LinuxPdfPrintAdapter(document, title) { finishPrint(document) },
+                null,
+            )
+            Log.i(TAG, "Opened Android print UI")
+        }.onFailure { error ->
+            Log.w(TAG, "Could not open Android print UI", error)
+            finishPrint(document)
+        }
+    }
+
+    private fun preparePrintDirectory(): File {
+        val requestedDirectory = File(cacheDir, PRINT_DIRECTORY)
+        check(!Files.isSymbolicLink(requestedDirectory.toPath()))
+        val directory = requestedDirectory.canonicalFile
+        check(directory.parentFile == cacheDir.canonicalFile)
+        check(!Files.isSymbolicLink(directory.toPath()))
+        check(directory.isDirectory || directory.mkdir())
+        cleanupStalePrintFiles()
+        return directory
+    }
+
+    private fun cleanupStalePrintFiles() {
+        val directory = File(cacheDir, PRINT_DIRECTORY)
+        if (!directory.exists()) return
+        val canonicalDirectory = directory.canonicalFile
+        check(
+            canonicalDirectory.parentFile == cacheDir.canonicalFile &&
+                !Files.isSymbolicLink(directory.toPath()) &&
+                canonicalDirectory.isDirectory,
+        )
+        val entries = canonicalDirectory.listFiles() ?: error("Could not inspect print staging")
+        check(entries.size <= MAX_STALE_PRINT_FILES)
+        synchronized(ACTIVE_PRINT_FILES) {
+            for (entry in entries) {
+                val canonical = entry.canonicalFile
+                check(
+                    canonical.parentFile == canonicalDirectory &&
+                        !Files.isSymbolicLink(entry.toPath()) &&
+                        canonical.isFile &&
+                        canonical.name.endsWith(".pdf"),
+                ) {
+                    "Unsafe private print staging entry"
+                }
+                if (ACTIVE_PRINT_FILES.contains(canonical)) continue
+                if (!canonical.delete()) {
+                    Log.w(TAG, "Could not delete stale private print document")
+                }
+            }
+        }
+    }
+
+    private fun finishPrint(document: File) {
+        synchronized(ACTIVE_PRINT_FILES) {
+            ACTIVE_PRINT_FILES.remove(document)
+        }
+        if (document.exists() && !document.delete()) {
+            Log.w(TAG, "Could not delete private print document")
+        }
+    }
+
     private fun validBrowserUri(value: String): Boolean {
         if (
             value.isBlank() ||
@@ -3136,9 +3400,10 @@ class LauncherActivity :
         private const val MIME_TYPES = "org.archphene.launcher.MIME_TYPES"
         private const val CAPABILITIES_V4 =
             "c:wayland,input,ime,clipboard,documents,open-uri,notifications"
+        private const val CAPABILITIES_PRINTING_V5 = "$CAPABILITIES_V4,printing"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 10
+        private const val PROTOCOL_VERSION = 11
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3156,6 +3421,7 @@ class LauncherActivity :
         private const val CALLBACK_CURSOR = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val CALLBACK_NOTIFICATION = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val CALLBACK_PRINT_PDF = IBinder.FIRST_CALL_TRANSACTION + 8
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val NOTIFICATION_PERMISSION_REQUEST = 7_001
@@ -3164,6 +3430,16 @@ class LauncherActivity :
         private const val LINUX_NOTIFICATION_CHANNEL = "linux-app"
         private const val LINUX_NOTIFICATION_ID = 1
         private const val MAX_BROWSER_URI_BYTES = 4_096
+        private const val MAX_PRINT_TITLE_UTF16 = 256
+        private const val MAX_PRINT_TITLE_BYTES = 512
+        private const val PRINT_DIRECTORY = "print"
+        private const val MIN_PRINT_BYTES = 5L
+        private const val MAX_PRINT_BYTES = 256L * 1024 * 1024
+        private const val MAX_PENDING_PRINTS = 4
+        private const val MAX_STALE_PRINT_FILES = 32
+        private const val MAX_PRINT_PAGES = 10_000
+        private const val MAX_PRINT_PAGE_DIMENSION = 100_000
+        private const val PRINT_COPY_BUFFER_BYTES = 64 * 1024
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120
@@ -3179,6 +3455,15 @@ class LauncherActivity :
         private const val MAX_CURSOR_DIMENSION = 256
         private const val MAX_CURSOR_PIXELS = 65_536L
         private const val SOFT_IME_TOUCH_DELAY_MILLIS = 300L
+        private val PDF_HEADER =
+            byteArrayOf(
+                '%'.code.toByte(),
+                'P'.code.toByte(),
+                'D'.code.toByte(),
+                'F'.code.toByte(),
+                '-'.code.toByte(),
+            )
+        private val ACTIVE_PRINT_FILES = HashSet<File>(MAX_PENDING_PRINTS)
         private const val INPUT_TOUCH_DOWN = 1
         private const val INPUT_TOUCH_MOTION = 2
         private const val INPUT_TOUCH_UP = 3

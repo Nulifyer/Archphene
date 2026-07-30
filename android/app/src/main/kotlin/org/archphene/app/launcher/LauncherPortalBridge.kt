@@ -3,6 +3,7 @@ package org.archphene.app.launcher
 import android.content.Context
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.os.Process
@@ -15,6 +16,7 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.Closeable
 import java.io.File
+import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStreamReader
@@ -69,6 +71,8 @@ internal class LauncherPortalBridge(
     private val requestOpenUri: (String) -> Boolean,
     private val requestNotification: (String, String, String) -> Boolean,
     private val withdrawNotification: (String) -> Boolean,
+    private val printingEnabled: Boolean,
+    private val requestPrint: (String, ParcelFileDescriptor) -> Boolean,
     private val importDirectory: (String, ParcelFileDescriptor) -> String?,
     private val cancelDirectoryImport: () -> Unit,
 ) : Closeable {
@@ -105,6 +109,7 @@ internal class LauncherPortalBridge(
     @Volatile private var saveSnapshot = emptyArray<ActiveSave>()
     @Volatile private var running = false
     private var server: LocalServerSocket? = null
+    private lateinit var brokerSocketName: String
     private var brokerThread: Thread? = null
     private var mirrorThread: Thread? = null
     private var daemon: java.lang.Process? = null
@@ -131,6 +136,7 @@ internal class LauncherPortalBridge(
         prepareImportsDirectory()
         val socketName =
             "archphene.portal.${Process.myPid()}.$sessionId.${randomHex(8)}"
+        brokerSocketName = socketName
         val localServer = LocalServerSocket(socketName)
         server = localServer
         running = true
@@ -241,6 +247,66 @@ internal class LauncherPortalBridge(
         }
     }
 
+    internal fun debugPrintPdf(
+        title: String,
+        payload: ByteArray,
+        nonRegular: Boolean,
+    ): String {
+        check(running && printingEnabled)
+        check(
+            title.isNotBlank() &&
+                title.length <= MAX_PRINT_TITLE_CHARACTERS &&
+                payload.size <= MAX_DEBUG_PRINT_BYTES,
+        )
+        val request =
+            "ARCHPHENE/1\tPRINT_PDF\t${encodeField(title)}\n"
+                .toByteArray(StandardCharsets.US_ASCII)
+        val pipe = if (nonRegular) Os.pipe() else null
+        val staging =
+            if (nonRegular) {
+                null
+            } else {
+                File(runtimeDirectory, "debug-print-${randomHex(8)}.pdf").canonicalFile
+                    .also { file ->
+                        check(file.parentFile == runtimeDirectory.canonicalFile)
+                        FileOutputStream(file, false).use { output ->
+                            output.write(payload)
+                            output.fd.sync()
+                        }
+                    }
+            }
+        try {
+            LocalSocket().use { socket ->
+                socket.connect(
+                    LocalSocketAddress(
+                        brokerSocketName,
+                        LocalSocketAddress.Namespace.ABSTRACT,
+                    ),
+                )
+                if (nonRegular) {
+                    socket.setFileDescriptorsForSend(arrayOf(checkNotNull(pipe)[0]))
+                    socket.outputStream.write(request)
+                    socket.outputStream.flush()
+                } else {
+                    FileInputStream(checkNotNull(staging)).use { input ->
+                        socket.setFileDescriptorsForSend(arrayOf(input.fd))
+                        socket.outputStream.write(request)
+                        socket.outputStream.flush()
+                    }
+                }
+                socket.setFileDescriptorsForSend(null)
+                return readRequest(socket) ?: error("Print probe response is missing")
+            }
+        } finally {
+            pipe?.forEach { descriptor ->
+                if (descriptor.valid()) runCatching { Os.close(descriptor) }
+            }
+            staging?.let { file ->
+                if (file.exists()) check(file.delete())
+            }
+        }
+    }
+
     private fun writeAppearanceState(
         dark: Boolean,
         accent: Int,
@@ -294,42 +360,55 @@ internal class LauncherPortalBridge(
 
     private fun handleClient(socket: LocalSocket) {
         socket.use { client ->
-            runCatching {
-                if (client.peerCredentials.uid != Process.myUid()) {
-                    writeResponse(client, "ERROR\tUNAUTHORIZED")
-                    return
+            var descriptors = emptyArray<FileDescriptor>()
+            try {
+                runCatching {
+                    if (client.peerCredentials.uid != Process.myUid()) {
+                        writeResponse(client, "ERROR\tUNAUTHORIZED")
+                        return
+                    }
+                    val request = readRequest(client) ?: run {
+                        writeResponse(client, "ERROR\tINVALID_REQUEST")
+                        return
+                    }
+                    descriptors = client.ancillaryFileDescriptors ?: emptyArray()
+                    val fields = request.split('\t')
+                    if (
+                        fields.isEmpty() ||
+                        (
+                            fields[0] != "ARCHPHENE/1" &&
+                            fields[0] != "ARCHPHENE/2" &&
+                                fields[0] != "ARCHPHENE/3" &&
+                                fields[0] != "ARCHPHENE/4"
+                        )
+                    ) {
+                        writeResponse(client, "ERROR\tUNSUPPORTED")
+                        return
+                    }
+                    if (fields.getOrNull(1) != "PRINT_PDF" && descriptors.isNotEmpty()) {
+                        writeResponse(client, "ERROR\tINVALID_REQUEST")
+                        return
+                    }
+                    when (fields.getOrNull(1)) {
+                        "OPEN_URI" -> handleOpenUriRequest(client, fields)
+                        "NOTIFY" -> handleNotificationRequest(client, fields)
+                        "WITHDRAW_NOTIFICATION" ->
+                            handleNotificationWithdrawal(client, fields)
+                        "PRINT_PDF" -> handlePrintRequest(client, fields, descriptors)
+                        "SAVE_FILE" -> handleSaveRequest(client, fields)
+                        "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
+                        "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
+                        "OPEN_DIRECTORY" -> handleDirectoryRequest(client, fields)
+                        else -> writeResponse(client, "ERROR\tUNSUPPORTED")
+                    }
+                }.onFailure { error ->
+                    Log.w(TAG, "Portal broker request failed session=$sessionId", error)
+                    runCatching { writeResponse(client, "ERROR\tFAILED") }
                 }
-                val request = readRequest(client) ?: run {
-                    writeResponse(client, "ERROR\tINVALID_REQUEST")
-                    return
+            } finally {
+                descriptors.forEach { descriptor ->
+                    if (descriptor.valid()) runCatching { Os.close(descriptor) }
                 }
-                val fields = request.split('\t')
-                if (
-                    fields.isEmpty() ||
-                    (
-                        fields[0] != "ARCHPHENE/1" &&
-                        fields[0] != "ARCHPHENE/2" &&
-                            fields[0] != "ARCHPHENE/3" &&
-                            fields[0] != "ARCHPHENE/4"
-                    )
-                ) {
-                    writeResponse(client, "ERROR\tUNSUPPORTED")
-                    return
-                }
-                when (fields.getOrNull(1)) {
-                    "OPEN_URI" -> handleOpenUriRequest(client, fields)
-                    "NOTIFY" -> handleNotificationRequest(client, fields)
-                    "WITHDRAW_NOTIFICATION" ->
-                        handleNotificationWithdrawal(client, fields)
-                    "SAVE_FILE" -> handleSaveRequest(client, fields)
-                    "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
-                    "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
-                    "OPEN_DIRECTORY" -> handleDirectoryRequest(client, fields)
-                    else -> writeResponse(client, "ERROR\tUNSUPPORTED")
-                }
-            }.onFailure { error ->
-                Log.w(TAG, "Portal broker request failed session=$sessionId", error)
-                runCatching { writeResponse(client, "ERROR\tFAILED") }
             }
         }
     }
@@ -395,6 +474,44 @@ internal class LauncherPortalBridge(
             return
         }
         writeResponse(client, if (withdrawNotification(id)) "OK" else "ERROR\tFAILED")
+    }
+
+    private fun handlePrintRequest(
+        client: LocalSocket,
+        fields: List<String>,
+        descriptors: Array<FileDescriptor>,
+    ) {
+        if (!printingEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        if (
+            fields.size != 3 ||
+            fields[0] != "ARCHPHENE/1" ||
+            descriptors.size != 1 ||
+            !descriptors[0].valid()
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val title = decodeField(fields[2], MAX_TITLE_BYTES)
+        if (
+            title == null ||
+            !validNotificationText(title, MAX_PRINT_TITLE_CHARACTERS, false)
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val accepted =
+            runCatching {
+                ParcelFileDescriptor.dup(descriptors[0]).use { descriptor ->
+                    requestPrint(title, descriptor)
+                }
+            }.getOrElse { error ->
+                Log.w(TAG, "Could not relay Linux print request session=$sessionId", error)
+                false
+            }
+        writeResponse(client, if (accepted) "OK" else "ERROR\tFAILED")
     }
 
     private fun handleSaveRequest(
@@ -952,6 +1069,8 @@ internal class LauncherPortalBridge(
         private const val MAX_NOTIFICATION_ID_CHARACTERS = 128
         private const val MAX_NOTIFICATION_TITLE_CHARACTERS = 256
         private const val MAX_NOTIFICATION_BODY_CHARACTERS = 4_096
+        private const val MAX_PRINT_TITLE_CHARACTERS = 256
+        private const val MAX_DEBUG_PRINT_BYTES = 65_536
         private const val MAX_ACTIVE_SAVES = 8
         private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_IMPORT_COLLISIONS = 1_000

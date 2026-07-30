@@ -31,6 +31,10 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
             requestDocumentSave(intent)
             return
         }
+        if (intent.action == ACTION_PRINT_PDF) {
+            printPdf(intent)
+            return
+        }
         if (intent.action != ACTION_PROBE) {
             Log.e(TAG, "Rejected unknown launcher-session operation")
             return
@@ -182,6 +186,52 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun printPdf(intent: Intent) {
+        val pending = goAsync()
+        Thread(
+            {
+                try {
+                    printPdfOnWorker(intent)
+                } finally {
+                    pending.finish()
+                }
+            },
+            "ArchphenePrintProbe",
+        ).start()
+    }
+
+    private fun printPdfOnWorker(intent: Intent) {
+        val androidPackage = intent.getStringExtra(EXTRA_PACKAGE).orEmpty()
+        val title = intent.getStringExtra(EXTRA_PRINT_TITLE).orEmpty()
+        val encodedPayload = intent.getStringExtra(EXTRA_PRINT_PAYLOAD_BASE64).orEmpty()
+        if (encodedPayload.length > MAX_BASE64_CHARACTERS) {
+            Log.e(TAG, "Rejected oversized launcher-session print payload")
+            return
+        }
+        val payload =
+            runCatching { Base64.decode(encodedPayload, Base64.DEFAULT) }
+                .getOrElse {
+                    Log.e(TAG, "Rejected invalid launcher-session print base64", it)
+                    return
+                }
+        val nonRegular = intent.getBooleanExtra(EXTRA_PRINT_NON_REGULAR, false)
+        val result =
+            LauncherSessionDebugBridge.printPdf(
+                androidPackage,
+                title,
+                payload,
+                nonRegular,
+            )
+        val message =
+            "Manager print request package=$androidPackage session=${result.sessionId} " +
+                "bytes=${payload.size} nonRegular=$nonRegular result=${result.reason}"
+        if (result.accepted) {
+            Log.i(TAG, message)
+        } else {
+            Log.e(TAG, message)
+        }
+    }
+
     private fun decodeUtf8(encoded: String): String? {
         if (encoded.length > MAX_BASE64_CHARACTERS) {
             Log.e(TAG, "Rejected invalid launcher-session IME payload")
@@ -270,6 +320,8 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.INJECT_LAUNCHER_IME"
         private const val ACTION_REQUEST_DOCUMENT_SAVE =
             "org.archphene.app.debug.action.REQUEST_LAUNCHER_DOCUMENT_SAVE"
+        private const val ACTION_PRINT_PDF =
+            "org.archphene.app.debug.action.PRINT_LAUNCHER_PDF"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_COMPOSING_BASE64 = "composing_base64"
@@ -279,6 +331,9 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
         private const val EXTRA_DOCUMENT_NAME = "document_name"
         private const val EXTRA_DOCUMENT_MIME = "document_mime"
         private const val EXTRA_DOCUMENT_PAYLOAD_BASE64 = "document_payload_base64"
+        private const val EXTRA_PRINT_TITLE = "print_title"
+        private const val EXTRA_PRINT_PAYLOAD_BASE64 = "print_payload_base64"
+        private const val EXTRA_PRINT_NON_REGULAR = "print_non_regular"
         private const val TOKEN = "launcher-session-gate"
         private const val MAX_IME_BYTES = 16_384
         private const val MAX_DEBUG_DOCUMENT_BYTES = 65_536

@@ -5113,7 +5113,7 @@ mod android {
         };
         let mut fields = request.split('\t');
         let (
-            Some(version @ ("A1" | "A2" | "A3")),
+            Some(version @ ("A1" | "A2" | "A3" | "A4")),
             Some(android_package),
             Some(descriptor_id),
             Some(generation),
@@ -5159,7 +5159,16 @@ mod android {
         if authorization.label.contains(['\t', '\n', '\r', '\0']) {
             return ERROR_INTERNAL;
         }
-        let encoded = if version == "A3" {
+        let encoded = if version == "A4" {
+            format!(
+                "A4\t{}\t{}\t{:x}\t{}\t{}\n",
+                u8::from(authorization.terminal),
+                authorization.integration_topology,
+                authorization.bridge_capabilities,
+                authorization.label,
+                authorization.mime_types.join(";"),
+            )
+        } else if version == "A3" {
             format!(
                 "A3\t{}\t{}\t{}\t{}\n",
                 u8::from(authorization.terminal),

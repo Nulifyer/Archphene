@@ -87,8 +87,9 @@ internal object LauncherIdentityVerifier {
             metadata.getString(MANAGER_PACKAGE) != context.packageName ||
             metadata.getString(TEMPLATE_SHA256) !=
             "h:${LauncherApkAssembler.templateDigestHex(context)}" ||
-            metadata.getString(CAPABILITIES) !=
-            "c:${LauncherApkAssembler.CAPABILITIES_V4}" ||
+            !LauncherApkAssembler.validMetadataCapabilities(
+                metadata.getString(CAPABILITIES),
+            ) ||
             signers.size != 1
         ) {
             return null

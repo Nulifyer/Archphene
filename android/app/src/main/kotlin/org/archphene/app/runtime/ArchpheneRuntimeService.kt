@@ -158,6 +158,7 @@ internal data class LauncherAuthorization(
     val label: String,
     val terminal: Boolean,
     val integrationTopology: Int,
+    val bridgeCapabilities: Int,
     val mimeTypes: List<String>,
 ) {
     val usesGraphicsBridge: Boolean
@@ -1832,7 +1833,7 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return null
         }
-        val request = "A3\t$androidPackage\t$descriptorIdHex\t$generation\n"
+        val request = "A4\t$androidPackage\t$descriptorIdHex\t$generation\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return null
@@ -1859,23 +1860,25 @@ class ArchpheneRuntimeService : Service() {
                 length,
                 StandardCharsets.UTF_8,
             )
-        val fields = response.removeSuffix("\n").split('\t', limit = 5)
-        val mimeTypes = fields.getOrNull(4)?.let(LauncherIntentMimePolicy::parseSpec)
+        val fields = response.removeSuffix("\n").split('\t', limit = 6)
+        val mimeTypes = fields.getOrNull(5)?.let(LauncherIntentMimePolicy::parseSpec)
         if (
-            fields.size != 5 ||
-            fields[0] != "A3" ||
+            fields.size != 6 ||
+            fields[0] != "A4" ||
             fields[1] !in setOf("0", "1") ||
             fields[2].toIntOrNull() !in 0..UShort.MAX_VALUE.toInt() ||
-            fields[3].isEmpty() ||
-            fields[3].length > 256 ||
+            fields[3].toIntOrNull(16) !in 0..BRIDGE_CAPABILITY_MASK ||
+            fields[4].isEmpty() ||
+            fields[4].length > 256 ||
             mimeTypes == null
         ) {
             return null
         }
         return LauncherAuthorization(
-            fields[3],
+            fields[4],
             fields[1] == "1",
             fields[2].toInt(),
+            fields[3].toInt(16),
             mimeTypes,
         )
     }
@@ -2416,6 +2419,8 @@ class ArchpheneRuntimeService : Service() {
         private const val BRIDGE_PRINTING = 1 shl 1
         private const val BRIDGE_CAMERA = 1 shl 2
         private const val BRIDGE_SECRETS = 1 shl 3
+        private const val BRIDGE_CAPABILITY_MASK =
+            BRIDGE_AUDIO_OUTPUT or BRIDGE_PRINTING or BRIDGE_CAMERA or BRIDGE_SECRETS
         private const val INTEGRATION_QT5 = 1 shl 0
         private const val INTEGRATION_QT6 = 1 shl 1
         private const val INTEGRATION_GTK3 = 1 shl 2
@@ -6172,7 +6177,7 @@ class ArchpheneRuntimeService : Service() {
                             fields[0] == "W4" &&
                             LAUNCHER_PACKAGE.matches(fields[1]) &&
                             LAUNCHER_DESCRIPTOR.matches(fields[2]) &&
-                            fields[5] == LauncherApkAssembler.CAPABILITIES_V4 &&
+                            LauncherApkAssembler.validCapabilities(fields[5]) &&
                             mimeTypes != null,
                     ) {
                         "Invalid native launcher publication"
@@ -6474,10 +6479,11 @@ class ArchpheneRuntimeService : Service() {
                                         metadata.getString(
                                             "org.archphene.launcher.TEMPLATE_SHA256",
                                         ) != "h:$templateDigest" ||
-                                            metadata.getString(
-                                                "org.archphene.launcher.CAPABILITIES",
-                                            ) !=
-                                            "c:${LauncherApkAssembler.CAPABILITIES_V4}"
+                                            !LauncherApkAssembler.validMetadataCapabilities(
+                                                metadata.getString(
+                                                    "org.archphene.launcher.CAPABILITIES",
+                                                ),
+                                            )
                                     )
                             )
                     if (installedContentIsStale) {

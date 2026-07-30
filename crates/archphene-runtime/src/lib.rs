@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_launcher::{
-    LAUNCHER_CAPABILITIES_V4, LauncherDescriptor, LauncherRegistry, LauncherRegistryError,
-    LauncherReviewDecision, ReconcileReport, WrapperStatus,
+    LauncherDescriptor, LauncherRegistry, LauncherRegistryError, LauncherReviewDecision,
+    ReconcileReport, WrapperStatus, launcher_capabilities,
 };
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackageCacheCatalog, PackagePayloadDownload,
@@ -153,10 +153,10 @@ pub struct PackageLauncherReview {
     pub unavailable_bridge_capabilities: u8,
 }
 
-// Optional helpers remain unavailable until their Kotlin broker endpoints are
-// present and exact-device tested. Never infer Android authority from a linked
-// Linux library.
-pub const AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES: u8 = 0;
+// Only optional helpers with complete Kotlin broker endpoints belong here.
+// Never infer Android authority from a linked Linux library alone.
+pub const AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES: u8 =
+    archphene_packages::elf_profile::BRIDGE_PRINTING;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPublishWork {
@@ -181,6 +181,7 @@ pub struct LauncherAuthorization {
     pub label: String,
     pub terminal: bool,
     pub integration_topology: u16,
+    pub bridge_capabilities: u8,
     pub mime_types: Vec<String>,
 }
 
@@ -1157,6 +1158,7 @@ impl RuntimeHost {
             label: descriptor.name.clone(),
             terminal: descriptor.terminal,
             integration_topology: self.launcher_integration_topology(descriptor),
+            bridge_capabilities: descriptor.bridge_capabilities,
             mime_types: launcher_mime_types(descriptor).to_vec(),
         })
     }
@@ -1439,7 +1441,7 @@ impl RuntimeHost {
             descriptor_id_hex: descriptor.descriptor_id_hex(),
             generation: descriptor.desired_generation,
             label: descriptor.name.clone(),
-            capabilities: LAUNCHER_CAPABILITIES_V4,
+            capabilities: launcher_capabilities(descriptor.bridge_capabilities),
             mime_types: launcher_mime_types(descriptor).to_vec(),
             icon_path,
             icon_sha256,

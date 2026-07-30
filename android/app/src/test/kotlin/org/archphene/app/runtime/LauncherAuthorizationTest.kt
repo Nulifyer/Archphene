@@ -12,6 +12,7 @@ class LauncherAuthorizationTest {
                 label = "OpenGL app",
                 terminal = false,
                 integrationTopology = 1 shl 10,
+                bridgeCapabilities = 0,
                 mimeTypes = emptyList(),
             ).usesGraphicsBridge,
         )
@@ -20,6 +21,7 @@ class LauncherAuthorizationTest {
                 label = "Chromium app",
                 terminal = false,
                 integrationTopology = 1 shl 6,
+                bridgeCapabilities = 0,
                 mimeTypes = emptyList(),
             ).usesGraphicsBridge,
         )
@@ -28,6 +30,7 @@ class LauncherAuthorizationTest {
                 label = "Wayland app",
                 terminal = false,
                 integrationTopology = 1 shl 8,
+                bridgeCapabilities = 0,
                 mimeTypes = emptyList(),
             ).usesGraphicsBridge,
         )

@@ -44,6 +44,15 @@ internal object LauncherSessionDebugBridge {
             mimeType,
             payload,
         ) ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
+
+    fun printPdf(
+        androidPackage: String,
+        title: String,
+        payload: ByteArray,
+        nonRegular: Boolean,
+    ): LauncherSessionDebugResult =
+        service?.debugPrintPdf(androidPackage, title, payload, nonRegular)
+            ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
 }
 
 internal data class LauncherSessionDebugResult(
