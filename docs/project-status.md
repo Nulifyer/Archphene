@@ -26,6 +26,22 @@ identity, and explicit key-loss recovery. A source contract keeps these claims
 linked to their Rust/Kotlin enforcement. Signed-scriptlet reverse rollback and
 interruption between multiple real AUR bases remain device-coverage tasks.
 
+Graphical Linux sessions now retain the same Android foreground-service
+protection as the shared shell and long package/file work. The manager records
+the native GUI handles in a preallocated 16-slot array, reports the active
+Linux-app count in its low-priority notification, and stays retained until the
+last process closes. The lifecycle policy makes the surrounding behavior
+explicit: session-owned process groups and descendants, no implicit package
+daemon autostart, bounded logs and registries, Home/detach retention,
+graceful-close/TERM/KILL teardown, Android process-death limits, and durable
+recovery only for mutation state rather than dead interactive process memory.
+State-preserving exact-ABI device gates confirm identical manager, generated
+wrapper, and Linux PIDs across Home for stock Mousepad on the Samsung and Foot
+plus Bash on the emulator. Android reports the manager as a `specialUse`
+foreground service with the visible “1 Linux app is running” notification;
+Back removes the Linux tree and notification. Full-device running, Home, and
+notification-shade captures were inspected.
+
 Release optimization is now an executable artifact gate rather than build-file
 intent. The manager, isolated Builder, and generated launcher each carry a
 small startup-only ART baseline profile; all three pass R8 and emit compiled

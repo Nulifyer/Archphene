@@ -1247,6 +1247,8 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var directCommandStarted = false
     @Volatile private var shellStopRequested = false
     @Volatile private var shellHandle = 0L
+    private val launcherProcessHandles = LongArray(MAX_TRACKED_LAUNCHER_PROCESSES)
+    @Volatile private var launcherProcessCount = 0
     private val shellTerminalRevision = AtomicLong()
     @Volatile private var shellRows = DEFAULT_SHELL_ROWS
     @Volatile private var shellColumns = DEFAULT_SHELL_COLUMNS
@@ -1966,6 +1968,12 @@ class ArchpheneRuntimeService : Service() {
             Log.e(TAG, "Could not launch graphical Linux process: $detail")
             return 0L
         }
+        if (!trackLauncherProcess(launcherHandle)) {
+            NativeRuntime.nativeCloseLauncherProcess(activeHandle, launcherHandle)
+            Log.e(TAG, "Could not retain graphical Linux process: launcher limit reached")
+            return 0L
+        }
+        promoteSessionToForeground()
         return launcherHandle
     }
 
@@ -2008,9 +2016,39 @@ class ArchpheneRuntimeService : Service() {
     @Synchronized
     private fun closeLauncherProcess(launcherHandle: Long): Boolean {
         val activeHandle = readyHandle
-        return activeHandle != 0L &&
-            launcherHandle > 0L &&
-            NativeRuntime.nativeCloseLauncherProcess(activeHandle, launcherHandle) == 0
+        if (
+            activeHandle == 0L ||
+            launcherHandle <= 0L ||
+            NativeRuntime.nativeCloseLauncherProcess(activeHandle, launcherHandle) != 0
+        ) {
+            return false
+        }
+        untrackLauncherProcess(launcherHandle)
+        reconcileForegroundNotification()
+        stopIfUnobservedAndIdle()
+        return true
+    }
+
+    private fun trackLauncherProcess(launcherHandle: Long): Boolean {
+        if (launcherProcessHandles.any { handle -> handle == launcherHandle }) {
+            return true
+        }
+        val index = launcherProcessHandles.indexOfFirst { handle -> handle == 0L }
+        if (index < 0) {
+            return false
+        }
+        launcherProcessHandles[index] = launcherHandle
+        launcherProcessCount++
+        return true
+    }
+
+    private fun untrackLauncherProcess(launcherHandle: Long) {
+        val index = launcherProcessHandles.indexOfFirst { handle -> handle == launcherHandle }
+        if (index < 0) {
+            return
+        }
+        launcherProcessHandles[index] = 0L
+        launcherProcessCount = (launcherProcessCount - 1).coerceAtLeast(0)
     }
 
     @Synchronized
@@ -2335,6 +2373,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MIN_SHELL_COLUMNS = 2
         private const val MAX_SHELL_COLUMNS = 400
         private const val RUNTIME_SHUTDOWN_WORKER_WAIT_MILLIS = 3_000L
+        private const val MAX_TRACKED_LAUNCHER_PROCESSES = 16
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val PACKAGE_CAPABILITY_COMMAND_LINE = 2
@@ -5040,30 +5079,44 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun sessionNotification(): Notification {
+        val graphicalSessions = launcherProcessCount
         return Notification.Builder(this, SESSION_NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_session_notification)
             .setContentTitle(getString(R.string.session_notification_title))
             .setContentText(
-                getString(
-                    if (shellHandle == 0L) {
-                        R.string.session_notification_starting
-                    } else {
-                        R.string.session_notification_running
-                    },
-                ),
+                when {
+                    graphicalSessions > 0 && shellActive ->
+                        resources.getQuantityString(
+                            R.plurals.session_notification_apps_and_shell,
+                            graphicalSessions,
+                            graphicalSessions,
+                        )
+                    graphicalSessions > 0 ->
+                        resources.getQuantityString(
+                            R.plurals.session_notification_apps,
+                            graphicalSessions,
+                            graphicalSessions,
+                        )
+                    shellHandle == 0L -> getString(R.string.session_notification_starting)
+                    else -> getString(R.string.session_notification_running)
+                },
             )
             .setContentIntent(openRuntimeAction())
             .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
-            .addAction(
-                Notification.Action.Builder(
-                    null,
-                    getString(R.string.session_notification_stop),
-                    shellStopAction(),
-                ).build(),
-            )
+            .apply {
+                if (shellActive) {
+                    addAction(
+                        Notification.Action.Builder(
+                            null,
+                            getString(R.string.session_notification_stop),
+                            shellStopAction(),
+                        ).build(),
+                    )
+                }
+            }
             .build()
     }
 
@@ -5152,7 +5205,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun reconcileForegroundNotification() {
-        if (shellActive || hasForegroundWork()) {
+        if (shellActive || launcherProcessCount > 0 || hasForegroundWork()) {
             updateSessionNotification()
         } else {
             removeSessionNotification()
@@ -16051,6 +16104,7 @@ class ArchpheneRuntimeService : Service() {
             packageOperationActive ||
             commandActive ||
             shellActive ||
+            launcherProcessCount > 0 ||
             storageDocumentActive ||
             folderOperationActive
 

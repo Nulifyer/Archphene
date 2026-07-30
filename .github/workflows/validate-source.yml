@@ -29,6 +29,7 @@ jobs:
           python3 scripts/test-release-workflow-contract.py
           python3 scripts/test-android-source-workflow-contract.py
           python3 scripts/test-trust-policy-contract.py
+          python3 scripts/test-runtime-lifecycle-contract.py
       - name: Validate private AT-SPI source contract
         run: python3 scripts/test-atspi-source-contract.py
       - name: Validate runtime-pack source contract

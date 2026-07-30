@@ -202,6 +202,14 @@
     <string name="session_notification_title">Archphene Linux session</string>
     <string name="session_notification_starting">Starting the shared shell</string>
     <string name="session_notification_running">Shared shell is running</string>
+    <plurals name="session_notification_apps">
+        <item quantity="one">%d Linux app is running</item>
+        <item quantity="other">%d Linux apps are running</item>
+    </plurals>
+    <plurals name="session_notification_apps_and_shell">
+        <item quantity="one">%d Linux app and the shared shell are running</item>
+        <item quantity="other">%d Linux apps and the shared shell are running</item>
+    </plurals>
     <string name="session_notification_stop">Stop</string>
     <string name="work_notification_title">Archphene is working</string>
     <string name="work_notification_packages">Package operation in progress</string>

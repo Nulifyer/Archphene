@@ -75,6 +75,10 @@ Blocking work stays off Android's main thread. JNI remains coarse-grained and
 passes descriptors, direct buffers, native windows, and bounded snapshots
 instead of object graphs or rendered bitmaps.
 
+Linux process ownership, foreground retention, daemon scope, fixed resource
+bounds, close ordering, and crash recovery follow the
+[Linux process and lifecycle policy](runtime-lifecycle.md).
+
 ### Archphene Builder companion
 
 AUR recipe execution belongs to one hidden companion APK, not to the manager

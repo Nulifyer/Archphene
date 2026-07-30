@@ -47,7 +47,8 @@ compatible userspace behavior, but does not replace or weaken those controls.
 - Daemons remain manager-supervised Android application processes. Android can
   stop them under lifecycle, battery, reboot, or memory-pressure rules; user
   initiated long work uses a visible foreground service where Android requires
-  it.
+  it. Installing a package does not enable boot-time or system-service
+  behavior; see the [lifecycle policy](runtime-lifecycle.md).
 - `/proc`, `/sys`, and `/dev` expose only information and devices available to
   the app UID. Archphene supplies a bounded compatibility view for safe
   self-process, CPU, terminal, shared-memory, and device paths; it does not
