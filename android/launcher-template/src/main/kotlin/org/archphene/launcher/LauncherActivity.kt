@@ -1209,6 +1209,18 @@ class LauncherActivity :
                     )
                     return@post
                 }
+                val displayName = queryDocumentName(uri)
+                if (displayName == null) {
+                    sendDocumentResult(
+                        requestId,
+                        operation,
+                        DOCUMENT_RESULT_FAILED,
+                        null,
+                        "",
+                        false,
+                    )
+                    return@post
+                }
                 val descriptor =
                     runCatching {
                         contentResolver.openFileDescriptor(uri, "w")
@@ -1232,7 +1244,7 @@ class LauncherActivity :
                             operation,
                             DOCUMENT_RESULT_SUCCESS,
                             it,
-                            "",
+                            displayName,
                             true,
                         )
                     }
@@ -3565,6 +3577,7 @@ class LauncherActivity :
 
     private fun safeDocumentName(name: String): Boolean =
         name.length in 1..MAX_DOCUMENT_NAME_UTF16 &&
+            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_DOCUMENT_NAME_BYTES &&
             name != "." &&
             name != ".." &&
             name.none { character ->
@@ -3596,6 +3609,9 @@ class LauncherActivity :
             (operation == DOCUMENT_OPERATION_OPEN &&
                 result == DOCUMENT_RESULT_SUCCESS &&
                 !safeDocumentName(displayName)) ||
+            (operation == DOCUMENT_OPERATION_SAVE &&
+                result == DOCUMENT_RESULT_SUCCESS &&
+                !safeDocumentName(displayName)) ||
             (operation == DOCUMENT_OPERATION_DIRECTORY &&
                 result == DOCUMENT_RESULT_SUCCESS &&
                 !safeDocumentName(displayName))
@@ -3611,9 +3627,14 @@ class LauncherActivity :
             parcel.writeInt(requestId)
             parcel.writeInt(result)
             if (descriptor != null) {
-                if (operation == DOCUMENT_OPERATION_OPEN) {
+                if (
+                    operation == DOCUMENT_OPERATION_OPEN ||
+                    operation == DOCUMENT_OPERATION_SAVE
+                ) {
                     parcel.writeString(displayName)
-                    parcel.writeInt(if (writable) 1 else 0)
+                    if (operation == DOCUMENT_OPERATION_OPEN) {
+                        parcel.writeInt(if (writable) 1 else 0)
+                    }
                 } else if (operation == DOCUMENT_OPERATION_DIRECTORY) {
                     parcel.writeString(displayName)
                 }
@@ -4215,7 +4236,7 @@ class LauncherActivity :
             )
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 14
+        private const val PROTOCOL_VERSION = 15
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -4355,6 +4376,7 @@ class LauncherActivity :
         private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_DOCUMENT_TITLE_UTF16 = 128
         private const val MAX_DOCUMENT_NAME_UTF16 = 255
+        private const val MAX_DOCUMENT_NAME_BYTES = 255
         private const val MAX_DIRECTORY_ENTRIES = 10_000L
         private const val MAX_DIRECTORY_DEPTH = 64
         private const val MAX_DIRECTORY_PATH_BYTES = 4 * 1024

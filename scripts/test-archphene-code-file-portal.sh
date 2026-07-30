@@ -58,6 +58,7 @@ code_flags_existed=false
 code_flags_hash_before=
 code_flags_mutated=false
 manager_was_running=false
+save_staging_path=
 
 if archphene_android_pid "$manager" >/dev/null 2>&1; then
   manager_was_running=true
@@ -120,7 +121,7 @@ cleanup() {
     "$imported_path_a" "$imported_path_b" "$imported_path_c" \
     >/dev/null 2>&1 || true
   archphene_adb_run shell \
-    "run-as $manager sh -c 'find files/arch-root/home/archphene/.cache/archphene/portal-save -type f -name \"*-$save_name\" -delete 2>/dev/null || true'" \
+    "run-as $manager sh -c 'find files/arch-root/home/archphene/.cache/archphene/portal-save -type f -name \"$save_name\" -delete 2>/dev/null || true'" \
     >/dev/null 2>&1 || true
   if [[ "$code_config_backed_up" == true ]]; then
     archphene_adb_run shell \
@@ -391,6 +392,23 @@ archphene_wait_log \
     tr -d '\r'
 )" == "$expected_hash" ]] ||
   archphene_die "Code Save As destination was not byte-exact"
+save_staging_paths="$(
+  archphene_adb_run exec-out run-as "$manager" find \
+    files/arch-root/home/archphene/.cache/archphene/portal-save \
+    -type f -name "$save_name" -print 2>/dev/null |
+    tr -d '\r'
+)"
+[[ "$(sed '/^$/d' <<<"$save_staging_paths" | wc -l)" == 1 ]] ||
+  archphene_die "Code Save As did not retain one exact-name Linux staging file"
+save_staging_path="$(sed -n '1p' <<<"$save_staging_paths")"
+[[ "$save_staging_path" =~ ^files/arch-root/home/archphene/\.cache/archphene/portal-save/[1-9][0-9]*-[0-9a-f]{16}/[1-9][0-9]*-[0-9a-f]{16}/"$save_name"$ ]] ||
+  archphene_die "Code Save As exposed an unsafe or opaque Linux path: $save_staging_path"
+[[ "$(
+  archphene_adb_run shell run-as "$manager" sha256sum "$save_staging_path" |
+    awk '{print $1}' |
+    tr -d '\r'
+)" == "$expected_hash" ]] ||
+  archphene_die "Code Save As Linux staging file was not byte-exact"
 sleep 2
 archphene_adb_run exec-out screencap -p >"$artifact_dir/save-complete.png"
 archphene_android_pid "$code_package" >/dev/null ||
@@ -443,6 +461,6 @@ else
 fi
 
 archphene_note "Code Open and Save As portals passed on $serial"
-archphene_note "  Single-file Open, two-file Open, all three Linux imports, and the Android Save As destination were byte-exact"
+archphene_note "  Single-file Open, two-file Open, all three Linux imports, exact-name Linux Save As staging, and the Android destination were byte-exact"
 archphene_note "  Code configuration and manager lifecycle were restored"
 archphene_note "  Full-device screenshots: $artifact_dir/{single-open-picker,single-open-complete,open-picker,open-complete,save-picker,save-complete}.png"

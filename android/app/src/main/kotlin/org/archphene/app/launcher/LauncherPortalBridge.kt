@@ -32,6 +32,7 @@ import kotlin.concurrent.thread
 
 internal data class LauncherPortalSaveResult(
     val descriptor: ParcelFileDescriptor?,
+    val displayName: String,
     val cancelled: Boolean,
 )
 
@@ -91,6 +92,7 @@ internal class LauncherPortalBridge(
 ) : Closeable {
     private class ActiveSave(
         val staging: File,
+        val stagingDirectory: File,
         val output: ParcelFileDescriptor.AutoCloseOutputStream,
         val initialModified: Long,
         val createdAtMillis: Long,
@@ -1075,12 +1077,13 @@ internal class LauncherPortalBridge(
         }
         val result = requestSave(title, name, mime)
         val descriptor = result.descriptor
-        if (descriptor == null) {
+        if (descriptor == null || !safeName(result.displayName)) {
+            descriptor?.close()
             writeResponse(client, if (result.cancelled) "CANCEL" else "ERROR\tFAILED")
             return
         }
         val uri =
-            runCatching { beginSave(name, descriptor) }
+            runCatching { beginSave(result.displayName, descriptor) }
                 .getOrElse { error ->
                     descriptor.close()
                     Log.e(TAG, "Could not create portal staging file session=$sessionId", error)
@@ -1180,19 +1183,22 @@ internal class LauncherPortalBridge(
 
     @Synchronized
     private fun beginSave(
-        suggestedName: String,
+        displayName: String,
         descriptor: ParcelFileDescriptor,
     ): String {
         check(running && activeSaves.size < MAX_ACTIVE_SAVES)
+        check(safeName(displayName))
         val output = ParcelFileDescriptor.AutoCloseOutputStream(descriptor)
         val destinationLength = Os.fstat(output.fd).st_size
         check(destinationLength in 0..MAX_SAVE_BYTES) {
             "Portal destination has an invalid initial size"
         }
-        val canonicalStaging = createStaging(suggestedName)
+        val canonicalStaging = createStaging(displayName)
+        val stagingDirectory = checkNotNull(canonicalStaging.parentFile)
         activeSaves +=
             ActiveSave(
                 canonicalStaging,
+                stagingDirectory,
                 output,
                 canonicalStaging.lastModified(),
                 SystemClock.uptimeMillis(),
@@ -1201,7 +1207,8 @@ internal class LauncherPortalBridge(
         saveSnapshot = activeSaves.toTypedArray()
         val logicalPath =
             "/home/archphene/.cache/archphene/portal-save/" +
-                "$sessionId-$instanceToken/${canonicalStaging.name}"
+                "$sessionId-$instanceToken/${stagingDirectory.name}/" +
+                canonicalStaging.name
         return PortalFileUri.fromLogicalPath(logicalPath)
     }
 
@@ -1253,14 +1260,22 @@ internal class LauncherPortalBridge(
         }
     }
 
-    private fun createStaging(suggestedName: String): File {
+    private fun createStaging(displayName: String): File {
         val saveId = nextSaveId++
-        val staging = File(savesDirectory, "$saveId-${randomHex(8)}-$suggestedName")
         val canonicalDirectory = savesDirectory.canonicalFile
+        val slot = File(canonicalDirectory, "$saveId-${randomHex(8)}").canonicalFile
+        check(slot.parentFile == canonicalDirectory)
+        check(slot.mkdir()) { "Could not create portal staging slot" }
+        val staging = File(slot, displayName)
         val canonicalStaging = staging.canonicalFile
-        check(canonicalStaging.parentFile == canonicalDirectory)
-        check(canonicalStaging.createNewFile()) { "Portal staging file already exists" }
-        return canonicalStaging
+        return try {
+            check(canonicalStaging.parentFile == slot)
+            check(canonicalStaging.createNewFile()) { "Portal staging file already exists" }
+            canonicalStaging
+        } catch (error: Exception) {
+            runCatching { slot.delete() }
+            throw error
+        }
     }
 
     private fun reserveImport(displayName: String): File {
@@ -1417,6 +1432,7 @@ internal class LauncherPortalBridge(
             }
             runCatching { save.output.close() }
             runCatching { save.staging.delete() }
+            runCatching { save.stagingDirectory.delete() }
         }
         stopProcess(portalProcess)
         stopProcess(daemonProcess)
@@ -1521,6 +1537,7 @@ internal class LauncherPortalBridge(
 
     private fun safeName(name: String): Boolean =
         name.length in 1..255 &&
+            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_DOCUMENT_NAME_BYTES &&
             name != "." &&
             name != ".." &&
             name.none { character ->
@@ -1699,6 +1716,7 @@ internal class LauncherPortalBridge(
         private const val MAX_REQUEST_BYTES = 16_384
         private const val MAX_TITLE_BYTES = 512
         private const val MAX_NAME_BYTES = 512
+        private const val MAX_DOCUMENT_NAME_BYTES = 255
         private const val MAX_MIME_BYTES = PortalMimePolicy.MAX_SPEC_UTF16
         private const val MAX_NOTIFICATION_ID_BYTES = 512
         private const val MAX_NOTIFICATION_TITLE_BYTES = 1_024
@@ -1861,16 +1879,45 @@ internal class LauncherPortalBridge(
                 }
                 for (entry in entries) {
                     val entryPath = entry.toPath()
-                    check(
-                        !Files.isSymbolicLink(entryPath) &&
-                            Files.isRegularFile(entryPath, LinkOption.NOFOLLOW_LINKS) &&
-                            entry.canonicalFile.parentFile == directory.canonicalFile,
-                    ) {
-                        "Unsafe stale portal save"
+                    if (Files.isDirectory(entryPath, LinkOption.NOFOLLOW_LINKS)) {
+                        check(
+                            !Files.isSymbolicLink(entryPath) &&
+                                entry.canonicalFile.parentFile == directory.canonicalFile,
+                        ) {
+                            "Unsafe stale portal save slot"
+                        }
+                        val staged = entry.listFiles()
+                            ?: error("Could not inspect stale portal save slot")
+                        check(staged.size == 1) {
+                            "Invalid stale portal save slot"
+                        }
+                        val file = staged.single()
+                        check(
+                            !Files.isSymbolicLink(file.toPath()) &&
+                                Files.isRegularFile(
+                                    file.toPath(),
+                                    LinkOption.NOFOLLOW_LINKS,
+                                ) &&
+                                file.canonicalFile.parentFile == entry.canonicalFile,
+                        ) {
+                            "Unsafe stale portal save"
+                        }
+                    } else {
+                        check(
+                            !Files.isSymbolicLink(entryPath) &&
+                                Files.isRegularFile(entryPath, LinkOption.NOFOLLOW_LINKS) &&
+                                entry.canonicalFile.parentFile == directory.canonicalFile,
+                        ) {
+                            "Unsafe legacy portal save"
+                        }
                     }
                 }
                 for (entry in entries) {
-                    check(entry.delete()) { "Could not remove stale portal save" }
+                    if (entry.isDirectory) {
+                        val staged = checkNotNull(entry.listFiles()).single()
+                        check(staged.delete()) { "Could not remove stale portal save" }
+                    }
+                    check(entry.delete()) { "Could not remove stale portal save entry" }
                 }
                 check(directory.delete()) { "Could not remove stale portal save directory" }
             }
