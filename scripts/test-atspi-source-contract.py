@@ -23,6 +23,37 @@ ACCESSIBILITY_PROBE_SOURCE = (
     / "prototypes/accessibility-capability-probe/src/org/archphene/bridge"
     / "ProbeAccessibilityService.java"
 )
+MANAGER_PORTAL_SOURCE = (
+    ROOT
+    / "android/app/src/main/kotlin/org/archphene/app/launcher"
+    / "LauncherPortalBridge.kt"
+)
+MANAGER_SESSION_SOURCE = (
+    ROOT
+    / "android/app/src/main/kotlin/org/archphene/app/launcher"
+    / "LauncherSessionService.kt"
+)
+LAUNCHER_ACCESSIBILITY_SOURCE = (
+    ROOT
+    / "android/launcher-template/src/main/kotlin/org/archphene/launcher"
+    / "LauncherAccessibilityProvider.kt"
+)
+LAUNCHER_ACTIVITY_SOURCE = (
+    ROOT
+    / "android/launcher-template/src/main/kotlin/org/archphene/launcher"
+    / "LauncherActivity.kt"
+)
+LAUNCHER_ASSEMBLER_SOURCE = (
+    ROOT
+    / "android/app/src/main/kotlin/org/archphene/app/launcher"
+    / "LauncherApkAssembler.kt"
+)
+DBUS_AUTH_PATCH = (
+    ROOT
+    / "native/archphene-dbus/patches"
+    / "0004-android-virtual-uid-auth.patch"
+)
+DBUS_BUILD_SCRIPT = ROOT / "scripts/build-android-dbus.sh"
 
 
 def c_string(name: str, source: str) -> str:
@@ -150,6 +181,15 @@ def main() -> None:
     android_capability_source = ANDROID_CAPABILITY_SOURCE.read_text(encoding="utf-8")
     compositor_source = COMPOSITOR_SOURCE.read_text(encoding="utf-8")
     accessibility_probe_source = ACCESSIBILITY_PROBE_SOURCE.read_text(encoding="utf-8")
+    manager_portal_source = MANAGER_PORTAL_SOURCE.read_text(encoding="utf-8")
+    manager_session_source = MANAGER_SESSION_SOURCE.read_text(encoding="utf-8")
+    launcher_accessibility_source = LAUNCHER_ACCESSIBILITY_SOURCE.read_text(
+        encoding="utf-8"
+    )
+    launcher_activity_source = LAUNCHER_ACTIVITY_SOURCE.read_text(encoding="utf-8")
+    launcher_assembler_source = LAUNCHER_ASSEMBLER_SOURCE.read_text(encoding="utf-8")
+    dbus_auth_patch = DBUS_AUTH_PATCH.read_text(encoding="utf-8")
+    dbus_build_script = DBUS_BUILD_SCRIPT.read_text(encoding="utf-8")
     validate_role_constants(client_source)
     bus_root = ET.fromstring(c_string("bus_xml", source))
     socket_root = ET.fromstring(c_string("root_xml", source))
@@ -266,9 +306,16 @@ def main() -> None:
         (publish_source, "if (tree->count == 0) goto fail;", "pre-free empty-tree check"),
         (publish_source, "if (read_result < 0) {\n            truncated = 1;",
          "unreadable transient child isolation"),
-        (publish_source, "size_t checkpoint = output.length;", "bounded JSON prefix"),
-        (publish_source, "output.length = checkpoint;", "JSON overflow rollback"),
-        (publish_source, "if (emitted == 0) output.failed = 1;", "non-empty JSON prefix"),
+        (publish_source, "#define TREE_WIRE_MAX (1024 * 1024)",
+         "bounded binary publication"),
+        (publish_source, "{'A', 'R', 'C', 'H', 'A', 'T', 'S', 'P'}",
+         "binary wire magic"),
+        (publish_source, "if (record > TREE_WIRE_MAX - total) break;",
+         "bounded binary prefix"),
+        (publish_source, "if (tree->count > 0 && emitted == 0) return -1;",
+         "non-empty binary prefix"),
+        (publish_source, "lseek(descriptor, TREE_WIRE_COUNT_OFFSET, SEEK_SET)",
+         "binary node-count patch"),
         (translator_source, "#define REBUILD_RETRY_MILLIS 1000", "retry backoff"),
         (translator_source,
          "if (authoritative_cache) {",
@@ -363,6 +410,8 @@ def main() -> None:
          "AT-SPI bulk cache query"),
         (source, 'strcmp(member, "Activate") == 0',
          "Qt activation cache refresh"),
+        (source, "!archphene_atspi_translator_has_cache(sender)",
+         "safe activation cache refresh"),
         (source, "cache_not_ready",
          "transient GTK cache startup detection"),
         (source, "if (!cache_not_ready) archphene_atspi_translator_mark_dirty();",
@@ -459,8 +508,8 @@ def main() -> None:
          "duplicate-action descendant validation"),
         (translator_source, "list_item_click || duplicate_action_routed",
          "duplicate-control pointer activation"),
-        (publish_source, '",\\"selected\\":"',
-         "selected-state publication"),
+        (publish_source, "if (node->selected) flags |= 1u << 6;",
+         "binary selected-state publication"),
         (translator_source, "if (!found_node) return;", "action lookup lifetime"),
         (translator_source,
          "state.tree->nodes[index].node.reference.bus",
@@ -473,6 +522,13 @@ def main() -> None:
         (translator_source,
          "strchr(*encoded_text, '\\t') != NULL",
          "exact action field count"),
+        (translator_source,
+         'strcmp(queued.type, "content") == 0\n'
+         '                    || strcmp(queued.type, "property") == 0',
+         "structural Android-event coalescing"),
+        (translator_source,
+         "selection, text, and window events",
+         "semantic Android-event retention"),
     )
     for implementation, token, label in lifecycle_tokens:
         if token not in implementation:
@@ -481,6 +537,17 @@ def main() -> None:
         raise AssertionError("application ID reply must be consumed asynchronously")
     if "cache_query_disabled" in source:
         raise AssertionError("transient GTK cache startup failure was made permanent")
+    dbus_patch_tokens = (
+        "authenticated_by_android_alias",
+        "#ifdef __ANDROID__",
+        "desired_uid == 0 || desired_uid == 1000",
+        "? auth->credentials",
+    )
+    for token in dbus_patch_tokens:
+        if token not in dbus_auth_patch:
+            raise AssertionError(f"missing private D-Bus authentication contract: {token}")
+    if "patch --batch --forward --fuzz=0" not in dbus_build_script:
+        raise AssertionError("D-Bus vendor patches are not applied strictly")
     for forbidden in ("value == '+'", "value == '/'", "encoded[index] == '='"):
         if forbidden in translator_source:
             raise AssertionError(f"non-canonical base64url accepted: {forbidden}")
@@ -527,6 +594,68 @@ def main() -> None:
             raise AssertionError(f"missing {label}")
     if "payload.substring(0, payloadEnd).split" not in accessibility_probe_source:
         raise AssertionError("empty accessibility command values are not preserved")
+
+    production_tokens = (
+        (manager_portal_source, '"ARCHPHENE_ENABLE_ACCESSIBILITY"] =',
+         "production accessibility environment"),
+        (manager_portal_source, '"PUBLISH_ACCESSIBILITY_TREE"',
+         "production tree portal"),
+        (manager_portal_source, '"TAKE_ACCESSIBILITY_ACTION"',
+         "production action portal"),
+        (manager_portal_source, "ACCESSIBILITY_TREE_MAX_BYTES = 1_024L * 1_024",
+         "manager tree bound"),
+        (manager_session_source, "ArrayBlockingQueue<AccessibilityAction>",
+         "bounded manager action queue"),
+        (manager_session_source, "private const val PROTOCOL_VERSION = 14",
+         "manager accessibility protocol"),
+        (manager_session_source, "CALLBACK_ACCESSIBILITY",
+         "manager accessibility callback"),
+        (launcher_activity_source, "TRANSACTION_ACCESSIBILITY_ACTION",
+         "launcher accessibility action transaction"),
+        (launcher_activity_source, "private const val PROTOCOL_VERSION = 14",
+         "launcher accessibility protocol"),
+        (launcher_activity_source, "accessibilityProvider.publish(descriptor)",
+         "launcher tree publication"),
+        (launcher_activity_source, "override fun onEnterAnimationComplete()",
+         "post-transition accessibility bounds refresh"),
+        (launcher_activity_source, "accessibilityProvider.refreshBoundsAfterTransition()",
+         "post-transition accessibility invalidation"),
+        (launcher_accessibility_source, "class LauncherAccessibilityProvider",
+         "production Android node provider"),
+        (launcher_accessibility_source, "MAX_TREE_BYTES = 1024 * 1024",
+         "launcher tree bound"),
+        (launcher_accessibility_source, "POST_TRANSITION_BOUNDS_FRAMES = 12",
+         "bounded post-transition geometry settling"),
+        (launcher_accessibility_source, "CodingErrorAction.REPORT",
+         "strict accessibility UTF-8"),
+        (launcher_accessibility_source, "override fun performAction(",
+         "production Android action bridge"),
+        (launcher_accessibility_source,
+         "AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE",
+         "explicit semantic subtree invalidation"),
+        (publish_source, "int archphene_atspi_tree_equal(",
+         "semantic accessibility tree comparison"),
+        (translator_source,
+         "bool unchanged = archphene_atspi_tree_equal(state.tree, *next_tree)",
+         "duplicate accessibility tree suppression"),
+        (translator_source, 'strcmp(member, "BoundsChanged") == 0',
+         "targeted accessibility geometry invalidation"),
+        (translator_source, "store_hydrated_metadata(&cached[index])",
+         "retained safe accessibility metadata"),
+        (translator_source, "#define EVENT_SETTLE_MILLIS 100",
+         "structural accessibility event debounce"),
+        (translator_source, "state.dirty_generation++",
+         "accessibility event generation tracking"),
+        (launcher_assembler_source, "CAPABILITIES_V10",
+         "versioned accessibility capability"),
+        (launcher_assembler_source, "value in CAPABILITY_CONTRACTS_V10",
+         "canonical accessibility capability validation"),
+    )
+    for implementation, token, label in production_tokens:
+        if token not in implementation:
+            raise AssertionError(f"missing {label}: {token}")
+    if "malloc(TREE_WIRE_MAX)" in publish_source:
+        raise AssertionError("accessibility publication allocates its maximum wire buffer")
 
     fallback_tokens = (
         (android_source, "void setMenuFallback", "Android fallback registration"),

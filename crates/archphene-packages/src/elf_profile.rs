@@ -424,11 +424,12 @@ fn scan_runtime_library_hints(path: &Path, available_bytes: u64) -> io::Result<(
                 *byte,
             );
             if *byte == 0 {
-                if !token_oversized && let Ok(name) = std::str::from_utf8(&token[..token_length]) {
-                    if valid_library_name(name) {
-                        topology |= classify_library(name);
-                        bridge_capabilities |= classify_bridge_library(name);
-                    }
+                if !token_oversized
+                    && let Ok(name) = std::str::from_utf8(&token[..token_length])
+                    && valid_library_name(name)
+                {
+                    topology |= classify_library(name);
+                    bridge_capabilities |= classify_bridge_library(name);
                 }
                 token_length = 0;
                 token_oversized = false;

@@ -50,7 +50,10 @@ public final class ProbeAccessibilityService extends AccessibilityService {
                 && !eventPackage.startsWith(LINUX_PACKAGE_PREFIX)) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         Log.i(TAG, "Accessibility event package=" + eventPackage
-                + " type=" + event.getEventType() + " root=" + (root != null));
+                + " type=" + event.getEventType()
+                + " class=" + event.getClassName()
+                + " changes=" + event.getContentChangeTypes()
+                + " root=" + (root != null));
         boolean probeTree = PACKAGE.equals(eventPackage);
         StringBuilder output = new StringBuilder();
         List<AccessibilityWindowInfo> windows = getWindows();

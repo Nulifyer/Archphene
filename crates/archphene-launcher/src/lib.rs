@@ -55,6 +55,38 @@ pub const LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V9: &str =
 pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,secrets,camera";
 pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets,camera";
 pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets,camera";
+pub const LAUNCHER_CAPABILITIES_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,accessibility";
+pub const LAUNCHER_CAPABILITIES_PRINTING_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,accessibility";
+pub const LAUNCHER_CAPABILITIES_SECRETS_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,secrets,accessibility";
+pub const LAUNCHER_CAPABILITIES_PRINTING_SECRETS_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,secrets,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,secrets,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,secrets,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets,accessibility";
+pub const LAUNCHER_CAPABILITIES_CAMERA_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_PRINTING_CAMERA_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_SECRETS_CAMERA_V10: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,secrets,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_PRINTING_SECRETS_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,secrets,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,secrets,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,secrets,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets,camera,accessibility";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets,camera,accessibility";
 
 pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
     let audio = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT != 0;
@@ -65,33 +97,33 @@ pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
     let camera = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_CAMERA != 0;
     debug_assert!(!audio_input || audio);
     match (audio, audio_input, printing, secrets, camera) {
-        (false, false, false, false, false) => LAUNCHER_CAPABILITIES_V4,
-        (false, false, true, false, false) => LAUNCHER_CAPABILITIES_PRINTING_V5,
-        (true, false, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
-        (true, false, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
-        (true, true, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
-        (true, true, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
-        (false, false, false, true, false) => LAUNCHER_CAPABILITIES_SECRETS_V8,
-        (false, false, true, true, false) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_V8,
-        (true, false, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V8,
-        (true, false, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,
-        (true, true, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V8,
-        (true, true, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,
-        (false, false, false, false, true) => LAUNCHER_CAPABILITIES_CAMERA_V9,
-        (false, false, true, false, true) => LAUNCHER_CAPABILITIES_PRINTING_CAMERA_V9,
-        (true, false, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_CAMERA_V9,
-        (true, false, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_CAMERA_V9,
-        (true, true, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_CAMERA_V9,
-        (true, true, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9,
-        (false, false, false, true, true) => LAUNCHER_CAPABILITIES_SECRETS_CAMERA_V9,
-        (false, false, true, true, true) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_CAMERA_V9,
-        (true, false, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V9,
-        (true, false, true, true, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9,
-        (true, true, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9,
+        (false, false, false, false, false) => LAUNCHER_CAPABILITIES_V10,
+        (false, false, true, false, false) => LAUNCHER_CAPABILITIES_PRINTING_V10,
+        (true, false, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_V10,
+        (true, false, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V10,
+        (true, true, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_V10,
+        (true, true, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V10,
+        (false, false, false, true, false) => LAUNCHER_CAPABILITIES_SECRETS_V10,
+        (false, false, true, true, false) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_V10,
+        (true, false, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V10,
+        (true, false, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V10,
+        (true, true, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V10,
+        (true, true, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V10,
+        (false, false, false, false, true) => LAUNCHER_CAPABILITIES_CAMERA_V10,
+        (false, false, true, false, true) => LAUNCHER_CAPABILITIES_PRINTING_CAMERA_V10,
+        (true, false, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_CAMERA_V10,
+        (true, false, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_CAMERA_V10,
+        (true, true, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_CAMERA_V10,
+        (true, true, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V10,
+        (false, false, false, true, true) => LAUNCHER_CAPABILITIES_SECRETS_CAMERA_V10,
+        (false, false, true, true, true) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_CAMERA_V10,
+        (true, false, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V10,
+        (true, false, true, true, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V10,
+        (true, true, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V10,
         (true, true, true, true, true) => {
-            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10
         }
-        (false, true, _, _, _) => LAUNCHER_CAPABILITIES_V4,
+        (false, true, _, _, _) => LAUNCHER_CAPABILITIES_V10,
     }
 }
 
@@ -2226,38 +2258,38 @@ mod tests {
             BRIDGE_AUDIO_INPUT, BRIDGE_AUDIO_OUTPUT, BRIDGE_CAMERA, BRIDGE_PRINTING, BRIDGE_SECRETS,
         };
 
-        assert_eq!(launcher_capabilities(0), LAUNCHER_CAPABILITIES_V4);
+        assert_eq!(launcher_capabilities(0), LAUNCHER_CAPABILITIES_V10);
         assert_eq!(
             launcher_capabilities(BRIDGE_PRINTING),
-            LAUNCHER_CAPABILITIES_PRINTING_V5,
+            LAUNCHER_CAPABILITIES_PRINTING_V10,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_CAMERA | BRIDGE_SECRETS,),
-            LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V9,
+            LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V10,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING),
-            LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
+            LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V10,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT),
-            LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_V10,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT | BRIDGE_PRINTING),
-            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V10,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_SECRETS),
-            LAUNCHER_CAPABILITIES_SECRETS_V8,
+            LAUNCHER_CAPABILITIES_SECRETS_V10,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING | BRIDGE_SECRETS),
-            LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,
+            LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V10,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_CAMERA),
-            LAUNCHER_CAPABILITIES_CAMERA_V9,
+            LAUNCHER_CAPABILITIES_CAMERA_V10,
         );
         assert_eq!(
             launcher_capabilities(
@@ -2267,8 +2299,9 @@ mod tests {
                     | BRIDGE_SECRETS
                     | BRIDGE_CAMERA
             ),
-            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9,
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10,
         );
+        assert!(launcher_capabilities(0).ends_with(",accessibility"));
     }
 
     struct TestRoot {

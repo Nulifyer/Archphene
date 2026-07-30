@@ -9,77 +9,82 @@ class LauncherApkAssemblerTest {
     fun acceptsOnlyCanonicalImplementedCapabilityContracts() {
         assertTrue(
             LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_V10,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_PRINTING_V10,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_V10,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_PRINTING_V10,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_V10,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_V10,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_SECRETS_V10,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V10,
+            ),
+        )
+        assertFalse(
+            LauncherApkAssembler.validCapabilities(
+                "${LauncherApkAssembler.CAPABILITIES_V10},accessibility",
+            ),
+        )
+        assertFalse(
+            LauncherApkAssembler.validCapabilities(
                 LauncherApkAssembler.CAPABILITIES_V4,
             ),
         )
         assertTrue(
             LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_PRINTING_V5,
+                LauncherApkAssembler.CAPABILITIES_CAMERA_V10,
             ),
         )
         assertTrue(
             LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_AUDIO_V6,
-            ),
-        )
-        assertTrue(
-            LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_AUDIO_PRINTING_V6,
-            ),
-        )
-        assertTrue(
-            LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_V7,
-            ),
-        )
-        assertTrue(
-            LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
-            ),
-        )
-        assertTrue(
-            LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_SECRETS_V8,
-            ),
-        )
-        assertTrue(
-            LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,
-            ),
-        )
-        assertFalse(
-            LauncherApkAssembler.validCapabilities(
-                "${LauncherApkAssembler.CAPABILITIES_V4},accessibility",
-            ),
-        )
-        assertTrue(
-            LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_CAMERA_V9,
-            ),
-        )
-        assertTrue(
-            LauncherApkAssembler.validCapabilities(
-                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9,
+                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10,
             ),
         )
         assertTrue(
             LauncherApkAssembler.hasCameraCapability(
-                LauncherApkAssembler.CAPABILITIES_CAMERA_V9,
+                LauncherApkAssembler.CAPABILITIES_CAMERA_V10,
             ),
         )
         assertFalse(
             LauncherApkAssembler.hasCameraCapability(
-                LauncherApkAssembler.CAPABILITIES_SECRETS_V8,
+                LauncherApkAssembler.CAPABILITIES_SECRETS_V10,
             ),
         )
         assertTrue(
             LauncherApkAssembler.validMetadataCapabilities(
-                "c:${LauncherApkAssembler.CAPABILITIES_PRINTING_V5}",
+                "c:${LauncherApkAssembler.CAPABILITIES_PRINTING_V10}",
             ),
         )
         assertFalse(
             LauncherApkAssembler.validMetadataCapabilities(
-                LauncherApkAssembler.CAPABILITIES_PRINTING_V5,
+                LauncherApkAssembler.CAPABILITIES_PRINTING_V10,
             ),
         )
     }

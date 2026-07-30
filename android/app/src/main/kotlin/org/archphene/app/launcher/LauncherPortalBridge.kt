@@ -81,6 +81,11 @@ internal class LauncherPortalBridge(
     private val cameraEnabled: Boolean,
     private val cameraPipeWireSocket: String?,
     private val requestCamera: (String, Int, Int, Boolean, ParcelFileDescriptor?) -> String,
+    private val accessibilityEnabled: Boolean,
+    private val publishAccessibilityTree: (ParcelFileDescriptor) -> Boolean,
+    private val publishAccessibilityEvent: (Int, String) -> Boolean,
+    private val takeAccessibilityAction: (Int) -> String,
+    private val requestAccessibilityMenu: (Int, Boolean) -> Boolean,
     private val importDirectory: (String, ParcelFileDescriptor) -> String?,
     private val cancelDirectoryImport: () -> Unit,
 ) : Closeable {
@@ -249,7 +254,8 @@ internal class LauncherPortalBridge(
                         environment()["ARCHPHENE_PIPEWIRE_SOCKET"] =
                             checkNotNull(cameraPipeWireSocket)
                     }
-                    environment()["ARCHPHENE_ENABLE_ACCESSIBILITY"] = "0"
+                    environment()["ARCHPHENE_ENABLE_ACCESSIBILITY"] =
+                        if (accessibilityEnabled) "1" else "0"
                 }.start()
                 .also { process -> drain(process, "portal") }
         SystemClock.sleep(PORTAL_READY_DELAY_MILLIS)
@@ -461,7 +467,10 @@ internal class LauncherPortalBridge(
                         return
                     }
                     val operation = fields.getOrNull(1)
-                    if (operation == "STREAM_CAMERA_I420") {
+                    if (
+                        operation == "STREAM_CAMERA_I420" ||
+                        operation in CONCURRENT_OPERATIONS
+                    ) {
                         dispatchClient(client, fields, descriptors)
                     } else {
                         /*
@@ -509,12 +518,187 @@ internal class LauncherPortalBridge(
             "CAPTURE_CAMERA_JPEG",
             "STREAM_CAMERA_I420",
             -> handleCameraRequest(client, fields, descriptors)
+            "PUBLISH_ACCESSIBILITY_TREE" ->
+                handleAccessibilityTree(client, fields, descriptors)
+            "ACCESSIBILITY_EVENT" ->
+                handleAccessibilityEvent(client, fields)
+            "TAKE_ACCESSIBILITY_ACTION" ->
+                handleAccessibilityAction(client, fields)
+            "ACCESSIBILITY_MENU_FALLBACK",
+            "ACCESSIBILITY_MENU_ACTION",
+            -> handleAccessibilityMenu(client, fields)
             "SAVE_FILE" -> handleSaveRequest(client, fields)
             "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
             "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
             "OPEN_DIRECTORY" -> handleDirectoryRequest(client, fields)
             else -> writeResponse(client, "ERROR\tUNSUPPORTED")
         }
+    }
+
+    private fun handleAccessibilityTree(
+        client: LocalSocket,
+        fields: List<String>,
+        descriptors: Array<FileDescriptor>,
+    ) {
+        if (!accessibilityEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        if (
+            fields.size != 2 ||
+            fields[0] != "ARCHPHENE/1" ||
+            descriptors.size != 1 ||
+            !descriptors[0].valid()
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val stat =
+            runCatching { Os.fstat(descriptors[0]) }.getOrElse {
+                writeResponse(client, "ERROR\tINVALID_REQUEST")
+                return
+            }
+        if (
+            stat.st_mode and OsConstants.S_IFMT != OsConstants.S_IFREG ||
+            stat.st_size !in ACCESSIBILITY_TREE_MIN_BYTES..ACCESSIBILITY_TREE_MAX_BYTES
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val accepted =
+            runCatching {
+                ParcelFileDescriptor.dup(descriptors[0]).use { descriptor ->
+                    publishAccessibilityTree(descriptor)
+                }
+            }.getOrDefault(false)
+        writeResponse(client, if (accepted) "OK" else "ERROR\tFAILED")
+    }
+
+    private fun handleAccessibilityEvent(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (!accessibilityEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        val nodeId = fields.getOrNull(2)?.toIntOrNull()
+        val type = fields.getOrNull(3).orEmpty()
+        if (
+            fields.size != 4 ||
+            fields[0] != "ARCHPHENE/1" ||
+            nodeId !in 0..MAX_ACCESSIBILITY_NODE_ID ||
+            type !in ACCESSIBILITY_EVENTS
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        writeResponse(
+            client,
+            if (publishAccessibilityEvent(checkNotNull(nodeId), type)) {
+                "OK"
+            } else {
+                "ERROR\tFAILED"
+            },
+        )
+    }
+
+    private fun handleAccessibilityAction(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (!accessibilityEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        val timeoutMillis = fields.getOrNull(2)?.toIntOrNull()
+        if (
+            fields.size != 3 ||
+            fields[0] != "ARCHPHENE/1" ||
+            timeoutMillis !in 0..MAX_ACCESSIBILITY_POLL_MILLIS
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val response = takeAccessibilityAction(checkNotNull(timeoutMillis))
+        writeResponse(
+            client,
+            if (validAccessibilityActionResponse(response)) {
+                response
+            } else {
+                "ERROR\tFAILED"
+            },
+        )
+    }
+
+    private fun handleAccessibilityMenu(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (!accessibilityEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        val operation = fields.getOrNull(1)
+        val nodeId = fields.getOrNull(2)?.toIntOrNull()
+        val transition =
+            when (operation) {
+                "ACCESSIBILITY_MENU_FALLBACK" ->
+                    if (fields.size == 3) false else null
+                "ACCESSIBILITY_MENU_ACTION" ->
+                    fields.getOrNull(3)?.toIntOrNull()?.let { value ->
+                        if (fields.size == 4 && value in 0..1) value == 1 else null
+                    }
+                else -> null
+            }
+        if (
+            fields[0] != "ARCHPHENE/1" ||
+            nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID ||
+            transition == null
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        writeResponse(
+            client,
+            if (requestAccessibilityMenu(checkNotNull(nodeId), transition)) {
+                "OK"
+            } else {
+                "ERROR\tFAILED"
+            },
+        )
+    }
+
+    private fun validAccessibilityActionResponse(response: String): Boolean {
+        if (response == "ERROR\tEMPTY") return true
+        val fields = response.split('\t', limit = 4)
+        val nodeId = fields.getOrNull(1)?.toIntOrNull()
+        val action = fields.getOrNull(2).orEmpty()
+        val encoded = fields.getOrNull(3).orEmpty()
+        if (
+            fields.size != 4 ||
+            fields[0] != "OK" ||
+            nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID ||
+            action !in ACCESSIBILITY_ACTIONS ||
+            encoded.length > MAX_ACCESSIBILITY_ACTION_ENCODED_BYTES
+        ) {
+            return false
+        }
+        val decoded =
+            runCatching {
+                Base64.decode(
+                    encoded,
+                    Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+                )
+            }.getOrNull() ?: return false
+        return decoded.size <= MAX_ACCESSIBILITY_ACTION_TEXT_BYTES &&
+            runCatching {
+                StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(decoded))
+            }.isSuccess
     }
 
     private fun handleOpenUriRequest(
@@ -1532,6 +1716,12 @@ internal class LauncherPortalBridge(
         private const val MAX_SECRET_ITEMS = 256
         private const val MAX_CAMERA_DIMENSION = 8_192
         private const val MAX_CAMERA_JPEG_BYTES = 32 * 1_024 * 1_024
+        private const val ACCESSIBILITY_TREE_MIN_BYTES = 24L
+        private const val ACCESSIBILITY_TREE_MAX_BYTES = 1_024L * 1_024
+        private const val MAX_ACCESSIBILITY_NODE_ID = 1_000_000
+        private const val MAX_ACCESSIBILITY_POLL_MILLIS = 250
+        private const val MAX_ACCESSIBILITY_ACTION_TEXT_BYTES = 4_096
+        private const val MAX_ACCESSIBILITY_ACTION_ENCODED_BYTES = 5_464
         private const val UNIX_SOCKET_PATH_LIMIT = 104
         private const val MAX_DEBUG_PRINT_BYTES = 65_536
         private const val MAX_ACTIVE_SAVES = 8
@@ -1565,6 +1755,18 @@ internal class LauncherPortalBridge(
                 "ERROR\tINVALID_REQUEST",
                 "ERROR\tFAILED",
             )
+        private val ACCESSIBILITY_EVENTS =
+            setOf("focus", "selected", "text", "clicked", "window", "content")
+        private val ACCESSIBILITY_ACTIONS =
+            setOf("click", "focus", "set-text", "scroll-forward", "scroll-backward")
+        private val CONCURRENT_OPERATIONS =
+            setOf(
+                "PUBLISH_ACCESSIBILITY_TREE",
+                "ACCESSIBILITY_EVENT",
+                "TAKE_ACCESSIBILITY_ACTION",
+                "ACCESSIBILITY_MENU_FALLBACK",
+                "ACCESSIBILITY_MENU_ACTION",
+            )
         private val DESCRIPTOR_OPERATIONS =
             setOf(
                 "PRINT_PDF",
@@ -1574,6 +1776,7 @@ internal class LauncherPortalBridge(
                 "CATALOG_SECRETS",
                 "CAPTURE_CAMERA_JPEG",
                 "STREAM_CAMERA_I420",
+                "PUBLISH_ACCESSIBILITY_TREE",
             )
         private val STALE_SAVE_DIRECTORY_NAME =
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")

@@ -22,6 +22,7 @@
 #define REBUILD_RETRY_MILLIS 1000
 #define ACTION_REFRESH_PASSES 4
 #define ACTION_REFRESH_MILLIS 250
+#define EVENT_SETTLE_MILLIS 100
 
 typedef struct {
     char bus[ARCHPHENE_ATSPI_BUS_MAX];
@@ -42,6 +43,7 @@ typedef struct {
     int32_t index;
     int32_t child_count;
     bool authoritative;
+    bool metadata_hydrated;
 } CachedAccessible;
 
 static struct {
@@ -54,6 +56,7 @@ static struct {
     bool worker_ready;
     bool worker_failed;
     bool dirty;
+    uint64_t dirty_generation;
     unsigned int action_refresh_passes;
     Registration applications[MAX_APPLICATIONS];
     size_t application_count;
@@ -75,6 +78,7 @@ static struct {
 
 static void wake_worker(void) {
     state.dirty = true;
+    state.dirty_generation++;
     pthread_cond_signal(&state.changed);
 }
 
@@ -432,6 +436,19 @@ static bool update_cached_text_locked(const char *bus, const char *path,
     }
     return false;
 }
+
+static bool invalidate_cached_metadata_locked(
+        const char *bus, const char *path) {
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        CachedAccessible *cached = &state.cached_accessibles[index];
+        if (!transient_reference_matches(
+                &cached->node.reference, bus, path)) continue;
+        cached->metadata_hydrated = false;
+        wake_worker();
+        return true;
+    }
+    return false;
+}
 static void remove_transient_root_locked(size_t index) {
     size_t remaining = state.transient_root_count - index - 1;
     memmove(&state.transient_roots[index], &state.transient_roots[index + 1],
@@ -735,26 +752,50 @@ static int parse_action(char *response, int *id,
 }
 
 static void process_event(void) {
-    PendingEvent event;
+    PendingEvent event = {0};
     int id = 0;
+    bool have_event = false;
     pthread_mutex_lock(&state.mutex);
     if (state.event_count > 0) {
-        event = state.events[state.event_head];
-        state.event_head = (state.event_head + 1) % MAX_EVENTS;
-        state.event_count--;
-        for (size_t index = 0; state.tree != NULL
-                && index < state.tree->count; index++) {
-            const ArchpheneAtspiReference *reference =
-                    &state.tree->nodes[index].node.reference;
-            if (strcmp(reference->bus, event.reference.bus) == 0
-                    && strcmp(reference->path, event.reference.path) == 0) {
-                id = state.tree->nodes[index].id;
-                break;
+        /*
+         * Toolkit startup can emit one structural event per widget. The tree
+         * has already been rebuilt and its publication notifies Android, so
+         * consume content/property events here while retaining ordered focus,
+         * selection, text, and window events.
+         */
+        size_t retained = 0;
+        size_t count = state.event_count;
+        for (size_t offset = 0; offset < count; offset++) {
+            size_t read = (state.event_head + offset) % MAX_EVENTS;
+            PendingEvent queued = state.events[read];
+            if (strcmp(queued.type, "content") == 0
+                    || strcmp(queued.type, "property") == 0) {
+                continue;
+            }
+            size_t write = (state.event_head + retained) % MAX_EVENTS;
+            if (write != read) state.events[write] = queued;
+            retained++;
+        }
+        state.event_count = retained;
+        if (retained > 0) {
+            event = state.events[state.event_head];
+            state.event_head = (state.event_head + 1) % MAX_EVENTS;
+            state.event_count--;
+            for (size_t index = 0; state.tree != NULL
+                    && index < state.tree->count; index++) {
+                const ArchpheneAtspiReference *reference =
+                        &state.tree->nodes[index].node.reference;
+                if (strcmp(reference->bus, event.reference.bus) == 0
+                        && strcmp(reference->path, event.reference.path) == 0) {
+                    id = state.tree->nodes[index].id;
+                    have_event = true;
+                    break;
+                }
             }
         }
     }
     pthread_mutex_unlock(&state.mutex);
-    if (id == 0) return;
+    if (!have_event) return;
     char response[256] = {0};
     archphene_android_accessibility_event(
             id, event.type, response, sizeof(response));
@@ -987,23 +1028,89 @@ static int cached_reference_index(const CachedAccessible *cached,
     return -1;
 }
 
+static bool reuse_published_metadata(CachedAccessible *cached) {
+    if (cached == NULL || !cached->metadata_hydrated) return false;
+    bool found = false;
+    pthread_mutex_lock(&state.mutex);
+    if (state.tree != NULL) {
+        for (size_t index = 0; index < state.tree->count; index++) {
+            const ArchpheneAtspiNode *known =
+                    &state.tree->nodes[index].node;
+            if (!transient_reference_matches(&known->reference,
+                    cached->node.reference.bus,
+                    cached->node.reference.path)) continue;
+            cached->node.x = known->x;
+            cached->node.y = known->y;
+            cached->node.width = known->width;
+            cached->node.height = known->height;
+            cached->node.click_action = known->click_action;
+            cached->node.scroll_forward_action =
+                    known->scroll_forward_action;
+            cached->node.scroll_backward_action =
+                    known->scroll_backward_action;
+            cached->node.show_menu_action = known->show_menu_action;
+            /*
+             * The cache reports whether Action exists but not which action is
+             * the primary Android click. Preserve the exact live result while
+             * allowing cache state/name changes to remain authoritative.
+             */
+            cached->node.clickable = known->clickable;
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&state.mutex);
+    return found;
+}
+
+static void store_hydrated_metadata(const CachedAccessible *hydrated) {
+    if (hydrated == NULL) return;
+    pthread_mutex_lock(&state.mutex);
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        CachedAccessible *cached = &state.cached_accessibles[index];
+        if (!transient_reference_matches(
+                &cached->node.reference,
+                hydrated->node.reference.bus,
+                hydrated->node.reference.path)) continue;
+        cached->node.x = hydrated->node.x;
+        cached->node.y = hydrated->node.y;
+        cached->node.width = hydrated->node.width;
+        cached->node.height = hydrated->node.height;
+        cached->node.click_action = hydrated->node.click_action;
+        cached->node.scroll_forward_action =
+                hydrated->node.scroll_forward_action;
+        cached->node.scroll_backward_action =
+                hydrated->node.scroll_backward_action;
+        cached->node.show_menu_action = hydrated->node.show_menu_action;
+        cached->node.clickable = hydrated->node.clickable;
+        cached->metadata_hydrated = true;
+        break;
+    }
+    pthread_mutex_unlock(&state.mutex);
+}
+
 /*
  * AT-SPI Cache items intentionally omit Component extents and exact Action
- * metadata. Treat the cache as the authoritative hierarchy, not as a complete
- * node snapshot: refresh every visible reference through the standard
- * interfaces and discover children that arrived between cache signals. This
- * retains GTK's reliable cache topology while publishing real control bounds,
- * current states, and correct action indices.
+ * metadata. Hydrate a reference once when it first becomes visible, then let
+ * cache signals update its hierarchy, state, and text. BoundsChanged and cache
+ * additions explicitly invalidate only the affected metadata. Re-querying
+ * every cached GTK object during each update races widget destruction and can
+ * make GTK 3 dereference a defunct ATK object. New or moved controls still
+ * receive a live query and can contribute children which arrived before their
+ * cache records.
  */
 static void hydrate_cached_tree(DBusConnection *connection,
         CachedAccessible *cached, size_t *count) {
     if (connection == NULL || cached == NULL || count == NULL) return;
-    ArchpheneAtspiReference *children = calloc(
-            ARCHPHENE_ATSPI_CHILD_MAX, sizeof(*children));
-    if (children == NULL) return;
+    ArchpheneAtspiReference *children = NULL;
     for (size_t index = 0; index < *count
             && index < MAX_CACHED_ACCESSIBLES; index++) {
         if (!cache_node_publishable(&cached[index])) continue;
+        if (reuse_published_metadata(&cached[index])) continue;
+        if (children == NULL) {
+            children = calloc(ARCHPHENE_ATSPI_CHILD_MAX, sizeof(*children));
+            if (children == NULL) return;
+        }
         ArchpheneAtspiNode refreshed;
         size_t child_count = 0;
         int result = archphene_atspi_client_read_node(
@@ -1044,6 +1151,8 @@ static void hydrate_cached_tree(DBusConnection *connection,
             refreshed.click_action = cached[index].node.click_action;
         }
         cached[index].node = refreshed;
+        cached[index].metadata_hydrated = true;
+        store_hydrated_metadata(&cached[index]);
         for (size_t child_index = 0;
                 child_index < child_count
                 && *count < MAX_CACHED_ACCESSIBLES; child_index++) {
@@ -1170,7 +1279,10 @@ static void retain_previous_geometry(ArchpheneAtspiTree *tree) {
 
 static int publish_and_swap_tree(ArchpheneAtspiTree **next_tree) {
     retain_previous_geometry(*next_tree);
-    if (archphene_atspi_tree_publish(*next_tree) != 0) {
+    pthread_mutex_lock(&state.mutex);
+    bool unchanged = archphene_atspi_tree_equal(state.tree, *next_tree);
+    pthread_mutex_unlock(&state.mutex);
+    if (!unchanged && archphene_atspi_tree_publish(*next_tree) != 0) {
         retain_dirty();
         return -1;
     }
@@ -1272,6 +1384,21 @@ static void *translator_worker(void *unused) {
     bool retrying = false;
     while (true) {
         pthread_mutex_lock(&state.mutex);
+        if (!state.stopping && state.dirty) {
+            uint64_t generation = state.dirty_generation;
+            while (!state.stopping) {
+                struct timespec deadline;
+                deadline_after_millis(&deadline, EVENT_SETTLE_MILLIS);
+                int wait_result = pthread_cond_timedwait(
+                        &state.changed, &state.mutex, &deadline);
+                if (state.stopping) break;
+                if (generation != state.dirty_generation) {
+                    generation = state.dirty_generation;
+                    continue;
+                }
+                if (wait_result == ETIMEDOUT) break;
+            }
+        }
         bool stopping = state.stopping;
         bool dirty = state.dirty;
         pthread_mutex_unlock(&state.mutex);
@@ -1324,6 +1451,7 @@ int archphene_atspi_translator_start(void) {
     state.worker_ready = false;
     state.worker_failed = false;
     state.dirty = true;
+    state.dirty_generation++;
     int result = pthread_create(
             &state.worker, NULL, translator_worker, NULL);
     if (result != 0) {
@@ -1368,6 +1496,7 @@ void archphene_atspi_translator_stop(void) {
     state.worker_ready = false;
     state.worker_failed = false;
     state.dirty = false;
+    state.dirty_generation = 0;
     state.action_refresh_passes = 0;
     state.application_count = 0;
     state.transient_root_count = 0;
@@ -1488,6 +1617,22 @@ dbus_bool_t archphene_atspi_translator_has_bus(const char *bus) {
     return found;
 }
 
+dbus_bool_t archphene_atspi_translator_has_cache(const char *bus) {
+    if (bus == NULL) return FALSE;
+    pthread_mutex_lock(&state.mutex);
+    dbus_bool_t found = FALSE;
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        const CachedAccessible *cached = &state.cached_accessibles[index];
+        if (cached->authoritative
+                && strcmp(cached->node.reference.bus, bus) == 0) {
+            found = TRUE;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&state.mutex);
+    return found;
+}
+
 static void handle_cache_signal(DBusMessage *message) {
     const char *member = dbus_message_get_member(message);
     if (member == NULL) return;
@@ -1565,6 +1710,7 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     bool cached_state_enabled = false;
     const char *cached_text = NULL;
     bool cached_description = false;
+    bool bounds_changed = false;
     ArchpheneAtspiNode event_window;
     ArchpheneAtspiReference child_reference;
     const char *detail = event_detail(message);
@@ -1615,6 +1761,8 @@ void archphene_atspi_translator_event(DBusMessage *message) {
         cached_description = strcmp(
                 detail, "accessible-description") == 0;
         type = "property";
+    } else if (strcmp(member, "BoundsChanged") == 0) {
+        bounds_changed = true;
     } else if (strcmp(member, "TextChanged") == 0
             || strcmp(member, "TextCaretMoved") == 0
             || strcmp(member, "TextSelectionChanged") == 0) {
@@ -1682,6 +1830,9 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     if (cached_text != NULL) {
         update_cached_text_locked(
                 bus, path, cached_description, cached_text);
+    }
+    if (bounds_changed) {
+        invalidate_cached_metadata_locked(bus, path);
     }
     bool priority_root = child_add;
     if (child_remove) {

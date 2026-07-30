@@ -29,6 +29,7 @@ import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.SystemClock
+import android.util.Base64
 import android.util.Log
 import android.view.Surface
 import android.view.inputmethod.EditorInfo
@@ -44,6 +45,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -66,6 +68,12 @@ class LauncherSessionService : Service() {
         val mimeType: String,
         val debugPayload: ByteArray?,
         val portalCompletion: PortalDocumentCompletion?,
+    )
+
+    private data class AccessibilityAction(
+        val nodeId: Int,
+        val action: String,
+        val text: String,
     )
 
     private class PortalDocumentCompletion {
@@ -174,6 +182,8 @@ class LauncherSessionService : Service() {
         var pendingDocumentRequest: PendingDocumentRequest? = null
         var pendingLaunchDocument: LauncherPortalOpenDocument? = null
         var launchDocumentImportStarted = false
+        val accessibilityActions =
+            ArrayBlockingQueue<AccessibilityAction>(MAX_ACCESSIBILITY_ACTIONS)
         var launchDocumentPath: String? = null
     }
 
@@ -341,6 +351,7 @@ class LauncherSessionService : Service() {
             session.imeSize = 0
             session.imePosted = false
             if (closeCompositor) {
+                session.accessibilityActions.clear()
                 session.pendingDocumentRequest?.portalCompletion?.complete(
                     DOCUMENT_RESULT_FAILED,
                     null,
@@ -443,6 +454,10 @@ class LauncherSessionService : Service() {
                 }
                 TRANSACTION_DOCUMENT_RESULT -> {
                     transactDocumentResult(data, reply)
+                    true
+                }
+                TRANSACTION_ACCESSIBILITY_ACTION -> {
+                    transactAccessibilityAction(data, reply)
                     true
                 }
                 else -> super.onTransact(code, data, reply, flags)
@@ -862,6 +877,50 @@ class LauncherSessionService : Service() {
             reply.writeNoException()
             reply.writeInt(result)
         }
+
+        private fun transactAccessibilityAction(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            val result =
+                runCatching {
+                    data.enforceInterface(INTERFACE)
+                    if (data.dataAvail() > MAX_ACCESSIBILITY_ACTION_PARCEL_BYTES) {
+                        return@runCatching RESULT_INVALID
+                    }
+                    val version = data.readInt()
+                    val sessionId = data.readInt()
+                    val nodeId = data.readInt()
+                    val action = data.readString().orEmpty()
+                    val text = data.readString().orEmpty()
+                    if (
+                        version != PROTOCOL_VERSION ||
+                        sessionId <= 0 ||
+                        nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID ||
+                        action !in ACCESSIBILITY_ACTIONS ||
+                        text.length > MAX_ACCESSIBILITY_TEXT_UTF16 ||
+                        text.toByteArray(StandardCharsets.UTF_8).size >
+                        MAX_ACCESSIBILITY_TEXT_BYTES ||
+                        (action != "set-text" && text.isNotEmpty()) ||
+                        !hasWellFormedUtf16(text) ||
+                        data.dataAvail() != 0
+                    ) {
+                        return@runCatching RESULT_INVALID
+                    }
+                    submitAccessibilityAction(
+                        Binder.getCallingUid(),
+                        sessionId,
+                        nodeId,
+                        action,
+                        text,
+                    )
+                }.getOrElse { error ->
+                    Log.w(TAG, "Rejected malformed accessibility action", error)
+                    RESULT_INVALID
+                }
+            reply.writeNoException()
+            reply.writeInt(result)
+        }
     }
 
     private data class OpenResult(
@@ -1040,6 +1099,26 @@ class LauncherSessionService : Service() {
             return null
         }
         return session
+    }
+
+    @Synchronized
+    private fun submitAccessibilityAction(
+        callingUid: Int,
+        sessionId: Int,
+        nodeId: Int,
+        action: String,
+        text: String,
+    ): Int {
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        return if (
+            session.accessibilityActions.offer(
+                AccessibilityAction(nodeId, action, text),
+            )
+        ) {
+            RESULT_OK
+        } else {
+            RESULT_BUSY
+        }
     }
 
     @Synchronized
@@ -1912,6 +1991,19 @@ class LauncherSessionService : Service() {
                                 front,
                                 descriptor,
                             )
+                        },
+                        accessibilityEnabled = true,
+                        publishAccessibilityTree = { descriptor ->
+                            notifyAccessibilityTree(session, descriptor)
+                        },
+                        publishAccessibilityEvent = { nodeId, type ->
+                            notifyAccessibilityEvent(session, nodeId, type)
+                        },
+                        takeAccessibilityAction = { timeoutMillis ->
+                            takeAccessibilityAction(session, timeoutMillis)
+                        },
+                        requestAccessibilityMenu = { nodeId, transition ->
+                            notifyAccessibilityMenu(session, nodeId, transition)
                         },
                         importDirectory = { displayName, descriptor ->
                             runtime.importPortalFolder(displayName, descriptor)
@@ -3600,6 +3692,147 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyAccessibilityTree(
+        session: Session,
+        descriptor: ParcelFileDescriptor,
+    ): Boolean {
+        if (!session.active) return false
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(ACCESSIBILITY_CALLBACK_TREE)
+            descriptor.writeToParcel(data, 0)
+            if (
+                data.dataSize() > MAX_ACCESSIBILITY_CALLBACK_PARCEL_BYTES ||
+                !session.clientToken.transact(
+                    CALLBACK_ACCESSIBILITY,
+                    data,
+                    reply,
+                    0,
+                )
+            ) {
+                false
+            } else {
+                reply.readException()
+                reply.readInt() == RESULT_OK && reply.dataAvail() == 0
+            }
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not publish accessibility tree session=${session.id}", error)
+            false
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun notifyAccessibilityEvent(
+        session: Session,
+        nodeId: Int,
+        type: String,
+    ): Boolean =
+        notifyAccessibilityControl(
+            session,
+            ACCESSIBILITY_CALLBACK_EVENT,
+            nodeId,
+            type,
+            false,
+        )
+
+    private fun notifyAccessibilityMenu(
+        session: Session,
+        nodeId: Int,
+        transition: Boolean,
+    ): Boolean =
+        notifyAccessibilityControl(
+            session,
+            ACCESSIBILITY_CALLBACK_MENU,
+            nodeId,
+            "",
+            transition,
+        )
+
+    private fun notifyAccessibilityControl(
+        session: Session,
+        operation: Int,
+        nodeId: Int,
+        type: String,
+        transition: Boolean,
+    ): Boolean {
+        val minimumNodeId =
+            if (operation == ACCESSIBILITY_CALLBACK_EVENT) 0 else 1
+        if (
+            !session.active ||
+            nodeId !in minimumNodeId..MAX_ACCESSIBILITY_NODE_ID
+        ) {
+            return false
+        }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(operation)
+            data.writeInt(nodeId)
+            data.writeString(type)
+            data.writeInt(if (transition) 1 else 0)
+            if (
+                data.dataSize() > MAX_ACCESSIBILITY_CALLBACK_PARCEL_BYTES ||
+                !session.clientToken.transact(
+                    CALLBACK_ACCESSIBILITY,
+                    data,
+                    reply,
+                    0,
+                )
+            ) {
+                false
+            } else {
+                reply.readException()
+                reply.readInt() == RESULT_OK && reply.dataAvail() == 0
+            }
+        } catch (error: RemoteException) {
+            Log.w(
+                TAG,
+                "Could not publish accessibility callback session=${session.id}",
+                error,
+            )
+            false
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun takeAccessibilityAction(
+        session: Session,
+        timeoutMillis: Int,
+    ): String {
+        if (
+            !session.active ||
+            timeoutMillis !in 0..MAX_ACCESSIBILITY_POLL_MILLIS
+        ) {
+            return "ERROR\tEMPTY"
+        }
+        val action =
+            if (timeoutMillis == 0) {
+                session.accessibilityActions.poll()
+            } else {
+                session.accessibilityActions.poll(
+                    timeoutMillis.toLong(),
+                    TimeUnit.MILLISECONDS,
+                )
+            } ?: return "ERROR\tEMPTY"
+        val encoded =
+            Base64.encodeToString(
+                action.text.toByteArray(StandardCharsets.UTF_8),
+                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+            )
+        return "OK\t${action.nodeId}\t${action.action}\t$encoded"
+    }
+
     private fun writeCursorCallbackHeader(
         data: Parcel,
         session: Session,
@@ -3847,7 +4080,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 13
+        private const val PROTOCOL_VERSION = 14
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3856,6 +4089,8 @@ class LauncherSessionService : Service() {
         private const val TRANSACTION_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val TRANSACTION_IME = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val TRANSACTION_DOCUMENT_RESULT = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val TRANSACTION_ACCESSIBILITY_ACTION =
+            IBinder.FIRST_CALL_TRANSACTION + 8
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
@@ -3871,6 +4106,19 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
         private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
         private const val CALLBACK_APPEARANCE = IBinder.FIRST_CALL_TRANSACTION + 12
+        private const val CALLBACK_ACCESSIBILITY = IBinder.FIRST_CALL_TRANSACTION + 13
+        private const val ACCESSIBILITY_CALLBACK_TREE = 1
+        private const val ACCESSIBILITY_CALLBACK_EVENT = 2
+        private const val ACCESSIBILITY_CALLBACK_MENU = 3
+        private const val MAX_ACCESSIBILITY_ACTIONS = 64
+        private const val MAX_ACCESSIBILITY_NODE_ID = 1_000_000
+        private const val MAX_ACCESSIBILITY_POLL_MILLIS = 250
+        private const val MAX_ACCESSIBILITY_TEXT_UTF16 = 1_024
+        private const val MAX_ACCESSIBILITY_TEXT_BYTES = 4_096
+        private const val MAX_ACCESSIBILITY_ACTION_PARCEL_BYTES = 16 * 1_024
+        private const val MAX_ACCESSIBILITY_CALLBACK_PARCEL_BYTES = 1_024
+        private val ACCESSIBILITY_ACTIONS =
+            setOf("click", "focus", "set-text", "scroll-forward", "scroll-backward")
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3

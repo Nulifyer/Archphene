@@ -95,35 +95,83 @@ internal object LauncherApkAssembler {
         "$CAPABILITIES_AUDIO_INPUT_SECRETS_V8,camera"
     internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9 =
         "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,camera"
+    internal const val CAPABILITIES_V10 = "$CAPABILITIES_V4,accessibility"
+    internal const val CAPABILITIES_PRINTING_V10 =
+        "$CAPABILITIES_PRINTING_V5,accessibility"
+    internal const val CAPABILITIES_AUDIO_V10 = "$CAPABILITIES_AUDIO_V6,accessibility"
+    internal const val CAPABILITIES_AUDIO_PRINTING_V10 =
+        "$CAPABILITIES_AUDIO_PRINTING_V6,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_V7,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_PRINTING_V7,accessibility"
+    internal const val CAPABILITIES_SECRETS_V10 = "$CAPABILITIES_SECRETS_V8,accessibility"
+    internal const val CAPABILITIES_PRINTING_SECRETS_V10 =
+        "$CAPABILITIES_PRINTING_SECRETS_V8,accessibility"
+    internal const val CAPABILITIES_AUDIO_SECRETS_V10 =
+        "$CAPABILITIES_AUDIO_SECRETS_V8,accessibility"
+    internal const val CAPABILITIES_AUDIO_PRINTING_SECRETS_V10 =
+        "$CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_SECRETS_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_SECRETS_V8,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,accessibility"
+    internal const val CAPABILITIES_CAMERA_V10 = "$CAPABILITIES_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_PRINTING_CAMERA_V10 =
+        "$CAPABILITIES_PRINTING_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_PRINTING_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_PRINTING_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_SECRETS_CAMERA_V10 =
+        "$CAPABILITIES_SECRETS_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_PRINTING_SECRETS_CAMERA_V10 =
+        "$CAPABILITIES_PRINTING_SECRETS_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_SECRETS_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_SECRETS_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9,accessibility"
+    internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10 =
+        "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9,accessibility"
 
-    internal fun validCapabilities(value: String): Boolean =
-        value == CAPABILITIES_V4 ||
-            value == CAPABILITIES_PRINTING_V5 ||
-            value == CAPABILITIES_AUDIO_V6 ||
-            value == CAPABILITIES_AUDIO_PRINTING_V6 ||
-            value == CAPABILITIES_AUDIO_INPUT_V7 ||
-            value == CAPABILITIES_AUDIO_INPUT_PRINTING_V7 ||
-            value == CAPABILITIES_SECRETS_V8 ||
-            value == CAPABILITIES_PRINTING_SECRETS_V8 ||
-            value == CAPABILITIES_AUDIO_SECRETS_V8 ||
-            value == CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 ||
-            value == CAPABILITIES_AUDIO_INPUT_SECRETS_V8 ||
-            value == CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 ||
-            value == CAPABILITIES_CAMERA_V9 ||
-            value == CAPABILITIES_PRINTING_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_PRINTING_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_INPUT_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9 ||
-            value == CAPABILITIES_SECRETS_CAMERA_V9 ||
-            value == CAPABILITIES_PRINTING_SECRETS_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_SECRETS_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9 ||
-            value == CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9
+    internal fun validCapabilities(value: String): Boolean = value in CAPABILITY_CONTRACTS_V10
 
     internal fun validMetadataCapabilities(value: String?): Boolean =
         value?.startsWith("c:") == true && validCapabilities(value.drop(2))
+
+    private val CAPABILITY_CONTRACTS_V10 =
+        setOf(
+            CAPABILITIES_V10,
+            CAPABILITIES_PRINTING_V10,
+            CAPABILITIES_AUDIO_V10,
+            CAPABILITIES_AUDIO_PRINTING_V10,
+            CAPABILITIES_AUDIO_INPUT_V10,
+            CAPABILITIES_AUDIO_INPUT_PRINTING_V10,
+            CAPABILITIES_SECRETS_V10,
+            CAPABILITIES_PRINTING_SECRETS_V10,
+            CAPABILITIES_AUDIO_SECRETS_V10,
+            CAPABILITIES_AUDIO_PRINTING_SECRETS_V10,
+            CAPABILITIES_AUDIO_INPUT_SECRETS_V10,
+            CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V10,
+            CAPABILITIES_CAMERA_V10,
+            CAPABILITIES_PRINTING_CAMERA_V10,
+            CAPABILITIES_AUDIO_CAMERA_V10,
+            CAPABILITIES_AUDIO_PRINTING_CAMERA_V10,
+            CAPABILITIES_AUDIO_INPUT_CAMERA_V10,
+            CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V10,
+            CAPABILITIES_SECRETS_CAMERA_V10,
+            CAPABILITIES_PRINTING_SECRETS_CAMERA_V10,
+            CAPABILITIES_AUDIO_SECRETS_CAMERA_V10,
+            CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V10,
+            CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V10,
+            CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10,
+        )
     private const val TEMPLATE_ICON_SHA256 =
         "2babc12a8af9fa0f7018a7d20110f4436e128ddac876d6276b519daefeea0a56"
     private const val MANIFEST = "AndroidManifest.xml"
@@ -638,7 +686,7 @@ internal object LauncherApkAssembler {
         MessageDigest.getInstance("SHA-256").digest(value)
 
     internal fun hasCameraCapability(capabilities: String): Boolean =
-        capabilities.endsWith(",camera") && validCapabilities(capabilities)
+        validCapabilities(capabilities) && ",camera," in ",$capabilities,"
 
     private class CountingOutputStream(
         output: OutputStream,

@@ -29,6 +29,9 @@ int archphene_atspi_tree_build(
         size_t application_count,
         ArchpheneAtspiTree *tree);
 int archphene_atspi_tree_publish(const ArchpheneAtspiTree *tree);
+int archphene_atspi_tree_equal(
+        const ArchpheneAtspiTree *left,
+        const ArchpheneAtspiTree *right);
 int archphene_atspi_tree_add_root(
         ArchpheneAtspiTree *tree, const ArchpheneAtspiNode *node);
 int archphene_atspi_tree_add_node(

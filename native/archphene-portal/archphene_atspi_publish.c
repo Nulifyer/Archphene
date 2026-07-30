@@ -4,7 +4,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +12,11 @@
 #include <time.h>
 #include <unistd.h>
 
-#define JSON_MAX (1024 * 1024)
+#define TREE_WIRE_MAX (1024 * 1024)
+#define TREE_WIRE_VERSION 1
+#define TREE_WIRE_HEADER_BYTES 24
+#define TREE_WIRE_NODE_FIXED_BYTES 36
+#define TREE_WIRE_COUNT_OFFSET 20
 #define NODE_ID_MAX 1000000
 #define VIEWPORT_MAX 16384
 #define TRAVERSAL_MAX (ARCHPHENE_ATSPI_NODE_MAX + 16)
@@ -23,13 +26,6 @@ typedef struct {
     ArchpheneAtspiReference reference;
     int parent;
 } PendingNode;
-
-typedef struct {
-    char *data;
-    size_t length;
-    size_t capacity;
-    int failed;
-} JsonBuffer;
 
 static int same_reference(const ArchpheneAtspiReference *left,
         const ArchpheneAtspiReference *right) {
@@ -344,132 +340,11 @@ fail:
     return -1;
 }
 
-static void json_raw(JsonBuffer *buffer, const char *value, size_t length) {
-    if (buffer->failed || length > buffer->capacity - buffer->length) {
-        buffer->failed = 1;
-        return;
-    }
-    memcpy(buffer->data + buffer->length, value, length);
-    buffer->length += length;
-}
-
-static void json_format(JsonBuffer *buffer, const char *format, ...) {
-    if (buffer->failed || buffer->length >= buffer->capacity) {
-        buffer->failed = 1;
-        return;
-    }
-    va_list arguments;
-    va_start(arguments, format);
-    int written = vsnprintf(buffer->data + buffer->length,
-            buffer->capacity - buffer->length, format, arguments);
-    va_end(arguments);
-    if (written < 0 || (size_t)written >= buffer->capacity - buffer->length) {
-        buffer->failed = 1;
-        return;
-    }
-    buffer->length += (size_t)written;
-}
-
-static void json_string(JsonBuffer *buffer, const char *value) {
-    json_raw(buffer, "\"", 1);
-    for (size_t index = 0; !buffer->failed && value[index] != '\0'; index++) {
-        unsigned char current = (unsigned char)value[index];
-        if (current == '"' || current == '\\') {
-            char escaped[2] = {'\\', (char)current};
-            json_raw(buffer, escaped, sizeof(escaped));
-        } else if (current == '\b') json_raw(buffer, "\\b", 2);
-        else if (current == '\f') json_raw(buffer, "\\f", 2);
-        else if (current == '\n') json_raw(buffer, "\\n", 2);
-        else if (current == '\r') json_raw(buffer, "\\r", 2);
-        else if (current == '\t') json_raw(buffer, "\\t", 2);
-        else if (current < 0x20) json_format(buffer, "\\u%04x", current);
-        else json_raw(buffer, (const char *)&value[index], 1);
-    }
-    json_raw(buffer, "\"", 1);
-}
-
-static void json_boolean(JsonBuffer *buffer, dbus_bool_t value) {
-    if (value) json_raw(buffer, "true", 4);
-    else json_raw(buffer, "false", 5);
-}
-
-static int render_tree(const ArchpheneAtspiTree *tree,
-        char **json, size_t *json_length) {
-    char *storage = malloc(JSON_MAX);
-    if (storage == NULL) return -1;
-    JsonBuffer output = {.data = storage, .capacity = JSON_MAX};
-    if (tree->count == 0) {
-        static const char clear_tree[] =
-                "{\"viewportWidth\":1,\"viewportHeight\":1,"
-                "\"clear\":true,\"nodes\":[]}";
-        json_raw(&output, clear_tree, sizeof(clear_tree) - 1);
-    } else {
-        json_format(&output, "{\"viewportWidth\":%d,\"viewportHeight\":%d,"
-                "\"nodes\":[", tree->viewport_width, tree->viewport_height);
-        size_t emitted = 0;
-        for (size_t index = 0; index < tree->count; index++) {
-            size_t checkpoint = output.length;
-            const ArchpheneAtspiPublishedNode *entry = &tree->nodes[index];
-            const ArchpheneAtspiNode *node = &entry->node;
-            if (emitted > 0) json_raw(&output, ",", 1);
-            json_format(&output, "{\"id\":%d,\"parent\":%d,\"role\":",
-                    entry->id, entry->parent);
-            json_string(&output, node->role);
-            json_raw(&output, ",\"text\":", 8);
-            json_string(&output, node->text);
-            json_raw(&output, ",\"description\":", 15);
-            json_string(&output, node->description);
-            if (entry->parent == 0) {
-                json_raw(&output, ",\"windowTitle\":", 15);
-                json_string(&output, entry->window_title);
-            }
-            json_format(&output,
-                    ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,"
-                    "\"enabled\":", node->x, node->y,
-                    node->width, node->height);
-            json_boolean(&output, node->enabled);
-            json_raw(&output, ",\"focusable\":", 13);
-            json_boolean(&output, node->focusable);
-            json_raw(&output, ",\"clickable\":", 13);
-            json_boolean(&output, node->clickable);
-            json_raw(&output, ",\"editable\":", 12);
-            json_boolean(&output, node->editable);
-            json_raw(&output, ",\"checkable\":", 13);
-            json_boolean(&output, node->checkable);
-            json_raw(&output, ",\"checked\":", 11);
-            json_boolean(&output, node->checked);
-            json_raw(&output, ",\"selected\":", 12);
-            json_boolean(&output, node->selected);
-            json_raw(&output, ",\"password\":", 12);
-            json_boolean(&output, node->password);
-            json_raw(&output, ",\"scrollForward\":", 17);
-            json_boolean(&output, node->scroll_forward_action >= 0);
-            json_raw(&output, ",\"scrollBackward\":", 18);
-            json_boolean(&output, node->scroll_backward_action >= 0);
-            json_raw(&output, "}", 1);
-            if (output.failed || output.length + 2 > output.capacity) {
-                output.failed = 0;
-                output.length = checkpoint;
-                break;
-            }
-            emitted++;
-        }
-        if (emitted == 0) output.failed = 1;
-        json_raw(&output, "]}", 2);
-    }
-    if (output.failed || output.length == 0 || output.length >= JSON_MAX) {
-        free(storage);
-        return -1;
-    }
-    *json = storage;
-    *json_length = output.length;
-    return 0;
-}
-
-static int write_all(int descriptor, const char *data, size_t length) {
+static int write_all(int descriptor, const void *data, size_t length) {
+    const unsigned char *bytes = data;
     size_t offset = 0;
     while (offset < length) {
-        ssize_t written = write(descriptor, data + offset, length - offset);
+        ssize_t written = write(descriptor, bytes + offset, length - offset);
         if (written < 0 && errno == EINTR) continue;
         if (written <= 0) return -1;
         offset += (size_t)written;
@@ -477,32 +352,156 @@ static int write_all(int descriptor, const char *data, size_t length) {
     return 0;
 }
 
+static int write_u16(int descriptor, uint16_t value) {
+    unsigned char bytes[2] = {
+        (unsigned char)(value >> 8),
+        (unsigned char)value,
+    };
+    return write_all(descriptor, bytes, sizeof(bytes));
+}
+
+static int write_u32(int descriptor, uint32_t value) {
+    unsigned char bytes[4] = {
+        (unsigned char)(value >> 24),
+        (unsigned char)(value >> 16),
+        (unsigned char)(value >> 8),
+        (unsigned char)value,
+    };
+    return write_all(descriptor, bytes, sizeof(bytes));
+}
+
+static int emitted_parent(const ArchpheneAtspiTree *tree,
+        size_t limit, int parent) {
+    if (parent == 0) return 1;
+    for (size_t index = 0; index < limit; index++) {
+        if (tree->nodes[index].id == parent) return 1;
+    }
+    return 0;
+}
+
+static uint32_t node_flags(const ArchpheneAtspiNode *node) {
+    uint32_t flags = 0;
+    if (node->enabled) flags |= 1u << 0;
+    if (node->focusable) flags |= 1u << 1;
+    if (node->clickable) flags |= 1u << 2;
+    if (node->editable) flags |= 1u << 3;
+    if (node->checkable) flags |= 1u << 4;
+    if (node->checked) flags |= 1u << 5;
+    if (node->selected) flags |= 1u << 6;
+    if (node->password) flags |= 1u << 7;
+    if (node->scroll_forward_action >= 0) flags |= 1u << 8;
+    if (node->scroll_backward_action >= 0) flags |= 1u << 9;
+    return flags;
+}
+
+int archphene_atspi_tree_equal(
+        const ArchpheneAtspiTree *left,
+        const ArchpheneAtspiTree *right) {
+    if (left == right) return 1;
+    if (left == NULL || right == NULL
+            || left->viewport_width != right->viewport_width
+            || left->viewport_height != right->viewport_height
+            || left->count != right->count) return 0;
+    for (size_t index = 0; index < left->count; index++) {
+        const ArchpheneAtspiPublishedNode *a = &left->nodes[index];
+        const ArchpheneAtspiPublishedNode *b = &right->nodes[index];
+        if (a->id != b->id || a->parent != b->parent
+                || a->node.x != b->node.x || a->node.y != b->node.y
+                || a->node.width != b->node.width
+                || a->node.height != b->node.height
+                || node_flags(&a->node) != node_flags(&b->node)
+                || strcmp(a->node.role, b->node.role) != 0
+                || strcmp(a->node.text, b->node.text) != 0
+                || strcmp(a->node.description, b->node.description) != 0
+                || strcmp(a->window_title, b->window_title) != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int write_tree_header(int descriptor, const ArchpheneAtspiTree *tree) {
+    static const unsigned char magic[8] =
+            {'A', 'R', 'C', 'H', 'A', 'T', 'S', 'P'};
+    return write_all(descriptor, magic, sizeof(magic))
+            || write_u32(descriptor, TREE_WIRE_VERSION)
+            || write_u32(descriptor, (uint32_t)clamp_size(tree->viewport_width))
+            || write_u32(descriptor, (uint32_t)clamp_size(tree->viewport_height))
+            || write_u32(descriptor, 0);
+}
+
+static int write_tree_node(int descriptor,
+        const ArchpheneAtspiPublishedNode *entry,
+        const uint16_t lengths[4]) {
+    const ArchpheneAtspiNode *node = &entry->node;
+    if (write_u32(descriptor, (uint32_t)entry->id)
+            || write_u32(descriptor, (uint32_t)entry->parent)
+            || write_u32(descriptor, (uint32_t)node->x)
+            || write_u32(descriptor, (uint32_t)node->y)
+            || write_u32(descriptor, (uint32_t)node->width)
+            || write_u32(descriptor, (uint32_t)node->height)
+            || write_u32(descriptor, node_flags(node))) return -1;
+    for (size_t index = 0; index < 4; index++) {
+        if (write_u16(descriptor, lengths[index])) return -1;
+    }
+    return write_all(descriptor, node->role, lengths[0])
+            || write_all(descriptor, node->text, lengths[1])
+            || write_all(descriptor, node->description, lengths[2])
+            || write_all(descriptor, entry->window_title, lengths[3]);
+}
+
+static int write_tree(int descriptor, const ArchpheneAtspiTree *tree,
+        size_t *emitted_count, size_t *wire_bytes) {
+    if (write_tree_header(descriptor, tree) != 0) return -1;
+    size_t total = TREE_WIRE_HEADER_BYTES;
+    size_t emitted = 0;
+    for (size_t index = 0; index < tree->count; index++) {
+        const ArchpheneAtspiPublishedNode *entry = &tree->nodes[index];
+        const ArchpheneAtspiNode *node = &entry->node;
+        size_t raw_lengths[4] = {
+            strnlen(node->role, sizeof(node->role)),
+            strnlen(node->text, sizeof(node->text)),
+            strnlen(node->description, sizeof(node->description)),
+            strnlen(entry->window_title, sizeof(entry->window_title)),
+        };
+        uint16_t lengths[4];
+        size_t record = TREE_WIRE_NODE_FIXED_BYTES;
+        for (size_t part = 0; part < 4; part++) {
+            if (raw_lengths[part] > UINT16_MAX) return -1;
+            lengths[part] = (uint16_t)raw_lengths[part];
+            if (raw_lengths[part] > TREE_WIRE_MAX - record) return -1;
+            record += raw_lengths[part];
+        }
+        if (record > TREE_WIRE_MAX - total) break;
+        if (!emitted_parent(tree, index, entry->parent)) continue;
+        if (write_tree_node(descriptor, entry, lengths) != 0) return -1;
+        total += record;
+        emitted++;
+    }
+    if (tree->count > 0 && emitted == 0) return -1;
+    if (lseek(descriptor, TREE_WIRE_COUNT_OFFSET, SEEK_SET) < 0
+            || write_u32(descriptor, (uint32_t)emitted) != 0
+            || lseek(descriptor, 0, SEEK_SET) < 0) return -1;
+    *emitted_count = emitted;
+    *wire_bytes = total;
+    return 0;
+}
+
 int archphene_atspi_tree_publish(const ArchpheneAtspiTree *tree) {
     if (tree == NULL) return -1;
-    char *json = NULL;
-    size_t json_length = 0;
-    if (render_tree(tree, &json, &json_length) != 0) return -1;
     const char *runtime = getenv("ARCHPHENE_RUNTIME_DIR");
-    if (runtime == NULL || runtime[0] != '/') {
-        free(json);
-        return -1;
-    }
+    if (runtime == NULL || runtime[0] != '/') return -1;
     char path[1024];
     int length = snprintf(path, sizeof(path),
             "%s/.archphene-atspi-XXXXXX", runtime);
-    if (length <= 0 || (size_t)length >= sizeof(path)) {
-        free(json);
-        return -1;
-    }
+    if (length <= 0 || (size_t)length >= sizeof(path)) return -1;
     int descriptor = mkstemp(path);
-    if (descriptor < 0) {
-        free(json);
-        return -1;
-    }
+    if (descriptor < 0) return -1;
     unlink(path);
-    int result = write_all(descriptor, json, json_length);
-    free(json);
-    if (result == 0 && lseek(descriptor, 0, SEEK_SET) < 0) result = -1;
+    size_t emitted_count = 0;
+    size_t wire_bytes = 0;
+    int result = write_tree(
+            descriptor, tree, &emitted_count, &wire_bytes);
     char response[256] = {0};
     if (result == 0) {
         result = archphene_android_publish_accessibility_tree(
@@ -510,11 +509,11 @@ int archphene_atspi_tree_publish(const ArchpheneAtspiTree *tree) {
         if (result == 0 && strcmp(response, "OK") != 0) result = -1;
     }
     static size_t last_logged_count = SIZE_MAX;
-    if (result != 0 || tree->count != last_logged_count) {
+    if (result != 0 || emitted_count != last_logged_count) {
         fprintf(stderr, "AT-SPI publish nodes=%zu bytes=%zu result=%d response=%s\n",
-                tree->count, json_length, result,
+                emitted_count, wire_bytes, result,
                 response[0] == '\0' ? "none" : response);
-        last_logged_count = tree->count;
+        last_logged_count = emitted_count;
     }
     close(descriptor);
     return result;

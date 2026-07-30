@@ -771,6 +771,12 @@ impl CommandEnvironment {
         if let Some(address) = self.portal_bus_address.as_ref() {
             command
                 .env("DBUS_SESSION_BUS_ADDRESS", address)
+                // GTK 4 otherwise defers to the host desktop's
+                // toolkit-accessibility preference, which is not authoritative
+                // inside the manager-owned Arch environment. The authenticated
+                // private AT-SPI registry is always present for portal-backed
+                // graphical sessions.
+                .env("GTK_A11Y", "atspi")
                 .env("GTK_USE_PORTAL", "1")
                 .env("GIO_USE_PORTALS", "1")
                 .env("NOTIFY_FORCE_PORTAL", "1")
@@ -3289,6 +3295,7 @@ mod tests {
             Some(OsStr::new("launcher-7.sock")),
         );
         assert_eq!(gui_value("GDK_BACKEND"), Some(OsStr::new("wayland")));
+        assert_eq!(gui_value("GTK_A11Y"), None);
         assert_eq!(gui_value("QT_QPA_PLATFORM"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("SDL_VIDEODRIVER"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("GSK_RENDERER"), None);
@@ -3462,6 +3469,7 @@ mod tests {
             ))
         );
         assert_eq!(value("GTK_USE_PORTAL"), Some(OsStr::new("1")));
+        assert_eq!(value("GTK_A11Y"), Some(OsStr::new("atspi")));
         assert_eq!(value("GIO_USE_PORTALS"), Some(OsStr::new("1")));
         assert_eq!(value("ARCHPHENE_GTK_FILE_PORTAL"), Some(OsStr::new("1")));
         let settings =

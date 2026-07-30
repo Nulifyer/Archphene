@@ -3963,8 +3963,17 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                 } else {
                     serial
                 };
-                let serial_matches_client = pending_input_serial
-                    .is_some_and(|candidate| candidate.serial == effective_serial);
+                /*
+                 * Toolkits may retain the serial which initiated a menu
+                 * transition even when focus or accessibility-generated input
+                 * produces a newer serial before xdg_popup.grab is dispatched.
+                 * Accept any bounded recent input serial owned by this client,
+                 * as wl_data_device selection validation already does.
+                 */
+                let serial_matches_client = state.selection_serials.iter().rev().any(|candidate| {
+                    candidate.serial == effective_serial
+                        && candidate.surface.id().same_client_as(&data.parent.id())
+                });
                 let serial_extends_grab = state.popup_grab.as_ref().is_some_and(|grab| {
                     grab.active
                         && grab.serial == effective_serial

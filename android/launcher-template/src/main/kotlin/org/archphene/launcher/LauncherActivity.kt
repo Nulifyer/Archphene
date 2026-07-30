@@ -54,6 +54,7 @@ import android.view.SurfaceView
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.accessibility.AccessibilityNodeProvider
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -129,6 +130,11 @@ class LauncherActivity :
     private val secretStore by lazy { LauncherSecretStore(filesDir) }
     private val cameraIntegrationDelegate = lazy { LauncherCameraIntegration(this) }
     private val cameraIntegration by cameraIntegrationDelegate
+    private val accessibilityProvider =
+        LauncherAccessibilityProvider(
+            submitAction = ::submitAccessibilityAction,
+            submitMenuFallback = ::submitAccessibilityMenuFallback,
+        )
     private val cameraLifecycleMonitor = Object()
     @Volatile private var cameraLifecycleClosed = false
     @Volatile private var cameraPermissionRequestInFlight = false
@@ -205,7 +211,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_APPEARANCE ||
+                    code !in CALLBACK_STATUS..CALLBACK_ACCESSIBILITY ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -620,6 +626,58 @@ class LauncherActivity :
                             }
                             true
                         }
+                        CALLBACK_ACCESSIBILITY -> {
+                            val operation = data.readInt()
+                            val accepted =
+                                when (operation) {
+                                    ACCESSIBILITY_CALLBACK_TREE -> {
+                                        val descriptor =
+                                            ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                                        if (data.dataAvail() != 0) {
+                                            descriptor.close()
+                                            false
+                                        } else {
+                                            accessibilityProvider.publish(descriptor)
+                                        }
+                                    }
+                                    ACCESSIBILITY_CALLBACK_EVENT,
+                                    ACCESSIBILITY_CALLBACK_MENU,
+                                    -> {
+                                        val nodeId = data.readInt()
+                                        val type = data.readString().orEmpty()
+                                        val transition = data.readInt()
+                                        val minimumNodeId =
+                                            if (
+                                                operation == ACCESSIBILITY_CALLBACK_EVENT
+                                            ) {
+                                                0
+                                            } else {
+                                                1
+                                            }
+                                        if (
+                                            nodeId !in minimumNodeId..
+                                            MAX_ACCESSIBILITY_NODE_ID ||
+                                            transition !in 0..1 ||
+                                            data.dataAvail() != 0
+                                        ) {
+                                            false
+                                        } else if (operation == ACCESSIBILITY_CALLBACK_EVENT) {
+                                            transition == 0 &&
+                                                accessibilityProvider.sendNamedEvent(nodeId, type)
+                                        } else {
+                                            type.isEmpty() &&
+                                                accessibilityProvider.activateMenuFallback(
+                                                    nodeId,
+                                                    transition == 1,
+                                                )
+                                        }
+                                    }
+                                    else -> false
+                                }
+                            reply?.writeNoException()
+                            reply?.writeInt(if (accepted) RESULT_OK else RESULT_INVALID)
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -655,6 +713,7 @@ class LauncherActivity :
                 linuxAppearanceDark = null
                 linuxAppearanceBackground = 0
                 linuxAppearanceForeground = 0
+                accessibilityProvider.clear()
                 applySystemBarAppearance()
                 applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
                 status.setText(R.string.launcher_disconnected)
@@ -823,6 +882,11 @@ class LauncherActivity :
         maybeRequestNotificationPermission()
     }
 
+    override fun onEnterAnimationComplete() {
+        super.onEnterAnimationComplete()
+        accessibilityProvider.refreshBoundsAfterTransition()
+    }
+
     override fun onPause() {
         synchronized(cameraLifecycleMonitor) {
             activityResumed = false
@@ -916,33 +980,8 @@ class LauncherActivity :
             return
         }
         val metadata = applicationMetadata()
-        val capabilities = metadata.getString(CAPABILITIES)
-        if (
-            capabilities != CAPABILITIES_V4 &&
-            capabilities != CAPABILITIES_PRINTING_V5 &&
-            capabilities != CAPABILITIES_AUDIO_V6 &&
-            capabilities != CAPABILITIES_AUDIO_PRINTING_V6 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_V7 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_V7 &&
-            capabilities != CAPABILITIES_SECRETS_V8 &&
-            capabilities != CAPABILITIES_PRINTING_SECRETS_V8 &&
-            capabilities != CAPABILITIES_AUDIO_SECRETS_V8 &&
-            capabilities != CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_SECRETS_V8 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 &&
-            capabilities != CAPABILITIES_CAMERA_V9 &&
-            capabilities != CAPABILITIES_PRINTING_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_PRINTING_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9 &&
-            capabilities != CAPABILITIES_SECRETS_CAMERA_V9 &&
-            capabilities != CAPABILITIES_PRINTING_SECRETS_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_SECRETS_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9
-        ) {
+        val capabilities = metadata.getString(CAPABILITIES).orEmpty()
+        if (capabilities !in VALID_CAPABILITIES_V10) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
             return
@@ -950,7 +989,7 @@ class LauncherActivity :
         printingEnabled = capabilities.contains(",printing")
         microphoneEnabled = capabilities.contains(",audio-input")
         secretsEnabled = capabilities.contains(",secrets")
-        cameraEnabled = capabilities.endsWith(",camera")
+        cameraEnabled = ",camera," in capabilities
         val manager = metadata.getString(MANAGER_PACKAGE).orEmpty()
         if (!SAFE_PACKAGE.matches(manager)) {
             status.setText(R.string.launcher_invalid)
@@ -978,6 +1017,7 @@ class LauncherActivity :
         remote = null
         sessionId = 0
         remoteStatus = STATUS_STARTING
+        accessibilityProvider.clear()
         resetSurfaceAttachment()
         recreateSurfaceView()
         pointerButtonState = 0
@@ -1003,6 +1043,7 @@ class LauncherActivity :
             pointerIcon =
                 customCursorPointerIcon
                     ?: PointerIcon.getSystemIcon(this@LauncherActivity, cursorSystemIcon)
+            accessibilityProvider.attach(this)
         }
 
     private fun recreateSurfaceView() {
@@ -1017,6 +1058,7 @@ class LauncherActivity :
         managerDeathSurfaceReset = true
         val previous = surfaceView
         previous.holder.removeCallback(this)
+        accessibilityProvider.detach(previous)
         content.removeView(previous)
         surfaceView = createSurfaceView()
         content.addView(
@@ -1074,6 +1116,8 @@ class LauncherActivity :
         incomingDocumentGeneration++
         preparedIncomingDocument?.descriptor?.close()
         preparedIncomingDocument = null
+        accessibilityProvider.clear()
+        accessibilityProvider.detach(surfaceView)
         if (cameraIntegrationDelegate.isInitialized()) {
             cameraIntegration.close()
         }
@@ -1659,6 +1703,88 @@ class LauncherActivity :
         } catch (error: RemoteException) {
             Log.w(TAG, "Could not submit launcher input", error)
             false
+        }
+    }
+
+    private fun submitAccessibilityAction(
+        nodeId: Int,
+        action: String,
+        text: String,
+    ): Boolean {
+        val service = remote ?: return false
+        if (
+            sessionId <= 0 ||
+            nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID ||
+            action !in ACCESSIBILITY_ACTIONS ||
+            text.length > MAX_ACCESSIBILITY_TEXT_UTF16 ||
+            text.toByteArray(StandardCharsets.UTF_8).size >
+            MAX_ACCESSIBILITY_TEXT_BYTES ||
+            (action != "set-text" && text.isNotEmpty())
+        ) {
+            return false
+        }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(sessionId)
+            data.writeInt(nodeId)
+            data.writeString(action)
+            data.writeString(text)
+            service.transact(
+                TRANSACTION_ACCESSIBILITY_ACTION,
+                data,
+                reply,
+                0,
+            ) &&
+                run {
+                    reply.readException()
+                    reply.readInt() == RESULT_OK && reply.dataAvail() == 0
+                }
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not submit accessibility action", error)
+            false
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun submitAccessibilityMenuFallback(
+        x: Int,
+        y: Int,
+        transition: Boolean,
+    ): Boolean {
+        if (
+            sessionId <= 0 ||
+            x !in 0 until surfaceView.width.coerceAtLeast(1) ||
+            y !in 0 until surfaceView.height.coerceAtLeast(1)
+        ) {
+            return false
+        }
+        val eventTime = SystemClock.uptimeMillis().toInt()
+        val data = beginInputParcel(2)
+        val reply = Parcel.obtain()
+        return try {
+            writeInputRecord(
+                data,
+                INPUT_TOUCH_DOWN,
+                ACCESSIBILITY_TOUCH_ID,
+                x,
+                y,
+                eventTime,
+            )
+            writeInputRecord(
+                data,
+                INPUT_TOUCH_UP,
+                ACCESSIBILITY_TOUCH_ID,
+                eventTime + if (transition) ACCESSIBILITY_MENU_HOLD_MILLIS else 1,
+            )
+            sendInputParcel(data, reply)
+        } finally {
+            reply.recycle()
+            data.recycle()
         }
     }
 
@@ -2266,6 +2392,9 @@ class LauncherActivity :
     private inner class LauncherSurfaceView(
         context: Context,
     ) : SurfaceView(context) {
+        override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider =
+            accessibilityProvider
+
         override fun onCapturedPointerEvent(event: MotionEvent): Boolean =
             submitCapturedPointer(event) || super.onCapturedPointerEvent(event)
 
@@ -3984,9 +4113,82 @@ class LauncherActivity :
             "$CAPABILITIES_AUDIO_INPUT_SECRETS_V8,camera"
         private const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9 =
             "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,camera"
+        private const val CAPABILITIES_V10 = "$CAPABILITIES_V4,accessibility"
+        private const val CAPABILITIES_PRINTING_V10 =
+            "$CAPABILITIES_PRINTING_V5,accessibility"
+        private const val CAPABILITIES_AUDIO_V10 = "$CAPABILITIES_AUDIO_V6,accessibility"
+        private const val CAPABILITIES_AUDIO_PRINTING_V10 =
+            "$CAPABILITIES_AUDIO_PRINTING_V6,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_V7,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_PRINTING_V7,accessibility"
+        private const val CAPABILITIES_SECRETS_V10 =
+            "$CAPABILITIES_SECRETS_V8,accessibility"
+        private const val CAPABILITIES_PRINTING_SECRETS_V10 =
+            "$CAPABILITIES_PRINTING_SECRETS_V8,accessibility"
+        private const val CAPABILITIES_AUDIO_SECRETS_V10 =
+            "$CAPABILITIES_AUDIO_SECRETS_V8,accessibility"
+        private const val CAPABILITIES_AUDIO_PRINTING_SECRETS_V10 =
+            "$CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_SECRETS_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_SECRETS_V8,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,accessibility"
+        private const val CAPABILITIES_CAMERA_V10 =
+            "$CAPABILITIES_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_PRINTING_CAMERA_V10 =
+            "$CAPABILITIES_PRINTING_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_PRINTING_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_PRINTING_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_SECRETS_CAMERA_V10 =
+            "$CAPABILITIES_SECRETS_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_PRINTING_SECRETS_CAMERA_V10 =
+            "$CAPABILITIES_PRINTING_SECRETS_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_SECRETS_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_SECRETS_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9,accessibility"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10 =
+            "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9,accessibility"
+        private val VALID_CAPABILITIES_V10 =
+            setOf(
+                CAPABILITIES_V10,
+                CAPABILITIES_PRINTING_V10,
+                CAPABILITIES_AUDIO_V10,
+                CAPABILITIES_AUDIO_PRINTING_V10,
+                CAPABILITIES_AUDIO_INPUT_V10,
+                CAPABILITIES_AUDIO_INPUT_PRINTING_V10,
+                CAPABILITIES_SECRETS_V10,
+                CAPABILITIES_PRINTING_SECRETS_V10,
+                CAPABILITIES_AUDIO_SECRETS_V10,
+                CAPABILITIES_AUDIO_PRINTING_SECRETS_V10,
+                CAPABILITIES_AUDIO_INPUT_SECRETS_V10,
+                CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V10,
+                CAPABILITIES_CAMERA_V10,
+                CAPABILITIES_PRINTING_CAMERA_V10,
+                CAPABILITIES_AUDIO_CAMERA_V10,
+                CAPABILITIES_AUDIO_PRINTING_CAMERA_V10,
+                CAPABILITIES_AUDIO_INPUT_CAMERA_V10,
+                CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V10,
+                CAPABILITIES_SECRETS_CAMERA_V10,
+                CAPABILITIES_PRINTING_SECRETS_CAMERA_V10,
+                CAPABILITIES_AUDIO_SECRETS_CAMERA_V10,
+                CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V10,
+                CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V10,
+                CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V10,
+            )
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 13
+        private const val PROTOCOL_VERSION = 14
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3995,6 +4197,8 @@ class LauncherActivity :
         private const val TRANSACTION_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val TRANSACTION_IME = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val TRANSACTION_DOCUMENT_RESULT = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val TRANSACTION_ACCESSIBILITY_ACTION =
+            IBinder.FIRST_CALL_TRANSACTION + 8
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
@@ -4010,6 +4214,17 @@ class LauncherActivity :
         private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
         private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
         private const val CALLBACK_APPEARANCE = IBinder.FIRST_CALL_TRANSACTION + 12
+        private const val CALLBACK_ACCESSIBILITY = IBinder.FIRST_CALL_TRANSACTION + 13
+        private const val ACCESSIBILITY_CALLBACK_TREE = 1
+        private const val ACCESSIBILITY_CALLBACK_EVENT = 2
+        private const val ACCESSIBILITY_CALLBACK_MENU = 3
+        private const val MAX_ACCESSIBILITY_NODE_ID = 1_000_000
+        private const val MAX_ACCESSIBILITY_TEXT_UTF16 = 1_024
+        private const val MAX_ACCESSIBILITY_TEXT_BYTES = 4_096
+        private const val ACCESSIBILITY_TOUCH_ID = 31
+        private const val ACCESSIBILITY_MENU_HOLD_MILLIS = 40
+        private val ACCESSIBILITY_ACTIONS =
+            setOf("click", "focus", "set-text", "scroll-forward", "scroll-backward")
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3
@@ -4047,6 +4262,7 @@ class LauncherActivity :
         private const val PRINT_COPY_BUFFER_BYTES = 64 * 1024
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
+        private const val RESULT_INVALID = 4
         private const val MAX_OPEN_ATTEMPTS = 120
         private const val OPEN_RETRY_MILLIS = 250L
         private const val MIN_DENSITY_DPI = 72

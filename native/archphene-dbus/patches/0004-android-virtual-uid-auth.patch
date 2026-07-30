@@ -1,0 +1,53 @@
+--- a/dbus/dbus-auth.c
++++ b/dbus/dbus-auth.c
+@@ -1090,6 +1090,7 @@
+ handle_server_data_external_mech (DBusAuth         *auth,
+                                   const DBusString *data)
+ {
++  dbus_bool_t authenticated_by_android_alias = FALSE;
+   if (_dbus_credentials_are_anonymous (auth->credentials))
+     {
+       _dbus_verbose ("%s: no credentials, mechanism EXTERNAL can't authenticate\n",
+@@ -1174,13 +1175,40 @@
+                      _dbus_string_get_const_data (&auth->identity));
+       return send_rejected (auth);
+     }
++
++#ifdef __ANDROID__
++  /*
++   * Archphene's Linux compatibility bridge deliberately presents uid 1000
++   * to ordinary desktop applications and uid 0 while running package
++   * operations. Android's AF_UNIX peer credentials still contain the
++   * application's real Android uid, so EXTERNAL would otherwise reject
++   * bridge-aware clients such as GDBus before the private session bus can
++   * apply its policy.
++   *
++   * This daemon is private to one Android application uid. Accept only the
++   * two virtual Linux identities, and retain the kernel-supplied credentials
++   * as the authorized identity. Socket permissions and Android peer
++   * credentials therefore remain the security boundary.
++   */
++  if (_dbus_credentials_get_unix_uid (auth->credentials) != DBUS_UID_UNSET)
++    {
++      dbus_uid_t desired_uid =
++        _dbus_credentials_get_unix_uid (auth->desired_identity);
++
++      authenticated_by_android_alias =
++        desired_uid == 0 || desired_uid == 1000;
++    }
++#endif
+   
+   if (_dbus_credentials_are_superset (auth->credentials,
+-                                      auth->desired_identity))
++                                      auth->desired_identity) ||
++      authenticated_by_android_alias)
+     {
+       /* client has authenticated */
+       if (!_dbus_credentials_add_credentials (auth->authorized_identity,
+-                                              auth->desired_identity))
++                                              authenticated_by_android_alias
++                                                ? auth->credentials
++                                                : auth->desired_identity))
+         return FALSE;
+ 
+       /* also copy misc process info from the socket credentials

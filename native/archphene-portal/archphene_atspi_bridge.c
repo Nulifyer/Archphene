@@ -761,7 +761,8 @@ void archphene_atspi_handle_signal(
         if (connection != NULL
                 && strcmp(interface, "org.a11y.atspi.Event.Window") == 0
                 && (strcmp(member, "Create") == 0
-                    || strcmp(member, "Activate") == 0)) {
+                    || (strcmp(member, "Activate") == 0
+                        && !archphene_atspi_translator_has_cache(sender)))) {
             if (!request_cache_items(connection, sender)) {
                 archphene_atspi_translator_mark_dirty();
             }

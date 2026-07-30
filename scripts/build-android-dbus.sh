@@ -66,7 +66,7 @@ make -C "$mbedtls_source" -j"$(nproc)" lib \
   AR="${TOOLCHAIN}/bin/llvm-ar" \
   CFLAGS="-fPIC -O2 -fvisibility=hidden"
 for patch_file in "$ROOT"/native/archphene-dbus/patches/*.patch; do
-  patch -d "$source_dir" -p1 < "$patch_file"
+  patch --batch --forward --fuzz=0 -d "$source_dir" -p1 < "$patch_file"
 done
 
 cross_file="$BUILD_ROOT/android.ini"
