@@ -1057,6 +1057,54 @@ struct XdgToplevelData {
     parent: Mutex<Option<XdgToplevel>>,
     title: Mutex<String>,
     app_id: Mutex<String>,
+    size_constraints: Mutex<ToplevelSizeConstraints>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ToplevelSizeConstraints {
+    min_width: i32,
+    min_height: i32,
+    max_width: i32,
+    max_height: i32,
+}
+
+impl ToplevelSizeConstraints {
+    fn constrain(self, width: i32, height: i32) -> (i32, i32) {
+        fn extent(value: i32, minimum: i32, maximum: i32) -> i32 {
+            if value <= 0 {
+                return value;
+            }
+            let value = if minimum > 0 {
+                value.max(minimum)
+            } else {
+                value
+            };
+            if maximum > 0 && (minimum == 0 || maximum >= minimum) {
+                value.min(maximum)
+            } else {
+                value
+            }
+        }
+        (
+            extent(width, self.min_width, self.max_width),
+            extent(height, self.min_height, self.max_height),
+        )
+    }
+
+    fn constrain_bounded(self, width: i32, height: i32) -> (i32, i32) {
+        let (constrained_width, constrained_height) = self.constrain(width, height);
+        let bound = |requested: i32, constrained: i32| {
+            if requested <= 0 || constrained <= 0 {
+                constrained
+            } else {
+                constrained.min(requested.saturating_mul(4).saturating_div(3))
+            }
+        };
+        (
+            bound(width, constrained_width),
+            bound(height, constrained_height),
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -3729,6 +3777,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                         parent: Mutex::new(None),
                         title: Mutex::new(String::new()),
                         app_id: Mutex::new(String::new()),
+                        size_constraints: Mutex::new(ToplevelSizeConstraints::default()),
                     },
                 );
                 surface_state.xdg_toplevel = Some(toplevel.clone());
@@ -4198,13 +4247,34 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
             | xdg_toplevel::Request::SetFullscreen { .. }
             | xdg_toplevel::Request::UnsetFullscreen
             | xdg_toplevel::Request::SetMinimized => {}
-            xdg_toplevel::Request::SetMaxSize { width, height }
-            | xdg_toplevel::Request::SetMinSize { width, height } => {
+            xdg_toplevel::Request::SetMaxSize { width, height } => {
                 if width < 0 || height < 0 {
                     resource.post_error(
                         xdg_toplevel::Error::InvalidSize,
                         "minimum and maximum sizes cannot be negative",
                     );
+                } else {
+                    let mut constraints = data
+                        .size_constraints
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    constraints.max_width = width;
+                    constraints.max_height = height;
+                }
+            }
+            xdg_toplevel::Request::SetMinSize { width, height } => {
+                if width < 0 || height < 0 {
+                    resource.post_error(
+                        xdg_toplevel::Error::InvalidSize,
+                        "minimum and maximum sizes cannot be negative",
+                    );
+                } else {
+                    let mut constraints = data
+                        .size_constraints
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    constraints.min_width = width;
+                    constraints.min_height = height;
                 }
             }
             _ => unreachable!("xdg_toplevel request added without an implementation"),
@@ -7654,6 +7724,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             } else {
                                 Vec::new()
                             };
+                            let (width, height) =
+                                constrain_toplevel_configure(toplevel, width, height);
                             toplevel.configure(width, height, states);
                             xdg_surface.configure(serial);
                         }
@@ -8339,6 +8411,17 @@ fn encode_xdg_toplevel_states(states: &[xdg_toplevel::State]) -> Vec<u8> {
     encoded
 }
 
+fn constrain_toplevel_configure(toplevel: &XdgToplevel, width: i32, height: i32) -> (i32, i32) {
+    toplevel
+        .data::<XdgToplevelData>()
+        .map_or((width, height), |data| {
+            data.size_constraints
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .constrain_bounded(width, height)
+        })
+}
+
 fn secondary_toplevel_needs_output_size(
     parented: bool,
     tile_toplevels: bool,
@@ -8368,6 +8451,7 @@ fn queue_toplevel_configure(
     if width <= 0 || height <= 0 {
         return 0;
     }
+    let (width, height) = constrain_toplevel_configure(toplevel, width, height);
     let Some(surface) = toplevel_surface(toplevel) else {
         return 0;
     };
@@ -10292,6 +10376,7 @@ impl CompositorCore {
                 serial,
                 popup_geometry: None,
             });
+        let (width, height) = constrain_toplevel_configure(&toplevel, width, height);
         toplevel.configure(width, height, Vec::new());
         xdg_surface.configure(serial);
         serial
@@ -17689,6 +17774,39 @@ mod tests {
         assert!(!toplevel_limit_reached(MAX_TOPLEVELS - 1));
         assert!(toplevel_limit_reached(MAX_TOPLEVELS));
         assert!(toplevel_limit_reached(MAX_TOPLEVELS + 1));
+    }
+
+    #[test]
+    fn toplevel_size_constraints_preserve_client_bounds() {
+        assert_eq!(
+            ToplevelSizeConstraints::default().constrain(432, 882),
+            (432, 882)
+        );
+        let constraints = ToplevelSizeConstraints {
+            min_width: 460,
+            min_height: 607,
+            max_width: 900,
+            max_height: 1_000,
+        };
+        assert_eq!(constraints.constrain(432, 882), (460, 882));
+        assert_eq!(constraints.constrain_bounded(432, 882), (460, 882));
+        assert_eq!(constraints.constrain(1_200, 1_400), (900, 1_000));
+        assert_eq!(constraints.constrain(0, 0), (0, 0));
+
+        let conflicting = ToplevelSizeConstraints {
+            min_width: 600,
+            max_width: 500,
+            ..ToplevelSizeConstraints::default()
+        };
+        assert_eq!(conflicting.constrain(432, 882), (600, 882));
+        assert_eq!(conflicting.constrain_bounded(432, 882), (576, 882));
+
+        let hostile = ToplevelSizeConstraints {
+            min_width: i32::MAX,
+            min_height: i32::MAX,
+            ..ToplevelSizeConstraints::default()
+        };
+        assert_eq!(hostile.constrain_bounded(432, 882), (576, 1_176));
     }
 
     #[test]

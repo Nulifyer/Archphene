@@ -47,6 +47,26 @@ def main() -> None:
     if action_bounds is None:
         raise SystemExit(f"accessible menu action {args.action!r} is missing")
     left, top, right, bottom = action_bounds
+    containers = [
+        candidate
+        for node in root.iter("node")
+        if node.attrib.get("class") == "android.widget.ListView"
+        if (candidate := bounds(node)) is not None
+        and candidate[0] <= left
+        and candidate[1] <= top
+        and candidate[2] >= left
+        and candidate[3] >= bottom
+    ]
+    if containers:
+        _, _, container_right, _ = min(
+            containers,
+            key=lambda candidate: (
+                candidate[2] - candidate[0]
+            ) * (
+                candidate[3] - candidate[1]
+            ),
+        )
+        right = min(right, container_right)
     row_height = bottom - top
     if row_height < 16 or right - left < row_height:
         raise SystemExit(f"menu action has invalid bounds: {action_bounds}")

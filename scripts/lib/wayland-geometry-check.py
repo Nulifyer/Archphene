@@ -142,8 +142,20 @@ def validate_presented_frames(
         raise SystemExit("selected presentation buffer does not match its source")
     if (surface_width, surface_height) != (mode_width, mode_height):
         raise SystemExit("Android surface does not match the advertised output mode")
-    if (logical_width, logical_height) != (output_width, output_height):
-        raise SystemExit("logical client size does not match the Wayland output")
+    # A client-declared xdg_toplevel minimum may be slightly larger than the
+    # advertised Android output. Archphene retains at most its existing 4/3
+    # bounded logical canvas and scales that complete canvas into the exact
+    # Android surface. Compact startup windows likewise use no less than half
+    # the output. Reject anything outside those compositor policy bounds.
+    if not (
+        output_width <= logical_width * 2
+        and logical_width * 3 <= output_width * 4
+        and output_height <= logical_height * 2
+        and logical_height * 3 <= output_height * 4
+    ):
+        raise SystemExit(
+            "logical client canvas is outside the bounded Wayland output policy"
+        )
 
     contained(
         "window geometry", geometry_x, geometry_y, geometry_width, geometry_height,

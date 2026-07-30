@@ -576,13 +576,18 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [x] Replace global `QT_SCALE_FACTOR` compatibility behavior with compositor-advertised logical size plus integer/fractional output scale; physical Samsung portrait/landscape reconfiguration passes without app-specific settings.
 - [x] Extend the compositor density gate to a bounded user-selected geometry scale. Auto retains the 432dp desktop floor; explicit 75%, 100%, 125%, and 150% values scale that automatic baseline in the compositor rather than injecting toolkit-specific geometry variables. Native tests cover every accepted bound, and Samsung Code proves the 125% output resolves to 346×705 logical pixels.
 - [ ] Validate live moves between Android displays while an explicit geometry scale is active.
-- [ ] Define a generic overflow/panning policy for fixed desktop layouts and wide
+- [x] Define a generic overflow/panning policy for fixed desktop layouts and wide
   popup shortcut columns on phone displays without app-specific patches. Stock
   KCalc's primary Settings actions are visible and semantically actionable at
-  the automatic 100% text setting on a 432dp phone. Qt shortcut columns now
+  the automatic text setting and the explicit 200% maximum on a 432dp phone.
+  The compositor now honors bounded client minimum/maximum toplevel sizes and
+  scales the complete retained canvas into Android instead of letterboxing a
+  desktop-sized minimum. Qt shortcut columns
   disappear below the standard 600dp tablet breakpoint instead of clipping
-  against the phone edge, while wide menus retain them; 200% text and fixed
-  desktop layouts still need coverage.
+  against the phone edge, overlong primary labels elide generically, and wide
+  menus retain their accelerators. Current-manager Auto and 200%/48dp
+  calculation/menu gates pass with inspected full-device frames on the
+  emulator and Samsung; a 1067dp emulator tablet viewport retains accelerators.
 - [ ] Finish reproducible AArch64 Qt/KDE and GTK settings bridge builds by pinning the required KConfig and GLib development sysroots.
   - [x] Decouple unchanged-helper availability from rebuilding changed Qt modules. The existing AArch64 KF6Config helper may be retained only when its exact pinned checksum matches, while the cached checksum-pinned Qt sysroot rebuilds the platform-theme/style modules; missing or altered helpers fail closed without a download.
 - [ ] Complete secondary-window behavior for phone, tablet, freeform, and external displays.
@@ -629,8 +634,14 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       constrained and wide behavior; current-manager x86_64 emulator and AArch64
       Samsung gates reject right-edge accelerator pixels and pass inspected
       full-device light/dark captures.
-    - [ ] Repeat the Qt font/control extremes and tablet/external-display cases
-      before closing Qt visual coverage.
+    - [x] Repeat the Qt font/control extremes and tablet cases. A reusable
+      production-manager gate drives the real ticked settings UI between Auto
+      and 200%/48dp, performs an exact semantic KCalc calculation, validates
+      popup geometry, colors, control/font configuration, and right-edge
+      integrity, captures only full-device frames, and restores preferences and
+      display state. It passes on the x86_64 emulator and AArch64 Samsung; the
+      emulator's 1067dp tablet viewport independently retains accelerator text.
+      Physical external-display behavior remains in the dedicated DeX gate.
   - [x] GTK 3 — stock Mousepad now consumes the standard embedded Adwaita light/dark variant through the manager-owned settings file and an event-driven GTK module. The Rust runtime republishes only color fields without altering the current published font/control snapshot. Exact light→dark→light gates on Android 16 x86_64 and Samsung Android 15 AArch64 require unchanged launcher, manager, and Linux PIDs; GTK's applied state; fatal-log cleanliness; and measured full-device GTK content plus Android system-bar luminance.
   - [x] GTK 4/libadwaita
     - [x] Load the checksum-pinned GTK settings helper from the generic GTK 4 preload path, monitor the manager-owned physical settings file directly, and retain the Settings-portal signal fallback. Current unmodified Snapshot receives exact initial and live light/dark state on x86_64 and AArch64 without restarting its wrapper, manager, or Linux process. Snapshot's intentionally black camera canvas is not broader libadwaita visual-quality evidence.

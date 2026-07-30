@@ -91,47 +91,64 @@ public:
                     qstyleoption_cast<const QStyleOptionMenuItem *>(option);
             if (menuItem && menuItem->menuItemType != QStyleOptionMenuItem::Separator) {
                 const qsizetype separator = menuItem->text.indexOf(QLatin1Char('\t'));
-                if (separator > 0 && separator + 1 < menuItem->text.size()) {
-                    const int labelWidth =
-                            menuItem->fontMetrics.horizontalAdvance(
-                                    menuItem->text, static_cast<int>(separator));
-                    int shortcutWidth = 0;
+                const bool hasShortcut =
+                        separator > 0 && separator + 1 < menuItem->text.size();
+                const int labelLength = hasShortcut
+                        ? static_cast<int>(separator)
+                        : static_cast<int>(menuItem->text.size());
+                const int labelWidth = menuItem->fontMetrics.horizontalAdvance(
+                        menuItem->text, labelLength);
+                int shortcutWidth = 0;
+                if (hasShortcut) {
                     for (qsizetype index = separator + 1;
                             index < menuItem->text.size(); ++index) {
                         shortcutWidth += menuItem->fontMetrics.horizontalAdvance(
                                 menuItem->text.at(index));
                     }
-                    const int shortcutColumn =
-                            qMax(menuItem->reservedShortcutWidth, shortcutWidth);
-                    const int chromeWidth =
-                            qMax(menuItem->maxIconWidth, controlVisual())
-                            + controlTarget() + qMax(12, controlVisual());
-                    QScreen *screen = widget ? widget->screen() : nullptr;
-                    if (!screen) {
-                        screen = QGuiApplication::primaryScreen();
-                    }
-                    const qreal devicePixelRatio =
-                            screen ? qMax<qreal>(1.0, screen->devicePixelRatio()) : 1.0;
-                    const int screenWidth = screen
-                            ? qRound(screen->availableGeometry().width()
-                                    / devicePixelRatio)
-                            : 0;
-                    const bool phoneViewport =
-                            screenWidth > 0 && screenWidth < 600;
+                }
+                const int visual = controlVisual();
+                const int target = controlTarget();
+                const int shortcutColumn =
+                        qMax(menuItem->reservedShortcutWidth, shortcutWidth);
+                const int chromeWidth = qMax(menuItem->maxIconWidth, visual)
+                        + target + qMax(12, visual);
+                const int labelChromeWidth = qMax(menuItem->maxIconWidth, visual)
+                        + qMax(12, target / 2) + qMax(8, visual / 2);
+                QScreen *screen = widget ? widget->screen() : nullptr;
+                if (!screen) {
+                    screen = QGuiApplication::primaryScreen();
+                }
+                const int screenWidth =
+                        screen ? screen->availableGeometry().width() : 0;
+                const bool phoneViewport =
+                        screenWidth > 0 && screenWidth < 600;
+                const int visibleWidth = screenWidth > 0
+                        ? qMin(menuItem->rect.width(), screenWidth)
+                        : menuItem->rect.width();
+                const int labelSpace =
+                        qMax(32, visibleWidth - labelChromeWidth);
+                const bool stripShortcut = hasShortcut
+                        && (phoneViewport || menuItem->rect.width()
+                                < labelWidth + shortcutColumn + chromeWidth);
+                const bool elideLabel = labelWidth > labelSpace;
 
-                    // Fusion reserves one desktop-sized shortcut column for every
-                    // item. A Wayland popup constrained to a phone viewport can
-                    // therefore clip the action label even though the label alone
-                    // fits. Keep shortcuts on wide displays and spend constrained
-                    // width on the primary action instead.
-                    if (phoneViewport || menuItem->rect.width()
-                            < labelWidth + shortcutColumn + chromeWidth) {
-                        QStyleOptionMenuItem fitted(*menuItem);
+                // Fusion reserves one desktop-sized shortcut column for every
+                // item. A Wayland popup constrained to a phone viewport can
+                // therefore clip its primary action. Keep shortcuts on wide
+                // displays; in constrained rows spend the width on a full or
+                // explicitly elided primary action.
+                if (stripShortcut || elideLabel) {
+                    QStyleOptionMenuItem fitted(*menuItem);
+                    if (stripShortcut) {
                         fitted.text.truncate(separator);
                         fitted.reservedShortcutWidth = 0;
-                        QProxyStyle::drawControl(element, &fitted, painter, widget);
-                        return;
                     }
+                    if (elideLabel) {
+                        fitted.text = menuItem->fontMetrics.elidedText(
+                                fitted.text, Qt::ElideRight, labelSpace);
+                    }
+                    QProxyStyle::drawControl(element, &fitted, painter, widget);
+                    return;
                 }
             }
         }
