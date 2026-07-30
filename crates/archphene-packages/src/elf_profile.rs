@@ -29,6 +29,8 @@ const MAX_RUNTIME_HINT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_RUNTIME_HINT_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 const RUNTIME_HINT_CHUNK_BYTES: usize = 8192;
 const ELECTRON_NODE_MARKER: &[u8] = b"ELECTRON_RUN_AS_NODE=1";
+const CAMERA_PORTAL_INTERFACE_MARKER: &[u8] = b"org.freedesktop.portal.Camera";
+const CAMERA_PIPEWIRE_REMOTE_MARKER: &[u8] = b"OpenPipeWireRemote";
 
 pub const BRIDGE_AUDIO_OUTPUT: u8 = 1 << 0;
 pub const BRIDGE_PRINTING: u8 = 1 << 1;
@@ -70,7 +72,7 @@ struct LoadSegment {
 pub struct IntegrationProfiler<'a> {
     root: &'a Path,
     objects: BTreeMap<String, ObjectProfile>,
-    runtime_hints: BTreeMap<String, u16>,
+    runtime_hints: BTreeMap<String, (u16, u8)>,
     runtime_hint_bytes_remaining: u64,
 }
 
@@ -112,8 +114,11 @@ impl<'a> IntegrationProfiler<'a> {
                 ObjectProfile::Elf(needed) => {
                     if visited.len() == 1 {
                         root_profiled = true;
-                        match self.runtime_hint_topology(&logical_path) {
-                            Ok(hints) => topology |= hints,
+                        match self.runtime_hint_profile(&logical_path) {
+                            Ok((topology_hints, bridge_hints)) => {
+                                topology |= topology_hints;
+                                bridge_capabilities |= bridge_hints;
+                            }
                             Err(_) => complete = false,
                         }
                     }
@@ -205,19 +210,20 @@ impl<'a> IntegrationProfiler<'a> {
         .find_map(|candidate| desktop::resolve_root_regular_file(self.root, &candidate, false))
     }
 
-    fn runtime_hint_topology(&mut self, logical_path: &str) -> io::Result<u16> {
-        if let Some(topology) = self.runtime_hints.get(logical_path) {
-            return Ok(*topology);
+    fn runtime_hint_profile(&mut self, logical_path: &str) -> io::Result<(u16, u8)> {
+        if let Some(profile) = self.runtime_hints.get(logical_path) {
+            return Ok(*profile);
         }
         let path = self.root.join(logical_path.trim_start_matches('/'));
-        let (topology, bytes_scanned) =
+        let (topology, bridge_capabilities, bytes_scanned) =
             scan_runtime_library_hints(&path, self.runtime_hint_bytes_remaining)?;
         self.runtime_hint_bytes_remaining = self
             .runtime_hint_bytes_remaining
             .checked_sub(bytes_scanned)
             .ok_or(io::ErrorKind::InvalidData)?;
-        self.runtime_hints.insert(logical_path.to_owned(), topology);
-        Ok(topology)
+        let profile = (topology, bridge_capabilities);
+        self.runtime_hints.insert(logical_path.to_owned(), profile);
+        Ok(profile)
     }
 }
 
@@ -366,14 +372,14 @@ fn valid_library_name(name: &str) -> bool {
             .any(|byte| byte == 0 || byte.is_ascii_control())
 }
 
-fn scan_runtime_library_hints(path: &Path, available_bytes: u64) -> io::Result<(u16, u64)> {
+fn scan_runtime_library_hints(path: &Path, available_bytes: u64) -> io::Result<(u16, u8, u64)> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() > MAX_RUNTIME_HINT_BYTES
         || metadata.len() > available_bytes
     {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     }
     let mut file = OpenOptions::new()
         .read(true)
@@ -385,6 +391,11 @@ fn scan_runtime_library_hints(path: &Path, available_bytes: u64) -> io::Result<(
     }
 
     let mut topology = 0_u16;
+    let mut bridge_capabilities = 0_u8;
+    let mut camera_portal_interface = false;
+    let mut camera_pipewire_remote = false;
+    let mut camera_portal_interface_match = 0_usize;
+    let mut camera_pipewire_remote_match = 0_usize;
     let mut chunk = [0_u8; RUNTIME_HINT_CHUNK_BYTES];
     let mut token = [0_u8; MAX_NEEDED_NAME_BYTES];
     let mut token_length = 0_usize;
@@ -402,12 +413,22 @@ fn scan_runtime_library_hints(path: &Path, available_bytes: u64) -> io::Result<(
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
         for byte in &chunk[..length] {
+            camera_portal_interface |= advance_exact_marker(
+                CAMERA_PORTAL_INTERFACE_MARKER,
+                &mut camera_portal_interface_match,
+                *byte,
+            );
+            camera_pipewire_remote |= advance_exact_marker(
+                CAMERA_PIPEWIRE_REMOTE_MARKER,
+                &mut camera_pipewire_remote_match,
+                *byte,
+            );
             if *byte == 0 {
-                if !token_oversized
-                    && let Ok(name) = std::str::from_utf8(&token[..token_length])
-                    && valid_library_name(name)
-                {
-                    topology |= classify_library(name);
+                if !token_oversized && let Ok(name) = std::str::from_utf8(&token[..token_length]) {
+                    if valid_library_name(name) {
+                        topology |= classify_library(name);
+                        bridge_capabilities |= classify_bridge_library(name);
+                    }
                 }
                 token_length = 0;
                 token_oversized = false;
@@ -422,7 +443,23 @@ fn scan_runtime_library_hints(path: &Path, available_bytes: u64) -> io::Result<(
     if total != metadata.len() {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
-    Ok((topology, total))
+    if camera_portal_interface && camera_pipewire_remote {
+        bridge_capabilities |= BRIDGE_CAMERA;
+    }
+    Ok((topology, bridge_capabilities, total))
+}
+
+fn advance_exact_marker(marker: &[u8], matched: &mut usize, byte: u8) -> bool {
+    if byte == marker[*matched] {
+        *matched += 1;
+        if *matched == marker.len() {
+            *matched = 0;
+            return true;
+        }
+    } else {
+        *matched = usize::from(byte == marker[0]);
+    }
+    false
 }
 
 fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
@@ -785,6 +822,41 @@ mod tests {
     }
 
     #[test]
+    fn profiles_exact_dynamic_camera_portal_contract() {
+        let root = test_root();
+        let executable = root.join("usr/bin/camera");
+        fs::create_dir_all(executable.parent().expect("binary parent")).expect("binary directory");
+        let mut image = elf_fixture(&[]);
+        image.extend_from_slice(
+            b"\0/org.freedesktop.portal.Camera:IsCameraPresent\0\
+              AccessCameraOpenPipeWireRemoteorg.freedesktop.portal.Request\0\
+              org.freedesktop.portal.Camera documentation\0",
+        );
+        fs::write(&executable, image).expect("portal camera ELF");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("executable permissions");
+
+        let profile = IntegrationProfiler::new(&root).profile("/usr/bin/camera");
+        assert!(profile.profiled);
+        assert!(profile.complete);
+        assert_eq!(profile.bridge_capabilities, BRIDGE_CAMERA);
+
+        let unrelated = root.join("usr/bin/unrelated");
+        let mut image = elf_fixture(&[]);
+        image.extend_from_slice(b"\0org.freedesktop.portal.Camera\0");
+        fs::write(&unrelated, image).expect("incomplete portal ELF");
+        fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o755))
+            .expect("unrelated permissions");
+        assert_eq!(
+            IntegrationProfiler::new(&root)
+                .profile("/usr/bin/unrelated")
+                .bridge_capabilities,
+            0,
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn runtime_hint_scan_carries_a_token_across_fixed_chunks() {
         let root = test_root();
         let executable = root.join("runtime-loader");
@@ -804,7 +876,19 @@ mod tests {
                 u64::try_from(RUNTIME_HINT_CHUNK_BYTES).expect("chunk size"),
             )
             .expect("bounded runtime hints"),
-            (0, 0),
+            (0, 0, 0),
+        );
+        let camera = root.join("camera-runtime-loader");
+        let mut camera_image = vec![b'x'; RUNTIME_HINT_CHUNK_BYTES - 5];
+        camera_image.extend_from_slice(CAMERA_PORTAL_INTERFACE_MARKER);
+        camera_image.push(0);
+        camera_image.extend_from_slice(CAMERA_PIPEWIRE_REMOTE_MARKER);
+        fs::write(&camera, camera_image).expect("camera runtime-loading image");
+        assert_eq!(
+            scan_runtime_library_hints(&camera, MAX_RUNTIME_HINT_TOTAL_BYTES)
+                .expect("camera runtime hints")
+                .1,
+            BRIDGE_CAMERA,
         );
         fs::remove_dir_all(root).expect("cleanup");
     }

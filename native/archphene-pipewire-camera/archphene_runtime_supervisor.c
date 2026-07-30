@@ -32,6 +32,13 @@ static const char CLIENT_CONFIG[] =
         "{ name = libpipewire-module-client-node } "
         "{ name = libpipewire-module-adapter } ]\n";
 
+static volatile sig_atomic_t stop_requested;
+
+static void request_stop(int signal_number) {
+    (void)signal_number;
+    stop_requested = 1;
+}
+
 static int write_all(int fd, const void *data, size_t size) {
     size_t offset = 0;
     while (offset < size) {
@@ -102,7 +109,18 @@ static void sleep_millis(long millis) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 5) return 64;
+    int helpers_only = argc == 4 && strcmp(argv[3], "--helpers-only") == 0;
+    if ((!helpers_only && argc < 5) || argc < 4) return 64;
+    if (helpers_only) {
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = request_stop;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGTERM, &action, NULL) != 0
+                || sigaction(SIGINT, &action, NULL) != 0) {
+            return 70;
+        }
+    }
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (runtime == NULL || runtime[0] != '/') return 64;
     char config[4096];
@@ -176,6 +194,27 @@ int main(int argc, char **argv) {
         stop_helper(policy_pid);
         stop_helper(daemon_pid);
         return 70;
+    }
+
+    if (helpers_only) {
+        int failed = 0;
+        while (!stop_requested) {
+            if (!helper_running(daemon_pid)
+                    || !helper_running(policy_pid)
+                    || !helper_running(camera_pid)) {
+                failed = 1;
+                break;
+            }
+            sleep_millis(100);
+        }
+        stop_helper(camera_pid);
+        stop_helper(policy_pid);
+        stop_helper(daemon_pid);
+        while (waitpid(camera_pid, NULL, 0) < 0 && errno == EINTR) {}
+        while (waitpid(policy_pid, NULL, 0) < 0 && errno == EINTR) {}
+        while (waitpid(daemon_pid, NULL, 0) < 0 && errno == EINTR) {}
+        unlink(socket);
+        return failed ? 70 : 0;
     }
 
     size_t app_arguments = (size_t)(argc - 5);

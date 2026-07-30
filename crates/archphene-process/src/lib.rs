@@ -231,6 +231,7 @@ pub struct CommandEnvironment {
     pulse_server_address: Option<OsString>,
     virgl_socket_path: Option<PathBuf>,
     software_opengl: bool,
+    gtk_camera_compatibility: bool,
     build_jobs: OsString,
     makeflags: OsString,
 }
@@ -314,6 +315,7 @@ impl CommandEnvironment {
             pulse_server_address: None,
             virgl_socket_path: None,
             software_opengl: false,
+            gtk_camera_compatibility: false,
             build_jobs: OsString::from("2"),
             makeflags: OsString::from("-j2"),
         })
@@ -404,6 +406,11 @@ impl CommandEnvironment {
         };
         self.software_opengl = self.virgl_socket_path.is_none();
         Ok(self)
+    }
+
+    pub fn with_gtk_camera_compatibility(mut self, enabled: bool) -> Self {
+        self.gtk_camera_compatibility = enabled;
+        self
     }
 
     pub fn run(&self, command: &str, arguments: &[&str]) -> Result<CommandOutput, ProcessError> {
@@ -777,6 +784,16 @@ impl CommandEnvironment {
         }
         if let Some(root) = self.qt_plugin_root.as_ref() {
             command.env("QT_PLUGIN_PATH", root);
+        }
+        if self.gtk_camera_compatibility {
+            /*
+             * GTK4 camera textures can be valid while GSK's GL/NGL renderer
+             * presents them as a solid magenta surface on Android graphics
+             * stacks. The runtime enables this only for launchers that both
+             * use GTK4 and expose the camera bridge; other GTK4 applications
+             * retain accelerated rendering.
+             */
+            command.env("GSK_RENDERER", "cairo");
         }
         if let Some(socket_path) = self.virgl_socket_path.as_ref() {
             command
@@ -3258,6 +3275,17 @@ mod tests {
         assert_eq!(gui_value("GDK_BACKEND"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("QT_QPA_PLATFORM"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("SDL_VIDEODRIVER"), Some(OsStr::new("wayland")));
+        assert_eq!(gui_value("GSK_RENDERER"), None);
+        let gtk_camera = environment
+            .clone()
+            .with_gtk_camera_compatibility(true)
+            .build_gui_command(&launch, &[], "launcher-camera.sock");
+        let gtk_camera_value = |name: &str| {
+            gtk_camera
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(gtk_camera_value("GSK_RENDERER"), Some(OsStr::new("cairo")),);
         let virgl_socket = root.0.join(".vg");
         let _virgl_listener = UnixListener::bind(&virgl_socket).expect("virgl socket");
         let accelerated = environment

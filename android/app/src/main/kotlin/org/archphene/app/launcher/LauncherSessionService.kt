@@ -107,6 +107,7 @@ class LauncherSessionService : Service() {
         var portalBridge: LauncherPortalBridge? = null
         var gpuBridge: AndroidGpuBridge? = null
         var audioBridge: LauncherAudioBridge? = null
+        var cameraBridge: LauncherCameraBridge? = null
         var audioStartInProgress = false
         var audioStartComplete = false
         var microphonePermissionState = MICROPHONE_PERMISSION_NONE
@@ -210,20 +211,29 @@ class LauncherSessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        AndroidGpuBridge.cleanupStaleRuntimeDirectories(this)
-        LauncherAudioBridge.cleanupStaleRuntimeDirectories(this)
-        if (stalePortalSavesRecovered.compareAndSet(false, true)) {
-            runCatching {
-                LauncherPortalBridge.recoverStaleRuntime(cacheDir)
-                LauncherPortalBridge.recoverStaleSaves(File(filesDir, "arch-root"))
-            }.onFailure { error ->
-                Log.e(TAG, "Could not recover stale portal state", error)
-            }
-        }
         surfaceThread = HandlerThread("ArchpheneLauncherSurface").apply { start() }
         surfaceHandler = Handler(surfaceThread.looper)
         clipboardThread = HandlerThread("ArchpheneLauncherClipboard").apply { start() }
         clipboardHandler = Handler(clipboardThread.looper)
+        /*
+         * Queue disk-backed recovery before any launcher work can reach the
+         * compositor thread. Service creation runs on Android's main thread,
+         * where walking runtime directories both violates StrictMode and
+         * delays the first launcher window.
+         */
+        surfaceHandler.post {
+            AndroidGpuBridge.cleanupStaleRuntimeDirectories(this)
+            LauncherAudioBridge.cleanupStaleRuntimeDirectories(this)
+            LauncherCameraBridge.cleanupStaleRuntimeDirectories(this)
+            if (stalePortalSavesRecovered.compareAndSet(false, true)) {
+                runCatching {
+                    LauncherPortalBridge.recoverStaleRuntime(cacheDir)
+                    LauncherPortalBridge.recoverStaleSaves(File(filesDir, "arch-root"))
+                }.onFailure { error ->
+                    Log.e(TAG, "Could not recover stale portal state", error)
+                }
+            }
+        }
         wallpaperManager =
             getSystemService(WallpaperManager::class.java)?.also { manager ->
                 manager.addOnColorsChangedListener(wallpaperColorsChanged, surfaceHandler)
@@ -362,6 +372,8 @@ class LauncherSessionService : Service() {
                 session.gpuBridge = null
                 session.audioBridge?.close()
                 session.audioBridge = null
+                session.cameraBridge?.close()
+                session.cameraBridge = null
                 compositor?.close()
                 session.compositor = null
                 session.compositorSocket = null
@@ -1811,6 +1823,17 @@ class LauncherSessionService : Service() {
             return
         }
         val appearance = resolvedAppearance(session)
+        val cameraEnabled =
+            session.authorization.bridgeCapabilities and BRIDGE_CAMERA != 0
+        val cameraBridge =
+            if (cameraEnabled) {
+                session.cameraBridge
+                    ?: LauncherCameraBridge(this, session.id).also {
+                        session.cameraBridge = it
+                    }
+            } else {
+                null
+            }
         val portalBridge =
             session.portalBridge
                 ?: runCatching {
@@ -1871,6 +1894,18 @@ class LauncherSessionService : Service() {
                         requestSecret = { operation, arguments, descriptor ->
                             notifySecret(session, operation, arguments, descriptor)
                         },
+                        cameraEnabled = cameraEnabled,
+                        cameraPipeWireSocket = cameraBridge?.socketPath,
+                        requestCamera = { operation, width, height, front, descriptor ->
+                            notifyCamera(
+                                session,
+                                operation,
+                                width,
+                                height,
+                                front,
+                                descriptor,
+                            )
+                        },
                         importDirectory = { displayName, descriptor ->
                             runtime.importPortalFolder(displayName, descriptor)
                         },
@@ -1890,6 +1925,7 @@ class LauncherSessionService : Service() {
                     )
                     return
                 }
+        if (!prepareCameraBridge(session, attachedSurface, portalBridge.brokerAddress)) return
         if (!prepareAudioBridge(session, attachedSurface, portalBridge.brokerAddress)) return
         val pendingLaunchDocument = session.pendingLaunchDocument
         if (pendingLaunchDocument != null && session.launchDocumentPath == null) {
@@ -1977,6 +2013,8 @@ class LauncherSessionService : Service() {
             session.gpuBridge = null
             session.audioBridge?.close()
             session.audioBridge = null
+            session.cameraBridge?.close()
+            session.cameraBridge = null
             Log.e(TAG, "Could not start descriptor process session=${session.id}")
             stopCompositorForStatus(
                 session,
@@ -1989,6 +2027,30 @@ class LauncherSessionService : Service() {
         session.nextProcessStatusMillis =
             SystemClock.uptimeMillis() + PROCESS_STATUS_DELAY_MILLIS
         Log.i(TAG, "Started manager-owned Linux process session=${session.id}")
+    }
+
+    private fun prepareCameraBridge(
+        session: Session,
+        attachedSurface: Surface,
+        brokerAddress: String,
+    ): Boolean {
+        if (session.authorization.bridgeCapabilities and BRIDGE_CAMERA == 0) return true
+        val bridge =
+            session.cameraBridge
+                ?: LauncherCameraBridge(this, session.id).also {
+                    session.cameraBridge = it
+                }
+        if (bridge.isReady() || bridge.start(brokerAddress)) return true
+        bridge.close()
+        session.cameraBridge = null
+        session.portalBridge?.close()
+        session.portalBridge = null
+        stopCompositorForStatus(
+            session,
+            attachedSurface,
+            "Could not start ${session.authorization.label}'s camera bridge.",
+        )
+        return false
     }
 
     private fun prepareAudioBridge(
@@ -2764,6 +2826,8 @@ class LauncherSessionService : Service() {
         session.gpuBridge = null
         session.audioBridge?.close()
         session.audioBridge = null
+        session.cameraBridge?.close()
+        session.cameraBridge = null
         val message =
             if (exitStatus == 0) {
                 "${session.authorization.label} closed."
@@ -3411,6 +3475,85 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyCamera(
+        session: Session,
+        operation: String,
+        width: Int,
+        height: Int,
+        front: Boolean,
+        descriptor: ParcelFileDescriptor?,
+    ): String {
+        if (
+            !session.active ||
+            session.authorization.bridgeCapabilities and BRIDGE_CAMERA == 0
+        ) {
+            return "ERROR\tFAILED"
+        }
+        val operationCode =
+            when (operation) {
+                "REQUEST_CAMERA" -> CAMERA_OPERATION_REQUEST
+                "CHECK_CAMERA" -> CAMERA_OPERATION_CHECK
+                "CAPTURE_CAMERA_JPEG" -> CAMERA_OPERATION_CAPTURE
+                "STREAM_CAMERA_I420" -> CAMERA_OPERATION_STREAM
+                else -> return "ERROR\tINVALID_REQUEST"
+            }
+        val descriptorRequired =
+            operationCode == CAMERA_OPERATION_CAPTURE ||
+                operationCode == CAMERA_OPERATION_STREAM
+        if (
+            descriptorRequired != (descriptor != null) ||
+            (
+                descriptorRequired &&
+                    (width !in 1..MAX_CAMERA_DIMENSION || height !in 1..MAX_CAMERA_DIMENSION)
+            ) ||
+            (!descriptorRequired && (width != 0 || height != 0 || front))
+        ) {
+            return "ERROR\tINVALID_REQUEST"
+        }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(operationCode)
+            data.writeInt(width)
+            data.writeInt(height)
+            data.writeInt(if (front) CAMERA_FACING_FRONT else CAMERA_FACING_BACK)
+            data.writeInt(if (descriptor == null) 0 else 1)
+            descriptor?.writeToParcel(data, 0)
+            if (
+                data.dataSize() > MAX_CAMERA_CALLBACK_PARCEL_BYTES ||
+                !session.clientToken.transact(CALLBACK_CAMERA, data, reply, 0)
+            ) {
+                "ERROR\tFAILED"
+            } else {
+                reply.readException()
+                val response = reply.readString()
+                if (
+                    response == null ||
+                    response.length > MAX_CAMERA_RESPONSE_BYTES ||
+                    reply.dataAvail() != 0
+                ) {
+                    "ERROR\tFAILED"
+                } else {
+                    response
+                }
+            }
+        } catch (error: RemoteException) {
+            Log.w(
+                TAG,
+                "Could not deliver Linux camera request session=${session.id} " +
+                    "operation=$operation",
+                error,
+            )
+            "ERROR\tFAILED"
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
     private fun writeCursorCallbackHeader(
         data: Parcel,
         session: Session,
@@ -3658,7 +3801,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 11
+        private const val PROTOCOL_VERSION = 12
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3680,6 +3823,7 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_MICROPHONE_PERMISSION =
             IBinder.FIRST_CALL_TRANSACTION + 9
         private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
+        private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3
@@ -3689,8 +3833,18 @@ class LauncherSessionService : Service() {
         private const val MAX_SECRET_ARGUMENT_UTF16 = 8 * 1_024
         private const val MAX_SECRET_CALLBACK_PARCEL_BYTES = 48 * 1_024
         private const val MAX_SECRET_RESPONSE_BYTES = 16 * 1_024
+        private const val CAMERA_OPERATION_REQUEST = 1
+        private const val CAMERA_OPERATION_CHECK = 2
+        private const val CAMERA_OPERATION_CAPTURE = 3
+        private const val CAMERA_OPERATION_STREAM = 4
+        private const val CAMERA_FACING_BACK = 0
+        private const val CAMERA_FACING_FRONT = 1
+        private const val MAX_CAMERA_DIMENSION = 8_192
+        private const val MAX_CAMERA_CALLBACK_PARCEL_BYTES = 1_024
+        private const val MAX_CAMERA_RESPONSE_BYTES = 128
         private const val BRIDGE_AUDIO_OUTPUT = 1 shl 0
         private const val BRIDGE_PRINTING = 1 shl 1
+        private const val BRIDGE_CAMERA = 1 shl 2
         private const val BRIDGE_SECRETS = 1 shl 3
         private const val BRIDGE_AUDIO_INPUT = 1 shl 4
         private const val MICROPHONE_PERMISSION_NONE = 0

@@ -135,9 +135,11 @@ Capability-scoped drag-and-drop maps Android `DragEvent` motion/drop/cancel life
 
 ## Camera
 
-A wrapper declaring `camera` can request and inspect Android `CAMERA` permission through the same broker. After consent, a glibc caller supplies one regular output descriptor, requested maximum dimensions up to 8192 pixels, and front/back preference. Camera2 selects the preferred lens when present, bounds JPEG payloads to 32 MiB, closes the camera/session/ImageReader after each request, and returns the actual dimensions and byte count. Android remains the permission authority; denial is persisted and is not repeatedly prompted.
+A generated V9 wrapper declares `camera` only when the verified launcher profile contains camera evidence. It then declares `CAMERA` and both Android camera features as optional; non-camera wrappers contain none of those declarations. The visible wrapper owns the first-use Android permission request and persists denial rather than repeatedly prompting.
 
-The x86_64 emulator and physical AArch64 Samsung regressions validate the real permission dialog, capture before-consent rejection, 1280x720 JPEG capture and signature/byte checks, invalid-dimension rejection, denial, and no automatic reprompt. The private XDG Camera adapter also returns a bounded PipeWire remote backed by Camera2. An official unmodified Arch Snapshot package passes Android grant and denial paths, timestamped frame delivery, process cleanup, and runtime-pack lease cleanup on both architectures.
+After consent, bounded one-shot JPEG capture accepts a regular output descriptor, maximum dimensions up to 8192 pixels, and front/back preference. Streaming uses Camera2 at 640×480 and preallocates three I420 frames plus one wire header; a slow consumer loses stale pending frames instead of growing a queue. The manager starts one session-private PipeWire daemon, policy helper, producer, and XDG Camera portal from verified APK-owned dual-ABI payloads, and tears them down with the launcher session.
+
+The current production path passes with the official unmodified Arch Snapshot package on the Android 16 x86_64 emulator and physical AArch64 Samsung. The emulator displays the live virtual scene with a 0–253 luminance range; both full-device captures have a zero hot-magenta ratio. GTK4 camera launchers alone receive `GSK_RENDERER=cairo` because Samsung's GSK GL/NGL path presented otherwise-valid planar textures as solid magenta; other GTK4 launchers retain acceleration. Earlier isolated regressions continue to cover pre-consent rejection, denial/no-reprompt, bounded JPEG capture, invalid dimensions, and per-plane I420 diagnostics.
 
 ## Accessibility
 

@@ -410,6 +410,25 @@ through the production descriptor launcher. It requires exact output and exit
 status, then checks invalid-descriptor rejection; this covers the reviewed
 fork/exec, inherited-FD, wait, and bounded child-output boundary on Android.
 
+### Current camera bridge
+
+Install Snapshot through the manager and approve its first-use camera request.
+The repeatable gate then uses the existing manager, shared Arch root, package,
+wrapper, and permission without installing or clearing anything:
+
+```bash
+./scripts/test-current-camera-bridge.sh \
+  --serial emulator-5554 --minimum-luma-range 64
+./scripts/test-current-camera-bridge.sh --serial <samsung-serial>
+```
+
+The gate relaunches only the wrapper process, verifies the exact GTK4 camera
+environment and private PipeWire startup, waits for Linux presentation, rejects
+fatal Android logs and the solid-magenta regression, and retains full-device
+PNG/raw captures under `tooling/artifacts/current-camera`. The luminance
+requirement is appropriate for the emulator's virtual scene; leave it at zero
+when a physical device may be lying camera-down.
+
 ### Secrets desktop-client fixture
 
 For the current generated-wrapper path, first install a package whose verified

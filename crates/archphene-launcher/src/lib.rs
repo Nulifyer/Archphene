@@ -35,6 +35,26 @@ pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8: &str =
 pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V8: &str =
     "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets";
 pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets";
+pub const LAUNCHER_CAPABILITIES_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,camera";
+pub const LAUNCHER_CAPABILITIES_PRINTING_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,camera";
+pub const LAUNCHER_CAPABILITIES_SECRETS_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,secrets,camera";
+pub const LAUNCHER_CAPABILITIES_PRINTING_SECRETS_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,printing,secrets,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V9: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,secrets,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing,secrets,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets,camera";
+pub const LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9: &str = "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets,camera";
 
 pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
     let audio = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT != 0;
@@ -42,21 +62,36 @@ pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
         bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_INPUT != 0;
     let printing = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_PRINTING != 0;
     let secrets = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_SECRETS != 0;
+    let camera = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_CAMERA != 0;
     debug_assert!(!audio_input || audio);
-    match (audio, audio_input, printing, secrets) {
-        (false, false, false, false) => LAUNCHER_CAPABILITIES_V4,
-        (false, false, true, false) => LAUNCHER_CAPABILITIES_PRINTING_V5,
-        (true, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
-        (true, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
-        (true, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
-        (true, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
-        (false, false, false, true) => LAUNCHER_CAPABILITIES_SECRETS_V8,
-        (false, false, true, true) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_V8,
-        (true, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V8,
-        (true, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,
-        (true, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V8,
-        (true, true, true, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,
-        (false, true, _, _) => LAUNCHER_CAPABILITIES_V4,
+    match (audio, audio_input, printing, secrets, camera) {
+        (false, false, false, false, false) => LAUNCHER_CAPABILITIES_V4,
+        (false, false, true, false, false) => LAUNCHER_CAPABILITIES_PRINTING_V5,
+        (true, false, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
+        (true, false, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
+        (true, true, false, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_V7,
+        (true, true, true, false, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_V7,
+        (false, false, false, true, false) => LAUNCHER_CAPABILITIES_SECRETS_V8,
+        (false, false, true, true, false) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_V8,
+        (true, false, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V8,
+        (true, false, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,
+        (true, true, false, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_V8,
+        (true, true, true, true, false) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,
+        (false, false, false, false, true) => LAUNCHER_CAPABILITIES_CAMERA_V9,
+        (false, false, true, false, true) => LAUNCHER_CAPABILITIES_PRINTING_CAMERA_V9,
+        (true, false, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_CAMERA_V9,
+        (true, false, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_CAMERA_V9,
+        (true, true, false, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_CAMERA_V9,
+        (true, true, true, false, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9,
+        (false, false, false, true, true) => LAUNCHER_CAPABILITIES_SECRETS_CAMERA_V9,
+        (false, false, true, true, true) => LAUNCHER_CAPABILITIES_PRINTING_SECRETS_CAMERA_V9,
+        (true, false, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V9,
+        (true, false, true, true, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9,
+        (true, true, false, true, true) => LAUNCHER_CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9,
+        (true, true, true, true, true) => {
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9
+        }
+        (false, true, _, _, _) => LAUNCHER_CAPABILITIES_V4,
     }
 }
 
@@ -64,7 +99,9 @@ const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
 const REGISTRY_FILE: &str = "launcher-registry-v1";
 const REGISTRY_TEMP_FILE: &str = ".launcher-registry-v1.tmp";
 const REGISTRY_MAGIC: &[u8; 8] = b"ARCHLREG";
-const REGISTRY_VERSION: u32 = 6;
+const REGISTRY_VERSION: u32 = 8;
+const EXACT_CAMERA_REGISTRY_VERSION: u32 = 7;
+const BRIDGE_REGISTRY_VERSION: u32 = 6;
 const OBSERVATION_REGISTRY_VERSION: u32 = 5;
 const EXECUTABLE_PACKAGE_REGISTRY_VERSION: u32 = 4;
 const PREVIOUS_REGISTRY_VERSION: u32 = 3;
@@ -1497,6 +1534,8 @@ fn encode_registry_version(
             | PREVIOUS_REGISTRY_VERSION
             | EXECUTABLE_PACKAGE_REGISTRY_VERSION
             | OBSERVATION_REGISTRY_VERSION
+            | BRIDGE_REGISTRY_VERSION
+            | EXACT_CAMERA_REGISTRY_VERSION
             | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
@@ -1512,7 +1551,9 @@ fn encode_registry_version(
             EXECUTABLE_PACKAGE_REGISTRY_VERSION | OBSERVATION_REGISTRY_VERSION => {
                 observation_descriptor_digest(descriptor)
             }
-            REGISTRY_VERSION => descriptor.content_digest,
+            BRIDGE_REGISTRY_VERSION | EXACT_CAMERA_REGISTRY_VERSION | REGISTRY_VERSION => {
+                descriptor.content_digest
+            }
             _ => return Err(LauncherRegistryError::Corrupt),
         };
         body.extend_from_slice(&content_digest);
@@ -1528,7 +1569,7 @@ fn encode_registry_version(
         if version >= EXECUTABLE_PACKAGE_REGISTRY_VERSION {
             push_optional_string(&mut body, descriptor.executable_package.as_deref())?;
         }
-        if version >= REGISTRY_VERSION {
+        if version >= BRIDGE_REGISTRY_VERSION {
             body.push(descriptor.bridge_capabilities);
         }
         if version >= OBSERVATION_REGISTRY_VERSION {
@@ -1613,6 +1654,8 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
             | PREVIOUS_REGISTRY_VERSION
             | EXECUTABLE_PACKAGE_REGISTRY_VERSION
             | OBSERVATION_REGISTRY_VERSION
+            | BRIDGE_REGISTRY_VERSION
+            | EXACT_CAMERA_REGISTRY_VERSION
             | REGISTRY_VERSION
     ) {
         return Err(LauncherRegistryError::Corrupt);
@@ -1646,7 +1689,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
         } else {
             None
         };
-        let bridge_capabilities = if version >= REGISTRY_VERSION {
+        let bridge_capabilities = if version >= BRIDGE_REGISTRY_VERSION {
             cursor.byte()?
         } else {
             0
@@ -1740,7 +1783,7 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
                 }
                 descriptor.content_digest = descriptor_digest(&descriptor);
             }
-            REGISTRY_VERSION => {}
+            BRIDGE_REGISTRY_VERSION | EXACT_CAMERA_REGISTRY_VERSION | REGISTRY_VERSION => {}
             _ => return Err(LauncherRegistryError::Corrupt),
         }
         descriptors.push(descriptor);
@@ -2190,7 +2233,7 @@ mod tests {
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_CAMERA | BRIDGE_SECRETS,),
-            LAUNCHER_CAPABILITIES_AUDIO_SECRETS_V8,
+            LAUNCHER_CAPABILITIES_AUDIO_SECRETS_CAMERA_V9,
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING),
@@ -2211,6 +2254,20 @@ mod tests {
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING | BRIDGE_SECRETS),
             LAUNCHER_CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,
+        );
+        assert_eq!(
+            launcher_capabilities(BRIDGE_CAMERA),
+            LAUNCHER_CAPABILITIES_CAMERA_V9,
+        );
+        assert_eq!(
+            launcher_capabilities(
+                BRIDGE_AUDIO_OUTPUT
+                    | BRIDGE_AUDIO_INPUT
+                    | BRIDGE_PRINTING
+                    | BRIDGE_SECRETS
+                    | BRIDGE_CAMERA
+            ),
+            LAUNCHER_CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9,
         );
     }
 
@@ -2565,6 +2622,32 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes(stored[8..12].try_into().expect("registry version")),
             REGISTRY_VERSION,
+        );
+    }
+
+    #[test]
+    fn bridge_registry_upgrade_republishes_newly_detected_capability() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.gnome.Snapshot.desktop", "Camera")]);
+        let (registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("current registry");
+        let previous =
+            encode_registry_version(&registry, BRIDGE_REGISTRY_VERSION).expect("bridge registry");
+        fs::write(
+            root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE),
+            previous,
+        )
+        .expect("replace with bridge registry");
+
+        let mut camera = entry("org.gnome.Snapshot.desktop", "Camera");
+        camera.bridge_capabilities = archphene_packages::elf_profile::BRIDGE_CAMERA;
+        let (reconciled, report) = LauncherRegistry::reconcile(&root.path, &catalog(vec![camera]))
+            .expect("rebind camera capability");
+        assert_eq!(report.changed, 1);
+        assert_eq!(reconciled.descriptors[0].desired_generation, 2);
+        assert_eq!(
+            reconciled.descriptors[0].bridge_capabilities,
+            archphene_packages::elf_profile::BRIDGE_CAMERA,
         );
     }
 

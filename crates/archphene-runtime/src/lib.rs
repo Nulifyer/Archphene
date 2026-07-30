@@ -23,11 +23,12 @@ use archphene_packages::{
         MAX_AUR_SOURCE_BYTES, plan_reviewed_aur_graph,
     },
     desktop::{DesktopCatalog, ExecArgument},
+    elf_profile::BRIDGE_CAMERA,
 };
 use archphene_process::{
     GuiAppearance, GuiRegistry, MAX_COMMAND_ARGUMENTS, MAX_GUI_SESSIONS, ProcessError, PtyRegistry,
     PtyWaiter,
-    integration::{IntegrationObservation, TOPOLOGY_CHROMIUM, TOPOLOGY_OPENGL},
+    integration::{IntegrationObservation, TOPOLOGY_CHROMIUM, TOPOLOGY_GTK4, TOPOLOGY_OPENGL},
 };
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 use archphene_storage::{
@@ -1285,7 +1286,12 @@ impl RuntimeHost {
         } else {
             environment
         };
-        let environment = environment.with_pulse_server_address(options.pulse_server_address)?;
+        let environment = environment
+            .with_gtk_camera_compatibility(gtk_camera_compatibility(
+                integration_topology,
+                bridge_capabilities,
+            ))
+            .with_pulse_server_address(options.pulse_server_address)?;
         if arguments.len() > MAX_COMMAND_ARGUMENTS {
             return Err(LauncherProcessError::Process(ProcessError::InvalidArgument));
         }
@@ -2300,6 +2306,10 @@ impl RuntimeHost {
     }
 }
 
+fn gtk_camera_compatibility(integration_topology: u16, bridge_capabilities: u8) -> bool {
+    integration_topology & TOPOLOGY_GTK4 != 0 && bridge_capabilities & BRIDGE_CAMERA != 0
+}
+
 fn session_marker_active(path: &Path) -> io::Result<bool> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -2411,6 +2421,14 @@ fn aur_build_environment_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gtk_camera_renderer_requires_both_verified_signals() {
+        assert!(gtk_camera_compatibility(TOPOLOGY_GTK4, BRIDGE_CAMERA));
+        assert!(!gtk_camera_compatibility(TOPOLOGY_GTK4, 0));
+        assert!(!gtk_camera_compatibility(0, BRIDGE_CAMERA));
+        assert!(!gtk_camera_compatibility(TOPOLOGY_OPENGL, BRIDGE_CAMERA));
+    }
     use archphene_core::SNAPSHOT_SIZE;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};

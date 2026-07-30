@@ -124,7 +124,11 @@ class LauncherActivity :
     @Volatile private var printingEnabled = false
     @Volatile private var microphoneEnabled = false
     @Volatile private var secretsEnabled = false
+    @Volatile private var cameraEnabled = false
     private val secretStore by lazy { LauncherSecretStore(filesDir) }
+    private val cameraIntegrationDelegate = lazy { LauncherCameraIntegration(this) }
+    private val cameraIntegration by cameraIntegrationDelegate
+    @Volatile private var cameraPermissionRequestInFlight = false
     private var notificationPermissionRequestInFlight = false
     private val pendingNotifications =
         arrayOfNulls<PendingNotification>(LauncherNotificationPolicy.MAX_PENDING)
@@ -195,7 +199,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_SECRET ||
+                    code !in CALLBACK_STATUS..CALLBACK_CAMERA ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -526,6 +530,69 @@ class LauncherActivity :
                             reply.writeString(response)
                             true
                         }
+                        CALLBACK_CAMERA -> {
+                            if (!cameraEnabled || reply == null) {
+                                return@runCatching false
+                            }
+                            val operation = data.readInt()
+                            val width = data.readInt()
+                            val height = data.readInt()
+                            val facing = data.readInt()
+                            val descriptorPresent = data.readInt()
+                            val descriptor =
+                                if (descriptorPresent == 1) {
+                                    runCatching {
+                                        ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                                    }.getOrNull()
+                                } else {
+                                    null
+                                }
+                            if (
+                                descriptorPresent !in 0..1 ||
+                                (descriptorPresent == 1 && descriptor == null) ||
+                                data.dataAvail() != 0 ||
+                                !validCameraCallback(
+                                    operation,
+                                    width,
+                                    height,
+                                    facing,
+                                    descriptor,
+                                )
+                            ) {
+                                runCatching { descriptor?.close() }
+                                return@runCatching false
+                            }
+                            val response =
+                                descriptor.use {
+                                    runCatching {
+                                        handleCameraCallback(
+                                            operation,
+                                            width,
+                                            height,
+                                            facing,
+                                            it,
+                                        )
+                                    }.getOrElse { error ->
+                                        if (error is IllegalArgumentException) {
+                                            Log.w(
+                                                TAG,
+                                                "Rejected invalid camera operation=$operation",
+                                            )
+                                            "ERROR\tINVALID_REQUEST"
+                                        } else {
+                                            Log.e(
+                                                TAG,
+                                                "Camera operation failed operation=$operation",
+                                                error,
+                                            )
+                                            "ERROR\tFAILED"
+                                        }
+                                    }
+                                }
+                            reply.writeNoException()
+                            reply.writeString(response)
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -718,21 +785,33 @@ class LauncherActivity :
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != NOTIFICATION_PERMISSION_REQUEST) return
-        notificationPermissionRequestInFlight = false
-        val granted =
-            permissions.size == 1 &&
-                permissions[0] == Manifest.permission.POST_NOTIFICATIONS &&
-                grantResults.size == 1 &&
-                grantResults[0] == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            for (index in pendingNotifications.indices) {
-                pendingNotifications[index]?.let(::postLinuxNotification)
-                pendingNotifications[index] = null
+        when (requestCode) {
+            NOTIFICATION_PERMISSION_REQUEST -> {
+                notificationPermissionRequestInFlight = false
+                val granted =
+                    permissions.size == 1 &&
+                        permissions[0] == Manifest.permission.POST_NOTIFICATIONS &&
+                        grantResults.size == 1 &&
+                        grantResults[0] == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    for (index in pendingNotifications.indices) {
+                        pendingNotifications[index]?.let(::postLinuxNotification)
+                        pendingNotifications[index] = null
+                    }
+                } else {
+                    pendingNotifications.fill(null)
+                    Log.i(TAG, "Linux notification permission denied")
+                }
             }
-        } else {
-            pendingNotifications.fill(null)
-            Log.i(TAG, "Linux notification permission denied")
+            CAMERA_PERMISSION_REQUEST -> {
+                cameraPermissionRequestInFlight = false
+                val granted =
+                    permissions.size == 1 &&
+                        permissions[0] == Manifest.permission.CAMERA &&
+                        grantResults.size == 1 &&
+                        grantResults[0] == PackageManager.PERMISSION_GRANTED
+                Log.i(TAG, "Linux camera permission ${if (granted) "granted" else "denied"}")
+            }
         }
     }
 
@@ -785,7 +864,19 @@ class LauncherActivity :
             capabilities != CAPABILITIES_AUDIO_SECRETS_V8 &&
             capabilities != CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 &&
             capabilities != CAPABILITIES_AUDIO_INPUT_SECRETS_V8 &&
-            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8
+            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 &&
+            capabilities != CAPABILITIES_CAMERA_V9 &&
+            capabilities != CAPABILITIES_PRINTING_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_PRINTING_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9 &&
+            capabilities != CAPABILITIES_SECRETS_CAMERA_V9 &&
+            capabilities != CAPABILITIES_PRINTING_SECRETS_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_SECRETS_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9 &&
+            capabilities != CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9
         ) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
@@ -793,7 +884,8 @@ class LauncherActivity :
         }
         printingEnabled = capabilities.contains(",printing")
         microphoneEnabled = capabilities.contains(",audio-input")
-        secretsEnabled = capabilities.endsWith(",secrets")
+        secretsEnabled = capabilities.contains(",secrets")
+        cameraEnabled = capabilities.endsWith(",camera")
         val manager = metadata.getString(MANAGER_PACKAGE).orEmpty()
         if (!SAFE_PACKAGE.matches(manager)) {
             status.setText(R.string.launcher_invalid)
@@ -884,6 +976,13 @@ class LauncherActivity :
 
     override fun onStop() {
         handler.removeCallbacksAndMessages(null)
+        if (
+            cameraPermissionRequestInFlight &&
+            !getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
+                .getBoolean(CAMERA_PERMISSION_REQUESTED, false)
+        ) {
+            cameraPermissionRequestInFlight = false
+        }
         stopClipboardListening()
         softImeRequested = false
         hideIme()
@@ -906,6 +1005,9 @@ class LauncherActivity :
         incomingDocumentGeneration++
         preparedIncomingDocument?.descriptor?.close()
         preparedIncomingDocument = null
+        if (cameraIntegrationDelegate.isInitialized()) {
+            cameraIntegration.close()
+        }
         remote = null
         if (binding) {
             unbindService(connection)
@@ -1543,6 +1645,162 @@ class LauncherActivity :
                 "OK\t${secretStore.catalog(checkNotNull(descriptor).fileDescriptor)}"
             else -> "ERROR\tINVALID_REQUEST"
         }
+
+    private fun validCameraCallback(
+        operation: Int,
+        width: Int,
+        height: Int,
+        facing: Int,
+        descriptor: ParcelFileDescriptor?,
+    ): Boolean =
+        when (operation) {
+            CAMERA_OPERATION_REQUEST,
+            CAMERA_OPERATION_CHECK,
+            -> width == 0 && height == 0 && facing == 0 && descriptor == null
+            CAMERA_OPERATION_CAPTURE,
+            CAMERA_OPERATION_STREAM,
+            -> width in 1..MAX_CAMERA_DIMENSION &&
+                height in 1..MAX_CAMERA_DIMENSION &&
+                facing in CAMERA_FACING_BACK..CAMERA_FACING_FRONT &&
+                descriptor != null
+            else -> false
+        }
+
+    private fun handleCameraCallback(
+        operation: Int,
+        width: Int,
+        height: Int,
+        facing: Int,
+        descriptor: ParcelFileDescriptor?,
+    ): String =
+        when (operation) {
+            CAMERA_OPERATION_REQUEST -> requestCameraPermission()
+            CAMERA_OPERATION_CHECK -> cameraPermissionState()
+            CAMERA_OPERATION_CAPTURE -> {
+                if (checkSelfPermission(Manifest.permission.CAMERA) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    cameraPermissionState()
+                } else {
+                    val file = checkNotNull(descriptor).fileDescriptor
+                    val stat = Os.fstat(file)
+                    require(stat.st_mode and OsConstants.S_IFMT == OsConstants.S_IFREG) {
+                        "Camera capture requires a regular output file"
+                    }
+                    Os.ftruncate(file, 0)
+                    Os.lseek(file, 0, OsConstants.SEEK_SET)
+                    val result =
+                        cameraIntegration.captureJpeg(
+                            file,
+                            width,
+                            height,
+                            facing == CAMERA_FACING_FRONT,
+                        )
+                    Log.i(
+                        TAG,
+                        "Captured Linux camera JPEG ${result.width}x${result.height} " +
+                            "bytes=${result.bytes}",
+                    )
+                    "OK\t${result.width}\t${result.height}\t${result.bytes}"
+                }
+            }
+            CAMERA_OPERATION_STREAM -> {
+                if (checkSelfPermission(Manifest.permission.CAMERA) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    cameraPermissionState()
+                } else {
+                    val file = checkNotNull(descriptor).fileDescriptor
+                    val type = Os.fstat(file).st_mode and OsConstants.S_IFMT
+                    require(type == OsConstants.S_IFSOCK || type == OsConstants.S_IFIFO) {
+                        "Camera stream requires a socket or pipe"
+                    }
+                    Log.i(TAG, "Starting Linux camera stream ${width}x$height")
+                    cameraIntegration.streamI420(
+                        file,
+                        width,
+                        height,
+                        facing == CAMERA_FACING_FRONT,
+                    )
+                    Log.i(TAG, "Linux camera stream stopped")
+                    "OK"
+                }
+            }
+            else -> "ERROR\tINVALID_REQUEST"
+        }
+
+    private fun requestCameraPermission(): String {
+        if (
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+        ) {
+            return "ERROR\tUNAVAILABLE"
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return "OK"
+        }
+        synchronized(this) {
+            if (cameraPermissionRequestInFlight) {
+                return "ERROR\tPERMISSION_REQUESTED"
+            }
+            if (
+                getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
+                    .getBoolean(CAMERA_PERMISSION_REQUESTED, false)
+            ) {
+                return "ERROR\tPERMISSION_DENIED"
+            }
+            if (!activityResumed) return "ERROR\tNOT_READY"
+            cameraPermissionRequestInFlight = true
+        }
+        handler.post {
+            if (isFinishing || isDestroyed) {
+                cameraPermissionRequestInFlight = false
+                return@post
+            }
+            runCatching {
+                getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(CAMERA_PERMISSION_REQUESTED, true)
+                    .apply()
+                requestPermissions(
+                    arrayOf(Manifest.permission.CAMERA),
+                    CAMERA_PERMISSION_REQUEST,
+                )
+            }.onFailure { error ->
+                cameraPermissionRequestInFlight = false
+                getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(CAMERA_PERMISSION_REQUESTED, false)
+                    .apply()
+                Log.e(TAG, "Could not request Linux camera permission", error)
+            }
+        }
+        Log.i(TAG, "Requested Android camera permission for Linux camera access")
+        return "ERROR\tPERMISSION_REQUESTED"
+    }
+
+    private fun cameraPermissionState(): String {
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            return "ERROR\tUNAVAILABLE"
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return "OK"
+        }
+        if (cameraPermissionRequestInFlight) {
+            return "ERROR\tPERMISSION_REQUESTED"
+        }
+        return if (
+            getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
+                .getBoolean(CAMERA_PERMISSION_REQUESTED, false)
+        ) {
+            "ERROR\tPERMISSION_DENIED"
+        } else {
+            "ERROR\tPERMISSION_NOT_REQUESTED"
+        }
+    }
 
     private fun encodeSecretField(value: String): String =
         Base64.encodeToString(
@@ -3620,9 +3878,31 @@ class LauncherActivity :
             "$CAPABILITIES_V4,audio-output,audio-input,secrets"
         private const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 =
             "$CAPABILITIES_V4,audio-output,audio-input,printing,secrets"
+        private const val CAPABILITIES_CAMERA_V9 = "$CAPABILITIES_V4,camera"
+        private const val CAPABILITIES_PRINTING_CAMERA_V9 =
+            "$CAPABILITIES_PRINTING_V5,camera"
+        private const val CAPABILITIES_AUDIO_CAMERA_V9 = "$CAPABILITIES_AUDIO_V6,camera"
+        private const val CAPABILITIES_AUDIO_PRINTING_CAMERA_V9 =
+            "$CAPABILITIES_AUDIO_PRINTING_V6,camera"
+        private const val CAPABILITIES_AUDIO_INPUT_CAMERA_V9 =
+            "$CAPABILITIES_AUDIO_INPUT_V7,camera"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9 =
+            "$CAPABILITIES_AUDIO_INPUT_PRINTING_V7,camera"
+        private const val CAPABILITIES_SECRETS_CAMERA_V9 =
+            "$CAPABILITIES_SECRETS_V8,camera"
+        private const val CAPABILITIES_PRINTING_SECRETS_CAMERA_V9 =
+            "$CAPABILITIES_PRINTING_SECRETS_V8,camera"
+        private const val CAPABILITIES_AUDIO_SECRETS_CAMERA_V9 =
+            "$CAPABILITIES_AUDIO_SECRETS_V8,camera"
+        private const val CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9 =
+            "$CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,camera"
+        private const val CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9 =
+            "$CAPABILITIES_AUDIO_INPUT_SECRETS_V8,camera"
+        private const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9 =
+            "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,camera"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 11
+        private const val PROTOCOL_VERSION = 12
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -3644,6 +3924,7 @@ class LauncherActivity :
         private const val CALLBACK_MICROPHONE_PERMISSION =
             IBinder.FIRST_CALL_TRANSACTION + 9
         private const val CALLBACK_SECRET = IBinder.FIRST_CALL_TRANSACTION + 10
+        private const val CALLBACK_CAMERA = IBinder.FIRST_CALL_TRANSACTION + 11
         private const val SECRET_OPERATION_STORE = 1
         private const val SECRET_OPERATION_READ = 2
         private const val SECRET_OPERATION_DELETE = 3
@@ -3651,9 +3932,19 @@ class LauncherActivity :
         private const val SECRET_OPERATION_CATALOG = 5
         private const val MAX_SECRET_ARGUMENTS = 4
         private const val MAX_SECRET_ARGUMENT_UTF16 = 8 * 1_024
+        private const val CAMERA_OPERATION_REQUEST = 1
+        private const val CAMERA_OPERATION_CHECK = 2
+        private const val CAMERA_OPERATION_CAPTURE = 3
+        private const val CAMERA_OPERATION_STREAM = 4
+        private const val CAMERA_FACING_BACK = 0
+        private const val CAMERA_FACING_FRONT = 1
+        private const val MAX_CAMERA_DIMENSION = 8_192
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val NOTIFICATION_PERMISSION_REQUEST = 7_001
+        private const val CAMERA_PERMISSION_REQUEST = 7_002
+        private const val CAMERA_PREFERENCES = "archphene-camera"
+        private const val CAMERA_PERMISSION_REQUESTED = "permission-requested"
         private const val NOTIFICATION_PREFERENCES = "archphene-notifications"
         private const val NOTIFICATION_PERMISSION_REQUESTED = "permission-requested"
         private const val LINUX_NOTIFICATION_CHANNEL = "linux-app"

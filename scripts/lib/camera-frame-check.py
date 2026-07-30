@@ -30,9 +30,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("frame", type=Path)
     parser.add_argument("--maximum-magenta-ratio", type=float, default=0.10)
+    parser.add_argument("--minimum-luma-range", type=int, default=0)
     args = parser.parse_args()
     if not 0 <= args.maximum_magenta_ratio < 1:
         raise SystemExit("--maximum-magenta-ratio must be in [0, 1)")
+    if not 0 <= args.minimum_luma_range <= 255:
+        raise SystemExit("--minimum-luma-range must be in [0, 255]")
 
     width, height, pixels = frame(args.frame)
     left, right = width * 5 // 100, width * 95 // 100
@@ -64,6 +67,10 @@ def main():
     )
     if ratio > args.maximum_magenta_ratio:
         raise SystemExit("camera application frame contains a dominant hot-magenta surface")
+    if maximum_luma - minimum_luma < args.minimum_luma_range:
+        raise SystemExit(
+            "camera application frame does not contain the required luminance range"
+        )
 
 
 if __name__ == "__main__":

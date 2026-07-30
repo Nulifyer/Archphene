@@ -1,5 +1,6 @@
 package org.archphene.app.launcher
 
+import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import java.io.ByteArrayOutputStream
@@ -72,6 +73,28 @@ internal object LauncherApkAssembler {
         "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,secrets"
     internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 =
         "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,audio-input,printing,secrets"
+    internal const val CAPABILITIES_CAMERA_V9 = "$CAPABILITIES_V4,camera"
+    internal const val CAPABILITIES_PRINTING_CAMERA_V9 =
+        "$CAPABILITIES_PRINTING_V5,camera"
+    internal const val CAPABILITIES_AUDIO_CAMERA_V9 = "$CAPABILITIES_AUDIO_V6,camera"
+    internal const val CAPABILITIES_AUDIO_PRINTING_CAMERA_V9 =
+        "$CAPABILITIES_AUDIO_PRINTING_V6,camera"
+    internal const val CAPABILITIES_AUDIO_INPUT_CAMERA_V9 =
+        "$CAPABILITIES_AUDIO_INPUT_V7,camera"
+    internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9 =
+        "$CAPABILITIES_AUDIO_INPUT_PRINTING_V7,camera"
+    internal const val CAPABILITIES_SECRETS_CAMERA_V9 =
+        "$CAPABILITIES_SECRETS_V8,camera"
+    internal const val CAPABILITIES_PRINTING_SECRETS_CAMERA_V9 =
+        "$CAPABILITIES_PRINTING_SECRETS_V8,camera"
+    internal const val CAPABILITIES_AUDIO_SECRETS_CAMERA_V9 =
+        "$CAPABILITIES_AUDIO_SECRETS_V8,camera"
+    internal const val CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9 =
+        "$CAPABILITIES_AUDIO_PRINTING_SECRETS_V8,camera"
+    internal const val CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9 =
+        "$CAPABILITIES_AUDIO_INPUT_SECRETS_V8,camera"
+    internal const val CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9 =
+        "$CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8,camera"
 
     internal fun validCapabilities(value: String): Boolean =
         value == CAPABILITIES_V4 ||
@@ -85,7 +108,19 @@ internal object LauncherApkAssembler {
             value == CAPABILITIES_AUDIO_SECRETS_V8 ||
             value == CAPABILITIES_AUDIO_PRINTING_SECRETS_V8 ||
             value == CAPABILITIES_AUDIO_INPUT_SECRETS_V8 ||
-            value == CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8
+            value == CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_V8 ||
+            value == CAPABILITIES_CAMERA_V9 ||
+            value == CAPABILITIES_PRINTING_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_PRINTING_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_INPUT_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_INPUT_PRINTING_CAMERA_V9 ||
+            value == CAPABILITIES_SECRETS_CAMERA_V9 ||
+            value == CAPABILITIES_PRINTING_SECRETS_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_SECRETS_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_PRINTING_SECRETS_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_INPUT_SECRETS_CAMERA_V9 ||
+            value == CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9
 
     internal fun validMetadataCapabilities(value: String?): Boolean =
         value?.startsWith("c:") == true && validCapabilities(value.drop(2))
@@ -302,6 +337,23 @@ internal object LauncherApkAssembler {
                                             ?: "application/x-archphene-disabled-$index",
                                     )
                             }
+                            if (!hasCameraCapability(request.capabilities)) {
+                                manifest =
+                                    manifest
+                                        .removeSelfClosingElement(
+                                            "uses-permission",
+                                            "name",
+                                            Manifest.permission.CAMERA,
+                                        ).removeSelfClosingElement(
+                                            "uses-feature",
+                                            "name",
+                                            PackageManager.FEATURE_CAMERA_ANY,
+                                        ).removeSelfClosingElement(
+                                            "uses-feature",
+                                            "name",
+                                            PackageManager.FEATURE_CAMERA,
+                                        )
+                            }
                             value =
                                 manifest
                                     .setVersionCode(request.generation.toInt())
@@ -437,7 +489,9 @@ internal object LauncherApkAssembler {
         signed: SignedLauncherApk,
     ) {
         val flags =
-            PackageManager.GET_META_DATA or
+            PackageManager.GET_CONFIGURATIONS or
+                PackageManager.GET_META_DATA or
+                PackageManager.GET_PERMISSIONS or
                 PackageManager.GET_SIGNING_CERTIFICATES
         val parsed =
             context.packageManager.getPackageArchiveInfo(signed.apk.path, flags)
@@ -477,6 +531,33 @@ internal object LauncherApkAssembler {
                 "m:${request.mimeTypes.joinToString(";")}",
         ) {
             "Generated launcher metadata changed"
+        }
+        val requestedPermissions = parsed.requestedPermissions?.toSet().orEmpty()
+        check(
+            (Manifest.permission.CAMERA in requestedPermissions) ==
+                hasCameraCapability(request.capabilities),
+        ) {
+            "Generated launcher camera permission changed"
+        }
+        val requestedFeatures = parsed.reqFeatures?.filter { it.name != null }.orEmpty()
+        val expectedCameraFeature = hasCameraCapability(request.capabilities)
+        val cameraFeatures =
+            requestedFeatures.filter {
+                it.name == PackageManager.FEATURE_CAMERA_ANY ||
+                    it.name == PackageManager.FEATURE_CAMERA
+            }
+        check(
+            if (expectedCameraFeature) {
+                cameraFeatures.map { it.name }.toSet() ==
+                    setOf(PackageManager.FEATURE_CAMERA_ANY, PackageManager.FEATURE_CAMERA) &&
+                    cameraFeatures.all {
+                        it.flags and android.content.pm.FeatureInfo.FLAG_REQUIRED == 0
+                    }
+            } else {
+                cameraFeatures.isEmpty()
+            },
+        ) {
+            "Generated launcher camera feature changed"
         }
         val certificates =
             parsed.signingInfo?.apkContentsSigners
@@ -555,6 +636,9 @@ internal object LauncherApkAssembler {
 
     private fun sha256(value: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(value)
+
+    internal fun hasCameraCapability(capabilities: String): Boolean =
+        capabilities.endsWith(",camera") && validCapabilities(capabilities)
 
     private class CountingOutputStream(
         output: OutputStream,
@@ -648,6 +732,86 @@ private class BinaryAndroidManifest(
             "Launcher manifest version marker is missing"
         }
         return this
+    }
+
+    fun removeSelfClosingElement(
+        elementName: String,
+        attributeName: String,
+        attributeValue: String,
+    ): BinaryAndroidManifest {
+        check(u16(bytes, 0) == XML_TYPE && i32(bytes, 4) == bytes.size) {
+            "Launcher manifest is not valid binary XML"
+        }
+        val strings = stringPool(bytes).values
+        val elementIndex = strings.indexOf(elementName)
+        val attributeIndex = strings.indexOf(attributeName)
+        val valueIndex = strings.indexOf(attributeValue)
+        check(elementIndex >= 0 && attributeIndex >= 0 && valueIndex >= 0) {
+            "Launcher manifest removable element marker is missing"
+        }
+        var offset = u16(bytes, 2)
+        var removeStart = -1
+        var removeEnd = -1
+        while (offset + 16 <= bytes.size) {
+            val type = u16(bytes, offset)
+            val size = i32(bytes, offset + 4)
+            check(size >= 8 && offset + size <= bytes.size) {
+                "Launcher manifest contains an invalid XML chunk"
+            }
+            if (type == START_ELEMENT_TYPE && i32(bytes, offset + 20) == elementIndex) {
+                val attributeStart = u16(bytes, offset + 24)
+                val attributeSize = u16(bytes, offset + 26)
+                val attributeCount = u16(bytes, offset + 28)
+                check(attributeSize >= 20 && attributeCount <= 256) {
+                    "Launcher manifest attributes are invalid"
+                }
+                val start = offset + 16 + attributeStart
+                var matched = false
+                for (index in 0 until attributeCount) {
+                    val attribute = start + index * attributeSize
+                    check(attribute + 20 <= offset + size) {
+                        "Launcher manifest attribute exceeds its chunk"
+                    }
+                    val rawValue = i32(bytes, attribute + 8)
+                    val typedValue =
+                        if (bytes[attribute + 15].toInt() and 0xff == TYPE_STRING) {
+                            i32(bytes, attribute + 16)
+                        } else {
+                            -1
+                        }
+                    if (
+                        i32(bytes, attribute + 4) == attributeIndex &&
+                        (rawValue == valueIndex || typedValue == valueIndex)
+                    ) {
+                        matched = true
+                    }
+                }
+                if (matched) {
+                    check(removeStart < 0) {
+                        "Launcher manifest removable element marker is ambiguous"
+                    }
+                    val endOffset = offset + size
+                    check(
+                        endOffset + 24 <= bytes.size &&
+                            u16(bytes, endOffset) == END_ELEMENT_TYPE &&
+                            i32(bytes, endOffset + 20) == elementIndex,
+                    ) {
+                        "Launcher manifest removable element is not self-closing"
+                    }
+                    removeStart = offset
+                    removeEnd = endOffset + i32(bytes, endOffset + 4)
+                }
+            }
+            offset += size
+        }
+        check(removeStart >= 0 && removeEnd > removeStart) {
+            "Launcher manifest removable element marker is missing"
+        }
+        val result = ByteArray(bytes.size - (removeEnd - removeStart))
+        bytes.copyInto(result, 0, 0, removeStart)
+        bytes.copyInto(result, removeStart, removeEnd)
+        putI32(result, 4, result.size)
+        return BinaryAndroidManifest(result)
     }
 
     private data class Pool(
@@ -905,7 +1069,9 @@ private class BinaryAndroidManifest(
         private const val XML_TYPE = 0x0003
         private const val STRING_POOL_TYPE = 0x0001
         private const val START_ELEMENT_TYPE = 0x0102
+        private const val END_ELEMENT_TYPE = 0x0103
         private const val UTF8_FLAG = 0x100
+        private const val TYPE_STRING = 0x03
         private const val TYPE_INT_DEC = 0x10
     }
 }

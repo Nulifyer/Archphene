@@ -26,6 +26,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.security.SecureRandom
 import java.util.Locale
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
@@ -77,6 +78,9 @@ internal class LauncherPortalBridge(
     private val requestPrint: (String, ParcelFileDescriptor) -> Boolean,
     private val secretsEnabled: Boolean,
     private val requestSecret: (String, List<String>, ParcelFileDescriptor?) -> String,
+    private val cameraEnabled: Boolean,
+    private val cameraPipeWireSocket: String?,
+    private val requestCamera: (String, Int, Int, Boolean, ParcelFileDescriptor?) -> String,
     private val importDirectory: (String, ParcelFileDescriptor) -> String?,
     private val cancelDirectoryImport: () -> Unit,
 ) : Closeable {
@@ -115,6 +119,10 @@ internal class LauncherPortalBridge(
     private var server: LocalServerSocket? = null
     private lateinit var brokerSocketName: String
     private var brokerThread: Thread? = null
+    private val brokerSlots = Semaphore(MAX_BROKER_CLIENTS, true)
+    private val brokerRequestLock = Any()
+    private val brokerClients = HashSet<LocalSocket>(MAX_BROKER_CLIENTS)
+    private val brokerClientThreads = HashSet<Thread>(MAX_BROKER_CLIENTS)
     private var mirrorThread: Thread? = null
     private var daemon: java.lang.Process? = null
     private var portal: java.lang.Process? = null
@@ -136,6 +144,19 @@ internal class LauncherPortalBridge(
     @Synchronized
     fun start() {
         check(!running) { "Portal bridge is already running" }
+        check(
+            !cameraEnabled ||
+                (
+                    cameraPipeWireSocket != null &&
+                        cameraPipeWireSocket.length in 1 until UNIX_SOCKET_PATH_LIMIT &&
+                        cameraPipeWireSocket.startsWith("/data/") &&
+                        cameraPipeWireSocket.none { character ->
+                            character == '\u0000' || character.isISOControl()
+                        }
+                ),
+        ) {
+            "Camera portal requires one private PipeWire socket"
+        }
         requireDirectory(runtimeDirectory)
         writeAppearanceState(publishedDark, publishedAccent)
         prepareSavesDirectory()
@@ -223,6 +244,11 @@ internal class LauncherPortalBridge(
                     environment()["ARCHPHENE_ENABLE_SECRETS"] =
                         if (secretsEnabled) "1" else "0"
                     environment()["ARCHPHENE_ENABLE_CAMERA"] = "0"
+                    if (cameraEnabled) {
+                        environment()["ARCHPHENE_ENABLE_CAMERA"] = "1"
+                        environment()["ARCHPHENE_PIPEWIRE_SOCKET"] =
+                            checkNotNull(cameraPipeWireSocket)
+                    }
                     environment()["ARCHPHENE_ENABLE_ACCESSIBILITY"] = "0"
                 }.start()
                 .also { process -> drain(process, "portal") }
@@ -361,7 +387,42 @@ internal class LauncherPortalBridge(
                     break
                 }
             socket.soTimeout = BROKER_IO_TIMEOUT_MILLIS
-            handleClient(socket)
+            if (!brokerSlots.tryAcquire()) {
+                runCatching { writeResponse(socket, "ERROR\tBUSY") }
+                runCatching { socket.close() }
+                continue
+            }
+            val worker =
+                Thread(
+                    {
+                        try {
+                            handleClient(socket)
+                        } finally {
+                            synchronized(this) {
+                                brokerClients.remove(socket)
+                                brokerClientThreads.remove(Thread.currentThread())
+                            }
+                            brokerSlots.release()
+                        }
+                    },
+                    "ArchphenePortalClient-$sessionId",
+                ).apply { isDaemon = true }
+            val accepted =
+                synchronized(this) {
+                    if (running) {
+                        brokerClients.add(socket)
+                        brokerClientThreads.add(worker)
+                        true
+                    } else {
+                        false
+                    }
+                }
+            if (!accepted) {
+                brokerSlots.release()
+                runCatching { socket.close() }
+                continue
+            }
+            worker.start()
         }
     }
 
@@ -399,27 +460,19 @@ internal class LauncherPortalBridge(
                         writeResponse(client, "ERROR\tINVALID_REQUEST")
                         return
                     }
-                    when (fields.getOrNull(1)) {
-                        "OPEN_URI" -> handleOpenUriRequest(client, fields)
-                        "NOTIFY" -> handleNotificationRequest(client, fields)
-                        "WITHDRAW_NOTIFICATION" ->
-                            handleNotificationWithdrawal(client, fields)
-                        "REQUEST_AUDIO_INPUT" ->
-                            handleAudioInputRequest(client, fields, request = true)
-                        "CHECK_AUDIO_INPUT" ->
-                            handleAudioInputRequest(client, fields, request = false)
-                        "PRINT_PDF" -> handlePrintRequest(client, fields, descriptors)
-                        "STORE_SECRET",
-                        "READ_SECRET",
-                        "DELETE_SECRET",
-                        "LIST_SECRETS",
-                        "CATALOG_SECRETS",
-                        -> handleSecretRequest(client, fields, descriptors)
-                        "SAVE_FILE" -> handleSaveRequest(client, fields)
-                        "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
-                        "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
-                        "OPEN_DIRECTORY" -> handleDirectoryRequest(client, fields)
-                        else -> writeResponse(client, "ERROR\tUNSUPPORTED")
+                    val operation = fields.getOrNull(1)
+                    if (operation == "STREAM_CAMERA_I420") {
+                        dispatchClient(client, fields, descriptors)
+                    } else {
+                        /*
+                         * Preserve the broker's original serial semantics for
+                         * document, notification, print, secret, and one-shot
+                         * camera state. Only the long-lived camera stream may
+                         * coexist with those bounded requests.
+                         */
+                        synchronized(brokerRequestLock) {
+                            dispatchClient(client, fields, descriptors)
+                        }
                     }
                 }.onFailure { error ->
                     Log.w(TAG, "Portal broker request failed session=$sessionId", error)
@@ -430,6 +483,37 @@ internal class LauncherPortalBridge(
                     if (descriptor.valid()) runCatching { Os.close(descriptor) }
                 }
             }
+        }
+    }
+
+    private fun dispatchClient(
+        client: LocalSocket,
+        fields: List<String>,
+        descriptors: Array<FileDescriptor>,
+    ) {
+        when (fields.getOrNull(1)) {
+            "OPEN_URI" -> handleOpenUriRequest(client, fields)
+            "NOTIFY" -> handleNotificationRequest(client, fields)
+            "WITHDRAW_NOTIFICATION" -> handleNotificationWithdrawal(client, fields)
+            "REQUEST_AUDIO_INPUT" -> handleAudioInputRequest(client, fields, request = true)
+            "CHECK_AUDIO_INPUT" -> handleAudioInputRequest(client, fields, request = false)
+            "PRINT_PDF" -> handlePrintRequest(client, fields, descriptors)
+            "STORE_SECRET",
+            "READ_SECRET",
+            "DELETE_SECRET",
+            "LIST_SECRETS",
+            "CATALOG_SECRETS",
+            -> handleSecretRequest(client, fields, descriptors)
+            "REQUEST_CAMERA",
+            "CHECK_CAMERA",
+            "CAPTURE_CAMERA_JPEG",
+            "STREAM_CAMERA_I420",
+            -> handleCameraRequest(client, fields, descriptors)
+            "SAVE_FILE" -> handleSaveRequest(client, fields)
+            "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
+            "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
+            "OPEN_DIRECTORY" -> handleDirectoryRequest(client, fields)
+            else -> writeResponse(client, "ERROR\tUNSUPPORTED")
         }
     }
 
@@ -679,6 +763,100 @@ internal class LauncherPortalBridge(
             Log.e(
                 TAG,
                 "Rejected invalid secret response session=$sessionId operation=$operation",
+            )
+            writeResponse(client, "ERROR\tFAILED")
+            return
+        }
+        writeResponse(client, response)
+    }
+
+    private fun handleCameraRequest(
+        client: LocalSocket,
+        fields: List<String>,
+        descriptors: Array<FileDescriptor>,
+    ) {
+        if (!cameraEnabled) {
+            writeResponse(client, "ERROR\tUNSUPPORTED")
+            return
+        }
+        if (fields.getOrNull(0) != "ARCHPHENE/1") {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val operation = fields.getOrNull(1).orEmpty()
+        val request =
+            when (operation) {
+                "REQUEST_CAMERA",
+                "CHECK_CAMERA",
+                ->
+                    if (fields.size == 2 && descriptors.isEmpty()) {
+                        CameraRequest(0, 0, false, null)
+                    } else {
+                        null
+                    }
+                "CAPTURE_CAMERA_JPEG",
+                "STREAM_CAMERA_I420",
+                -> {
+                    val width = fields.getOrNull(2)?.toIntOrNull()
+                    val height = fields.getOrNull(3)?.toIntOrNull()
+                    val facing = fields.getOrNull(4)
+                    if (
+                        fields.size == 5 &&
+                        width != null &&
+                        width in 1..MAX_CAMERA_DIMENSION &&
+                        height != null &&
+                        height in 1..MAX_CAMERA_DIMENSION &&
+                        (facing == "front" || facing == "back") &&
+                        descriptors.size == 1 &&
+                        descriptors[0].valid()
+                    ) {
+                        val descriptor =
+                            runCatching {
+                                ParcelFileDescriptor.dup(descriptors[0])
+                            }.getOrNull() ?: run {
+                                writeResponse(client, "ERROR\tFAILED")
+                                return
+                            }
+                        CameraRequest(
+                            width,
+                            height,
+                            facing == "front",
+                            descriptor,
+                        )
+                    } else {
+                        null
+                    }
+                }
+                else -> null
+            }
+        if (request == null) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val response =
+            request.descriptor.use { descriptor ->
+                runCatching {
+                    requestCamera(
+                        operation,
+                        request.width,
+                        request.height,
+                        request.front,
+                        descriptor,
+                    )
+                }.getOrElse { error ->
+                    Log.w(
+                        TAG,
+                        "Could not relay Linux camera request session=$sessionId " +
+                            "operation=$operation",
+                        error,
+                    )
+                    "ERROR\tFAILED"
+                }
+            }
+        if (!validCameraResponse(operation, response)) {
+            Log.e(
+                TAG,
+                "Rejected invalid camera response session=$sessionId operation=$operation",
             )
             writeResponse(client, "ERROR\tFAILED")
             return
@@ -1006,6 +1184,8 @@ internal class LauncherPortalBridge(
         val daemonProcess: java.lang.Process?
         val localServer: LocalServerSocket?
         val brokerWorker: Thread?
+        val clientSockets: Array<LocalSocket>
+        val clientWorkers: Array<Thread>
         val mirrorWorker: Thread?
         synchronized(this) {
             if (!running && server == null && daemon == null && portal == null) return
@@ -1021,13 +1201,19 @@ internal class LauncherPortalBridge(
             server = null
             brokerWorker = brokerThread
             brokerThread = null
+            clientSockets = brokerClients.toTypedArray()
+            brokerClients.clear()
+            clientWorkers = brokerClientThreads.toTypedArray()
+            brokerClientThreads.clear()
             mirrorWorker = mirrorThread
             mirrorThread = null
         }
         runCatching { localServer?.close() }
+        clientSockets.forEach { socket -> runCatching { socket.close() } }
         runCatching { cancelDirectoryImport() }
         joinWorker(mirrorWorker)
         joinWorker(brokerWorker)
+        clientWorkers.forEach(::joinWorker)
         for (save in saves) {
             runCatching {
                 val length = save.staging.length()
@@ -1225,6 +1411,28 @@ internal class LauncherPortalBridge(
         }
     }
 
+    private fun validCameraResponse(
+        operation: String,
+        response: String,
+    ): Boolean {
+        if (response in CAMERA_ERROR_RESPONSES) return true
+        return when (operation) {
+            "REQUEST_CAMERA",
+            "CHECK_CAMERA",
+            "STREAM_CAMERA_I420",
+            -> response == "OK"
+            "CAPTURE_CAMERA_JPEG" -> {
+                val fields = response.split('\t')
+                fields.size == 4 &&
+                    fields[0] == "OK" &&
+                    fields[1].toIntOrNull() in 1..MAX_CAMERA_DIMENSION &&
+                    fields[2].toIntOrNull() in 1..MAX_CAMERA_DIMENSION &&
+                    fields[3].toIntOrNull() in 1..MAX_CAMERA_JPEG_BYTES
+            }
+            else -> false
+        }
+    }
+
     private fun randomHex(bytes: Int): String =
         ByteArray(bytes).also(random::nextBytes).joinToString("") { value ->
             "%02x".format(value.toInt() and 0xff)
@@ -1282,6 +1490,13 @@ internal class LauncherPortalBridge(
     }
 
     companion object {
+        private data class CameraRequest(
+            val width: Int,
+            val height: Int,
+            val front: Boolean,
+            val descriptor: ParcelFileDescriptor?,
+        )
+
         private const val TAG = "ArchphenePortal"
         private const val DAEMON = "libarchphene_dbus_daemon.so"
         private const val PORTAL = "libarchphene_portal_service.so"
@@ -1293,6 +1508,7 @@ internal class LauncherPortalBridge(
         private const val PROCESS_STOP_TIMEOUT_SECONDS = 2L
         private const val WORKER_STOP_TIMEOUT_MILLIS = 2_000L
         private const val BROKER_IO_TIMEOUT_MILLIS = 1_000
+        private const val MAX_BROKER_CLIENTS = 4
         private const val MAX_REQUEST_BYTES = 16_384
         private const val MAX_TITLE_BYTES = 512
         private const val MAX_NAME_BYTES = 512
@@ -1314,6 +1530,9 @@ internal class LauncherPortalBridge(
         private const val MAX_SECRET_VALUE_BYTES = 64 * 1_024
         private const val MAX_SECRET_RESPONSE_BYTES = 16 * 1_024
         private const val MAX_SECRET_ITEMS = 256
+        private const val MAX_CAMERA_DIMENSION = 8_192
+        private const val MAX_CAMERA_JPEG_BYTES = 32 * 1_024 * 1_024
+        private const val UNIX_SOCKET_PATH_LIMIT = 104
         private const val MAX_DEBUG_PRINT_BYTES = 65_536
         private const val MAX_ACTIVE_SAVES = 8
         private const val MAX_OPEN_DOCUMENTS = 32
@@ -1336,6 +1555,16 @@ internal class LauncherPortalBridge(
                 "ERROR\tUNAVAILABLE",
                 "ERROR\tFAILED",
             )
+        private val CAMERA_ERROR_RESPONSES =
+            setOf(
+                "ERROR\tPERMISSION_REQUESTED",
+                "ERROR\tPERMISSION_DENIED",
+                "ERROR\tPERMISSION_NOT_REQUESTED",
+                "ERROR\tUNAVAILABLE",
+                "ERROR\tNOT_READY",
+                "ERROR\tINVALID_REQUEST",
+                "ERROR\tFAILED",
+            )
         private val DESCRIPTOR_OPERATIONS =
             setOf(
                 "PRINT_PDF",
@@ -1343,6 +1572,8 @@ internal class LauncherPortalBridge(
                 "READ_SECRET",
                 "LIST_SECRETS",
                 "CATALOG_SECRETS",
+                "CAPTURE_CAMERA_JPEG",
+                "STREAM_CAMERA_I420",
             )
         private val STALE_SAVE_DIRECTORY_NAME =
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")

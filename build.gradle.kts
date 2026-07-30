@@ -189,6 +189,58 @@ tasks.register<Exec>("stageArchpheneAndroidAudio") {
     outputs.dir("android/app/build/generated/audioJniLibs")
 }
 
+val buildArchphenePipeWireCameraX86 =
+    tasks.register<Exec>("buildArchphenePipeWireCameraX86") {
+        workingDir(rootDir)
+        commandLine(
+            "bash",
+            "scripts/build-pipewire-camera-runtime-podman.sh",
+            "--architecture",
+            "x86_64",
+        )
+        inputs.files(
+            file("native/archphene-pipewire-camera/archphene_camera_policy.c"),
+            file("native/archphene-pipewire-camera/archphene_pipewire_camera.c"),
+            file("native/archphene-pipewire-camera/archphene_runtime_supervisor.c"),
+            file("scripts/build-pipewire-camera-runtime.sh"),
+            file("scripts/build-pipewire-camera-runtime-podman.sh"),
+            file("containers/arm-runtime-builder.Containerfile"),
+        )
+        outputs.dir("tooling/build/pipewire-camera/x86_64")
+    }
+
+val buildArchphenePipeWireCameraArm =
+    tasks.register<Exec>("buildArchphenePipeWireCameraArm") {
+        workingDir(rootDir)
+        commandLine(
+            "bash",
+            "scripts/build-pipewire-camera-runtime-podman.sh",
+            "--architecture",
+            "aarch64",
+        )
+        inputs.files(
+            file("native/archphene-pipewire-camera/archphene_camera_policy.c"),
+            file("native/archphene-pipewire-camera/archphene_pipewire_camera.c"),
+            file("native/archphene-pipewire-camera/archphene_runtime_supervisor.c"),
+            file("scripts/build-pipewire-camera-runtime.sh"),
+            file("scripts/build-pipewire-camera-runtime-podman.sh"),
+            file("containers/arm-runtime-builder.Containerfile"),
+        )
+        outputs.dir("tooling/build/pipewire-camera/aarch64")
+    }
+
+tasks.register<Exec>("stageArchphenePipeWireCamera") {
+    dependsOn(buildArchphenePipeWireCameraX86, buildArchphenePipeWireCameraArm)
+    workingDir(rootDir)
+    commandLine("bash", "scripts/stage-archphene-pipewire-camera.sh")
+    inputs.files(
+        fileTree("tooling/build/pipewire-camera/x86_64"),
+        fileTree("tooling/build/pipewire-camera/aarch64"),
+        file("scripts/stage-archphene-pipewire-camera.sh"),
+    )
+    outputs.dir("android/app/build/generated/cameraJniLibs")
+}
+
 val verifyArchpheneTerminalFont =
     tasks.register<Exec>("verifyArchpheneTerminalFont") {
         workingDir("third_party/jetbrains-mono-nerd-font")

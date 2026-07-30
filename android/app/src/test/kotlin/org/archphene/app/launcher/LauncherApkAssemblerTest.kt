@@ -49,7 +49,27 @@ class LauncherApkAssemblerTest {
         )
         assertFalse(
             LauncherApkAssembler.validCapabilities(
-                "${LauncherApkAssembler.CAPABILITIES_V4},camera",
+                "${LauncherApkAssembler.CAPABILITIES_V4},accessibility",
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_CAMERA_V9,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.validCapabilities(
+                LauncherApkAssembler.CAPABILITIES_AUDIO_INPUT_PRINTING_SECRETS_CAMERA_V9,
+            ),
+        )
+        assertTrue(
+            LauncherApkAssembler.hasCameraCapability(
+                LauncherApkAssembler.CAPABILITIES_CAMERA_V9,
+            ),
+        )
+        assertFalse(
+            LauncherApkAssembler.hasCameraCapability(
+                LauncherApkAssembler.CAPABILITIES_SECRETS_V8,
             ),
         )
         assertTrue(
