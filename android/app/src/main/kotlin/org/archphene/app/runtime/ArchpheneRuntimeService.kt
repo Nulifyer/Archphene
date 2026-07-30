@@ -369,6 +369,7 @@ class ArchpheneRuntimeService : Service() {
             reducedIsolationElectron: Boolean,
             virglSocketPath: String?,
             launchDocumentPath: String?,
+            pulseServerAddress: String?,
         ): Long =
             this@ArchpheneRuntimeService.openLauncherProcess(
                 androidPackage,
@@ -386,6 +387,7 @@ class ArchpheneRuntimeService : Service() {
                 reducedIsolationElectron,
                 virglSocketPath,
                 launchDocumentPath,
+                pulseServerAddress,
             )
 
         internal fun updateGuiColors(
@@ -1900,6 +1902,7 @@ class ArchpheneRuntimeService : Service() {
         reducedIsolationElectron: Boolean,
         virglSocketPath: String?,
         launchDocumentPath: String?,
+        pulseServerAddress: String?,
     ): Long {
         val activeHandle = readyHandle
         if (
@@ -1943,6 +1946,16 @@ class ArchpheneRuntimeService : Service() {
                             character.isISOControl()
                     }
             } == true ||
+            pulseServerAddress?.let { address ->
+                address.length !in 12..109 ||
+                    !address.startsWith("unix:/data/") ||
+                    address.any { character ->
+                        character == '\t' ||
+                            character == '\n' ||
+                            character == '\r' ||
+                            character == '\u0000'
+                    }
+            } == true ||
             waylandDisplay.isEmpty() ||
             waylandDisplay.length > 64 ||
             !waylandDisplay.all { character ->
@@ -1958,12 +1971,15 @@ class ArchpheneRuntimeService : Service() {
         }
         val encodedDocumentPath =
             launchDocumentPath?.toByteArray(StandardCharsets.UTF_8)?.let(::encodeHex) ?: "-"
+        val encodedPulseServerAddress =
+            pulseServerAddress?.toByteArray(StandardCharsets.UTF_8)?.let(::encodeHex) ?: "-"
         val request =
-            "G6\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
+            "G7\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
                 "${if (dark) 1 else 0}\t$fontPercent\t$controlVisualDp\t$controlTargetDp\t" +
                 "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\t" +
                 "$portalBusAddress\t${if (reducedIsolationElectron) 1 else 0}\t" +
-                "${virglSocketPath ?: "-"}\t$encodedDocumentPath\n"
+                "${virglSocketPath ?: "-"}\t$encodedDocumentPath\t" +
+                "$encodedPulseServerAddress\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return 0L

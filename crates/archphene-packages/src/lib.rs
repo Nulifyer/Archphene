@@ -1156,8 +1156,6 @@ impl PackageRuntime {
         )?;
         let mut library_path = alias_root.as_os_str().to_os_string();
         library_path.push(":");
-        library_path.push(native_root.as_os_str());
-        library_path.push(":");
         library_path.push(arch_root.join("usr/lib").as_os_str());
         let mut executable_path = alias_root.as_os_str().to_os_string();
         executable_path.push(":");
@@ -12630,6 +12628,13 @@ library\txdg-open\tlibarchphene_pkg_777777777777777777777777.so\t4\n";
                 .library_path
                 .as_encoded_bytes()
                 .ends_with(tree.root.join("usr/lib").as_os_str().as_encoded_bytes())
+        );
+        assert!(
+            !runtime
+                .library_path
+                .as_encoded_bytes()
+                .split(|byte| *byte == b':')
+                .any(|path| path == tree.native.as_os_str().as_encoded_bytes())
         );
     }
 

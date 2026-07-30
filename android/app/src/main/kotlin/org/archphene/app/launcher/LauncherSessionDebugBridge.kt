@@ -53,6 +53,10 @@ internal object LauncherSessionDebugBridge {
     ): LauncherSessionDebugResult =
         service?.debugPrintPdf(androidPackage, title, payload, nonRegular)
             ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
+
+    fun playAudio(androidPackage: String): LauncherSessionDebugResult =
+        service?.debugPlayAudio(androidPackage)
+            ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
 }
 
 internal data class LauncherSessionDebugResult(

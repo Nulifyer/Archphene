@@ -119,6 +119,7 @@ pub struct LauncherProcessOptions<'a> {
     pub reduced_isolation_electron: bool,
     pub virgl_socket_path: Option<&'a Path>,
     pub launch_document_path: Option<&'a str>,
+    pub pulse_server_address: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,7 +157,8 @@ pub struct PackageLauncherReview {
 // Only optional helpers with complete Kotlin broker endpoints belong here.
 // Never infer Android authority from a linked Linux library alone.
 pub const AVAILABLE_LAUNCHER_BRIDGE_CAPABILITIES: u8 =
-    archphene_packages::elf_profile::BRIDGE_PRINTING;
+    archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT
+        | archphene_packages::elf_profile::BRIDGE_PRINTING;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherPublishWork {
@@ -1195,7 +1197,7 @@ impl RuntimeHost {
         appearance: GuiAppearance,
         options: LauncherProcessOptions<'_>,
     ) -> Result<u64, LauncherProcessError> {
-        let (command, mut arguments, descriptor_id, integration_topology) = {
+        let (command, mut arguments, descriptor_id, integration_topology, bridge_capabilities) = {
             let descriptor = self
                 .launcher_registry
                 .as_ref()
@@ -1249,8 +1251,14 @@ impl RuntimeHost {
                 arguments,
                 descriptor.descriptor_id,
                 self.launcher_integration_topology(descriptor),
+                descriptor.bridge_capabilities,
             )
         };
+        if options.pulse_server_address.is_some()
+            && bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT == 0
+        {
+            return Err(LauncherProcessError::InvalidDescriptor);
+        }
         apply_electron_compatibility_arguments(
             &mut arguments,
             integration_topology,
@@ -1275,6 +1283,7 @@ impl RuntimeHost {
         } else {
             environment
         };
+        let environment = environment.with_pulse_server_address(options.pulse_server_address)?;
         if arguments.len() > MAX_COMMAND_ARGUMENTS {
             return Err(LauncherProcessError::Process(ProcessError::InvalidArgument));
         }

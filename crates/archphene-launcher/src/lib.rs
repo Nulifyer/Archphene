@@ -17,12 +17,19 @@ pub const LAUNCHER_CAPABILITIES_V4: &str =
     "wayland,input,ime,clipboard,documents,open-uri,notifications";
 pub const LAUNCHER_CAPABILITIES_PRINTING_V5: &str =
     "wayland,input,ime,clipboard,documents,open-uri,notifications,printing";
+pub const LAUNCHER_CAPABILITIES_AUDIO_V6: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output";
+pub const LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6: &str =
+    "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing";
 
 pub fn launcher_capabilities(bridge_capabilities: u8) -> &'static str {
-    if bridge_capabilities & archphene_packages::elf_profile::BRIDGE_PRINTING != 0 {
-        LAUNCHER_CAPABILITIES_PRINTING_V5
-    } else {
-        LAUNCHER_CAPABILITIES_V4
+    let audio = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_AUDIO_OUTPUT != 0;
+    let printing = bridge_capabilities & archphene_packages::elf_profile::BRIDGE_PRINTING != 0;
+    match (audio, printing) {
+        (false, false) => LAUNCHER_CAPABILITIES_V4,
+        (false, true) => LAUNCHER_CAPABILITIES_PRINTING_V5,
+        (true, false) => LAUNCHER_CAPABILITIES_AUDIO_V6,
+        (true, true) => LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
     }
 }
 
@@ -2139,7 +2146,7 @@ mod tests {
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
 
     #[test]
-    fn launcher_contract_exposes_only_the_implemented_printing_broker() {
+    fn launcher_contract_exposes_only_implemented_brokers() {
         use archphene_packages::elf_profile::{
             BRIDGE_AUDIO_OUTPUT, BRIDGE_CAMERA, BRIDGE_PRINTING, BRIDGE_SECRETS,
         };
@@ -2151,7 +2158,11 @@ mod tests {
         );
         assert_eq!(
             launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_CAMERA | BRIDGE_SECRETS,),
-            LAUNCHER_CAPABILITIES_V4,
+            LAUNCHER_CAPABILITIES_AUDIO_V6,
+        );
+        assert_eq!(
+            launcher_capabilities(BRIDGE_AUDIO_OUTPUT | BRIDGE_PRINTING),
+            LAUNCHER_CAPABILITIES_AUDIO_PRINTING_V6,
         );
     }
 

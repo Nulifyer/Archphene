@@ -52,9 +52,16 @@ internal object LauncherApkAssembler {
         "wayland,input,ime,clipboard,documents,open-uri,notifications"
     internal const val CAPABILITIES_PRINTING_V5 =
         "wayland,input,ime,clipboard,documents,open-uri,notifications,printing"
+    internal const val CAPABILITIES_AUDIO_V6 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output"
+    internal const val CAPABILITIES_AUDIO_PRINTING_V6 =
+        "wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output,printing"
 
     internal fun validCapabilities(value: String): Boolean =
-        value == CAPABILITIES_V4 || value == CAPABILITIES_PRINTING_V5
+        value == CAPABILITIES_V4 ||
+            value == CAPABILITIES_PRINTING_V5 ||
+            value == CAPABILITIES_AUDIO_V6 ||
+            value == CAPABILITIES_AUDIO_PRINTING_V6
 
     internal fun validMetadataCapabilities(value: String?): Boolean =
         value?.startsWith("c:") == true && validCapabilities(value.drop(2))

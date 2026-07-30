@@ -1,35 +1,37 @@
 # Android audio payload
 
-Archphene provides Linux playback and optional capture through a private
-PulseAudio server inside each audio-enabled wrapper UID. Linux applications
-keep using the standard Pulse native protocol through `PULSE_SERVER`; the
-server renders through Android AAudio and falls back to OpenSL ES when needed.
+Archphene's current Rust/Kotlin manager provides Linux playback through one
+session-scoped private PulseAudio server for each authorized graphical process.
+Linux applications keep using the standard Pulse native protocol through
+`PULSE_SERVER`; the server renders through Android AAudio and falls back to
+OpenSL ES when needed.
 
 The payload is built from pinned official Termux packages by
 `scripts/build-android-pulse.sh`. `termux-pulse-packages.tsv` records every
 download URL component, byte count, and SHA-256 digest. The build extracts only
-the PulseAudio server, playback modules, pipe-source module, native protocol
-module, `pacat` regression client, and their reachable Bionic dependencies. It
-removes repository-specific RUNPATH values and validates every ELF dependency
-before publishing `SHA256SUMS`.
+the PulseAudio server, playback modules, native protocol module, bounded
+playback probe, and their reachable Bionic dependencies. It removes
+repository-specific RUNPATH values and validates every ELF dependency before
+publishing `SHA256SUMS`. `scripts/stage-archphene-android-audio.sh` stages the
+verified dual-ABI result into the manager APK.
 
-Playback does not require an Android runtime permission. Microphone input is an
-independent per-wrapper manager setting and `audio-input` capability. When it is
-enabled, a Bionic helper watches only Pulse source streams attached to the
-private `archphene_input` source. The first attached Linux stream asks the
-same-UID Android broker to request `RECORD_AUDIO`; wrapper or playback startup
-alone never requests it. After consent, the helper captures mono 48 kHz PCM16
-through AAudio and feeds the private Pulse source. Android denial and the global
-microphone privacy switch remain authoritative.
+The manager creates the Pulse server and socket inside its private cache before
+starting the authorized Linux process. Only a descriptor whose verified
+executable closure carries `audio-output` receives the socket address. The
+socket is not exposed through Binder, a generated launcher UID, or shared
+storage, and is removed when the session closes. Anonymous Pulse authentication
+is therefore bounded by the manager's Android sandbox and private filesystem
+mode.
 
-The private socket and anonymous Pulse authentication are safe only because the
-server and client share one Android application UID and sandbox. Archphene does
-not expose this socket outside the wrapper.
+Playback requires no Android runtime permission. The current manager APK does
+not request `RECORD_AUDIO`; microphone input must be implemented later as an
+independent capability, permission, consent, and privacy boundary.
 
-Run `scripts/test-android-microphone-bridge.sh` against a prepared
-`pavucontrol` wrapper to validate real capture on a physical device. The script
-can temporarily disable and restore the device-wide microphone privacy switch;
-it never changes that setting unless explicitly requested.
+Run `scripts/test-android-audio-bridge.sh` against a current generated
+`pavucontrol` launcher and an active non-audio launcher. The gate verifies exact
+metadata, absence of microphone permission, private server startup, stock
+client authentication, bounded 48 kHz stereo playback, non-audio denial,
+cleanup/fatal logs, and a full-device screenshot.
 
 Termux package metadata and sources are available from:
 

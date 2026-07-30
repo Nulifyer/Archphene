@@ -83,7 +83,7 @@ fn parse_launcher_reduced_isolation(
     version: &str,
     fields: &mut std::str::Split<'_, char>,
 ) -> Result<bool, ()> {
-    if version != "G4" && version != "G5" && version != "G6" {
+    if version != "G4" && version != "G5" && version != "G6" && version != "G7" {
         return Ok(false);
     }
     match fields.next() {
@@ -5257,12 +5257,13 @@ mod android {
             reduced_isolation_electron,
             virgl_socket_path,
             launch_document_path,
+            pulse_server_address,
         ) = if version == "G1" {
             if fields.next().is_some() {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             }
-            (GuiAppearance::default(), None, false, None, None)
-        } else if matches!(version, "G2" | "G3" | "G4" | "G5" | "G6") {
+            (GuiAppearance::default(), None, false, None, None, None)
+        } else if matches!(version, "G2" | "G3" | "G4" | "G5" | "G6" | "G7") {
             let (
                 Some(dark),
                 Some(font_percent),
@@ -5283,7 +5284,7 @@ mod android {
             else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
-            let portal_bus_address = if matches!(version, "G3" | "G4" | "G5" | "G6") {
+            let portal_bus_address = if matches!(version, "G3" | "G4" | "G5" | "G6" | "G7") {
                 let Some(address) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5304,7 +5305,7 @@ mod android {
             else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
-            let virgl_socket_path = if version == "G5" || version == "G6" {
+            let virgl_socket_path = if matches!(version, "G5" | "G6" | "G7") {
                 let Some(socket) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5323,7 +5324,7 @@ mod android {
             } else {
                 None
             };
-            let launch_document_path = if version == "G6" {
+            let launch_document_path = if matches!(version, "G6" | "G7") {
                 let Some(encoded_path) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5333,6 +5334,29 @@ mod android {
                     let Some(decoded) = super::decode_hex_utf8(encoded_path) else {
                         return i64::from(ERROR_INVALID_ARGUMENT);
                     };
+                    Some(decoded)
+                }
+            } else {
+                None
+            };
+            let pulse_server_address = if version == "G7" {
+                let Some(encoded_address) = fields.next() else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                if encoded_address == "-" {
+                    None
+                } else {
+                    let Some(decoded) = super::decode_hex_utf8(encoded_address) else {
+                        return i64::from(ERROR_INVALID_ARGUMENT);
+                    };
+                    if decoded.len() > 109
+                        || !decoded.starts_with("unix:/data/")
+                        || decoded
+                            .bytes()
+                            .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+                    {
+                        return i64::from(ERROR_INVALID_ARGUMENT);
+                    }
                     Some(decoded)
                 }
             } else {
@@ -5375,6 +5399,7 @@ mod android {
                     reduced_isolation_electron,
                     virgl_socket_path,
                     launch_document_path,
+                    pulse_server_address,
                 ),
                 Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
             }
@@ -5420,6 +5445,7 @@ mod android {
                     reduced_isolation_electron,
                     virgl_socket_path: virgl_socket_path.map(Path::new),
                     launch_document_path: launch_document_path.as_deref(),
+                    pulse_server_address: pulse_server_address.as_deref(),
                 },
             )
         };

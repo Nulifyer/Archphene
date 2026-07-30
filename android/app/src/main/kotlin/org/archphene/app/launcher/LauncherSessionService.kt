@@ -92,6 +92,9 @@ class LauncherSessionService : Service() {
         var terminalMessage: String? = null
         var portalBridge: LauncherPortalBridge? = null
         var gpuBridge: AndroidGpuBridge? = null
+        var audioBridge: LauncherAudioBridge? = null
+        var audioStartInProgress = false
+        var audioStartComplete = false
         var gpuRecoveryStage = 0
         var nextProcessStatusMillis = 0L
         var pumpStarted = false
@@ -190,6 +193,7 @@ class LauncherSessionService : Service() {
     override fun onCreate() {
         super.onCreate()
         AndroidGpuBridge.cleanupStaleRuntimeDirectories(this)
+        LauncherAudioBridge.cleanupStaleRuntimeDirectories(this)
         if (stalePortalSavesRecovered.compareAndSet(false, true)) {
             runCatching {
                 LauncherPortalBridge.recoverStaleRuntime(cacheDir)
@@ -319,6 +323,8 @@ class LauncherSessionService : Service() {
                 session.portalBridge = null
                 session.gpuBridge?.close()
                 session.gpuBridge = null
+                session.audioBridge?.close()
+                session.audioBridge = null
                 compositor?.close()
                 session.compositor = null
                 val socket = session.compositorSocket
@@ -1421,6 +1427,38 @@ class LauncherSessionService : Service() {
         return LauncherSessionDebugResult(response == "OK", activeSession.id, response)
     }
 
+    internal fun debugPlayAudio(androidPackage: String): LauncherSessionDebugResult {
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+                !isValidLauncherPackage(androidPackage)
+        ) {
+            return LauncherSessionDebugResult(false, 0, "invalid-audio-probe")
+        }
+        val activeSession =
+            synchronized(this) {
+                sessions.values.singleOrNull { session ->
+                    session.active &&
+                        session.identity.androidPackage == androidPackage
+                }
+            } ?: return LauncherSessionDebugResult(false, 0, "audio-session-not-ready")
+        if (activeSession.authorization.bridgeCapabilities and BRIDGE_AUDIO_OUTPUT == 0) {
+            return LauncherSessionDebugResult(
+                false,
+                activeSession.id,
+                "audio-capability-denied",
+            )
+        }
+        val bridge =
+            synchronized(this) {
+                activeSession.audioBridge?.takeIf { it.isReady() }
+            } ?: return LauncherSessionDebugResult(false, activeSession.id, "audio-bridge-not-ready")
+        return if (runCatching { bridge.playDebugTone() }.getOrDefault(false)) {
+            LauncherSessionDebugResult(true, activeSession.id, "played")
+        } else {
+            LauncherSessionDebugResult(false, activeSession.id, "playback-failed")
+        }
+    }
+
     private fun isValidLauncherPackage(androidPackage: String): Boolean {
         if (
             androidPackage.length != 53 ||
@@ -1691,6 +1729,7 @@ class LauncherSessionService : Service() {
             Log.e(TAG, "Shared runtime unavailable for Linux session=${session.id}")
             return
         }
+        if (!prepareAudioBridge(session, attachedSurface)) return
         val appearance = resolvedAppearance(session)
         val portalBridge =
             session.portalBridge
@@ -1838,12 +1877,15 @@ class LauncherSessionService : Service() {
                 session.reducedIsolationElectron,
                 gpuSocket?.absolutePath,
                 session.launchDocumentPath,
+                session.audioBridge?.takeIf { it.isReady() }?.serverAddress,
             )
         if (linuxHandle == 0L) {
             session.portalBridge?.close()
             session.portalBridge = null
             session.gpuBridge?.close()
             session.gpuBridge = null
+            session.audioBridge?.close()
+            session.audioBridge = null
             Log.e(TAG, "Could not start descriptor process session=${session.id}")
             stopCompositorForStatus(
                 session,
@@ -1856,6 +1898,55 @@ class LauncherSessionService : Service() {
         session.nextProcessStatusMillis =
             SystemClock.uptimeMillis() + PROCESS_STATUS_DELAY_MILLIS
         Log.i(TAG, "Started manager-owned Linux process session=${session.id}")
+    }
+
+    private fun prepareAudioBridge(
+        session: Session,
+        attachedSurface: Surface,
+    ): Boolean {
+        if (session.authorization.bridgeCapabilities and BRIDGE_AUDIO_OUTPUT == 0) return true
+        session.audioBridge?.let { bridge ->
+            if (bridge.isReady()) return true
+            bridge.close()
+            session.audioBridge = null
+            session.audioStartComplete = false
+        }
+        if (session.audioStartComplete) return true
+        if (session.audioStartInProgress) return false
+        session.audioStartInProgress = true
+        Thread(
+                {
+                    val started =
+                        runCatching {
+                            LauncherAudioBridge(this, session.id).also { bridge ->
+                                bridge.start()
+                            }
+                        }
+                    surfaceHandler.post {
+                        session.audioStartInProgress = false
+                        session.audioStartComplete = true
+                        if (!session.active || session.surface !== attachedSurface) {
+                            started.getOrNull()?.close()
+                            return@post
+                        }
+                        started
+                            .onSuccess { bridge ->
+                                session.audioBridge = bridge
+                            }.onFailure { error ->
+                                Log.e(
+                                    TAG,
+                                    "Audio output unavailable session=${session.id}; " +
+                                        "starting Linux app without PulseAudio",
+                                    error,
+                                )
+                            }
+                        startLinuxProcess(session, attachedSurface)
+                    }
+                },
+                "ArchpheneAudioStart-${session.id}",
+            )
+            .start()
+        return false
     }
 
     private fun requestPortalDocumentSave(
@@ -2573,6 +2664,8 @@ class LauncherSessionService : Service() {
         session.linuxHandle = 0L
         session.gpuBridge?.close()
         session.gpuBridge = null
+        session.audioBridge?.close()
+        session.audioBridge = null
         val message =
             if (exitStatus == 0) {
                 "${session.authorization.label} closed."
@@ -3198,6 +3291,7 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_OPEN_URI = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val CALLBACK_NOTIFICATION = IBinder.FIRST_CALL_TRANSACTION + 7
         private const val CALLBACK_PRINT_PDF = IBinder.FIRST_CALL_TRANSACTION + 8
+        private const val BRIDGE_AUDIO_OUTPUT = 1 shl 0
         private const val BRIDGE_PRINTING = 1 shl 1
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2

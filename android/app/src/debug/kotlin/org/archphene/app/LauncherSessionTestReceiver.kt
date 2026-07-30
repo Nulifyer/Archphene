@@ -35,6 +35,10 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
             printPdf(intent)
             return
         }
+        if (intent.action == ACTION_PLAY_AUDIO) {
+            playAudio(intent)
+            return
+        }
         if (intent.action != ACTION_PROBE) {
             Log.e(TAG, "Rejected unknown launcher-session operation")
             return
@@ -232,6 +236,30 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun playAudio(intent: Intent) {
+        val pending = goAsync()
+        Thread(
+                {
+                    try {
+                        val androidPackage = intent.getStringExtra(EXTRA_PACKAGE).orEmpty()
+                        val result = LauncherSessionDebugBridge.playAudio(androidPackage)
+                        val message =
+                            "Manager audio request package=$androidPackage " +
+                                "session=${result.sessionId} result=${result.reason}"
+                        if (result.accepted) {
+                            Log.i(TAG, message)
+                        } else {
+                            Log.e(TAG, message)
+                        }
+                    } finally {
+                        pending.finish()
+                    }
+                },
+                "ArchpheneAudioProbe",
+            )
+            .start()
+    }
+
     private fun decodeUtf8(encoded: String): String? {
         if (encoded.length > MAX_BASE64_CHARACTERS) {
             Log.e(TAG, "Rejected invalid launcher-session IME payload")
@@ -322,6 +350,8 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.REQUEST_LAUNCHER_DOCUMENT_SAVE"
         private const val ACTION_PRINT_PDF =
             "org.archphene.app.debug.action.PRINT_LAUNCHER_PDF"
+        private const val ACTION_PLAY_AUDIO =
+            "org.archphene.app.debug.action.PLAY_LAUNCHER_AUDIO"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_COMPOSING_BASE64 = "composing_base64"

@@ -50,6 +50,7 @@ android {
             jniLibs.directories.add("build/generated/packageRuntime/jniLibs")
             jniLibs.directories.add("build/generated/portalJniLibs")
             jniLibs.directories.add("build/generated/gpuJniLibs")
+            jniLibs.directories.add("build/generated/audioJniLibs")
             assets.directories.add("build/generated/packageRuntime/assets")
             assets.directories.add("build/generated/launcherTemplate/assets")
             assets.directories.add("build/generated/terminalFont/assets")
@@ -89,6 +90,7 @@ tasks.named("preBuild").configure {
         dependsOn(rootProject.tasks.named("stageArchphenePackageRuntime"))
         dependsOn(rootProject.tasks.named("stageArchpheneAndroidDbus"))
         dependsOn(rootProject.tasks.named("stageArchpheneAndroidGpu"))
+        dependsOn(rootProject.tasks.named("stageArchpheneAndroidAudio"))
         dependsOn(rootProject.tasks.named("stageArchpheneLauncherTemplate"))
         dependsOn(rootProject.tasks.named("stageArchpheneTerminalFont"))
     }

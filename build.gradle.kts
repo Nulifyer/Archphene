@@ -135,6 +135,54 @@ tasks.register<Sync>("stageArchpheneAndroidGpu") {
     into("android/app/build/generated/gpuJniLibs")
 }
 
+val buildArchpheneAndroidAudioX86 =
+    tasks.register<Exec>("buildArchpheneAndroidAudioX86") {
+        workingDir(rootDir)
+        commandLine(
+            "bash",
+            "scripts/build-android-pulse-podman.sh",
+            "--architecture",
+            "x86_64",
+        )
+        inputs.files(
+            file("native/archphene-audio/termux-pulse-packages.tsv"),
+            file("scripts/build-android-pulse.sh"),
+            file("scripts/build-android-pulse-podman.sh"),
+            file("containers/android-native.Containerfile"),
+        )
+        outputs.dir("tooling/build/android-pulse/x86_64/out")
+    }
+
+val buildArchpheneAndroidAudioArm =
+    tasks.register<Exec>("buildArchpheneAndroidAudioArm") {
+        workingDir(rootDir)
+        commandLine(
+            "bash",
+            "scripts/build-android-pulse-podman.sh",
+            "--architecture",
+            "aarch64",
+        )
+        inputs.files(
+            file("native/archphene-audio/termux-pulse-packages.tsv"),
+            file("scripts/build-android-pulse.sh"),
+            file("scripts/build-android-pulse-podman.sh"),
+            file("containers/android-native.Containerfile"),
+        )
+        outputs.dir("tooling/build/android-pulse/aarch64/out")
+    }
+
+tasks.register<Exec>("stageArchpheneAndroidAudio") {
+    dependsOn(buildArchpheneAndroidAudioX86, buildArchpheneAndroidAudioArm)
+    workingDir(rootDir)
+    commandLine("bash", "scripts/stage-archphene-android-audio.sh")
+    inputs.files(
+        fileTree("tooling/build/android-pulse/x86_64/out"),
+        fileTree("tooling/build/android-pulse/aarch64/out"),
+        file("scripts/stage-archphene-android-audio.sh"),
+    )
+    outputs.dir("android/app/build/generated/audioJniLibs")
+}
+
 val verifyArchpheneTerminalFont =
     tasks.register<Exec>("verifyArchpheneTerminalFont") {
         workingDir("third_party/jetbrains-mono-nerd-font")

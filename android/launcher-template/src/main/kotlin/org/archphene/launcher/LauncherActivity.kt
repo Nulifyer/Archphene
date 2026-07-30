@@ -689,13 +689,17 @@ class LauncherActivity :
         val capabilities = metadata.getString(CAPABILITIES)
         if (
             capabilities != CAPABILITIES_V4 &&
-            capabilities != CAPABILITIES_PRINTING_V5
+            capabilities != CAPABILITIES_PRINTING_V5 &&
+            capabilities != CAPABILITIES_AUDIO_V6 &&
+            capabilities != CAPABILITIES_AUDIO_PRINTING_V6
         ) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
             return
         }
-        printingEnabled = capabilities == CAPABILITIES_PRINTING_V5
+        printingEnabled =
+            capabilities == CAPABILITIES_PRINTING_V5 ||
+                capabilities == CAPABILITIES_AUDIO_PRINTING_V6
         val manager = metadata.getString(MANAGER_PACKAGE).orEmpty()
         if (!SAFE_PACKAGE.matches(manager)) {
             status.setText(R.string.launcher_invalid)
@@ -3401,6 +3405,9 @@ class LauncherActivity :
         private const val CAPABILITIES_V4 =
             "c:wayland,input,ime,clipboard,documents,open-uri,notifications"
         private const val CAPABILITIES_PRINTING_V5 = "$CAPABILITIES_V4,printing"
+        private const val CAPABILITIES_AUDIO_V6 = "$CAPABILITIES_V4,audio-output"
+        private const val CAPABILITIES_AUDIO_PRINTING_V6 =
+            "$CAPABILITIES_V4,audio-output,printing"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
         private const val PROTOCOL_VERSION = 11

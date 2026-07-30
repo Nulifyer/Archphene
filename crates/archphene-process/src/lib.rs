@@ -228,6 +228,7 @@ pub struct CommandEnvironment {
     qt_plugin_root: Option<PathBuf>,
     appearance: GuiAppearance,
     portal_bus_address: Option<OsString>,
+    pulse_server_address: Option<OsString>,
     virgl_socket_path: Option<PathBuf>,
     software_opengl: bool,
     build_jobs: OsString,
@@ -310,6 +311,7 @@ impl CommandEnvironment {
             qt_plugin_root: None,
             appearance: GuiAppearance::default(),
             portal_bus_address: None,
+            pulse_server_address: None,
             virgl_socket_path: None,
             software_opengl: false,
             build_jobs: OsString::from("2"),
@@ -350,6 +352,35 @@ impl CommandEnvironment {
             return Err(ProcessError::InvalidEnvironment);
         }
         self.portal_bus_address = Some(OsString::from(address));
+        Ok(self)
+    }
+
+    pub fn with_pulse_server_address(
+        mut self,
+        address: Option<&str>,
+    ) -> Result<Self, ProcessError> {
+        self.pulse_server_address = match address {
+            Some(address) => {
+                let Some(socket_path) = address.strip_prefix("unix:") else {
+                    return Err(ProcessError::InvalidEnvironment);
+                };
+                let path = Path::new(socket_path);
+                if address.len() > 109
+                    || !socket_path.starts_with("/data/")
+                    || !path.is_absolute()
+                    || path.as_os_str().as_encoded_bytes().contains(&0)
+                {
+                    return Err(ProcessError::InvalidEnvironment);
+                }
+                let metadata = fs::symlink_metadata(path)?;
+                let root_metadata = fs::symlink_metadata(&self.arch_root)?;
+                if !metadata.file_type().is_socket() || metadata.uid() != root_metadata.uid() {
+                    return Err(ProcessError::InvalidEnvironment);
+                }
+                Some(OsString::from(address))
+            }
+            None => None,
+        };
         Ok(self)
     }
 
@@ -730,6 +761,9 @@ impl CommandEnvironment {
                 .env("ARCHPHENE_GTK_FILE_PORTAL", "1");
         } else {
             command.env("GTK_USE_PORTAL", "0");
+        }
+        if let Some(address) = self.pulse_server_address.as_ref() {
+            command.env("PULSE_SERVER", address);
         }
         if let Some(module) = self.gtk_settings_module.as_ref() {
             let mut preloads = self.path_bridge.as_os_str().to_os_string();
