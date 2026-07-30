@@ -11,8 +11,8 @@
     },
     {
       "name": "libarchphene_qt_platform_theme.so",
-      "bytes": 69024,
-      "sha256": "92d63e5b3f38243ac643c849e81b0acc3d7dbf1d434d48dfae63b4dec980bf02"
+      "bytes": 69104,
+      "sha256": "d6acab7b19fa14c8efe930ecca7542adf380b4bb6fcfa0f3a4cc624bbc44d9ce"
     },
     {
       "name": "libarchphene_qt_style.so",

@@ -119,8 +119,10 @@ it re-arms after atomic replacement, uses a directory fallback only if the file
 is unexpectedly absent, and performs no steady-state polling. A native gate
 loads the production plugin and requires a same-process light-to-dark palette
 update (currently 25 ms). Both rebuilt plugin architectures are in the exact
-manager APKs installed on the emulator and Samsung; current shared-root KCalc
-device validation remains pending.
+manager APKs installed on the emulator and Samsung. Current shared-root,
+unmodified KCalc opens Android DocumentsUI for single-file Open and Save/create
+on both devices; cancellation returns to the same live dialog without changing
+a file.
 
 The dense single-screen manager scaffold has been split into focused Packages,
 Files, and Terminal sections with a persistent bottom navigation surface. The
@@ -930,7 +932,8 @@ cover picker cancellation, normal exact-byte completion/restart, visible
 byte/percent progress, chunk-boundary cancellation, and manager death after a
 real nonempty partial write. Both destinations are removed, the Linux source
 is unchanged, and full-device phone/wide frames plus fatal-log checks pass on
-the emulator and Samsung. Linux desktop-portal Save As remains pending.
+the emulator and Samsung. The Linux desktop-portal Save As path is separately
+proven through stock GTK 3, Electron/Chromium, and Qt 6 callers.
 
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates
@@ -2396,9 +2399,15 @@ a current Foot launcher remains unaffected.
 The diagnostic `--disable-gpu` flag was previously removed on both device
 lanes: full-device rendering and normal close remained stable, and Samsung
 created a Chromium GPU process. That process still reported
-`--use-gl=disabled`, so this is not an accelerated-rendering claim. Accelerated
-rendering, broader editor/IME/clipboard behavior, the C# debugger, and
-sustained lifecycle remain open.
+`--use-gl=disabled`, so this is not an accelerated-rendering claim. A later
+verbose audit found the concrete first boundary: Electron 42 sees Samsung's
+`/dev/dri/renderD128`, Android SELinux denies the app domain access, Chromium
+fails render-node/GBM initialization, and the GPU process crashes three times
+before software reinitialization. The emulator has no `/dev/dri`. Temporary
+direct-EGL, ANGLE, blocklist, and single-process diagnostics were removed.
+Accelerated rendering now explicitly requires both a safe render-node/GBM
+strategy and compositor presentation/readback; the C# debugger and sustained
+lifecycle also remain open.
 
 Current x86_64 Code-OSS now also reaches its full Ozone/Wayland workbench with
 the shared process, Node workers, extension host, file watcher, and integrated
@@ -2523,6 +2532,17 @@ without importing a secret. It requires unchanged keyring/dconf inventories,
 healthy manager/wrapper/Linux processes, no fatal logs, exact manager lifecycle
 restoration, complete fixture cleanup, and inspected full-device picker/result
 frames on the x86_64 emulator and AArch64 Samsung.
+
+The Archphene Qt 6 appearance theme now delegates only native file-dialog
+helpers to Qt's stock `xdgdesktopportal` theme. It primes Qt's asynchronous
+FileChooser-version discovery on the first event-loop turn, after the platform
+theme factory has unwound, and guards the stock portal theme's Archphene
+base-theme lookup against recursive portal construction. Unmodified KCalc on
+the physical AArch64 Samsung and x86_64 emulator now opens Android DocumentsUI
+from both **Import Scheme** and **Export Scheme**. Open and Save/create
+cancellation return to the same live KDE dialog, emit exact portal cancellation
+results, change no files, and pass full-device and scoped fatal-log inspection.
+Qt multiple-file and folder selection remain pending.
 
 Folder streaming also has a sliding 30-second boundary around provider queries,
 descriptor opens, and reads. It first cancels the SAF operation or closes the

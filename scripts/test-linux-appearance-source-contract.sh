@@ -162,7 +162,21 @@ grep -Fq 'QFileSystemWatcher' "$platform_theme" \
   || archphene_die 'Qt live settings do not use an event-driven file monitor'
 ! grep -Fq 'setInterval(500)' "$platform_theme" \
   || archphene_die 'Qt live settings still poll and allocate continuously'
+grep -Fq 'QPlatformThemeFactory::create(' "$platform_theme" \
+  && grep -Fq 'QStringLiteral("xdgdesktopportal")' "$platform_theme" \
+  || archphene_die 'Qt platform theme does not load the stock desktop portal delegate'
+grep -Fq 'QTimer::singleShot(0, QCoreApplication::instance()' "$platform_theme" \
+  && grep -Fq 'portalTheme();' "$platform_theme" \
+  || archphene_die 'Qt platform theme does not safely prime asynchronous portal discovery'
+grep -Fq 'thread_local bool creatingPortalTheme = false' "$platform_theme" \
+  && grep -Fq 'ArchphenePlatformTheme(!creatingPortalTheme)' "$platform_theme" \
+  && grep -Fq 'PortalThemeCreationGuard guard' "$platform_theme" \
+  || archphene_die 'Qt portal delegation does not stop recursive base-theme construction'
+grep -Fq 'type == FileDialog && m_portalDelegationEnabled' "$platform_theme" \
+  || archphene_die 'Qt portal delegation is not restricted to lazy native file dialogs'
+grep -Fq 'portal->createPlatformDialogHelper(type)' "$platform_theme" \
+  || archphene_die 'Qt file-dialog requests do not reach the stock portal helper'
 grep -Fq 'window.statusBarColor = background' "$launcher_activity" \
   || archphene_die 'generated launchers do not repaint their status bar on mode changes'
 
-archphene_note 'Linux appearance source contract passed: live Adwaita selection, event-driven updates, system bars, and independent Qt/GTK control density are present.'
+archphene_note 'Linux appearance source contract passed: live Adwaita selection, event-driven updates, Qt file-portal delegation, system bars, and independent Qt/GTK control density are present.'

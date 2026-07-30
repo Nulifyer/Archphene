@@ -89,11 +89,15 @@ Samsung.
 
 GPU commands can execute on Android's GLES driver, but the final Linux window
 is currently copied through `wl_shm`. This is not zero-copy and caps benchmark
-throughput. Chromium 42 still starts its GPU process with
-`--use-gl=disabled`, even with a live virgl helper; direct EGL, ANGLE, and
-blocklist test profiles did not make it map a GL library. Those unproven flags
-are not shipped. Chromium acceleration therefore remains gated on a compatible
-Wayland GPU presentation/readback path rather than an app-specific override.
+throughput. Current Electron 42 on Samsung sees `/dev/dri/renderD128`, but
+Android SELinux denies the ordinary app domain access; Chromium consequently
+fails render-node/GBM initialization, crashes its GPU process three times, and
+restarts it with `--use-gl=disabled`. The emulator exposes no `/dev/dri`.
+A live virgl helper plus direct EGL, ANGLE, blocklist, and single-process
+diagnostic profiles did not produce a safe accelerated path. Those temporary
+profiles were removed. Chromium acceleration therefore remains gated on both a
+safe userspace render-node/GBM strategy and compatible Wayland GPU
+presentation/readback rather than an app-specific override.
 The next presentation milestone is Android `AHardwareBuffer`/dmabuf import
 with explicit synchronization and SHM fallback. No Venus or Android-host
 Vulkan transport is published yet, so accelerated Vulkan and Wayland Vulkan

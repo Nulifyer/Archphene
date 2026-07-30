@@ -15,11 +15,32 @@
 #include <QVariant>
 #include <QWidget>
 #include <qpa/qplatformtheme.h>
+#include <qpa/qplatformthemefactory_p.h>
 #include <qpa/qplatformthemeplugin.h>
 #include <qpa/qwindowsysteminterface.h>
 #include <memory>
 
 namespace {
+
+thread_local bool creatingPortalTheme = false;
+
+class PortalThemeCreationGuard final
+{
+public:
+    PortalThemeCreationGuard()
+        : m_previous(creatingPortalTheme)
+    {
+        creatingPortalTheme = true;
+    }
+
+    ~PortalThemeCreationGuard()
+    {
+        creatingPortalTheme = m_previous;
+    }
+
+private:
+    bool m_previous;
+};
 
 QColor readColor(QSettings &settings, const QString &group, const QString &key,
         const QColor &fallback)
@@ -91,12 +112,13 @@ class ArchphenePlatformTheme final : public QPlatformTheme
 {
 public:
     ArchphenePlatformTheme()
-        : ArchphenePlatformTheme(true)
+        : ArchphenePlatformTheme(!creatingPortalTheme)
     {
     }
 
 private:
     explicit ArchphenePlatformTheme(bool watch)
+        : m_portalDelegationEnabled(watch)
     {
         const QString configHome = qEnvironmentVariable("XDG_CONFIG_HOME",
                 QDir::homePath() + QStringLiteral("/.config"));
@@ -197,6 +219,11 @@ private:
                             window.name(QColor::HexRgb), view.name(QColor::HexRgb),
                             button.name(QColor::HexRgb), highlight.name(QColor::HexRgb)));
             QTimer::singleShot(0, QCoreApplication::instance(), [this]() {
+                // The stock portal theme discovers the FileChooser interface
+                // version asynchronously. Start it on the first event-loop
+                // turn, after this plugin's factory callback has unwound, so
+                // ordinary dialogs do not race that discovery.
+                portalTheme();
                 startWatching();
                 refresh();
             });
@@ -298,6 +325,22 @@ public:
         return m_scheme;
     }
 
+    bool usePlatformNativeDialog(DialogType type) const override
+    {
+        QPlatformTheme *portal = type == FileDialog && m_portalDelegationEnabled
+                ? portalTheme() : nullptr;
+        return portal != nullptr && portal->usePlatformNativeDialog(type);
+    }
+
+    QPlatformDialogHelper *createPlatformDialogHelper(DialogType type) const override
+    {
+        QPlatformTheme *portal = type == FileDialog && m_portalDelegationEnabled
+                ? portalTheme() : nullptr;
+        return portal != nullptr
+                ? portal->createPlatformDialogHelper(type)
+                : nullptr;
+    }
+
     QVariant themeHint(ThemeHint hint) const override
     {
         switch (hint) {
@@ -321,13 +364,39 @@ public:
     }
 
 private:
+    QPlatformTheme *portalTheme() const
+    {
+        if (!m_portalThemeAttempted) {
+            // Creating another platform-theme plugin while Qt is still inside
+            // this plugin's factory callback re-enters QFactoryLoader and
+            // crashes real KDE processes. The constructor schedules this on
+            // the first event-loop turn; keep the lazy path for a caller that
+            // asks before that turn.
+            m_portalThemeAttempted = true;
+            PortalThemeCreationGuard guard;
+            m_portalTheme.reset(QPlatformThemeFactory::create(
+                    QStringLiteral("xdgdesktopportal")));
+            if (m_portalTheme == nullptr) {
+                logKdeHelperError(QStringLiteral(
+                        "Qt xdgdesktopportal platform theme is unavailable"));
+            } else {
+                logKdeHelperError(QStringLiteral(
+                        "initialized Qt xdgdesktopportal file-dialog delegate"));
+            }
+        }
+        return m_portalTheme.get();
+    }
+
     QPalette m_palette;
     QFont m_font;
     QFont m_fixedFont;
+    mutable std::unique_ptr<QPlatformTheme> m_portalTheme;
+    mutable bool m_portalThemeAttempted = false;
     Qt::ColorScheme m_scheme = Qt::ColorScheme::Unknown;
     QString m_configPath;
     QString m_configDirectory;
     std::unique_ptr<QFileSystemWatcher> m_configWatcher;
+    bool m_portalDelegationEnabled;
     bool m_forceRefresh = true;
 };
 
