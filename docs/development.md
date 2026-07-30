@@ -236,11 +236,13 @@ and exercise the off-thread clipboard descriptor path:
 ```bash
 ./scripts/test-launcher-thread-ownership.sh \
   --serial <adb-serial> \
-  --apk tooling/build/apk/app-debug-<abi>.apk \
   --package org.archphene.linux.p<descriptor-id>
 ```
 
-The device clipboard must contain text; the gate reads but does not replace it.
+The installed manager is used by default. Add
+`--apk tooling/build/apk/app-debug-<abi>.apk --install-apk` only when replacing
+it is explicitly intended. The device clipboard must contain text; the gate
+reads but does not replace it.
 It requires authenticated Surface attachment, input, a presented Wayland frame,
 and a successful Android-to-Linux transfer explicitly reported from
 `ArchpheneLauncherClipboard`. It archives the scoped log and a full-device
@@ -433,31 +435,34 @@ with:
 ```bash
 ./scripts/test-archphene-code-git.sh \
   --serial emulator-5554 \
-  --apk tooling/build/apk/app-debug-x86_64.apk \
   --code-package <generated-code-package>
 ```
 
-The gate refuses to replace its fixed private test paths, creates a disposable
-repository, requires the exact staged-file result, removes every fixture, checks
-fatal Android logs, and captures the full device under
-`tooling/build/code-git/`. Git must normally be installed first through the
-public Packages UI. `--install-if-missing` deliberately performs that same
-mutating UI workflow and therefore must be used only after installation has
-been approved.
+The gate uses the installed manager by default, refuses an active Code session,
+snapshots and exactly restores Code's configuration, refuses to replace its
+fixed private test paths, creates a disposable repository, requires the exact
+staged-file result, removes every fixture, checks fatal Android logs, and
+captures the full device under `tooling/build/code-git/`. Add
+`--apk <manager.apk> --install-apk` only for an explicitly approved manager
+replacement. Git must normally be installed first through the public Packages
+UI. `--install-if-missing` deliberately performs that same mutating UI workflow
+and therefore must be used only after installation has been approved.
 
 Validate the generic 75% phone workspace with:
 
 ```bash
 ./scripts/test-archphene-code-phone-workspace.sh \
   --serial emulator-5554 \
-  --apk tooling/build/apk/app-debug-x86_64.apk \
   --code-package <generated-code-package>
 ```
 
-The gate uses the public Settings slider, proves the choice survives manager
-restart, requires Code to publish a 576-logical-pixel-wide exact frame, opens
-the integrated terminal, captures the complete Android display, checks fatal
-logs, and restores the user's original App scale even when the test fails.
+The gate uses the installed manager and public Settings slider, proves the
+choice survives manager restart, requires Code to publish a
+576-logical-pixel-wide exact portrait frame, opens the integrated terminal,
+captures the complete Android display, checks fatal logs, and restores the
+exact Code configuration, App scale, manager section/running state, and Android
+rotation even when the test fails. Add `--apk <manager.apk> --install-apk` only
+for an explicitly approved manager replacement.
 
 Validate the authenticated Linux-to-Android browser handoff against an already
 published current-contract launcher with:
