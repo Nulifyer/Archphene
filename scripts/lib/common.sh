@@ -134,8 +134,15 @@ archphene_capture_ui() {
   local name="$1" path output
   path="/sdcard/$name.xml"
   archphene_adb_run shell rm -f "$path" >/dev/null 2>&1 || true
-  if archphene_adb_run shell uiautomator dump --compressed "$path" >/dev/null 2>&1; then
-    output="$(archphene_adb_run exec-out cat "$path" 2>/dev/null || true)"
+  # Chromium and other continuously animating surfaces can prevent
+  # uiautomator from reaching its idle state. Bound both capture paths so the
+  # caller's own UI deadline remains effective.
+  if timeout 5s "$ARCHPHENE_ADB" "${ARCHPHENE_ADB_ARGS[@]}" \
+    shell uiautomator dump --compressed "$path" >/dev/null 2>&1; then
+    output="$(
+      timeout 5s "$ARCHPHENE_ADB" "${ARCHPHENE_ADB_ARGS[@]}" \
+        exec-out cat "$path" 2>/dev/null || true
+    )"
     if [[ "$output" == *"<hierarchy"* ]]; then
       printf '%s' "$output"
       return 0
@@ -144,7 +151,8 @@ archphene_capture_ui() {
   # Some current Android builds visibly settle the window but intermittently
   # fail publication through /sdcard. The direct stream has no stale-file
   # failure mode and preserves the same accessibility hierarchy.
-  archphene_adb_run exec-out uiautomator dump --compressed /dev/tty 2>/dev/null
+  timeout 5s "$ARCHPHENE_ADB" "${ARCHPHENE_ADB_ARGS[@]}" \
+    exec-out uiautomator dump --compressed /dev/tty 2>/dev/null
 }
 
 archphene_regex_contains() {
