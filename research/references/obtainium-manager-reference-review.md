@@ -4,6 +4,13 @@ Date: 2026-07-12
 Reference revision: `ImranR98/Obtainium` commit `3e29ddca554084458dfd11f3b605aff842195b04`
 Physical reference: Obtainium 1.6.3 (`versionCode 23423`) on the attached Samsung Galaxy
 
+Greenfield follow-up: 2026-07-30, against the current upstream `main`
+`app_list_tile.dart`, repository screenshots, and GPL-3.0 license.
+
+The original July 12 notes below describe the retained design lessons and the
+now-replaced Java prototype. The Rust/Kotlin follow-up is the current Archphene
+decision where the two differ.
+
 ## Why Obtainium is relevant
 
 Obtainium treats an application as a persisted source configuration plus transient download, installed-package, and update state. A source adapter normalizes a URL, retrieves release metadata, chooses compatible assets, and returns a new immutable app record. Update checks are batched; installer implementations are selected behind a common interface; periodic checks run through Android WorkManager; and Android remains responsible for installation authorization.
@@ -60,9 +67,40 @@ After process restart, Obtainium reloads Android's real installed package inform
 
 Obtainium represents download progress as 0 through 100 and installation as an indeterminate sentinel, replacing the row's normal trailing state with a progress control. Archphene now follows the same single-state principle for self-update: the version action becomes an Updating spinner while the richer download/install stage indicator remains available below it.
 
+The Rust/Kotlin manager follow-up keeps that useful immediate-feedback pattern
+without copying Obtainium's Flutter implementation. Obtainium's current compact
+row replaces its normal trailing version state with a bounded linear progress
+track, percentage/byte labels, and optional cancellation while that specific
+app is active. Archphene now gives only the matching or appended package row a
+recycled native Android progress track, retains its exact operation, phase, and
+percentage label, and keeps the durable multi-line activity card for recovery
+details. Zero percent is indeterminate so a newly queued operation is visibly
+active before useful byte progress exists; later phases are determinate.
+
+This is intentionally narrower than Obtainium's presentation:
+
+- no category gradients, swipe-to-install/remove, publisher icons, or source
+  branding were copied;
+- Archphene retains explicit buttons because package closure review, mutation,
+  and Android launcher publication have different trust boundaries;
+- terminal progress stays durable across restart rather than existing only as
+  an in-memory download notifier;
+- one native `ProgressBar` belongs to each recycled visible row, and progress
+  updates reuse it rather than rebuilding the package list.
+
+State-preserving exact-ABI gates prove the matching row and activity card show
+the same queued state, the row exposes accessible progress, Cancel remains
+available before mutation, and the real package database, cache, job state, and
+manager navigation are restored. Full-device light and dark captures were
+inspected on the x86_64 emulator and AArch64 Samsung.
+
 ## Security and licensing conclusions
 
-Obtainium's source is GPL-3.0. This work reimplements architectural ideas and Android interaction patterns in the existing Java manager; it does not copy Obtainium Dart/Flutter code, assets, branding, or translations. Directly incorporating its implementation would require a deliberate GPL-3.0 compatibility decision for the distributed combined work.
+Obtainium's source is GPL-3.0. This work reimplements architectural ideas and
+Android interaction patterns in Archphene's Rust/Kotlin manager; it does not
+copy Obtainium Dart/Flutter code, assets, branding, or translations. Directly
+incorporating its implementation would require a deliberate GPL-3.0
+compatibility decision for the distributed combined work.
 
 The manager still must not treat package metadata as sufficient authorization to install. A production transaction requires repository signature verification, exact closure hashes, deterministic wrapper construction, signer continuity, package identity checks, downgrade policy, atomic downloads, and cleanup/rollback.
 
@@ -76,12 +114,13 @@ The manager still must not treat package metadata as sufficient authorization to
 6. Add import/export, categories, update history/logs, and notification deep links.
 7. Replace the centered wide layout with navigation rail and list/detail panes when the manager becomes a desktop-mode workflow.
 
-## Reference files
+## Upstream references
 
-- Obtainium architecture: `tooling/source/Obtainium/docs/DEVELOPER_GUIDE.md`
-- Obtainium adaptive shell: `tooling/source/Obtainium/lib/pages/home.dart`
-- Obtainium app list: `tooling/source/Obtainium/lib/pages/apps.dart`
-- Obtainium source model: `tooling/source/Obtainium/lib/providers/source_provider.dart`
-- Obtainium persistence: `tooling/source/Obtainium/lib/providers/apps_provider_lifecycle.dart`
-- Obtainium update batching: `tooling/source/Obtainium/lib/providers/apps_provider_updates.dart`
-- Obtainium installer boundary: `tooling/source/Obtainium/lib/providers/apps_provider_install.dart`
+- Repository, screenshots, and license:
+  <https://github.com/ImranR98/Obtainium>
+- Current compact app row:
+  <https://github.com/ImranR98/Obtainium/blob/main/lib/components/app_list_tile.dart>
+- Current application list:
+  <https://github.com/ImranR98/Obtainium/blob/main/lib/pages/apps.dart>
+- GPL-3.0 license:
+  <https://github.com/ImranR98/Obtainium/blob/main/LICENSE.txt>

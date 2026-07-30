@@ -16,6 +16,13 @@ and both exact-ABI APK builds pass. The APK contains one Kotlin Activity, one
 Service-owned native runtime, reusable direct buffers for batched input and
 status snapshots, and generation-checked bounded native handles.
 
+Exact-ABI manager builds are now one serialized build-and-copy transaction.
+The build gate bypasses local task-cache restoration and verifies both the debug
+Application class and requested native ABI before publishing an APK. This was
+added after concurrent x86_64/AArch64 builds combined a valid manifest with a
+dex missing `ArchpheneDebugApplication`; the invalid artifacts are now rejected
+before they can be installed.
+
 The package and launcher trust boundary is now normative rather than spread
 across implementation notes. It defines verified official packages, bounded
 recursive AUR graphs built by the separate no-network Builder UID, exact
@@ -2729,6 +2736,16 @@ The physical Samsung manager was updated in place and shows the real current
 Foot package as Installed while preserving its 255-package shared root.
 Verified package-file classification, version-order-safe update labels, and
 reviewed AUR result integration now pass as described above.
+
+The Obtainium follow-up retained one suitable phone UX pattern without copying
+its GPL-3.0 Flutter implementation: only the matching or appended active
+package row replaces idle trailing space with compact progress. Archphene keeps
+its richer exact operation/phase/percentage string and durable recovery card;
+zero-percent work is indeterminate and later phases are determinate. Recycled
+native views avoid rebuilding the list. State-preserving emulator and Samsung
+gates prove immediate accessible Queued feedback, safe Cancel, cold-restored
+Cancelled state, exact package/database/cache restoration, clean scoped logs,
+and inspected full-device light/dark presentation.
 
 The shared-file namespace is now concrete on both devices: root bootstrap
 creates exact fail-closed `/mnt/android/{documents,downloads,media,pictures,shared}`

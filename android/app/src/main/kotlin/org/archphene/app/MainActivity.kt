@@ -38,6 +38,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -2941,6 +2942,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 binder.packageJobActivityLabel,
                 binder.packageJobMessage,
                 binder.packageJobState,
+                binder.packageJobProgress,
             )
             if (binder.packageJobState == NativeRuntime.JOB_QUEUED) {
                 showPackageSearchResults()
@@ -3075,6 +3077,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private var jobLabel = ""
         private var jobMessage = ""
         private var jobState = 0
+        private var jobProgress = 0
         private var jobPackageIndex = -1
 
         fun submit(snapshot: AvailablePackageSnapshot) {
@@ -3088,11 +3091,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             label: String,
             message: String,
             state: Int,
+            progress: Int,
         ) {
             jobPackage = packageName
             jobLabel = label
             jobMessage = message
             jobState = state
+            jobProgress = progress.coerceIn(0, 100)
             jobPackageIndex = packages?.names?.indexOf(packageName) ?: -1
             notifyDataSetChanged()
         }
@@ -3167,8 +3172,38 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     TextView(this@MainActivity).apply {
                         setTextColor(getColor(R.color.archphene_on_surface_muted))
                         textSize = 13f
-                        gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                        gravity = Gravity.END
                         maxLines = 2
+                    }
+                val progress =
+                    ProgressBar(
+                        this@MainActivity,
+                        null,
+                        android.R.attr.progressBarStyleHorizontal,
+                    ).apply {
+                        max = 100
+                        visibility = View.GONE
+                    }
+                val stateColumn =
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                        addView(
+                            state,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ),
+                        )
+                        addView(
+                            progress,
+                            LinearLayout.LayoutParams(
+                                dp(88),
+                                dp(4),
+                            ).apply {
+                                topMargin = dp(6)
+                            },
+                        )
                     }
                 row =
                     LinearLayout(this@MainActivity).apply {
@@ -3194,7 +3229,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             ),
                         )
                         addView(
-                            state,
+                            stateColumn,
                             LinearLayout.LayoutParams(
                                 ViewGroup.LayoutParams.WRAP_CONTENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3211,6 +3246,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         analysis,
                         description,
                         state,
+                        progress,
                     )
                 row.tag = views
             }
@@ -3292,6 +3328,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         }
                     },
                 )
+                updateAvailablePackageRowProgress(
+                    views,
+                    position == jobPackageIndex,
+                )
             } else {
                 setTextIfChanged(views.name, jobPackage)
                 setTextIfChanged(views.version, "")
@@ -3299,8 +3339,28 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextIfChanged(views.analysis, "")
                 setTextIfChanged(views.description, jobMessage)
                 setTextIfChanged(views.state, jobLabel)
+                updateAvailablePackageRowProgress(views, true)
             }
             return row
+        }
+
+        private fun updateAvailablePackageRowProgress(
+            views: AvailablePackageRowViews,
+            matchesJob: Boolean,
+        ) {
+            val active = matchesJob && isActivePackageJobState(jobState)
+            views.progress.visibility = if (active) View.VISIBLE else View.GONE
+            if (!active) {
+                views.progress.isIndeterminate = false
+                views.progress.progress = 0
+                views.progress.contentDescription = null
+                return
+            }
+            views.progress.isIndeterminate = jobProgress == 0
+            if (jobProgress > 0) {
+                views.progress.progress = jobProgress
+            }
+            views.progress.contentDescription = "$jobLabel progress"
         }
 
         private fun appendActiveJob(): Boolean =
@@ -3423,6 +3483,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val analysis: TextView,
         val description: TextView,
         val state: TextView,
+        val progress: ProgressBar,
     )
 
     private fun updatePackageActions() {

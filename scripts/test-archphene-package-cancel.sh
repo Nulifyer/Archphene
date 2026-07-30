@@ -418,7 +418,7 @@ archphene_adb_run shell am broadcast \
   -a org.archphene.app.debug.action.ARM_PACKAGE_WORKER \
   --es token package-worker \
   --es package "$target" \
-  --ei hold-ms 5000 >/dev/null
+  --ei hold-ms 30000 >/dev/null
 archphene_wait_log \
   'Started package phases=true token=package-worker' 15 \
   'ArchphenePackagePhaseProbe:I *:S' >/dev/null
@@ -427,6 +427,14 @@ archphene_tap_ui_pattern \
 archphene_wait_ui \
   'text="(?:CANCEL|Cancel)"[^>]*enabled="true"' \
   "package-cancel-active-$serial" 15
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" \
+  'text="Search results"[^>]*class="android.widget.Button"' \
+  "Search results"
+archphene_wait_ui \
+  'class="android.widget.ProgressBar"[^>]*content-desc="(?:Install|Update) · (?:Queued|Resolving|Verifying) · [0-9]+% progress"' \
+  "package-cancel-row-progress-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-active.png"
 archphene_tap_ui_pattern \
   "$ARCHPHENE_UI" 'text="(?:CANCEL|Cancel)"' 'cancel package'
 archphene_wait_ui \
@@ -439,7 +447,7 @@ archphene_wait_log "Cancelled package operation for $target" 15 >/dev/null
 
 assert_package_state_unchanged
 
-archphene_adb_run exec-out screencap -p >"$output_dir/$serial.png"
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-cancelled.png"
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
@@ -477,4 +485,4 @@ assert_restored
 archphene_note "Archphene package cancellation passed on $serial"
 archphene_note "  Cancelled before mutation and preserved installed/cache state"
 archphene_note "  Durable Cancelled state survived manager process restart"
-archphene_note "  Full-device screenshot: $output_dir/$serial.png"
+archphene_note "  Full-device screenshots: $output_dir/$serial-{active,cancelled}.png"

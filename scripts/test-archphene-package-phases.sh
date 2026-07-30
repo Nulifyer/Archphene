@@ -99,6 +99,12 @@ for index in "${!states[@]}"; do
   ui="$ARCHPHENE_UI"
   [[ "$ui" == *"text=\"$message\""* ]] ||
     archphene_die "$state did not render its exact durable message"
+  if ((index < 8)); then
+    archphene_regex_contains \
+      "$ui" \
+      "class=\"android.widget.ProgressBar\"[^>]*content-desc=\"Install · $state · $percent% progress\"" ||
+      archphene_die "$state did not expose compact row-level progress"
+  fi
   if ((index <= 5)); then
     archphene_regex_contains \
       "$ui" \

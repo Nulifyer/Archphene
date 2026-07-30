@@ -120,6 +120,10 @@ archphene_regex_contains \
   archphene_die "dotnet-sdk search row did not carry its live Queued state"
 archphene_regex_contains \
   "$queued_ui" \
+  'class="android.widget.ProgressBar"[^>]*content-desc="Install · Queued · 0% progress"' ||
+  archphene_die "dotnet-sdk search row did not expose compact Queued progress"
+archphene_regex_contains \
+  "$queued_ui" \
   'text="(?:CANCEL|Cancel)"[^>]*class="android.widget.Button"[^>]*enabled="true"' ||
   archphene_die "Queued package operation was not cancellable"
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-queued.png"
