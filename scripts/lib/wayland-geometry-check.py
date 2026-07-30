@@ -23,6 +23,9 @@ PRESENTED = re.compile(
     r"root=(-?\d+),(-?\d+) (\d+)x(\d+) "
     r"content=(-?\d+),(-?\d+) (\d+)x(\d+)"
 )
+PRESENTED_REASONS = re.compile(
+    r"Presented Linux frame .*?reasons=(\d+),(\d+)"
+)
 
 
 def contained(label: str, x: int, y: int, width: int, height: int,
@@ -105,7 +108,11 @@ def validate_presented_frames(
         raise SystemExit("no compositor output frame found")
     if require_title is not None:
         raise SystemExit("current presentation diagnostic does not include a title")
-    if require_popup:
+    popup_presented = any(
+        int(match.group(2)) & (1 << 1)
+        for match in PRESENTED_REASONS.finditer(text)
+    )
+    if require_popup and not popup_presented:
         raise SystemExit("current presentation diagnostic does not include popup state")
 
     values = list(map(int, matches[-1].groups()))
@@ -127,7 +134,11 @@ def validate_presented_frames(
     ]
     if any(value <= 0 for value in dimensions):
         raise SystemExit("presentation diagnostic contains an empty dimension")
-    if (selected_width, selected_height) != (original_width, original_height):
+    selected_size = (selected_width, selected_height)
+    if popup_presented:
+        if selected_size != (surface_width, surface_height):
+            raise SystemExit("composited popup presentation does not match Android surface")
+    elif selected_size != (original_width, original_height):
         raise SystemExit("selected presentation buffer does not match its source")
     if (surface_width, surface_height) != (mode_width, mode_height):
         raise SystemExit("Android surface does not match the advertised output mode")
@@ -148,7 +159,7 @@ def validate_presented_frames(
     )
     print(
         f"output={logical_width}x{logical_height} mapped_frames=1 "
-        "finalized_popups=0"
+        f"finalized_popups={int(popup_presented)}"
     )
 
 

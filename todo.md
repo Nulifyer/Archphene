@@ -576,7 +576,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [x] Replace global `QT_SCALE_FACTOR` compatibility behavior with compositor-advertised logical size plus integer/fractional output scale; physical Samsung portrait/landscape reconfiguration passes without app-specific settings.
 - [x] Extend the compositor density gate to a bounded user-selected geometry scale. Auto retains the 432dp desktop floor; explicit 75%, 100%, 125%, and 150% values scale that automatic baseline in the compositor rather than injecting toolkit-specific geometry variables. Native tests cover every accepted bound, and Samsung Code proves the 125% output resolves to 346×705 logical pixels.
 - [ ] Validate live moves between Android displays while an explicit geometry scale is active.
-- [ ] Define a generic overflow/panning policy for fixed desktop layouts at 200% phone text scaling without app-specific patches.
+- [ ] Define a generic overflow/panning policy for fixed desktop layouts and wide
+  popup shortcut columns on phone displays without app-specific patches. Stock
+  KCalc's primary Settings actions are visible and semantically actionable at
+  the automatic 100% text setting on a 432dp phone, but the right-aligned
+  keyboard-shortcut column remains clipped; 200% text also needs coverage.
 - [ ] Finish reproducible AArch64 Qt/KDE and GTK settings bridge builds by pinning the required KConfig and GLib development sysroots.
   - [x] Decouple unchanged-helper availability from rebuilding changed Qt modules. The existing AArch64 KF6Config helper may be retained only when its exact pinned checksum matches, while the cached checksum-pinned Qt sysroot rebuilds the platform-theme/style modules; missing or altered helpers fail closed without a download.
 - [ ] Complete secondary-window behavior for phone, tablet, freeform, and external displays.
@@ -596,7 +600,29 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Emit Settings `SettingChanged` updates when a live portal-visible appearance value changes. Each private portal consumes an exact 11-byte, versioned appearance record that the manager publishes with fsync plus atomic rename off the main thread; the reader rejects links, non-regular files, malformed data, and partial replacements. Android configuration/display changes and wallpaper-color changes refresh color scheme and Material You accent without restarting the Linux process. Real light→dark→light signals match subsequent `ReadOne` results on Android 16 x86_64 and Samsung Android 15 AArch64, with inspected full-device frames and fatal-log gates.
 - [ ] Validate automatic and explicit appearance settings across:
   - [ ] Qt 6/KDE
-    - [x] Replace the Qt platform theme's 500 ms polling timer with a deferred event-driven exact-file watcher that survives atomic `kdeglobals` replacement and falls back to the directory only when the file is absent. A native gate loads the exact production plugin and requires a same-process light-to-dark palette change; rebuilt x86_64 and AArch64 modules are installed in the current manager APKs. KCalc visual, interaction, font, control, and explicit-setting device coverage on the new shared root remains open.
+    - [x] Replace the Qt platform theme's 500 ms polling timer with a deferred
+      event-driven exact-file watcher that survives atomic `kdeglobals`
+      replacement and falls back to the directory only when the file is absent.
+      A native gate loads the exact production plugin and requires a
+      same-process light-to-dark palette change.
+    - [x] Make the generic Qt 6 bridge load reliably from the shared root on both
+      Android ABIs. Qt's factory scan rejected the prior two-hop plugin symlinks,
+      so the package runtime now atomically publishes bounded, verified,
+      owner-executable plugin copies and migrates the legacy topology. The
+      platform theme receives an exact validated KConfig-helper path instead of
+      reconstructing an obsolete per-wrapper location.
+    - [x] Remove Qt Wayland's redundant client-side desktop title bar from the
+      Android-hosted toplevel policy. This restores phone space and aligns Qt's
+      AT-SPI widget bounds with visible controls without KCalc-specific offsets.
+      Stock KCalc 26.04.3-1 passes calculation, File-to-Settings menu switching,
+      About/Close, bounded semantic actions, popup presentation geometry,
+      nonblank full-device pixel checks, and palette contrast on the x86_64
+      emulator and AArch64 Samsung. Explicit Light/Dark updates keep the same
+      manager, wrapper, and Linux PIDs; both current APKs contain the rebuilt
+      bridge, and Auto/Material You defaults were restored after testing.
+    - [ ] Resolve wide Qt popup/shortcut-column presentation on the 432dp phone
+      viewport, then repeat the font/control extremes and tablet/external-display
+      cases before closing Qt visual coverage.
   - [x] GTK 3 — stock Mousepad now consumes the standard embedded Adwaita light/dark variant through the manager-owned settings file and an event-driven GTK module. The Rust runtime republishes only color fields without altering the current published font/control snapshot. Exact light→dark→light gates on Android 16 x86_64 and Samsung Android 15 AArch64 require unchanged launcher, manager, and Linux PIDs; GTK's applied state; fatal-log cleanliness; and measured full-device GTK content plus Android system-bar luminance.
   - [x] GTK 4/libadwaita
     - [x] Load the checksum-pinned GTK settings helper from the generic GTK 4 preload path, monitor the manager-owned physical settings file directly, and retain the Settings-portal signal fallback. Current unmodified Snapshot receives exact initial and live light/dark state on x86_64 and AArch64 without restarting its wrapper, manager, or Linux process. Snapshot's intentionally black camera canvas is not broader libadwaita visual-quality evidence.

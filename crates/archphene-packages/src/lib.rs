@@ -7602,18 +7602,18 @@ fn prepare_toolkit_plugin_directory(
     alias_root: &Path,
 ) -> Result<PathBuf, PackageRuntimeError> {
     let root = arch_root.join(TOOLKIT_PLUGIN_DIRECTORY);
-    prepare_known_directory(&root, &["platformthemes", "styles"])?;
+    prepare_known_directory(&root, &["platformthemes", "styles"], &[])?;
     let platformthemes = root.join("platformthemes");
     let styles = root.join("styles");
-    prepare_known_directory(&platformthemes, &[])?;
-    prepare_known_directory(&styles, &[])?;
-    symlink(
-        alias_root.join(QT_PLATFORM_THEME_LIBRARY),
-        platformthemes.join(QT_PLATFORM_THEME_LIBRARY),
+    prepare_known_directory(&platformthemes, &[], &[QT_PLATFORM_THEME_LIBRARY])?;
+    prepare_known_directory(&styles, &[], &[QT_STYLE_LIBRARY])?;
+    publish_toolkit_plugin(
+        &alias_root.join(QT_PLATFORM_THEME_LIBRARY),
+        &platformthemes.join(QT_PLATFORM_THEME_LIBRARY),
     )?;
-    symlink(
-        alias_root.join(QT_STYLE_LIBRARY),
-        styles.join(QT_STYLE_LIBRARY),
+    publish_toolkit_plugin(
+        &alias_root.join(QT_STYLE_LIBRARY),
+        &styles.join(QT_STYLE_LIBRARY),
     )?;
     // Keep the helper next to the plugin root as well as in the verified
     // runtime library path. The platform theme can resolve it without adding
@@ -7625,9 +7625,36 @@ fn prepare_toolkit_plugin_directory(
     Ok(root)
 }
 
+fn publish_toolkit_plugin(alias: &Path, destination: &Path) -> Result<(), PackageRuntimeError> {
+    if !fs::symlink_metadata(alias)?.file_type().is_symlink() {
+        return Err(PackageRuntimeError::UnsafeEntry(alias.to_path_buf()));
+    }
+    let source = alias.canonicalize()?;
+    let temporary = destination.with_extension("so.tmp");
+    match fs::symlink_metadata(&temporary) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(PackageRuntimeError::UnsafeEntry(temporary));
+        }
+        Ok(_) => fs::remove_file(&temporary)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    copy_bounded_regular_file(&source, &temporary, 256 * 1024 * 1024)?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o500))?;
+    fs::rename(&temporary, destination)?;
+    File::open(
+        destination
+            .parent()
+            .ok_or(PackageRuntimeError::InvalidPath)?,
+    )?
+    .sync_all()?;
+    Ok(())
+}
+
 fn prepare_known_directory(
     path: &Path,
     allowed_directories: &[&str],
+    allowed_files: &[&str],
 ) -> Result<(), PackageRuntimeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -7652,6 +7679,10 @@ fn prepare_known_directory(
         let metadata = fs::symlink_metadata(entry.path())?;
         if allowed_directories.contains(&name) {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(entry.path()));
+            }
+        } else if allowed_files.contains(&name) {
+            if !metadata.file_type().is_symlink() && !metadata.is_file() {
                 return Err(PackageRuntimeError::UnsafeEntry(entry.path()));
             }
         } else if metadata.file_type().is_symlink() {
@@ -12827,27 +12858,53 @@ library\tlibarchphene_kde_config.so\tlibarchphene_pkg_999999999999999999999999.s
         )
         .expect("toolkit runtime");
         let plugin_root = runtime.qt_plugin_root.as_ref().expect("Qt plugin root");
-        assert!(
-            fs::symlink_metadata(
-                plugin_root
-                    .join("platformthemes")
-                    .join(QT_PLATFORM_THEME_LIBRARY),
-            )
-            .expect("platform theme")
-            .file_type()
-            .is_symlink(),
-        );
-        assert!(
-            fs::symlink_metadata(plugin_root.join("styles").join(QT_STYLE_LIBRARY))
-                .expect("style")
-                .file_type()
-                .is_symlink(),
-        );
+        let platform_theme = plugin_root
+            .join("platformthemes")
+            .join(QT_PLATFORM_THEME_LIBRARY);
+        let style = plugin_root.join("styles").join(QT_STYLE_LIBRARY);
+        for (plugin, expected) in [
+            (&platform_theme, b"platform".as_slice()),
+            (&style, b"style".as_slice()),
+        ] {
+            let metadata = fs::symlink_metadata(plugin).expect("plugin metadata");
+            assert!(metadata.is_file());
+            assert!(!metadata.file_type().is_symlink());
+            assert_eq!(fs::read(plugin).expect("plugin contents"), expected);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o500);
+        }
         let appearance = GuiAppearance::new(true, 100, 20, 32, [1, 2, 3], [4, 5, 6], [7, 8, 9])
             .expect("appearance");
         runtime
             .command_environment_with_gui(appearance)
             .expect("GUI environment");
+
+        fs::remove_file(&platform_theme).expect("remove copied platform theme");
+        symlink(
+            runtime.alias_root().join(QT_PLATFORM_THEME_LIBRARY),
+            &platform_theme,
+        )
+        .expect("legacy platform theme symlink");
+        let refreshed = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("refresh toolkit runtime");
+        let refreshed_theme = refreshed
+            .qt_plugin_root
+            .as_ref()
+            .expect("refreshed Qt plugin root")
+            .join("platformthemes")
+            .join(QT_PLATFORM_THEME_LIBRARY);
+        let refreshed_metadata =
+            fs::symlink_metadata(&refreshed_theme).expect("refreshed platform theme");
+        assert!(refreshed_metadata.is_file());
+        assert!(!refreshed_metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read(refreshed_theme).expect("refreshed platform theme contents"),
+            b"platform",
+        );
 
         let partial = manifest
             .strip_suffix(

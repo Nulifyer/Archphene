@@ -66,8 +66,11 @@ void logKdeHelperError(const QString &message)
 
 void reparseKdeColorConfig()
 {
-    QLibrary helper(QDir(QDir::homePath()).filePath(
-            QStringLiteral("../linux-runtime/lib/libarchphene_kde_config.so")));
+    const QString helperPath = qEnvironmentVariable(
+            "ARCHPHENE_KDE_CONFIG_HELPER",
+            QDir(QDir::homePath()).filePath(
+                    QStringLiteral("../linux-runtime/lib/libarchphene_kde_config.so")));
+    QLibrary helper(helperPath);
     if (!helper.load()) {
         logKdeHelperError(helper.errorString());
         return;

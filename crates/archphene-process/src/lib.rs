@@ -67,6 +67,7 @@ const MAX_ELF_NEEDED_PER_OBJECT: usize = 256;
 const MAX_ELF_DEPENDENCY_OBJECTS: usize = 256;
 const MAX_ELF_PRIVATE_LIBRARY_PATHS: usize = 64;
 const GTK_SETTINGS_ROOT_RELATIVE_PATH: &str = "home/archphene/.config/gtk-3.0/settings.ini";
+const QT_KDE_CONFIG_LIBRARY: &str = "libarchphene_kde_config.so";
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -226,6 +227,7 @@ pub struct CommandEnvironment {
     gdk_pixbuf_module_file: Option<PathBuf>,
     gtk_settings_module: Option<PathBuf>,
     qt_plugin_root: Option<PathBuf>,
+    qt_kde_config_helper: Option<PathBuf>,
     appearance: GuiAppearance,
     portal_bus_address: Option<OsString>,
     pulse_server_address: Option<OsString>,
@@ -310,6 +312,7 @@ impl CommandEnvironment {
             gdk_pixbuf_module_file,
             gtk_settings_module: None,
             qt_plugin_root: None,
+            qt_kde_config_helper: None,
             appearance: GuiAppearance::default(),
             portal_bus_address: None,
             pulse_server_address: None,
@@ -339,6 +342,13 @@ impl CommandEnvironment {
         self.gtk_settings_module =
             validate_optional_gui_file(&self.arch_root, gtk_settings_module)?;
         self.qt_plugin_root = validate_optional_gui_directory(&self.arch_root, qt_plugin_root)?;
+        self.qt_kde_config_helper = match self.qt_plugin_root.as_ref() {
+            Some(_) => validate_optional_gui_file(
+                &self.arch_root,
+                Some(&self.command_directory.join(QT_KDE_CONFIG_LIBRARY)),
+            )?,
+            None => None,
+        };
         publish_gui_appearance(&self.arch_root, appearance)?;
         self.appearance = appearance;
         Ok(self)
@@ -744,6 +754,14 @@ impl CommandEnvironment {
             .env("QT_QPA_PLATFORM", "wayland")
             .env("QT_QPA_PLATFORMTHEME", "archphene")
             .env("QT_STYLE_OVERRIDE", "archphene")
+            /*
+             * Each Linux toplevel is already hosted by an Android Activity.
+             * Qt Wayland's client-side desktop decoration otherwise consumes
+             * phone space and sits outside Qt's AT-SPI widget coordinates,
+             * making framework accessibility actions land one title-bar row
+             * above the visible control.
+             */
+            .env("QT_WAYLAND_DISABLE_WINDOWDECORATION", "1")
             .env("QT_FONT_DPI", "96")
             .env("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
             .env(
@@ -806,6 +824,9 @@ impl CommandEnvironment {
         }
         if let Some(root) = self.qt_plugin_root.as_ref() {
             command.env("QT_PLUGIN_PATH", root);
+        }
+        if let Some(helper) = self.qt_kde_config_helper.as_ref() {
+            command.env("ARCHPHENE_KDE_CONFIG_HELPER", helper);
         }
         if self.gtk_camera_compatibility {
             /*
@@ -3398,6 +3419,12 @@ mod tests {
         fs::set_permissions(&gtk, fs::Permissions::from_mode(0o755)).expect("settings mode");
         let gtk_alias = aliases.join("libgtksettings.so");
         symlink(&gtk, &gtk_alias).expect("settings alias");
+        let kde_config = native.join(QT_KDE_CONFIG_LIBRARY);
+        fs::write(&kde_config, b"kconfig").expect("KDE config helper");
+        fs::set_permissions(&kde_config, fs::Permissions::from_mode(0o755))
+            .expect("KDE config helper mode");
+        let kde_config_alias = aliases.join(QT_KDE_CONFIG_LIBRARY);
+        symlink(&kde_config, &kde_config_alias).expect("KDE config helper alias");
         let appearance = GuiAppearance::new(
             true,
             150,
@@ -3452,6 +3479,14 @@ mod tests {
         assert_eq!(value("GDK_SCALE"), None);
         assert_eq!(value("GDK_DPI_SCALE"), None);
         assert_eq!(value("QT_PLUGIN_PATH"), Some(plugins.as_os_str()));
+        assert_eq!(
+            value("QT_WAYLAND_DISABLE_WINDOWDECORATION"),
+            Some(OsStr::new("1"))
+        );
+        assert_eq!(
+            value("ARCHPHENE_KDE_CONFIG_HELPER"),
+            Some(kde_config_alias.as_os_str())
+        );
         assert_eq!(value("ARCHPHENE_FONT_POINT_SIZE"), Some(OsStr::new("18")));
         assert_eq!(
             value("ARCHPHENE_QT_CONTROL_MIN_SIZE"),
