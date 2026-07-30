@@ -175,6 +175,23 @@ retain the same manager-owned Linux process through resize before testing
 close, force-stop cleanup, and a cold relaunch. Full-device PNGs and raw
 comparison frames are written under `tooling/build/foot-workflows/`.
 
+## Package cancellation
+
+Run both state-preserving cancellation paths against an installed manager:
+
+```bash
+./scripts/test-archphene-package-cancel.sh --serial <adb-serial>
+./scripts/test-archphene-package-cancel.sh \
+  --serial <adb-serial> --during-review --debug-cancel-broadcast
+```
+
+Git is the default installed-package representative; use `--target` only for
+another installed package whose executable has the same name and whose signed
+archive remains cached. The gate is non-installing by default. Explicit manager
+replacement requires `--apk <path> --install-apk`. Both paths restore the exact
+compatibility cache, package job/recovery state, manager navigation/running
+state, and verify the complete pacman database and download-cache inventories.
+
 ## Main-thread I/O diagnostics
 
 Debug APKs enable StrictMode after framework application initialization. Run
