@@ -224,6 +224,19 @@ already be explicitly installed and have exactly one matching signed archive
 in Archphene's package cache. Manager replacement requires the separate
 `--apk <path> --install-apk` action.
 
+## Package closure preflight
+
+Run cache-only signed verification, remove/reinstall, and reason recovery:
+
+```bash
+./scripts/test-archphene-package-preflight.sh --serial <adb-serial>
+```
+
+Installed explicit Git is the default fixture. Another package may be selected
+with `--package` and `--file`; its signed payload must already be retained.
+The gate compares every cache file before and after and replaces the manager
+only with the explicit `--apk <path> --install-apk` action.
+
 ## Main-thread I/O diagnostics
 
 Debug APKs enable StrictMode after framework application initialization. Run
