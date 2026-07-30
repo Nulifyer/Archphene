@@ -154,7 +154,7 @@ choose_fixture normal-picker-ready.png
 archphene_wait_log \
   'Portal folder imported name=ProviderFailureFixture entries=1 bytes=25' \
   30 'ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
-wait_probe_result 'PASS portal folder selected'
+wait_probe_result 'PASS portal folder selected with one logical project URI'
 expected="$(
   printf 'provider-failure-fixture\n' | sha256sum | awk '{print $1}'
 )"

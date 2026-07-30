@@ -1167,7 +1167,7 @@ internal class LauncherPortalBridge(
                     val logicalPath =
                         importDirectory(result.displayName, it)
                             ?: error("Could not import the selected Android folder")
-                    Uri.Builder().scheme("file").path(logicalPath).build().toString()
+                    PortalFileUri.fromLogicalPath(logicalPath)
                 }
             }.getOrElse { error ->
                 runCatching { descriptor.close() }
@@ -1202,7 +1202,7 @@ internal class LauncherPortalBridge(
         val logicalPath =
             "/home/archphene/.cache/archphene/portal-save/" +
                 "$sessionId-$instanceToken/${canonicalStaging.name}"
-        return Uri.Builder().scheme("file").path(logicalPath).build().toString()
+        return PortalFileUri.fromLogicalPath(logicalPath)
     }
 
     @Synchronized
@@ -1249,7 +1249,7 @@ internal class LauncherPortalBridge(
         }
         return imported.map { file ->
             val logicalPath = "/home/archphene/Documents/Android/${file.name}"
-            Uri.Builder().scheme("file").path(logicalPath).build().toString()
+            PortalFileUri.fromLogicalPath(logicalPath)
         }
     }
 

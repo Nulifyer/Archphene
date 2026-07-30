@@ -130,8 +130,45 @@ static dbus_bool_t append_filters_property(
     return dbus_message_iter_close_container(dict, &entry);
 }
 
+static int copy_first_response_uri(
+        DBusMessageIter *arguments, char *uri, size_t uri_size) {
+    if (!dbus_message_iter_next(arguments)
+            || dbus_message_iter_get_arg_type(arguments) != DBUS_TYPE_ARRAY) {
+        return -1;
+    }
+    DBusMessageIter entries;
+    dbus_message_iter_recurse(arguments, &entries);
+    while (dbus_message_iter_get_arg_type(&entries) == DBUS_TYPE_DICT_ENTRY) {
+        DBusMessageIter entry;
+        dbus_message_iter_recurse(&entries, &entry);
+        const char *key = NULL;
+        if (dbus_message_iter_get_arg_type(&entry) != DBUS_TYPE_STRING) return -1;
+        dbus_message_iter_get_basic(&entry, &key);
+        if (!dbus_message_iter_next(&entry)
+                || dbus_message_iter_get_arg_type(&entry) != DBUS_TYPE_VARIANT) {
+            return -1;
+        }
+        if (key != NULL && strcmp(key, "uris") == 0) {
+            DBusMessageIter values;
+            DBusMessageIter value;
+            dbus_message_iter_recurse(&entry, &values);
+            if (dbus_message_iter_get_arg_type(&values) != DBUS_TYPE_ARRAY) return -1;
+            dbus_message_iter_recurse(&values, &value);
+            const char *selected = NULL;
+            if (dbus_message_iter_get_arg_type(&value) != DBUS_TYPE_STRING) return -1;
+            dbus_message_iter_get_basic(&value, &selected);
+            if (selected == NULL || strlen(selected) >= uri_size) return -1;
+            strcpy(uri, selected);
+            return dbus_message_iter_next(&value) ? -1 : 0;
+        }
+        dbus_message_iter_next(&entries);
+    }
+    return -1;
+}
+
 static uint32_t wait_request_response_attempts(DBusConnection *connection,
-        const char *path, const char *label, int attempts) {
+        const char *path, const char *label, int attempts,
+        char *uri, size_t uri_size) {
     for (int attempt = 0; attempt < attempts; attempt++) {
         dbus_connection_read_write(connection, 100);
         DBusMessage *message;
@@ -161,6 +198,12 @@ static uint32_t wait_request_response_attempts(DBusConnection *connection,
                     exit(1);
                 }
                 dbus_message_iter_get_basic(&arguments, &response);
+                if (response == 0 && uri != NULL
+                        && copy_first_response_uri(&arguments, uri, uri_size) != 0) {
+                    dbus_message_unref(message);
+                    fprintf(stderr, "FAIL %s: missing single URI result\n", label);
+                    exit(1);
+                }
                 dbus_message_unref(message);
                 return response;
             }
@@ -173,7 +216,8 @@ static uint32_t wait_request_response_attempts(DBusConnection *connection,
 
 static uint32_t wait_request_response(DBusConnection *connection,
         const char *path, const char *label) {
-    return wait_request_response_attempts(connection, path, label, 50);
+    return wait_request_response_attempts(
+            connection, path, label, 50, NULL, 0);
 }
 
 static uint32_t portal_version(DBusConnection *connection,
@@ -579,13 +623,19 @@ static void open_directory(DBusConnection *connection) {
     }
     strcpy(path_copy, response_path);
     dbus_message_unref(reply);
+    char uri[4097] = {0};
     uint32_t response = wait_request_response_attempts(
-            connection, path_copy, "portal folder", 1800);
+            connection, path_copy, "portal folder", 1800, uri, sizeof(uri));
     if (response != 0) {
         fprintf(stderr, "FAIL portal folder: response=%u\n", response);
         exit(1);
     }
-    printf("PASS portal folder selected\n");
+    const char logical_prefix[] = "file:///home/archphene/Projects/";
+    if (strncmp(uri, logical_prefix, sizeof(logical_prefix) - 1) != 0) {
+        fprintf(stderr, "FAIL portal folder: URI is not a logical project path\n");
+        exit(1);
+    }
+    printf("PASS portal folder selected with one logical project URI\n");
 }
 
 static void open_filtered(DBusConnection *connection) {
@@ -645,7 +695,7 @@ static void open_filtered(DBusConnection *connection) {
     strcpy(path_copy, response_path);
     dbus_message_unref(reply);
     uint32_t response = wait_request_response_attempts(
-            connection, path_copy, "portal filtered", 600);
+            connection, path_copy, "portal filtered", 600, NULL, 0);
     if (response != 0) {
         fprintf(stderr, "FAIL portal filtered: response=%u\n", response);
         exit(1);

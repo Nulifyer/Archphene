@@ -134,8 +134,8 @@ probe_result="$(
   archphene_adb_run shell run-as "$manager" cat "$probe_output" |
     tr -d '\r'
 )"
-[[ "$probe_result" == "PASS portal folder selected" ]] ||
-  archphene_die "folder portal probe did not receive its selected URI"
+[[ "$probe_result" == "PASS portal folder selected with one logical project URI" ]] ||
+  archphene_die "folder portal probe did not receive its selected URI: $probe_result"
 
 archphene_adb_run logcat -c
 run_probe "$probe_output"

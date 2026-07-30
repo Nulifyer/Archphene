@@ -28,3 +28,26 @@ internal object PortalUriPolicy {
         return uri.port == -1 || uri.port in 1..65_535
     }
 }
+
+internal object PortalFileUri {
+    private const val LINUX_HOME_PREFIX = "/home/archphene/"
+
+    fun fromLogicalPath(path: String): String {
+        require(
+            path.startsWith(LINUX_HOME_PREFIX) &&
+                path.toByteArray(StandardCharsets.UTF_8).size <= PortalUriPolicy.MAX_URI_BYTES &&
+                path.none { character -> character.isISOControl() } &&
+                path
+                    .removePrefix(LINUX_HOME_PREFIX)
+                    .split('/')
+                    .none { component -> component == "." || component == ".." },
+        ) {
+            "File portal path is not a bounded logical Archphene home path"
+        }
+        return URI("file", "", path, null).toASCIIString().also { uri ->
+            require(uri.toByteArray(StandardCharsets.US_ASCII).size <= PortalUriPolicy.MAX_URI_BYTES) {
+                "File portal URI exceeds the protocol limit"
+            }
+        }
+    }
+}

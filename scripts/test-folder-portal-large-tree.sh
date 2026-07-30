@@ -127,7 +127,7 @@ probe_result="$(
   archphene_adb_run shell run-as "$manager" cat "$probe_output" |
     tr -d '\r'
 )"
-[[ "$probe_result" == "PASS portal folder selected" ]] ||
+[[ "$probe_result" == "PASS portal folder selected with one logical project URI" ]] ||
   archphene_die "large-tree portal probe did not receive its selected URI"
 
 actual_entries="$(
