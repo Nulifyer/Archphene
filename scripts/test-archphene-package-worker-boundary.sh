@@ -66,14 +66,23 @@ cache_inventory() {
 
 restore_section() {
   [[ -n "$original_section" ]] || return 0
-  local ui
+  local center ui x y
   ui="$(archphene_capture_ui "package-worker-restore-$serial" 2>/dev/null || true)"
   if archphene_regex_contains \
     "$ui" "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\""; then
-    archphene_tap_ui_pattern \
-      "$ui" \
-      "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
-      "$original_section" || true
+    center="$(
+      archphene_ui_node_center \
+        "$ui" \
+        "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+        "$original_section" 2>/dev/null || true
+    )"
+    if [[ "$center" =~ ^[0-9]+[[:space:]][0-9]+$ ]]; then
+      read -r x y <<<"$center"
+      archphene_adb_run shell input tap "$x" "$y" >/dev/null 2>&1 || true
+      archphene_wait_ui_optional \
+        "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"[^>]*selected=\"true\"" \
+        "package-worker-restore-selected-$serial" 10 >/dev/null 2>&1 || true
+    fi
   fi
 }
 
@@ -100,10 +109,8 @@ cleanup() {
       >/dev/null 2>&1 || true
     backup_ready=false
   fi
-  if [[ "$initially_running" == true ]]; then
-    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
-    restore_section || true
-  fi
+  archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+  restore_section >/dev/null 2>&1 || true
   if [[ "$initially_running" == false ]]; then
     archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
   fi
@@ -139,6 +146,13 @@ assert_restored() {
   fi
   archphene_adb_run shell run-as "$package" test ! -e "$backup_root" ||
     archphene_die "package worker left its backup directory"
+  if [[ "$initially_running" == true ]]; then
+    archphene_android_pid "$package" >/dev/null ||
+      archphene_die "package worker did not restore the running manager"
+  else
+    ! archphene_android_pid "$package" >/dev/null 2>&1 ||
+      archphene_die "package worker left a previously stopped manager running"
+  fi
 }
 
 if [[ "$skip_install" == false ]]; then
@@ -196,6 +210,8 @@ for name in ("Packages", "Files", "Terminal", "Settings"):
         break
 ' <<<"$initial_ui"
 )"
+[[ -n "$original_section" ]] ||
+  archphene_die "could not determine the original manager section"
 archphene_open_manager_section Packages "package-worker-packages-$serial"
 package_ui="$ARCHPHENE_UI"
 archphene_tap_ui_pattern \
