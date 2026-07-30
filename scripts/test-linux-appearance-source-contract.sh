@@ -133,10 +133,18 @@ grep -Fq 'nativeUpdateGuiColors(' "$runtime_service" \
   || archphene_die 'current manager runtime does not publish live Linux colors'
 grep -Fq 'runtimeBinder?.updateGuiColors(' "$session_service" \
   || archphene_die 'launcher sessions do not bridge Android appearance changes to Linux'
-grep -Fq 'g_file_monitor_directory(' "$gtk_live" \
-  || archphene_die 'GTK live settings do not use an event-driven file monitor'
+if ! grep -Fq 'g_file_monitor_directory(' "$gtk_live" &&
+    ! grep -Fq 'inotify_init1(' "$gtk_live"; then
+  archphene_die 'GTK live settings do not use an event-driven file monitor'
+fi
 ! grep -Fq 'g_timeout_add(' "$gtk_live" \
   || archphene_die 'GTK live settings still poll and allocate continuously'
+for toolkit_contract in RTLD_NOLOAD '"libgtk-4.so.1"' '"libgtk-3.so.0"' \
+    '"libadwaita-1.so.0"'; do
+  grep -Fq "$toolkit_contract" "$gtk_live" \
+    || archphene_die \
+      'GTK live settings do not handle local toolkit symbol namespaces'
+done
 ! grep -Fq -- '--allow-shlib-undefined' "$gtk_build" \
   || archphene_die 'GTK settings bridge must not defer its GLib symbols to an arbitrary target process'
 grep -Fq '662ee8c1c9546b10e394cac1d25205417b76580fab5d51524c5377e10024b34c' "$gtk_build" \

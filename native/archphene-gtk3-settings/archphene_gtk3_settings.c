@@ -87,6 +87,33 @@ static void write_diagnostic(const gchar *status)
     g_free(path);
 }
 
+/*
+ * Linux desktop applications normally load toolkit dependencies into the
+ * process-wide symbol namespace. Some Android/AArch64 loader paths retain
+ * those dependencies in a local namespace instead, even though the same ELF
+ * symbols are present. Prefer the normal lookup, then query only already
+ * loaded GTK libraries. RTLD_NOLOAD prevents the bridge from selecting or
+ * introducing a toolkit that the application did not choose.
+ */
+static gpointer resolve_toolkit_symbol(const gchar *name)
+{
+    gpointer symbol = dlsym(RTLD_DEFAULT, name);
+    if (symbol != NULL) return symbol;
+    static const gchar *libraries[] = {
+        "libgtk-4.so.1",
+        "libgtk-3.so.0",
+        "libadwaita-1.so.0",
+    };
+    for (guint index = 0; index < G_N_ELEMENTS(libraries); index++) {
+        gpointer library = dlopen(libraries[index], RTLD_LAZY | RTLD_NOLOAD);
+        if (library == NULL) continue;
+        symbol = dlsym(library, name);
+        dlclose(library);
+        if (symbol != NULL) return symbol;
+    }
+    return NULL;
+}
+
 static void portal_file_chooser_destroyed(
         gpointer data, GObject *chooser)
 {
@@ -194,7 +221,7 @@ static GtkSettingsGetDefault resolve_settings_get_default(void)
     union {
         gpointer object;
         GtkSettingsGetDefault function;
-    } symbol = {dlsym(RTLD_DEFAULT, "gtk_settings_get_default")};
+    } symbol = {resolve_toolkit_symbol("gtk_settings_get_default")};
     return symbol.function;
 }
 
@@ -203,7 +230,7 @@ static gpointer default_screen(void)
     union {
         gpointer object;
         GdkScreenGetDefault function;
-    } screen_symbol = {dlsym(RTLD_DEFAULT, "gdk_screen_get_default")};
+    } screen_symbol = {resolve_toolkit_symbol("gdk_screen_get_default")};
     return screen_symbol.function == NULL ? NULL : screen_symbol.function();
 }
 
@@ -213,20 +240,20 @@ static void reload_css_provider(gpointer screen, const gchar *css_path)
     union {
         gpointer object;
         GtkCssProviderNew function;
-    } new_symbol = {dlsym(RTLD_DEFAULT, "gtk_css_provider_new")};
+    } new_symbol = {resolve_toolkit_symbol("gtk_css_provider_new")};
     union {
         gpointer object;
         GdkDisplayGetDefault function;
-    } display_symbol = {dlsym(RTLD_DEFAULT, "gdk_display_get_default")};
+    } display_symbol = {resolve_toolkit_symbol("gdk_display_get_default")};
     union {
         gpointer object;
         GtkStyleContextAddProviderForDisplay function;
-    } add_display_symbol = {dlsym(RTLD_DEFAULT,
+    } add_display_symbol = {resolve_toolkit_symbol(
             "gtk_style_context_add_provider_for_display")};
     union {
         gpointer object;
         GtkStyleContextRemoveProviderForDisplay function;
-    } remove_display_symbol = {dlsym(RTLD_DEFAULT,
+    } remove_display_symbol = {resolve_toolkit_symbol(
             "gtk_style_context_remove_provider_for_display")};
     if (new_symbol.function != NULL && display_symbol.function != NULL
             && add_display_symbol.function != NULL
@@ -241,7 +268,8 @@ static void reload_css_provider(gpointer screen, const gchar *css_path)
         union {
             gpointer object;
             Gtk4CssProviderLoadFromPath function;
-        } load_symbol = {dlsym(RTLD_DEFAULT, "gtk_css_provider_load_from_path")};
+        } load_symbol = {
+                resolve_toolkit_symbol("gtk_css_provider_load_from_path")};
         if (load_symbol.function == NULL) return;
         load_symbol.function(active_css_provider, css_path);
         add_display_symbol.function(display, active_css_provider, 801);
@@ -251,16 +279,17 @@ static void reload_css_provider(gpointer screen, const gchar *css_path)
     union {
         gpointer object;
         Gtk3CssProviderLoadFromPath function;
-    } load_symbol = {dlsym(RTLD_DEFAULT, "gtk_css_provider_load_from_path")};
+    } load_symbol = {
+            resolve_toolkit_symbol("gtk_css_provider_load_from_path")};
     union {
         gpointer object;
         GtkStyleContextAddProviderForScreen function;
-    } add_symbol = {dlsym(RTLD_DEFAULT,
+    } add_symbol = {resolve_toolkit_symbol(
             "gtk_style_context_add_provider_for_screen")};
     union {
         gpointer object;
         GtkStyleContextRemoveProviderForScreen function;
-    } remove_symbol = {dlsym(RTLD_DEFAULT,
+    } remove_symbol = {resolve_toolkit_symbol(
             "gtk_style_context_remove_provider_for_screen")};
     if (new_symbol.function == NULL || load_symbol.function == NULL
             || add_symbol.function == NULL || remove_symbol.function == NULL) return;
@@ -285,7 +314,8 @@ static void reset_widgets(gpointer screen)
     union {
         gpointer object;
         GtkStyleContextResetWidgets function;
-    } reset_symbol = {dlsym(RTLD_DEFAULT, "gtk_style_context_reset_widgets")};
+    } reset_symbol = {
+            resolve_toolkit_symbol("gtk_style_context_reset_widgets")};
     if (screen != NULL && reset_symbol.function != NULL) reset_symbol.function(screen);
 }
 
@@ -294,11 +324,13 @@ static void update_libadwaita(gboolean dark)
     union {
         gpointer object;
         AdwStyleManagerGetDefault function;
-    } get_symbol = {dlsym(RTLD_DEFAULT, "adw_style_manager_get_default")};
+    } get_symbol = {
+            resolve_toolkit_symbol("adw_style_manager_get_default")};
     union {
         gpointer object;
         AdwStyleManagerSetColorScheme function;
-    } set_symbol = {dlsym(RTLD_DEFAULT, "adw_style_manager_set_color_scheme")};
+    } set_symbol = {
+            resolve_toolkit_symbol("adw_style_manager_set_color_scheme")};
     if (get_symbol.function == NULL || set_symbol.function == NULL) return;
     gpointer manager = get_symbol.function();
     if (manager != NULL) set_symbol.function(manager, dark ? 4 : 1);
