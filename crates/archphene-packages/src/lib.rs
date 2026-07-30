@@ -3593,7 +3593,15 @@ impl PackageRuntime {
     fn verified_aur_transaction_plan(
         &self,
         archives: &[InstallArchive],
+        assumed_dependencies: &[&str],
     ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
+        if assumed_dependencies.len() >= 256
+            || assumed_dependencies
+                .iter()
+                .any(|dependency| !safe_dependency_expression(dependency))
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
         let config_path = self.arch_root.join(AUR_PACMAN_CONFIG_FILE);
         let config = config_path
             .to_str()
@@ -3621,20 +3629,53 @@ impl PackageRuntime {
             cache,
             "--noconfirm",
             "--noprogressbar",
-            "-U",
-            "--print",
-            "--print-format",
-            "%n\t%v",
         ];
+        for dependency in assumed_dependencies {
+            plan_arguments.extend(["--assume-installed", *dependency]);
+        }
+        plan_arguments.extend(["-U", "--print", "--print-format", "%n\t%v"]);
         plan_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
         let plan =
             self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
         validate_install_plan(plan.as_str()?, archives)?;
-        let transaction_plan = self.preview_aur_install_transaction(archives)?;
+        let transaction_plan =
+            self.preview_aur_install_transaction(archives, assumed_dependencies)?;
         if transaction_plan.removals.len() > MAX_INSTALL_PLAN_REMOVALS {
             return Err(PackageRuntimeError::OutputLimit);
         }
         Ok(transaction_plan)
+    }
+
+    fn verified_aur_runtime_assumptions(
+        &self,
+        archives: &[InstallArchive],
+    ) -> Result<Vec<String>, PackageRuntimeError> {
+        let mut assumptions = Vec::new();
+        for archive in archives {
+            let package_info =
+                self.run(PackageTool::Bsdtar, &["-xOf", &archive.path, ".PKGINFO"])?;
+            for line in package_info.as_str()?.lines() {
+                let Some(dependency) = line.strip_prefix("depend = ") else {
+                    continue;
+                };
+                let name = dependency_expression_name(dependency)
+                    .ok_or(PackageRuntimeError::InvalidPayload)?;
+                if archives.iter().any(|archive| archive.name == name) {
+                    continue;
+                }
+                let assumption = pacman_assumed_dependency(dependency)
+                    .ok_or(PackageRuntimeError::InvalidPayload)?;
+                if assumptions.iter().any(|existing| existing == &assumption) {
+                    continue;
+                }
+                if assumptions.len() >= 255 {
+                    return Err(PackageRuntimeError::OutputLimit);
+                }
+                assumptions.push(assumption);
+            }
+        }
+        assumptions.sort();
+        Ok(assumptions)
     }
 
     pub fn plan_verified_aur_archives(
@@ -3645,7 +3686,10 @@ impl PackageRuntime {
         self.refresh_package_hook_overrides()?;
         let (archives, lifecycle_capabilities) =
             self.prepare_verified_aur_archives(inputs, selected_package)?;
-        let transaction_plan = self.verified_aur_transaction_plan(&archives)?;
+        let assumptions = self.verified_aur_runtime_assumptions(&archives)?;
+        let assumed_dependencies = assumptions.iter().map(String::as_str).collect::<Vec<_>>();
+        let transaction_plan =
+            self.verified_aur_transaction_plan(&archives, &assumed_dependencies)?;
         let input_sha256 =
             aur_install_input_sha256(selected_package, &archives, &lifecycle_capabilities)?;
         self.publish_package_replacement_review_digest(
@@ -3667,7 +3711,7 @@ impl PackageRuntime {
         self.refresh_package_hook_overrides()?;
         let (archives, lifecycle_capabilities) =
             self.prepare_verified_aur_archives(inputs, selected_package)?;
-        let transaction_plan = self.verified_aur_transaction_plan(&archives)?;
+        let transaction_plan = self.verified_aur_transaction_plan(&archives, &[])?;
         let input_sha256 =
             aur_install_input_sha256(selected_package, &archives, &lifecycle_capabilities)?;
         let replacements =
@@ -3832,11 +3876,14 @@ impl PackageRuntime {
                     Box::new(error),
                 )
             })?;
-        let transaction_plan = self
-            .verified_aur_transaction_plan(&archives)
-            .map_err(|error| {
-                PackageRuntimeError::Operation("rechecking AUR transaction plan", Box::new(error))
-            })?;
+        let transaction_plan =
+            self.verified_aur_transaction_plan(&archives, &[])
+                .map_err(|error| {
+                    PackageRuntimeError::Operation(
+                        "rechecking AUR transaction plan",
+                        Box::new(error),
+                    )
+                })?;
         let replacements = replacement_records
             .iter()
             .map(|record| InstalledPackageIdentity {
@@ -4334,16 +4381,18 @@ impl PackageRuntime {
         &self,
         archives: &[InstallArchive],
     ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
-        self.preview_install_transaction_with_config(archives, &self.pacman_config)
+        self.preview_install_transaction_with_config(archives, &self.pacman_config, &[])
     }
 
     fn preview_aur_install_transaction(
         &self,
         archives: &[InstallArchive],
+        assumed_dependencies: &[&str],
     ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
         self.preview_install_transaction_with_config(
             archives,
             &self.arch_root.join(AUR_PACMAN_CONFIG_FILE),
+            assumed_dependencies,
         )
     }
 
@@ -4351,6 +4400,7 @@ impl PackageRuntime {
         &self,
         archives: &[InstallArchive],
         config_path: &Path,
+        assumed_dependencies: &[&str],
     ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
         let live_local = self.arch_root.join("var/lib/pacman/local");
         let before = read_local_package_identities(&live_local)?;
@@ -4393,6 +4443,9 @@ impl PackageRuntime {
                 "--ask",
                 "4",
             ];
+            for dependency in assumed_dependencies {
+                arguments.extend(["--assume-installed", *dependency]);
+            }
             append_install_transaction_mode(&mut arguments, InstallResolutionMode::Normal);
             arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
             self.run_bytes_with_timeout(
@@ -7656,6 +7709,64 @@ fn safe_logical_name(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b'+' | b'-')
         })
+}
+
+fn safe_dependency_expression(value: &str) -> bool {
+    if value.is_empty() || value.len() > 256 || value.starts_with('-') {
+        return false;
+    }
+    let comparator = value
+        .bytes()
+        .position(|byte| matches!(byte, b'<' | b'=' | b'>'));
+    let Some(index) = comparator else {
+        return safe_logical_name(value);
+    };
+    if !safe_logical_name(&value[..index]) {
+        return false;
+    }
+    let suffix = &value[index..];
+    let operator_length = if suffix.starts_with(">=") || suffix.starts_with("<=") {
+        2
+    } else if suffix.starts_with('>') || suffix.starts_with('<') || suffix.starts_with('=') {
+        1
+    } else {
+        return false;
+    };
+    let version = &suffix[operator_length..];
+    !version.is_empty()
+        && version.len() <= 128
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'<' | b'=' | b'>'))
+}
+
+fn dependency_expression_name(value: &str) -> Option<&str> {
+    if !safe_dependency_expression(value) {
+        return None;
+    }
+    let end = value
+        .bytes()
+        .position(|byte| matches!(byte, b'<' | b'=' | b'>'))
+        .unwrap_or(value.len());
+    Some(&value[..end])
+}
+
+fn pacman_assumed_dependency(value: &str) -> Option<String> {
+    let name = dependency_expression_name(value)?;
+    let suffix = &value[name.len()..];
+    if suffix.is_empty() {
+        return Some(format!("{name}=0"));
+    }
+    let version = if let Some(version) = suffix.strip_prefix(">=") {
+        version
+    } else if let Some(version) = suffix.strip_prefix("<=") {
+        version
+    } else if let Some(version) = suffix.strip_prefix('=') {
+        version
+    } else {
+        return None;
+    };
+    Some(format!("{name}={version}"))
 }
 
 fn safe_packaged_name(value: &str) -> bool {
@@ -12021,6 +12132,45 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn pacman_assumed_dependency_expressions_are_strictly_bounded() {
+        for valid in [
+            "glib2",
+            "glib2>=2.42",
+            "libalpm.so=16",
+            "pacman>=7.1",
+            "pkg=1:2.0+r1-1",
+        ] {
+            assert!(safe_dependency_expression(valid), "{valid}");
+        }
+        for invalid in ["", "--bad", "pkg>=", "pkg >< 1", "pkg=1=2", "pkg\n=1", "=1"] {
+            assert!(!safe_dependency_expression(invalid), "{invalid:?}");
+        }
+        assert!(!safe_dependency_expression(&format!(
+            "pkg={}",
+            "1".repeat(129)
+        )));
+        assert!(!safe_dependency_expression(&"p".repeat(257)));
+        assert_eq!(
+            pacman_assumed_dependency("json-glib").as_deref(),
+            Some("json-glib=0"),
+        );
+        assert_eq!(
+            pacman_assumed_dependency("glib2>=2.42").as_deref(),
+            Some("glib2=2.42"),
+        );
+        assert_eq!(
+            pacman_assumed_dependency("libalpm.so=16").as_deref(),
+            Some("libalpm.so=16"),
+        );
+        assert_eq!(
+            pacman_assumed_dependency("example<=2").as_deref(),
+            Some("example=2"),
+        );
+        assert_eq!(pacman_assumed_dependency("example>1"), None);
+        assert_eq!(pacman_assumed_dependency("example<2"), None);
+    }
 
     fn test_resolution(label: &str) -> PackageResolution {
         PackageResolution {

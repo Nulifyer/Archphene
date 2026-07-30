@@ -1480,11 +1480,7 @@ impl BuilderRuntime {
 }
 
 fn publish_builder_ninja_wrapper(root: &OwnedFd, build_jobs: u8) -> Result<(), BuilderError> {
-    if !(1..=8).contains(&build_jobs) {
-        return Err(BuilderError::InvalidArgument);
-    }
-    let wrapper =
-        format!("#!/usr/bin/sh\nexec /usr/bin/ninja -j{build_jobs} \"$@\"\n").into_bytes();
+    let wrapper = builder_ninja_wrapper(build_jobs)?;
     let usr = open_directory(root, "usr")?;
     let local = open_or_create_directory(&usr, "local")?;
     let bin = open_or_create_directory(&local, "bin")?;
@@ -1499,7 +1495,11 @@ fn publish_builder_ninja_wrapper(root: &OwnedFd, build_jobs: u8) -> Result<(), B
             if existing == wrapper {
                 return Ok(());
             }
-            return Err(BuilderError::InvalidRuntime);
+            if !(1..=8).any(|jobs| {
+                builder_ninja_wrapper(jobs).is_ok_and(|candidate| existing == candidate)
+            }) {
+                return Err(BuilderError::InvalidRuntime);
+            }
         }
         Ok(_) => return Err(BuilderError::InvalidRuntime),
         Err(Errno::NOENT) => {}
@@ -1514,6 +1514,13 @@ fn publish_builder_ninja_wrapper(root: &OwnedFd, build_jobs: u8) -> Result<(), B
     )?;
     fsync(&bin)?;
     Ok(())
+}
+
+fn builder_ninja_wrapper(build_jobs: u8) -> Result<Vec<u8>, BuilderError> {
+    if !(1..=8).contains(&build_jobs) {
+        return Err(BuilderError::InvalidArgument);
+    }
+    Ok(format!("#!/usr/bin/sh\nexec /usr/bin/ninja -j{build_jobs} \"$@\"\n").into_bytes())
 }
 
 impl AurBuildSession {
@@ -5876,6 +5883,12 @@ summary\t1\t{}\n",
         );
         BuilderRuntime::prepare(&directory, &native, &manifest, 2)
             .expect("idempotent verified Builder runtime");
+        BuilderRuntime::prepare(&directory, &native, &manifest, 4)
+            .expect("valid adaptive concurrency change");
+        assert_eq!(
+            fs::read(&ninja).expect("updated Ninja wrapper"),
+            b"#!/usr/bin/sh\nexec /usr/bin/ninja -j4 \"$@\"\n",
+        );
         fs::write(&ninja, b"#!/usr/bin/sh\nexit 0\n").expect("tamper Ninja wrapper");
         fs::set_permissions(&ninja, fs::Permissions::from_mode(0o700))
             .expect("tampered wrapper mode");

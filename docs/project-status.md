@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-29
+Updated: 2026-07-30
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -23,8 +23,8 @@ lifecycle-script authorization, disabled arbitrary libalpm hooks with fixed
 maintenance adapters, contained executable and desktop ownership, APK-bound
 native runtime content, AndroidKeyStore launcher signing, authenticated Binder
 identity, and explicit key-loss recovery. A source contract keeps these claims
-linked to their Rust/Kotlin enforcement. Signed-scriptlet reverse rollback and
-interruption between multiple real AUR bases remain device-coverage tasks.
+linked to their Rust/Kotlin enforcement. Signed-scriptlet reverse rollback
+remains a device-coverage task.
 
 Graphical Linux sessions now retain the same Android foreground-service
 protection as the shared shell and long package/file work. The manager records
@@ -2160,9 +2160,26 @@ script, graph digest, ABI, and signed-closure digest before Kotlin prepares the
 first unfinished base with only its verified ancestors. Partial-base output is
 rejected, and the final native install path separately requires every reviewed
 base. The Rust workspace, strict Clippy, Android JVM tests/lint, and both
-release JNI ABIs pass. An exact-device kill after the first retained dependency
-base remains required before whole-operation recursive recovery is considered
-closed.
+release JNI ABIs pass.
+
+The exact-device prefix-recovery gate now passes on the physical AArch64
+Samsung. The Manager was force-stopped immediately after it atomically retained
+current `libpamac-aur 11.7.4-2` as base 1/2 for `pamac-aur 11.7.5-1`. Restart
+reverified the current 356-package, 448,395,520-byte signed closure and restored
+that exact prefix without rebuilding it; only base 2/2 ran before the final
+transaction. The gate exposed two generic recovery defects. A valid adaptive
+Ninja wrapper change from `-j2` to `-j4` was incorrectly treated as tampering,
+so only exact Archphene-generated wrappers may now be atomically updated while
+arbitrary content still fails closed. Final AUR preflight also attempted to
+resolve the verified archives before their reviewed official runtime
+dependencies existed. It now derives bounded libalpm
+`--assume-installed package=version` entries from the exact verified archive
+metadata for the two non-mutating plan passes only. Commit still installs the
+signed official dependencies, repeats an assumption-free plan, rechecks
+ownership/removals, and performs one final two-archive transaction. The device
+finished with 312 packages, exact `libpamac-aur`/`pamac-aur` records, four
+reconciled Android launchers, and no lock, mutation journal, retained graph
+capability, or fatal log.
 
 The AUR pre-install decision surface is now explicitly gated as a complete
 contract rather than by one token per section. Six mutually compact,
@@ -2852,7 +2869,7 @@ promote any topology into a compatibility claim.
 | Drag-and-drop | Generated GUI wrappers declare a `drag-drop` capability. Bounded plain text and `text/uri-list` map bidirectionally between Android `DragEvent` and standard Wayland data devices. Android files import through the conflict-safe document session; Linux exports are restricted to visible-home files and use exact Android URI grants. Copy negotiation, transfer, import/writeback, denied and granted provider access, completion, cancellation, and cleanup pass on x86_64 emulator and physical AArch64. |
 | GUI application documents | One manager-owned **Archphene Apps** DocumentsProvider exposes each generated GUI wrapper's visible Linux home while dotfiles and runtime state remain private. Per-wrapper endpoints require the manager signature permission and verify the calling package. `ACTION_VIEW` and `ACTION_EDIT` support up to 32 URI grants, collision-safe same-name imports, hash-based writeback, and concurrent Android-edit conflict copies. A document sent to an active `singleTask` wrapper presents a native warning before a generic safe restart; Cancel preserves the running app. Manager CRUD, direct-provider denial, active-app restart, same-name import, conflict preservation, writeback, and DocumentsUI browse pass on the x86_64 emulator and physical AArch64. |
 | Package discovery | Official Arch name/description candidates use deterministic exact, executable, prefix, token, and description ranking; executable ownership is merged from repository file databases, glmark2-es2-wayland resolves to glmark2, and installed-app multi-term search shares the same matching rules |
-| Recursive AUR package graphs | Rust-authorized dependency-first reviews, exact official/AUR provider partitioning, separate isolated Builder roots, digest-bound dependency manifests, independent output verification, one final pacman transaction, and durable graph-output restoration pass on physical AArch64 with current `libpamac-aur` → `pamac-aur`. The exact 339-package signed closure, both installed pacman records, generated launcher handoff, packaged GPGME runtime-command path, 1,318-byte mode-0600 graph capability, Manager replacement/restart, no-rebuild restore, and full-device Built/Update presentation pass. |
+| Recursive AUR package graphs | Rust-authorized dependency-first reviews, exact official/AUR provider partitioning, separate isolated Builder roots, digest-bound dependency manifests, independent output verification, one final pacman transaction, and durable graph-prefix restoration pass on physical AArch64 with current `libpamac-aur` → `pamac-aur`. The latest exact 356-package signed closure, forced death after base 1/2, no-rebuild prefix restore, remaining base, final two-archive transaction, both installed pacman records, generated launcher handoff, clean recovery state, and full-device completion presentation pass. |
 | OpenGL ES bridge | Current manager-generated GLMark2 wrappers start a same-UID Android virglrenderer helper on their first launch. The bounded ELF profiler recognizes exact literal `dlopen` SONAMEs without file-sized allocation, while process-map observation remains the fallback. Mesa reports virgl over the emulator NVIDIA OpenGL ES translator and completes 32 logged default scene variants at 1080x2205 with score 14 and exit 0. On the Samsung Galaxy S22 Ultra, virgl uses Qualcomm Adreno 730 / OpenGL ES 3.2 and completes 33 logged variants at 1080x2202 with score 12 and exit 0. Both devices pass distinct full-device frames, bounded geometry, stable-host, fallback/fatal-log, and same-UID fault-injection gates. |
 | 16 KB x86_64 loader | Patched glibc 2.43 is reproducibly linked with 64 KB PT_LOAD alignment and a 16 KB common page size. Every emitted loader/runtime ELF passes an independent alignment audit, and a similarly aligned dynamic executable runs through it inside the manager UID on the API 36 16 KB x86_64 emulator. Official Arch x86_64 package closures remain 4 KB-only and stay blocked. |
 | Release display matrix | Fail-closed KCalc, Mousepad, and Foot gates combine raw/PNG frames, contrast, semantic trees, toolkit config, actual content geometry, scoped logs, and manifests across phone/tablet/docked emulator density profiles. Current-source Samsung repeats the core KCalc, Mousepad, and Foot phone cases. Kate separately passes stable-process tablet rotation plus an actual temporary 1920x1080 emulator display, task placement, mapping, and targeted input; sustained physical external-display coverage remains. |
