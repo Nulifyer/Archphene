@@ -581,7 +581,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 - [x] Replace global `QT_SCALE_FACTOR` compatibility behavior with compositor-advertised logical size plus integer/fractional output scale; physical Samsung portrait/landscape reconfiguration passes without app-specific settings.
 - [x] Extend the compositor density gate to a bounded user-selected geometry scale. Auto retains the 432dp desktop floor; explicit 75%, 100%, 125%, and 150% values scale that automatic baseline in the compositor rather than injecting toolkit-specific geometry variables. Native tests cover every accepted bound, and Samsung Code proves the 125% output resolves to 346×705 logical pixels.
-- [ ] Validate live moves between Android displays while an explicit geometry scale is active.
+- [x] Validate live moves between Android displays while an explicit geometry scale is active. A state-preserving emulator gate moves the same unmodified Seahorse task from the 1080×2205 phone display to a real temporary 1920×1080 Android display and back at 125%, while the manager, wrapper, and Linux process IDs remain stable. The compositor converges from 346×706 to 1024×506 logical pixels and back with no pending resize or fatal event; inspected full-device captures, preference restoration, display cleanup, and foreground restoration are required by the repeatable gate. Physical Samsung DeX remains a separate release-hardware requirement.
 - [x] Define a generic overflow/panning policy for fixed desktop layouts and wide
   popup shortcut columns on phone displays without app-specific patches. Stock
   KCalc's primary Settings actions are visible and semantically actionable at

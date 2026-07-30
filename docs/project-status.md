@@ -246,8 +246,15 @@ gate switches both maintained devices to tablet and external-display-sized
 Android configurations, verifies accessibility geometry, rotates the Activity,
 and captures full-device views of every section. It restores the complete
 Archphene sandbox, prior section/running state, display overrides, and rotation;
-it does not download packages. A physical Samsung DeX/external-display audit
-with live display moves remains planned.
+it does not download packages. A separate state-preserving emulator gate moves
+the same unmodified Seahorse Android task from the 1080x2205 phone display to a
+real temporary 1920x1080 Android display and back while App scale remains 125%.
+The task and manager/wrapper/Linux process IDs remain stable as the compositor
+converges from 346x706 to 1024x506 logical pixels and back with no pending
+resize or fatal event. The gate requires inspected full-device captures and
+restores the scale preference, secondary display, prior manager section, and
+foreground Activity. Physical Samsung DeX/external-display hardware remains
+planned.
 
 The latest bounded Rust package-journal record is now exposed as stable Binder
 fields rather than reparsed UI text. Packages renders it as a recent-activity
@@ -3005,7 +3012,7 @@ input remains a separate unported capability and permission boundary.
 | Recursive AUR package graphs | Rust-authorized dependency-first reviews, exact official/AUR provider partitioning, separate isolated Builder roots, digest-bound dependency manifests, independent output verification, one final pacman transaction, and durable graph-prefix restoration pass on physical AArch64 with current `libpamac-aur` → `pamac-aur`. The latest exact 356-package signed closure, forced death after base 1/2, no-rebuild prefix restore, remaining base, final two-archive transaction, both installed pacman records, generated launcher handoff, clean recovery state, and full-device completion presentation pass. |
 | OpenGL ES bridge | Current manager-generated GLMark2 wrappers start a same-UID Android virglrenderer helper on their first launch. The bounded ELF profiler recognizes exact literal `dlopen` SONAMEs without file-sized allocation, while process-map observation remains the fallback. Mesa reports virgl over the emulator NVIDIA OpenGL ES translator and completes 32 logged default scene variants at 1080x2205 with score 14 and exit 0. On the Samsung Galaxy S22 Ultra, virgl uses Qualcomm Adreno 730 / OpenGL ES 3.2 and completes 33 logged variants at 1080x2202 with score 12 and exit 0. Both devices pass distinct full-device frames, bounded geometry, stable-host, fallback/fatal-log, and same-UID fault-injection gates. |
 | 16 KB x86_64 loader | Patched glibc 2.43 is reproducibly linked with 64 KB PT_LOAD alignment and a 16 KB common page size. Every emitted loader/runtime ELF passes an independent alignment audit, and a similarly aligned dynamic executable runs through it inside the manager UID on the API 36 16 KB x86_64 emulator. Official Arch x86_64 package closures remain 4 KB-only and stay blocked. |
-| Release display matrix | Fail-closed KCalc, Mousepad, and Foot gates combine raw/PNG frames, contrast, semantic trees, toolkit config, actual content geometry, scoped logs, and manifests across phone/tablet/docked emulator density profiles. Current-source Samsung repeats the core KCalc, Mousepad, and Foot phone cases. Kate separately passes stable-process tablet rotation plus an actual temporary 1920x1080 emulator display, task placement, mapping, and targeted input; sustained physical external-display coverage remains. |
+| Release display matrix | Fail-closed KCalc, Mousepad, and Foot gates combine raw/PNG frames, contrast, semantic trees, toolkit config, actual content geometry, scoped logs, and manifests across phone/tablet/docked emulator density profiles. Current-source Samsung repeats the core KCalc, Mousepad, and Foot phone cases. Kate separately passes stable-process tablet rotation plus an actual temporary 1920x1080 emulator display, task placement, mapping, and targeted input. Unmodified Seahorse additionally passes a state-preserving live task move from phone to a temporary 1920x1080 display and back at explicit 125% geometry: manager/wrapper/Linux identities remain stable and the compositor converges from 346x706 to 1024x506 logical pixels and back. Sustained physical external-display coverage remains. |
 
 ## In progress
 
