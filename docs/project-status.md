@@ -2830,6 +2830,13 @@ zero-allocation core, job, and Terminal paths), and all-target Clippy with
 warnings denied. Exact Android performance soaks remain local until a maintained
 physical-device runner is available.
 
+Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
+CI lane for debug unit tests and Android lint. That lane uses an explicit
+source-validation mode which omits native/runtime assembly and rejects any APK
+assembly request, so only complete normal builds can emit installable artifacts.
+The release workflow also provisions JDK 26; the prior JDK 17 setup could not
+pass the repository's current build contract.
+
 1. **Architecture support**
    - maintain the validated exact-ABI release workflow and production self-update regressions;
    - use official Arch Linux packages only for x86_64 and Arch Linux ARM packages/trust roots for AArch64;

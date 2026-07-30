@@ -3,6 +3,10 @@ plugins {
 }
 
 val archpheneAbi = providers.gradleProperty("archpheneAbi").orNull
+val sourceValidation =
+    providers.gradleProperty("archpheneSourceValidation")
+        .map(String::toBooleanStrict)
+        .orElse(false)
 require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
     "archpheneAbi must be x86_64 or arm64-v8a"
 }
@@ -79,11 +83,13 @@ android {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(rootProject.tasks.named("buildArchpheneRust"))
-    dependsOn(rootProject.tasks.named("buildArchpheneCompositor"))
-    dependsOn(rootProject.tasks.named("stageArchphenePackageRuntime"))
-    dependsOn(rootProject.tasks.named("stageArchpheneAndroidDbus"))
-    dependsOn(rootProject.tasks.named("stageArchpheneAndroidGpu"))
-    dependsOn(rootProject.tasks.named("stageArchpheneLauncherTemplate"))
-    dependsOn(rootProject.tasks.named("stageArchpheneTerminalFont"))
+    if (!sourceValidation.get()) {
+        dependsOn(rootProject.tasks.named("buildArchpheneRust"))
+        dependsOn(rootProject.tasks.named("buildArchpheneCompositor"))
+        dependsOn(rootProject.tasks.named("stageArchphenePackageRuntime"))
+        dependsOn(rootProject.tasks.named("stageArchpheneAndroidDbus"))
+        dependsOn(rootProject.tasks.named("stageArchpheneAndroidGpu"))
+        dependsOn(rootProject.tasks.named("stageArchpheneLauncherTemplate"))
+        dependsOn(rootProject.tasks.named("stageArchpheneTerminalFont"))
+    }
 }

@@ -2,9 +2,25 @@ plugins {
     id("com.android.application") version "9.3.0" apply false
 }
 
-val requiredJdk = "26.0.1"
-check(System.getProperty("java.version") == requiredJdk) {
-    "Archphene builds require JDK $requiredJdk; current runtime is ${System.getProperty("java.version")}"
+val requiredJdkFeature = 26
+check(Runtime.version().feature() == requiredJdkFeature) {
+    "Archphene builds require JDK $requiredJdkFeature; current runtime is ${System.getProperty("java.version")}"
+}
+
+val sourceValidation =
+    providers.gradleProperty("archpheneSourceValidation")
+        .map(String::toBooleanStrict)
+        .orElse(false)
+if (sourceValidation.get()) {
+    val allowedTasks = setOf("lintDebug", "testDebugUnitTest")
+    check(
+        gradle.startParameter.taskNames.isNotEmpty() &&
+            gradle.startParameter.taskNames.all { task ->
+                task.substringAfterLast(':') in allowedTasks
+            },
+    ) {
+        "archpheneSourceValidation may run only lintDebug and testDebugUnitTest"
+    }
 }
 
 tasks.register<Exec>("buildArchpheneRust") {

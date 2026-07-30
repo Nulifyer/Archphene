@@ -25,6 +25,7 @@ required_workflow = (
     "Archphene-arm64-v8a-$version_name.apk",
     'gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber',
     'gh release edit "$RELEASE_TAG" --draft=false',
+    'java-version: "26"',
 )
 for value in required_workflow:
     if value not in workflow:
