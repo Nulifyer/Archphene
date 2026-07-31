@@ -1621,6 +1621,7 @@ fn copy_wayland_pixels_to_android(
 #[cfg(target_os = "android")]
 #[allow(unsafe_code)]
 mod android_graphics_ffi {
+    use super::{PresentationCopyDamage, PresentationSlotContent};
     use std::ffi::{c_char, c_void};
     use std::marker::PhantomData;
     use std::mem::zeroed;
@@ -1820,6 +1821,7 @@ mod android_graphics_ffi {
         generation: u32,
         buffer: NonNull<AndroidHardwareBuffer>,
         stride_bytes: usize,
+        content: PresentationSlotContent,
         state: HardwareBufferState,
         release_context: ReleaseContext,
     }
@@ -1837,6 +1839,8 @@ mod android_graphics_ffi {
         width: usize,
         height: usize,
         stride_bytes: usize,
+        copy_damage: PresentationCopyDamage,
+        frame_damage: PresentationCopyDamage,
     }
 
     struct ReleaseContext {
@@ -1949,11 +1953,12 @@ mod android_graphics_ffi {
             Ok(())
         }
 
-        pub(super) fn with_locked_rgba<R>(
+        pub(super) fn with_locked_rgba(
             &mut self,
-            operation: impl FnOnce(WindowBuffer<'_>) -> R,
-        ) -> Result<(R, i32), i32> {
-            let reservation = reserve_hardware_slot(&self.presentation).ok_or(-8)?;
+            frame_damage: PresentationCopyDamage,
+            operation: impl FnOnce(WindowBuffer<'_>, PresentationCopyDamage) -> i32,
+        ) -> Result<(i32, i32), i32> {
+            let reservation = reserve_hardware_slot(&self.presentation, frame_damage).ok_or(-8)?;
             let Some(byte_count) = reservation
                 .stride_bytes
                 .checked_mul(reservation.height)
@@ -1988,12 +1993,15 @@ mod android_graphics_ffi {
             // SAFETY: AHardwareBuffer_describe supplied this bounded stride and
             // height, and the buffer remains locked for this borrow.
             let pixels = unsafe { std::slice::from_raw_parts_mut(address.as_ptr(), byte_count) };
-            let result = operation(WindowBuffer {
-                width: reservation.width,
-                height: reservation.height,
-                stride_bytes: reservation.stride_bytes,
-                pixels,
-            });
+            let result = operation(
+                WindowBuffer {
+                    width: reservation.width,
+                    height: reservation.height,
+                    stride_bytes: reservation.stride_bytes,
+                    pixels,
+                },
+                reservation.copy_damage,
+            );
             let mut acquire_fence = -1;
             // SAFETY: exactly balances the successful exclusive lock.
             let unlocked = unsafe {
@@ -2001,8 +2009,12 @@ mod android_graphics_ffi {
             };
             if unlocked != 0 {
                 close_descriptor(acquire_fence);
-                return_hardware_slot(&self.presentation, reservation.id, -1);
+                invalidate_hardware_slot(&self.presentation, reservation.id, -1);
                 return Err(-4);
+            }
+            if result != 0 {
+                invalidate_hardware_slot(&self.presentation, reservation.id, acquire_fence);
+                return Ok((result, 0));
             }
             let posted = present_hardware_slot(&self.presentation, reservation, acquire_fence);
             Ok((result, posted))
@@ -2078,6 +2090,7 @@ mod android_graphics_ffi {
                 generation: 0,
                 buffer,
                 stride_bytes,
+                content: PresentationSlotContent::default(),
                 state: HardwareBufferState::Available(-1),
                 release_context: ReleaseContext {
                     slot_id: 0,
@@ -2088,7 +2101,10 @@ mod android_graphics_ffi {
         Ok(slots)
     }
 
-    fn reserve_hardware_slot(presentation: &PresentationState) -> Option<SlotReservation> {
+    fn reserve_hardware_slot(
+        presentation: &PresentationState,
+        frame_damage: PresentationCopyDamage,
+    ) -> Option<SlotReservation> {
         let mut buffers = presentation
             .buffers
             .lock()
@@ -2108,6 +2124,7 @@ mod android_graphics_ffi {
         }
         let index = selected?;
         let slot = &mut buffers.slots[index];
+        let copy_damage = slot.content.copy_damage(frame_damage);
         slot.state = HardwareBufferState::Writing;
         Some(SlotReservation {
             id: slot.id,
@@ -2115,6 +2132,8 @@ mod android_graphics_ffi {
             width,
             height,
             stride_bytes: slot.stride_bytes,
+            copy_damage,
+            frame_damage,
         })
     }
 
@@ -2124,6 +2143,19 @@ mod android_graphics_ffi {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(slot) = buffers.slots.iter_mut().find(|slot| slot.id == slot_id) {
+            slot.state = HardwareBufferState::Available(fence);
+        } else {
+            close_descriptor(fence);
+        }
+    }
+
+    fn invalidate_hardware_slot(presentation: &PresentationState, slot_id: u64, fence: i32) {
+        let mut buffers = presentation
+            .buffers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(slot) = buffers.slots.iter_mut().find(|slot| slot.id == slot_id) {
+            slot.content.invalidate();
             slot.state = HardwareBufferState::Available(fence);
         } else {
             close_descriptor(fence);
@@ -2141,7 +2173,7 @@ mod android_graphics_ffi {
             return_hardware_slot(presentation, reservation.id, -1);
             return -5;
         };
-        let (completion_context, source, destination) = {
+        let (completion_context, source, destination, damage) = {
             let mut buffers = presentation
                 .buffers
                 .lock()
@@ -2176,22 +2208,40 @@ mod android_graphics_ffi {
                         .cast::<c_void>(),
                 )
             });
+            let generation = buffers.slots[index].generation;
+            for slot in &mut buffers.slots {
+                if slot.id != reservation.id && slot.generation == generation {
+                    slot.content.mark_stale(reservation.frame_damage);
+                }
+            }
+            buffers.slots[index].content.mark_presented();
             buffers.slots[index].state = HardwareBufferState::Current;
             buffers.current = Some(reservation.id);
+            let source = AndroidRect {
+                left: 0,
+                top: 0,
+                right: reservation.width as i32,
+                bottom: reservation.height as i32,
+            };
+            let damage = match reservation.frame_damage {
+                PresentationCopyDamage::Full => source,
+                PresentationCopyDamage::Region(region) => AndroidRect {
+                    left: region.x,
+                    top: region.y,
+                    right: region.right() as i32,
+                    bottom: region.bottom() as i32,
+                },
+            };
             (
                 completion_context,
-                AndroidRect {
-                    left: 0,
-                    top: 0,
-                    right: reservation.width as i32,
-                    bottom: reservation.height as i32,
-                },
+                source,
                 AndroidRect {
                     left: 0,
                     top: 0,
                     right: buffers.destination_width,
                     bottom: buffers.destination_height,
                 },
+                damage,
             )
         };
         unsafe {
@@ -2211,7 +2261,7 @@ mod android_graphics_ffi {
             android_surface_transaction_set_damage_region(
                 transaction.as_ptr(),
                 presentation.control.as_ptr(),
-                &source,
+                &damage,
                 1,
             );
             android_surface_transaction_set_buffer_transparency(
@@ -2908,6 +2958,7 @@ fn copy_last_frame_to_native_window(
     let Some(frame) = launcher_presentation_frame(&core.state) else {
         return -1;
     };
+    let frame_damage = presentation_copy_damage(&core.state, &frame);
     let (Ok(width), Ok(height)) = (i32::try_from(frame.width), i32::try_from(frame.height)) else {
         return -2;
     };
@@ -2921,9 +2972,9 @@ fn copy_last_frame_to_native_window(
         *buffer_width = width;
         *buffer_height = height;
     }
-    let (result, posted) = match window
-        .with_locked_rgba(|buffer| copy_frame_to_native_window_buffer(&frame, buffer))
-    {
+    let (result, posted) = match window.with_locked_rgba(frame_damage, |buffer, copy_damage| {
+        copy_frame_to_native_window_buffer(&frame, buffer, copy_damage)
+    }) {
         Ok(result) => result,
         Err(error) => return error,
     };
@@ -2934,6 +2985,56 @@ fn copy_last_frame_to_native_window(
     } else {
         0
     }
+}
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn presentation_copy_damage(
+    state: &CompositorState,
+    frame: &CommittedFrame,
+) -> PresentationCopyDamage {
+    let Some(bounds) = state
+        .presentation_damage
+        .iter()
+        .copied()
+        .reduce(RegionRectangle::union)
+    else {
+        return PresentationCopyDamage::Full;
+    };
+    let (Ok(source_width), Ok(source_height)) = (
+        u32::try_from(state.output_width),
+        u32::try_from(state.output_height),
+    ) else {
+        return PresentationCopyDamage::Full;
+    };
+    let Some(bounds) = bounds.clip(source_width, source_height) else {
+        return PresentationCopyDamage::Full;
+    };
+    let scale_floor = |value: i64, source: u32, destination: u32| {
+        value
+            .saturating_mul(i64::from(destination))
+            .div_euclid(i64::from(source))
+    };
+    let scale_ceil = |value: i64, source: u32, destination: u32| {
+        value
+            .saturating_mul(i64::from(destination))
+            .saturating_add(i64::from(source) - 1)
+            .div_euclid(i64::from(source))
+    };
+    if source_width == 0 || source_height == 0 || frame.width == 0 || frame.height == 0 {
+        return PresentationCopyDamage::Full;
+    }
+    let left = scale_floor(i64::from(bounds.x), source_width, frame.width);
+    let top = scale_floor(i64::from(bounds.y), source_height, frame.height);
+    let right = scale_ceil(bounds.right(), source_width, frame.width);
+    let bottom = scale_ceil(bounds.bottom(), source_height, frame.height);
+    RegionRectangle::new(
+        left as i32,
+        top as i32,
+        (right - left) as i32,
+        (bottom - top) as i32,
+    )
+    .and_then(|damage| damage.clip(frame.width, frame.height))
+    .map_or(PresentationCopyDamage::Full, PresentationCopyDamage::Region)
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -3201,6 +3302,7 @@ fn launcher_presentation_signature(state: &CompositorState) -> [i32; 6] {
 fn copy_frame_to_native_window_buffer(
     frame: &CommittedFrame,
     buffer: android_graphics_ffi::WindowBuffer<'_>,
+    damage: PresentationCopyDamage,
 ) -> i32 {
     let android_graphics_ffi::WindowBuffer {
         width,
@@ -3208,8 +3310,6 @@ fn copy_frame_to_native_window_buffer(
         stride_bytes: destination_stride,
         pixels: destination,
     } = buffer;
-    destination.fill(0);
-
     let frame_width = frame.width as usize;
     let frame_height = frame.height as usize;
     if frame_width == 0 || frame_height == 0 {
@@ -3220,13 +3320,28 @@ fn copy_frame_to_native_window_buffer(
     };
     let frame_pixels = frame.pixels();
     if width == frame_width && height == frame_height {
-        for row in 0..height {
+        let region = match damage {
+            PresentationCopyDamage::Full => {
+                destination.fill(0);
+                RegionRectangle::new(0, 0, width as i32, height as i32).expect("validated frame")
+            }
+            PresentationCopyDamage::Region(region) => {
+                let Some(region) = region.clip(frame.width, frame.height) else {
+                    return -4;
+                };
+                region
+            }
+        };
+        let left = region.x as usize;
+        let row_bytes = region.width as usize * 4;
+        for row in region.y as usize..region.bottom() as usize {
             let source_start = row * source_stride;
-            let destination_start = row * destination_stride;
+            let source_start = source_start + left * 4;
+            let destination_start = row * destination_stride + left * 4;
             if copy_wayland_pixels_to_android(
-                &frame_pixels[source_start..source_start + source_stride],
+                &frame_pixels[source_start..source_start + row_bytes],
                 frame.format,
-                &mut destination[destination_start..destination_start + source_stride],
+                &mut destination[destination_start..destination_start + row_bytes],
             )
             .is_err()
             {
@@ -3235,6 +3350,7 @@ fn copy_frame_to_native_window_buffer(
         }
         return 0;
     }
+    destination.fill(0);
     for destination_y in 0..height {
         let source_y = destination_y.saturating_mul(frame_height) / height;
         for destination_x in 0..width {
@@ -3363,6 +3479,65 @@ impl RegionRectangle {
             width: (right - left).clamp(1, i64::from(i32::MAX)) as i32,
             height: (bottom - top).clamp(1, i64::from(i32::MAX)) as i32,
         }
+    }
+}
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentationCopyDamage {
+    Full,
+    Region(RegionRectangle),
+}
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn merge_presentation_copy_damage(
+    pending: Option<PresentationCopyDamage>,
+    current: PresentationCopyDamage,
+) -> PresentationCopyDamage {
+    match (pending, current) {
+        (Some(PresentationCopyDamage::Full), _) | (_, PresentationCopyDamage::Full) => {
+            PresentationCopyDamage::Full
+        }
+        (
+            Some(PresentationCopyDamage::Region(previous)),
+            PresentationCopyDamage::Region(current),
+        ) => PresentationCopyDamage::Region(previous.union(current)),
+        (None, current) => current,
+    }
+}
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PresentationSlotContent {
+    initialized: bool,
+    pending_damage: Option<PresentationCopyDamage>,
+}
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+impl PresentationSlotContent {
+    fn copy_damage(self, current: PresentationCopyDamage) -> PresentationCopyDamage {
+        if self.initialized {
+            merge_presentation_copy_damage(self.pending_damage, current)
+        } else {
+            PresentationCopyDamage::Full
+        }
+    }
+
+    fn mark_stale(&mut self, current: PresentationCopyDamage) {
+        if self.initialized {
+            self.pending_damage =
+                Some(merge_presentation_copy_damage(self.pending_damage, current));
+        }
+    }
+
+    fn mark_presented(&mut self) {
+        self.initialized = true;
+        self.pending_damage = None;
+    }
+
+    fn invalidate(&mut self) {
+        self.initialized = false;
+        self.pending_damage = None;
     }
 }
 
@@ -18287,6 +18462,74 @@ mod tests {
         assert_eq!(
             first.union(second),
             RegionRectangle::new(0, 0, 4, 4).expect("expected")
+        );
+    }
+
+    #[test]
+    fn scales_and_accumulates_retained_presentation_damage() {
+        let frame = CommittedFrame::new(
+            200,
+            100,
+            wl_shm::Format::Xrgb8888,
+            vec![0; 200 * 100 * 4],
+            None,
+        );
+        let mut state = CompositorState {
+            output_width: 100,
+            output_height: 50,
+            ..CompositorState::default()
+        };
+        assert_eq!(
+            presentation_copy_damage(&state, &frame),
+            PresentationCopyDamage::Full
+        );
+        state.presentation_damage.push(
+            RegionRectangle::new(10, 5, 20, 10).expect("logical presentation damage"),
+        );
+        assert_eq!(
+            presentation_copy_damage(&state, &frame),
+            PresentationCopyDamage::Region(
+                RegionRectangle::new(20, 10, 40, 20).expect("physical presentation damage")
+            )
+        );
+
+        let prior = RegionRectangle::new(0, 0, 10, 10).expect("prior slot damage");
+        let current = RegionRectangle::new(20, 10, 5, 5).expect("current frame damage");
+        assert_eq!(
+            merge_presentation_copy_damage(
+                Some(PresentationCopyDamage::Region(prior)),
+                PresentationCopyDamage::Region(current),
+            ),
+            PresentationCopyDamage::Region(prior.union(current))
+        );
+        assert_eq!(
+            merge_presentation_copy_damage(
+                Some(PresentationCopyDamage::Region(prior)),
+                PresentationCopyDamage::Full,
+            ),
+            PresentationCopyDamage::Full
+        );
+
+        let mut slot = PresentationSlotContent::default();
+        assert_eq!(
+            slot.copy_damage(PresentationCopyDamage::Region(current)),
+            PresentationCopyDamage::Full
+        );
+        slot.mark_presented();
+        assert_eq!(
+            slot.copy_damage(PresentationCopyDamage::Region(current)),
+            PresentationCopyDamage::Region(current)
+        );
+        slot.mark_stale(PresentationCopyDamage::Region(prior));
+        slot.mark_stale(PresentationCopyDamage::Region(current));
+        assert_eq!(
+            slot.copy_damage(PresentationCopyDamage::Region(current)),
+            PresentationCopyDamage::Region(prior.union(current))
+        );
+        slot.invalidate();
+        assert_eq!(
+            slot.copy_damage(PresentationCopyDamage::Region(current)),
+            PresentationCopyDamage::Full
         );
     }
 

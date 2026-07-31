@@ -3160,8 +3160,20 @@ to preserve its stable base across later in-place client damage. Unit tests cove
 direct eligibility, physical-size mismatch, transform and viewport fallback,
 low-alpha opaque-region fallback, and popup-base isolation; the full workspace
 and strict Clippy gates plus rebuilt x86_64 and AArch64 Android compositor probes
-pass. Retained-raster conversion/copy into `AHardwareBuffer` and direct client
-dmabuf import remain open.
+pass.
+
+Android presentation now retains content validity and one conservative stale
+damage union independently for each of its three reusable `AHardwareBuffer`
+slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
+Otherwise a selected slot converts only the physical rectangle covering every
+frame that slot missed, while `ASurfaceTransaction` receives the current frame's
+damage rectangle. Logical compositor damage is scaled outward to physical frame
+coordinates. Copy or unlock failure invalidates the slot before reuse, so a
+partially written buffer can never become a partial-copy baseline. Host tests
+cover scaling, full initialization, clean reuse, stale union, and invalidation;
+the full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
+Android probes pass. CPU conversion remains damage-driven until direct client
+dmabuf import removes it.
 
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
