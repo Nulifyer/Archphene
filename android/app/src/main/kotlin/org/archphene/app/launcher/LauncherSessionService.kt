@@ -118,6 +118,7 @@ class LauncherSessionService : Service() {
     private class Session(
         val id: Int,
         val uid: Int,
+        val protocolVersion: Int,
         val identity: VerifiedLauncherIdentity,
         val clientToken: IBinder,
         val authorization: LauncherAuthorization,
@@ -135,6 +136,7 @@ class LauncherSessionService : Service() {
         var gpuBridge: AndroidGpuBridge? = null
         var audioBridge: LauncherAudioBridge? = null
         var cameraBridge: LauncherCameraBridge? = null
+        var hostActive = false
         var audioStartInProgress = false
         var audioStartComplete = false
         var microphonePermissionState = MICROPHONE_PERMISSION_NONE
@@ -146,6 +148,8 @@ class LauncherSessionService : Service() {
         var frameLogged = false
         var surfaceWidth = 0
         var surfaceHeight = 0
+        var logicalWidth = 0
+        var logicalHeight = 0
         var densityDpi = DEFAULT_DENSITY_DPI
         var fontScaleMillis = DEFAULT_FONT_SCALE_MILLIS
         var attachmentFramesLogged = 0
@@ -155,7 +159,7 @@ class LauncherSessionService : Service() {
                 .allocateDirect(
                     NativeLauncherCompositor.PRESENTATION_COMPONENTS * Int.SIZE_BYTES,
                 ).order(ByteOrder.LITTLE_ENDIAN)
-        var inputLogged = false
+        var inputKindsLogged = 0
         var clipboardLogged = false
         var androidPasteLogged = false
         var linuxCopyLogged = false
@@ -194,6 +198,8 @@ class LauncherSessionService : Service() {
         var imePosted = false
         var imeDrain: Runnable? = null
         var lastImeChangeSerial = Int.MIN_VALUE
+        var lastImeDiagnosticActive = false
+        var lastImeDiagnosticEvidence = LauncherImeEvidencePolicy.NONE
         var imeLogged = false
         var pendingDocumentRequest: PendingDocumentRequest? = null
         var pendingLaunchDocument: LauncherPortalOpenDocument? = null
@@ -385,6 +391,8 @@ class LauncherSessionService : Service() {
                 TAG,
                 "Releasing launcher resources session=${session.id} close=$closeCompositor",
             )
+            session.hostActive = false
+            session.audioBridge?.setHostActive(false)
             if (closeCompositor) {
                 val linuxHandle = session.linuxHandle
                 session.linuxHandle = 0L
@@ -525,14 +533,14 @@ class LauncherSessionService : Service() {
                             return@runCatching OpenResult(RESULT_INVALID, 0, null)
                         }
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         token == null ||
                         data.dataAvail() != 0
                     ) {
                         document?.document?.descriptor?.close()
                         return@runCatching OpenResult(RESULT_INVALID, 0, null)
                     }
-                    openSession(Binder.getCallingUid(), token, document)
+                    openSession(Binder.getCallingUid(), version, token, document)
                 }.getOrElse { error ->
                     Log.w(TAG, "Rejected malformed launcher open", error)
                     OpenResult(RESULT_INVALID, 0, null)
@@ -542,6 +550,13 @@ class LauncherSessionService : Service() {
             reply.writeInt(result.sessionId)
             reply.writeString(result.authorization?.label)
             reply.writeInt(if (result.authorization?.terminal == true) 1 else 0)
+            reply.writeInt(
+                if (result.authorization?.prefersPhoneLandscape == true) {
+                    ORIENTATION_POLICY_SDL_PHONE
+                } else {
+                    ORIENTATION_POLICY_DEFAULT
+                },
+            )
         }
 
         private fun transactClose(
@@ -554,7 +569,7 @@ class LauncherSessionService : Service() {
                     val version = data.readInt()
                     val sessionId = data.readInt()
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         data.dataAvail() != 0
                     ) {
@@ -595,7 +610,7 @@ class LauncherSessionService : Service() {
                             DEFAULT_FONT_SCALE_MILLIS
                         }
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         width !in 1..MAX_SURFACE_DIMENSION ||
                         height !in 1..MAX_SURFACE_DIMENSION ||
@@ -605,7 +620,7 @@ class LauncherSessionService : Service() {
                         surface?.isValid != true ||
                         data.dataAvail() != 0
                     ) {
-                        return@runCatching RESULT_INVALID
+                        return@runCatching SurfaceAttachResult(RESULT_INVALID)
                     }
                     attachSurface(
                         Binder.getCallingUid(),
@@ -616,17 +631,21 @@ class LauncherSessionService : Service() {
                         densityDpi,
                         fontScaleMillis,
                     ).also { attachResult ->
-                        if (attachResult == RESULT_OK) {
+                        if (attachResult.status == RESULT_OK) {
                             surface = null
                         }
                     }
                 }.getOrElse { error ->
                     Log.w(TAG, "Rejected malformed launcher Surface", error)
-                    RESULT_INVALID
+                    SurfaceAttachResult(RESULT_INVALID)
                 }
             surface?.release()
             reply.writeNoException()
-            reply.writeInt(result)
+            reply.writeInt(result.status)
+            if (result.status == RESULT_OK) {
+                reply.writeInt(result.logicalWidth)
+                reply.writeInt(result.logicalHeight)
+            }
         }
 
         private fun transactDetachSurface(
@@ -639,7 +658,7 @@ class LauncherSessionService : Service() {
                     val version = data.readInt()
                     val sessionId = data.readInt()
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         data.dataAvail() != 0
                     ) {
@@ -665,7 +684,7 @@ class LauncherSessionService : Service() {
                     val sessionId = data.readInt()
                     val count = data.readInt()
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         count !in 1..MAX_INPUT_RECORDS ||
                         data.dataAvail() != count * INPUT_FIELDS * Int.SIZE_BYTES
@@ -698,7 +717,7 @@ class LauncherSessionService : Service() {
                     val htmlPresent = if (present == 1) data.readInt() else 0
                     val html = if (htmlPresent == 1) data.readString() else null
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         present !in 0..1 ||
                         htmlPresent !in 0..1 ||
@@ -746,7 +765,7 @@ class LauncherSessionService : Service() {
                     val a = data.readInt()
                     val b = data.readInt()
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         operation !in IME_COMMIT..IME_EDITOR_ACTION ||
                         ((operation == IME_COMMIT || operation == IME_PREEDIT) &&
@@ -863,7 +882,7 @@ class LauncherSessionService : Service() {
                                     directoryName.isEmpty()
                         }
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         requestId <= 0 ||
                         operation !in
@@ -925,7 +944,7 @@ class LauncherSessionService : Service() {
                     val text = data.readString().orEmpty()
                     val internalRefresh = nodeId == 0 && action == "refresh"
                     if (
-                        version != PROTOCOL_VERSION ||
+                        !supportedProtocolVersion(version) ||
                         sessionId <= 0 ||
                         (!internalRefresh && nodeId !in 1..MAX_ACCESSIBILITY_NODE_ID) ||
                         (action == "refresh" && !internalRefresh) ||
@@ -962,6 +981,12 @@ class LauncherSessionService : Service() {
         val authorization: LauncherAuthorization?,
     )
 
+    private data class SurfaceAttachResult(
+        val status: Int,
+        val logicalWidth: Int = 0,
+        val logicalHeight: Int = 0,
+    )
+
     private data class PendingLaunchDocument(
         val document: LauncherPortalOpenDocument,
         val mimeType: String,
@@ -970,6 +995,7 @@ class LauncherSessionService : Service() {
     @Synchronized
     private fun openSession(
         callingUid: Int,
+        protocolVersion: Int,
         clientToken: IBinder,
         pendingDocument: PendingLaunchDocument?,
     ): OpenResult {
@@ -1022,7 +1048,11 @@ class LauncherSessionService : Service() {
             }
         if (existing != null) {
             pendingDocument?.document?.descriptor?.close()
-            return OpenResult(RESULT_OK, existing.id, authorization)
+            return if (existing.protocolVersion == protocolVersion) {
+                OpenResult(RESULT_OK, existing.id, authorization)
+            } else {
+                OpenResult(RESULT_INVALID, 0, null)
+            }
         }
         if (sessions.size >= MAX_SESSIONS) {
             return reject(RESULT_BUSY)
@@ -1036,6 +1066,7 @@ class LauncherSessionService : Service() {
             Session(
                 sessionId,
                 callingUid,
+                protocolVersion,
                 identity,
                 clientToken,
                 authorization,
@@ -1069,12 +1100,23 @@ class LauncherSessionService : Service() {
         height: Int,
         densityDpi: Int,
         fontScaleMillis: Int,
-    ): Int {
-        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+    ): SurfaceAttachResult {
+        val session =
+            authorizedSession(callingUid, sessionId)
+                ?: return SurfaceAttachResult(RESULT_UNAUTHORIZED)
+        val logicalSize =
+            LauncherSurfaceGeometryPolicy.logicalSize(
+                width,
+                height,
+                densityDpi,
+                session.appearanceOverrides.geometryPercent,
+            )
         val previous = session.surface
         session.surface = surface
         session.surfaceWidth = width
         session.surfaceHeight = height
+        session.logicalWidth = logicalSize.width
+        session.logicalHeight = logicalSize.height
         session.densityDpi = densityDpi
         session.fontScaleMillis = fontScaleMillis
         surfaceHandler.post {
@@ -1096,7 +1138,11 @@ class LauncherSessionService : Service() {
             }
         }
         Log.i(TAG, "Attached launcher Surface session=$sessionId size=${width}x$height")
-        return RESULT_OK
+        return SurfaceAttachResult(
+            RESULT_OK,
+            logicalSize.width,
+            logicalSize.height,
+        )
     }
 
     @Synchronized
@@ -1181,9 +1227,26 @@ class LauncherSessionService : Service() {
                         session.inputRecords[start + 3],
                         session.inputRecords[start + 4],
                         session.inputRecords[start + 5],
+                        maxOf(
+                            MAX_INPUT_COORDINATE,
+                            session.surfaceWidth,
+                            session.surfaceHeight,
+                            session.logicalWidth,
+                            session.logicalHeight,
+                        ),
                     )
                 ) {
                     return RESULT_INVALID
+                }
+                if (session.protocolVersion < INPUT_LOGICAL_COORDINATE_PROTOCOL_VERSION) {
+                    scaleLegacyInputRecord(
+                        session.inputRecords,
+                        start,
+                        session.logicalWidth,
+                        session.logicalHeight,
+                        session.surfaceWidth,
+                        session.surfaceHeight,
+                    )
                 }
                 val eventTime =
                     inputEventTime(
@@ -1733,14 +1796,15 @@ class LauncherSessionService : Service() {
         c: Int,
         d: Int,
         e: Int,
+        maxCoordinate: Int,
     ): Boolean =
         when (kind) {
             INPUT_TOUCH_DOWN,
             INPUT_TOUCH_MOTION,
             -> {
                 a in 0 until MAX_TOUCHES &&
-                    b in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
-                    c in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
+                    b in MIN_INPUT_COORDINATE..maxCoordinate &&
+                    c in MIN_INPUT_COORDINATE..maxCoordinate &&
                     e == 0
             }
             INPUT_TOUCH_UP -> a in 0 until MAX_TOUCHES && c == 0 && d == 0 && e == 0
@@ -1752,8 +1816,8 @@ class LauncherSessionService : Service() {
                     e == 0
             }
             INPUT_POINTER_MOTION -> {
-                a in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
-                    b in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
+                a in MIN_INPUT_COORDINATE..maxCoordinate &&
+                    b in MIN_INPUT_COORDINATE..maxCoordinate &&
                     d == 0 &&
                     e == 0
             }
@@ -1821,12 +1885,41 @@ class LauncherSessionService : Service() {
     }
 
     private fun drainInput(session: Session) {
+        var hostActive: Boolean? = null
+        var firstUserKind = 0
+        var firstUserA = 0
+        var firstUserB = 0
+        var userKinds = 0
+        var pointerButtonStates = 0
         val count =
             synchronized(session) {
                 val count = session.inputCount
                 session.inputBuffer.clear()
-                for (index in 0 until count * INPUT_FIELDS) {
-                    session.inputBuffer.putInt(session.inputRecords[index])
+                for (record in 0 until count) {
+                    val offset = record * INPUT_FIELDS
+                    val kind = session.inputRecords[offset]
+                    for (field in 0 until INPUT_FIELDS) {
+                        session.inputBuffer.putInt(session.inputRecords[offset + field])
+                    }
+                    if (kind == INPUT_HOST_ACTIVE) {
+                        hostActive = session.inputRecords[offset + 1] != 0
+                    } else if (kind in INPUT_TOUCH_DOWN..INPUT_POINTER_CAPTURE_LOST) {
+                        userKinds = userKinds or (1 shl kind)
+                        if (kind == INPUT_POINTER_BUTTON) {
+                            pointerButtonStates =
+                                pointerButtonStates or
+                                    if (session.inputRecords[offset + 2] != 0) {
+                                        POINTER_BUTTON_STATE_PRESSED
+                                    } else {
+                                        POINTER_BUTTON_STATE_RELEASED
+                                    }
+                        }
+                        if (firstUserKind == 0) {
+                            firstUserKind = kind
+                            firstUserA = session.inputRecords[offset + 1]
+                            firstUserB = session.inputRecords[offset + 2]
+                        }
+                    }
                 }
                 PerformanceMetrics.recordCompositorKotlinCopy(
                     count * INPUT_FIELDS * Int.SIZE_BYTES,
@@ -1840,11 +1933,20 @@ class LauncherSessionService : Service() {
             return
         }
         val result = session.compositor?.submitInput(session.inputBuffer, count) ?: return
-        if (!session.inputLogged) {
-            session.inputLogged = true
+        hostActive?.let { active ->
+            session.hostActive = active
+            session.audioBridge?.setHostActive(active)
+        }
+        val newInputKinds = userKinds and session.inputKindsLogged.inv()
+        if (newInputKinds != 0) {
+            session.inputKindsLogged = session.inputKindsLogged or newInputKinds
             Log.i(
                 TAG,
-                "Delivered first bounded input batch session=${session.id} records=$count result=$result",
+                "Delivered new bounded input kinds=0x${newInputKinds.toString(16)} " +
+                    "first=$firstUserKind session=${session.id} " +
+                    "a=$firstUserA b=$firstUserB " +
+                    "buttonStates=0x${pointerButtonStates.toString(16)} " +
+                    "records=$count result=$result",
             )
         }
         if (result < 0) {
@@ -1896,6 +1998,8 @@ class LauncherSessionService : Service() {
             }
             session.attachmentFramesLogged = 0
             compositor.setHostActive(true)
+            session.hostActive = true
+            session.audioBridge?.setHostActive(true)
             compositor.setClipboardActive(true)
             session.clipboardRevision = session.clipboardRevision.inc().coerceAtLeast(1)
             val clipboard = synchronized(this) { session.androidClipboard }
@@ -2065,7 +2169,7 @@ class LauncherSessionService : Service() {
                     return
                 }
         if (!prepareCameraBridge(session, attachedSurface, portalBridge.brokerAddress)) return
-        if (!prepareAudioBridge(session, attachedSurface, portalBridge.brokerAddress)) return
+        if (!prepareAudioBridge(session, portalBridge.brokerAddress)) return
         val pendingLaunchDocument = session.pendingLaunchDocument
         if (pendingLaunchDocument != null && session.launchDocumentPath == null) {
             if (session.launchDocumentImportStarted) return
@@ -2163,6 +2267,7 @@ class LauncherSessionService : Service() {
             return
         }
         session.linuxHandle = linuxHandle
+        session.audioBridge?.setRuntimeForeground(true)
         session.nextProcessStatusMillis =
             SystemClock.uptimeMillis() + PROCESS_STATUS_DELAY_MILLIS
         Log.i(TAG, "Started manager-owned Linux process session=${session.id}")
@@ -2194,7 +2299,6 @@ class LauncherSessionService : Service() {
 
     private fun prepareAudioBridge(
         session: Session,
-        attachedSurface: Surface,
         brokerAddress: String,
     ): Boolean {
         if (session.authorization.bridgeCapabilities and BRIDGE_AUDIO_OUTPUT == 0) return true
@@ -2214,6 +2318,9 @@ class LauncherSessionService : Service() {
                             LauncherAudioBridge(
                                 this,
                                 session.id,
+                                session.compositorSocketName
+                                    .substringAfterLast('-')
+                                    .substringBeforeLast('.'),
                                 session.authorization.bridgeCapabilities and
                                     BRIDGE_AUDIO_INPUT != 0,
                                 brokerAddress,
@@ -2224,13 +2331,14 @@ class LauncherSessionService : Service() {
                     surfaceHandler.post {
                         session.audioStartInProgress = false
                         session.audioStartComplete = true
-                        if (!session.active || session.surface !== attachedSurface) {
+                        if (!session.active) {
                             started.getOrNull()?.close()
                             return@post
                         }
                         started
                             .onSuccess { bridge ->
                                 session.audioBridge = bridge
+                                bridge.setHostActive(session.hostActive)
                             }.onFailure { error ->
                                 Log.e(
                                     TAG,
@@ -2239,7 +2347,9 @@ class LauncherSessionService : Service() {
                                     error,
                                 )
                             }
-                        startLinuxProcess(session, attachedSurface)
+                        session.surface?.let { currentSurface ->
+                            startLinuxProcess(session, currentSurface)
+                        }
                     }
                 },
                 "ArchpheneAudioStart-${session.id}",
@@ -2869,10 +2979,50 @@ class LauncherSessionService : Service() {
         }
         session.lastImeChangeSerial = changeSerial
         if (!compositor.imeActive()) {
-            notifyImeState(session, changeSerial, null, 0, 0, 0, 0)
+            if (session.lastImeDiagnosticActive) {
+                Log.i(TAG, "Linux IME state session=${session.id} active=false")
+            }
+            session.lastImeDiagnosticActive = false
+            session.lastImeDiagnosticEvidence = LauncherImeEvidencePolicy.NONE
+            notifyImeState(
+                session,
+                changeSerial,
+                null,
+                0,
+                0,
+                0,
+                0,
+                LauncherImeEvidencePolicy.NONE,
+            )
             return
         }
         val byteLength = compositor.imeSurroundingTextLength()
+        val hint = compositor.imeStateComponent(IME_COMPONENT_HINT).coerceAtLeast(0)
+        val purpose = compositor.imeStateComponent(IME_COMPONENT_PURPOSE).coerceAtLeast(0)
+        val cursorRectangleWidth =
+            compositor.imeStateComponent(IME_COMPONENT_CURSOR_RECTANGLE_WIDTH)
+        val cursorRectangleHeight =
+            compositor.imeStateComponent(IME_COMPONENT_CURSOR_RECTANGLE_HEIGHT)
+        val editorEvidence =
+            LauncherImeEvidencePolicy.classify(
+                byteLength,
+                hint,
+                purpose,
+                cursorRectangleWidth,
+                cursorRectangleHeight,
+            )
+        if (
+            !session.lastImeDiagnosticActive ||
+            session.lastImeDiagnosticEvidence != editorEvidence
+        ) {
+            Log.i(
+                TAG,
+                "Linux IME state session=${session.id} active=true " +
+                    "editorEvidence=$editorEvidence",
+            )
+        }
+        session.lastImeDiagnosticActive = true
+        session.lastImeDiagnosticEvidence = editorEvidence
         val text =
             if (byteLength < 0) {
                 ""
@@ -2883,7 +3033,16 @@ class LauncherSessionService : Service() {
                         "Rejected oversized IME surrounding text session=${session.id} " +
                             "bytes=$byteLength",
                     )
-                    notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+                    notifyImeState(
+                        session,
+                        changeSerial,
+                        "",
+                        0,
+                        0,
+                        hint,
+                        purpose,
+                        editorEvidence,
+                    )
                     return
                 }
                 session.imeBuffer.clear()
@@ -2898,7 +3057,16 @@ class LauncherSessionService : Service() {
                         "Could not snapshot IME surrounding text session=${session.id} " +
                             "expected=$byteLength copied=$copied",
                     )
-                    notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+                    notifyImeState(
+                        session,
+                        changeSerial,
+                        "",
+                        0,
+                        0,
+                        hint,
+                        purpose,
+                        editorEvidence,
+                    )
                     return
                 }
                 session.imeBuffer.position(0)
@@ -2907,7 +3075,16 @@ class LauncherSessionService : Service() {
                 runCatching { session.imeDecoder.decode(session.imeBuffer).toString() }
                     .getOrElse {
                         Log.w(TAG, "Rejected invalid IME surrounding text session=${session.id}")
-                        notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+                        notifyImeState(
+                            session,
+                            changeSerial,
+                            "",
+                            0,
+                            0,
+                            hint,
+                            purpose,
+                            editorEvidence,
+                        )
                         return
                     }
             }
@@ -2923,7 +3100,16 @@ class LauncherSessionService : Service() {
             )
         if (cursor < 0 || anchor < 0) {
             Log.w(TAG, "Rejected invalid IME selection offsets session=${session.id}")
-            notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+            notifyImeState(
+                session,
+                changeSerial,
+                "",
+                0,
+                0,
+                hint,
+                purpose,
+                editorEvidence,
+            )
             return
         }
         notifyImeState(
@@ -2932,8 +3118,9 @@ class LauncherSessionService : Service() {
             text,
             cursor,
             anchor,
-            compositor.imeStateComponent(IME_COMPONENT_HINT).coerceAtLeast(0),
-            compositor.imeStateComponent(IME_COMPONENT_PURPOSE).coerceAtLeast(0),
+            hint,
+            purpose,
+            editorEvidence,
         )
     }
 
@@ -3123,7 +3310,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(state)
             data.writeString(message.take(256))
@@ -3143,7 +3330,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(if (appearance.dark) 1 else 0)
             data.writeInt(appearance.background)
@@ -3181,7 +3368,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(if (text == null) 0 else 1)
             if (text != null) {
@@ -3207,6 +3394,7 @@ class LauncherSessionService : Service() {
         anchor: Int,
         hint: Int,
         purpose: Int,
+        editorEvidence: Int,
     ) {
         if (
             !session.active ||
@@ -3220,7 +3408,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(if (text == null) 0 else 1)
             data.writeInt(revision)
@@ -3230,6 +3418,11 @@ class LauncherSessionService : Service() {
                 data.writeInt(anchor)
                 data.writeInt(hint)
                 data.writeInt(purpose)
+                if (session.protocolVersion >= IME_EDITOR_EVIDENCE_LEVEL_PROTOCOL_VERSION) {
+                    data.writeInt(editorEvidence)
+                } else if (session.protocolVersion >= IME_EDITOR_EVIDENCE_PROTOCOL_VERSION) {
+                    data.writeInt(if (editorEvidence == LauncherImeEvidencePolicy.STRONG) 1 else 0)
+                }
             }
             session.clientToken.transact(CALLBACK_IME_STATE, data, null, IBinder.FLAG_ONEWAY)
         } catch (error: RemoteException) {
@@ -3249,7 +3442,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(if (active) 1 else 0)
             session.clientToken.transact(
@@ -3509,7 +3702,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             permissionIntent.writeToParcel(data, 0)
             session.clientToken.transact(
@@ -3557,7 +3750,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeString(uri)
             session.clientToken.transact(
@@ -3590,7 +3783,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(operation)
             data.writeString(id)
@@ -3629,7 +3822,7 @@ class LauncherSessionService : Service() {
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeString(title)
             descriptor.writeToParcel(data, 0)
@@ -3688,7 +3881,7 @@ class LauncherSessionService : Service() {
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(operationCode)
             data.writeInt(arguments.size)
@@ -3766,7 +3959,7 @@ class LauncherSessionService : Service() {
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(operationCode)
             data.writeInt(width)
@@ -3815,7 +4008,7 @@ class LauncherSessionService : Service() {
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(ACCESSIBILITY_CALLBACK_TREE)
             descriptor.writeToParcel(data, 0)
@@ -3863,7 +4056,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(presentationWidth)
             data.writeInt(presentationHeight)
@@ -3933,7 +4126,7 @@ class LauncherSessionService : Service() {
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(operation)
             data.writeInt(nodeId)
@@ -3999,7 +4192,7 @@ class LauncherSessionService : Service() {
         kind: Int,
     ) {
         data.writeInterfaceToken(CALLBACK_INTERFACE)
-        data.writeInt(PROTOCOL_VERSION)
+        data.writeInt(session.protocolVersion)
         data.writeInt(session.id)
         data.writeInt(kind)
     }
@@ -4025,7 +4218,7 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.protocolVersion)
             data.writeInt(session.id)
             data.writeInt(request.id)
             data.writeInt(request.operation)
@@ -4245,7 +4438,13 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 16
+        private const val PROTOCOL_VERSION = 19
+        private const val MINIMUM_PROTOCOL_VERSION = 16
+        private const val INPUT_LOGICAL_COORDINATE_PROTOCOL_VERSION = 18
+        private const val IME_EDITOR_EVIDENCE_PROTOCOL_VERSION = 17
+        private const val IME_EDITOR_EVIDENCE_LEVEL_PROTOCOL_VERSION = 19
+        private const val ORIENTATION_POLICY_DEFAULT = 0
+        private const val ORIENTATION_POLICY_SDL_PHONE = 1
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -4392,6 +4591,92 @@ class LauncherSessionService : Service() {
         private const val INPUT_HOST_ACTIVE = 10
         private const val INPUT_POINTER_RELATIVE = 11
         private const val INPUT_POINTER_CAPTURE_LOST = 12
+        private const val POINTER_BUTTON_STATE_PRESSED = 1
+        private const val POINTER_BUTTON_STATE_RELEASED = 2
+
+        internal fun supportedProtocolVersion(version: Int): Boolean =
+            version in MINIMUM_PROTOCOL_VERSION..PROTOCOL_VERSION
+
+        internal fun scaleLegacyInputRecord(
+            records: IntArray,
+            offset: Int,
+            logicalWidth: Int,
+            logicalHeight: Int,
+            physicalWidth: Int,
+            physicalHeight: Int,
+        ) {
+            require(offset >= 0 && offset <= records.size - INPUT_FIELDS)
+            when (records[offset]) {
+                INPUT_TOUCH_DOWN,
+                INPUT_TOUCH_MOTION,
+                -> {
+                    records[offset + 2] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 2],
+                            logicalWidth,
+                            physicalWidth,
+                        )
+                    records[offset + 3] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 3],
+                            logicalHeight,
+                            physicalHeight,
+                        )
+                }
+                INPUT_POINTER_MOTION -> {
+                    records[offset + 1] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 1],
+                            logicalWidth,
+                            physicalWidth,
+                        )
+                    records[offset + 2] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 2],
+                            logicalHeight,
+                            physicalHeight,
+                        )
+                }
+                INPUT_POINTER_RELATIVE -> {
+                    records[offset + 1] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 1],
+                            logicalWidth,
+                            physicalWidth,
+                        )
+                    records[offset + 2] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 2],
+                            logicalHeight,
+                            physicalHeight,
+                        )
+                    records[offset + 3] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 3],
+                            logicalWidth,
+                            physicalWidth,
+                        )
+                    records[offset + 4] =
+                        scaleLegacyInputCoordinate(
+                            records[offset + 4],
+                            logicalHeight,
+                            physicalHeight,
+                        )
+                }
+            }
+        }
+
+        private fun scaleLegacyInputCoordinate(
+            value: Int,
+            logical: Int,
+            physical: Int,
+        ): Int {
+            if (logical <= 0 || physical <= 0) return value
+            val numerator = value.toLong() * logical.toLong()
+            val half = physical.toLong() / 2L
+            val rounded = if (numerator >= 0L) numerator + half else numerator - half
+            return (rounded / physical.toLong()).coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
+        }
         private const val KEY_RELEASED = 0
         private const val KEY_REPEATED = 2
         private const val MAX_POINTER_BUTTON = 16
@@ -4413,6 +4698,8 @@ class LauncherSessionService : Service() {
         private const val IME_COMPONENT_ANCHOR = 1
         private const val IME_COMPONENT_HINT = 2
         private const val IME_COMPONENT_PURPOSE = 3
+        private const val IME_COMPONENT_CURSOR_RECTANGLE_WIDTH = 6
+        private const val IME_COMPONENT_CURSOR_RECTANGLE_HEIGHT = 7
         private const val DOCUMENT_OPERATION_SAVE = 1
         private const val DOCUMENT_OPERATION_OPEN = 2
         private const val DOCUMENT_OPERATION_OPEN_MULTIPLE = 3

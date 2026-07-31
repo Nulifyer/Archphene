@@ -1,6 +1,6 @@
 # Archphene TODO
 
-Updated: 2026-07-30
+Updated: 2026-07-31
 
 This file is the remaining prioritized work, not a history of completed tests. Validated behavior belongs in `docs/project-status.md`, `docs/compatibility-matrix.md`, and `research/experiments/`.
 
@@ -692,6 +692,12 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 - [ ] Complete the release representatives in `docs/compatibility-matrix.md`; package search or launch alone is not a support claim.
 - [ ] Finish SuperTux gameplay, pointer capture, audio focus/interruption, and fullscreen/window transitions on emulator and Samsung.
+  - [x] Route an ordinary one-finger Android gesture through generic Wayland pointer semantics without allocating in the motion path: DOWN establishes focus, movement crosses Android's device-defined touch slop before holding the primary button, UP clicks/releases, cancellation releases, and secondary pointers cannot create duplicate clicks. Kotlin unit tests pass, and the current Samsung manager/wrapper accepts the exact bounded motion and atomic motion/primary-press/primary-release records (`0x40`, then `0x100`) with results `1` and `3`.
+  - [x] Separate SuperTux-specific behavior from bridge conformance. The installed AArch64 `supertux 0.7.0-1` is linked through SDL2/sdl2-compat and its menu reads `ev.motion.x/y` from an SDL button event; do not add an Archphene application patch or claim that this menu is a generic click oracle.
+  - [x] Revalidate the generic keyboard path against the current launcher. Protocol v19 retains the v18 compositor logical-output extent so the wrapper maps absolute and captured input into Wayland coordinates, and adds absent/empty/strong editor evidence without breaking v16-v18 wrappers. Strictly monotonic unsigned key timestamps prevent an Android repeat from leaving SDL with a stale held key. Current exact-ABI Samsung and x86_64 emulator runs visibly select and activate non-default menu rows without restarting the wrapper, manager, or Linux process.
+  - [x] Make the automated mixed pointer/keyboard setup deterministic without adding a SuperTux-specific runtime workaround. Bounded 300 ms key holds and rendered side-strip selection checks avoid both missed polling ticks and repeated-row skips. The workflow separately proves ordinary finger pointer focus plus atomic primary press/release, then uses the valid keyboard path for the SDL2/sdl2-compat menu.
+  - [x] Restore package-generic game audio and prevent implicit gameplay IME display. Pulse-enabled graphical launches select SDL and OpenAL Pulse backends and include the verified `/usr/lib/pulseaudio` private dependency directory, allowing unmodified OpenAL to load `libpulsecommon-17.0.so`. Sink suspension is serialized and awaited before focus abandonment. Generated launchers suppress an unrequested SDL empty-text IME after hardware keys while retaining explicit long-press requests, touched empty editors, populated editors, and strong-to-empty editor transitions.
+  - [x] Pass the complete state-preserving workflow on the current x86_64 emulator and Samsung. Both exact-ABI runs prove accelerated animation, automatic landscape, full-device pointer and keyboard input, real level movement/jump, Pulse playback with Android focus abandon/reacquire, Home/resume, live 1920×1200 resize, stable process identities, fatal-log rejection across every log-clear boundary, and exact prior-state restoration. Current evidence is under `tooling/artifacts/supertux-workflows/emulator-5554/review-fixes-final-13` and `tooling/artifacts/supertux-workflows/RFCT90AEEFA/review-fixes-final-6`.
 - [ ] Validate XWayland with a representative unmodified X11 application.
 - [ ] Validate an Android-backed Vulkan presentation path; keep Vulkan presentation unclaimed until `vkcube-wayland` renders.
 - [ ] Add a low/zero-copy Android HardwareBuffer or dmabuf presentation path while retaining SHM fallback.

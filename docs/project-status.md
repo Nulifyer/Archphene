@@ -1,8 +1,61 @@
 # Project status
 
-Updated: 2026-07-30
+Updated: 2026-07-31
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
+
+## SuperTux checkpoint
+
+The current workspace passes `cargo fmt`, all locked Rust workspace tests,
+workspace Clippy with warnings denied, the complete JDK 26 Android unit/lint
+gate, every repository/source contract, and Bash syntax validation for the
+SuperTux workflow. Exact arm64-v8a and x86_64 manager APKs are installed on the
+Samsung SM-S908U and emulator. Their generated launchers were updated through
+Android's normal PackageInstaller confirmations; the current SuperTux wrapper
+versions are 1727 on Samsung and 1158 on the emulator. Both use authenticated
+Binder protocol v19.
+
+The current launcher work adds generic one-finger
+Android-to-Wayland pointer routing, device-defined touch slop, SDL phone
+orientation policy, three-level editor evidence for empty and populated text
+fields, view-to-buffer input scaling against the compositor's returned logical output extent,
+pointer-click keyboard focus, fullscreen/maximized state handling,
+bounded per-input-kind diagnostics, and audio foreground/focus lifecycle
+handling. The touch hot path uses retained primitive state rather than
+per-motion heap objects. On the Samsung, a complete injected finger gesture
+produced an accepted pointer-motion batch followed by one atomic motion,
+primary-press, and primary-release batch: `kinds=0x40 records=1 result=1`, then
+`kinds=0x100 buttonStates=0x3 records=3 result=3`. Full-device screenshots,
+SurfaceFlinger geometry, and manager logs confirm the current 2241×978 Surface
+inside the 2316×1080 landscape device frame; cropped app screenshots are not
+used as visual evidence.
+
+The state-preserving SuperTux gate now passes on both maintained devices. It
+keeps the installed `supertux 0.7.0-1` SDL2/sdl2-compat menu quirk separate from
+bridge conformance: an ordinary finger gesture proves generic Wayland pointer
+focus and atomic primary-button delivery, while keyboard input activates menu
+rows and enters a real contributed level. Full-device frames prove movement
+and jumping without an Android IME, and the same wrapper, manager, and Linux
+process survive Home/resume plus a live 1920×1200 resize. Pulse logs identify
+`application.name = "supertux2"` and prove Android audio-focus grant, abandon,
+and reacquisition. Both runs reject scoped fatal logs and restore the exact
+prior SuperTux and Android state. Signed manifests and inspected evidence are
+under `tooling/artifacts/supertux-workflows/emulator-5554/review-fixes-final-13`
+and `tooling/artifacts/supertux-workflows/RFCT90AEEFA/review-fixes-final-6`.
+
+The audio failure exposed a package-generic loader gap rather than a SuperTux
+special case. Pulse-enabled graphical launches now select SDL and OpenAL Pulse
+backends and include the verified `/usr/lib/pulseaudio` private directory, so
+OpenAL can load `libpulsecommon-17.0.so`. Generated launchers also suppress an
+implicit ambiguous-text IME after hardware gameplay keys while preserving
+explicit long-press and editor-backed IME requests, including fields that become
+empty after editing. Pulse sink suspension is serialized and completes before
+Android audio focus is abandoned. SuperTux pointer capture and an explicit
+in-app fullscreen/window-mode transition remain open.
+
+Two unrelated user-owned test-script changes remain excluded from this work:
+the modified `scripts/test-archphene-package-update.sh` and untracked
+`scripts/test-archphene-signed-scriptlet-rollback.sh`.
 
 ## Greenfield Rust + Kotlin replacement
 

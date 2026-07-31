@@ -9471,10 +9471,11 @@ fn canonical_cached_compatibility(
         Some(package) if safe_logical_name(package) => Some(package),
         _ => return Err(PackageRuntimeError::InvalidPayload),
     };
+    let unsupported = matches!(status, PackageCompatibilityStatus::Unsupported);
+    let has_diagnostic = !matches!(diagnostic, PackageCompatibilityDiagnostic::None);
     if fields.next().is_some()
-        || matches!(status, PackageCompatibilityStatus::Unsupported)
-            != !matches!(diagnostic, PackageCompatibilityDiagnostic::None)
-        || matches!(status, PackageCompatibilityStatus::Unsupported) != diagnostic_package.is_some()
+        || unsupported != has_diagnostic
+        || unsupported != diagnostic_package.is_some()
     {
         return Err(PackageRuntimeError::InvalidPayload);
     }

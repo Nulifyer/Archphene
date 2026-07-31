@@ -16,6 +16,7 @@ payload=(
   libarchphene_pulse_module_pipe_source.so
   libarchphene_audio_input.so
   libarchphene_pulse_probe.so
+  libarchphene_pulse_control.so
   libprotocol-native.so
   libpulsecore-17.0.so
   libpulsecommon-17.0.so

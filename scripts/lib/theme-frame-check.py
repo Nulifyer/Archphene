@@ -61,10 +61,11 @@ def compare(first_path: Path, second_path: Path, left_percent=5, top_percent=15,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "mode", choices=("light-dark", "different", "similar", "inspect")
+        "mode", choices=("light-dark", "different", "more-different", "similar", "inspect")
     )
     parser.add_argument("first", type=Path)
     parser.add_argument("second", type=Path, nargs="?")
+    parser.add_argument("third", type=Path, nargs="?")
     parser.add_argument("--minimum-luma-delta", type=float, default=40)
     parser.add_argument("--minimum-difference", type=float, default=2)
     parser.add_argument("--minimum-changed-ratio", type=float, default=0.2)
@@ -106,6 +107,29 @@ def main():
         return
     if args.second is None:
         parser.error(f"{args.mode} requires a second frame")
+
+    if args.mode == "more-different":
+        if args.third is None:
+            parser.error("more-different requires three frames")
+        _, _, baseline_difference, baseline_changed = compare(
+            args.first, args.second, args.left_percent, args.top_percent,
+            args.right_percent, args.bottom_percent)
+        _, _, action_difference, action_changed = compare(
+            args.second, args.third, args.left_percent, args.top_percent,
+            args.right_percent, args.bottom_percent)
+        print(
+            f"baseline_difference={baseline_difference:.1f} "
+            f"baseline_changed_ratio={baseline_changed:.3f} "
+            f"action_difference={action_difference:.1f} "
+            f"action_changed_ratio={action_changed:.3f}"
+        )
+        if action_difference < max(
+                args.minimum_difference,
+                baseline_difference * 1.1 + 0.2):
+            raise SystemExit("input interval did not exceed idle animation")
+        if action_changed < args.minimum_changed_ratio:
+            raise SystemExit("too little of the Linux-app surface changed")
+        return
 
     first_luma, second_luma, difference, changed = compare(
         args.first, args.second, args.left_percent, args.top_percent,

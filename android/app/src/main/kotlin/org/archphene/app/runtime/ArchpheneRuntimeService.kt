@@ -164,8 +164,14 @@ internal data class LauncherAuthorization(
     val usesGraphicsBridge: Boolean
         get() = integrationTopology and GRAPHICS_BRIDGE_TOPOLOGY != 0
 
+    val prefersPhoneLandscape: Boolean
+        get() = integrationTopology and SDL_TOPOLOGY != 0
+
     private companion object {
+        private const val INTEGRATION_SDL2 = 1 shl 4
+        private const val INTEGRATION_SDL3 = 1 shl 5
         private const val INTEGRATION_OPENGL = 1 shl 10
+        private const val SDL_TOPOLOGY = INTEGRATION_SDL2 or INTEGRATION_SDL3
         private const val GRAPHICS_BRIDGE_TOPOLOGY = INTEGRATION_OPENGL
     }
 }
@@ -1255,7 +1261,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var shellStopRequested = false
     @Volatile private var shellHandle = 0L
     private val launcherProcessHandles = LongArray(MAX_TRACKED_LAUNCHER_PROCESSES)
+    private val launcherAudioProcesses = BooleanArray(MAX_TRACKED_LAUNCHER_PROCESSES)
     @Volatile private var launcherProcessCount = 0
+    @Volatile private var launcherAudioProcessCount = 0
     private val shellTerminalRevision = AtomicLong()
     @Volatile private var shellRows = DEFAULT_SHELL_ROWS
     @Volatile private var shellColumns = DEFAULT_SHELL_COLUMNS
@@ -2011,7 +2019,7 @@ class ArchpheneRuntimeService : Service() {
             Log.e(TAG, "Could not launch graphical Linux process: $detail")
             return 0L
         }
-        if (!trackLauncherProcess(launcherHandle)) {
+        if (!trackLauncherProcess(launcherHandle, pulseServerAddress != null)) {
             NativeRuntime.nativeCloseLauncherProcess(activeHandle, launcherHandle)
             Log.e(TAG, "Could not retain graphical Linux process: launcher limit reached")
             return 0L
@@ -2083,7 +2091,10 @@ class ArchpheneRuntimeService : Service() {
         return true
     }
 
-    private fun trackLauncherProcess(launcherHandle: Long): Boolean {
+    private fun trackLauncherProcess(
+        launcherHandle: Long,
+        audioOutput: Boolean,
+    ): Boolean {
         if (launcherProcessHandles.any { handle -> handle == launcherHandle }) {
             return true
         }
@@ -2092,7 +2103,11 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         launcherProcessHandles[index] = launcherHandle
+        launcherAudioProcesses[index] = audioOutput
         launcherProcessCount++
+        if (audioOutput) {
+            launcherAudioProcessCount++
+        }
         return true
     }
 
@@ -2101,6 +2116,10 @@ class ArchpheneRuntimeService : Service() {
         if (index < 0) {
             return
         }
+        if (launcherAudioProcesses[index]) {
+            launcherAudioProcessCount = (launcherAudioProcessCount - 1).coerceAtLeast(0)
+        }
+        launcherAudioProcesses[index] = false
         launcherProcessHandles[index] = 0L
         launcherProcessCount = (launcherProcessCount - 1).coerceAtLeast(0)
     }
@@ -5256,7 +5275,7 @@ class ArchpheneRuntimeService : Service() {
             startForeground(
                 SESSION_NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                runtimeForegroundServiceType(launcherAudioProcessCount),
             )
         } else {
             startForeground(SESSION_NOTIFICATION_ID, notification)
@@ -5271,7 +5290,7 @@ class ArchpheneRuntimeService : Service() {
 
     private fun reconcileForegroundNotification() {
         if (shellActive || launcherProcessCount > 0 || hasForegroundWork()) {
-            updateSessionNotification()
+            promoteToForeground(activeForegroundNotification())
         } else {
             removeSessionNotification()
         }
@@ -16166,7 +16185,7 @@ class ArchpheneRuntimeService : Service() {
                 )
             }
             mainHandler.post {
-                removeSessionNotification()
+                reconcileForegroundNotification()
                 stopIfUnobservedAndIdle()
             }
         }

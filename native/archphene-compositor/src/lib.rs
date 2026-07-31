@@ -708,7 +708,8 @@ fn apply_text_input_commit(text_state: &mut TextInputState, another_enabled: boo
         let enabled = enabled && !another_enabled;
         changed |= text_state.enabled != enabled
             || text_state.surrounding_text.is_some()
-            || text_state.content_type != (0, 0);
+            || text_state.content_type != (0, 0)
+            || text_state.cursor_rectangle.is_some();
         text_state.enabled = enabled;
         text_state.surrounding_text = None;
         text_state.content_type = (0, 0);
@@ -723,6 +724,7 @@ fn apply_text_input_commit(text_state: &mut TextInputState, another_enabled: boo
         text_state.content_type = content_type;
     }
     if let Some(cursor_rectangle) = text_state.pending_cursor_rectangle.take() {
+        changed |= text_state.cursor_rectangle.is_none();
         text_state.cursor_rectangle = Some(cursor_rectangle);
     }
     changed
@@ -1053,6 +1055,7 @@ struct XdgConfigure {
     serial: u32,
     popup_geometry: Option<(i32, i32, i32, i32)>,
     toplevel_size: Option<(i32, i32)>,
+    restores_windowed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1064,12 +1067,25 @@ struct WindowGeometry {
 }
 
 impl XdgSurfaceState {
+    fn initial_configure_sent(&self) -> bool {
+        !self.pending_configures.is_empty() || self.acknowledged_configure.is_some()
+    }
+
     fn has_pending_toplevel_size(&self, width: i32, height: i32) -> bool {
         self.pending_configures
             .iter()
             .rev()
             .find_map(|configure| configure.toplevel_size)
             == Some((width, height))
+    }
+
+    fn commit_windowed_restoration(&mut self) -> bool {
+        let Some(configure) = self.acknowledged_configure.as_mut() else {
+            return false;
+        };
+        let restores_windowed = configure.restores_windowed;
+        configure.restores_windowed = false;
+        restores_windowed
     }
 
     fn commit_window_geometry(&mut self) -> bool {
@@ -1088,6 +1104,9 @@ struct XdgToplevelData {
     title: Mutex<String>,
     app_id: Mutex<String>,
     size_constraints: Mutex<ToplevelSizeConstraints>,
+    windowed_size: Mutex<Option<(u32, u32)>>,
+    fullscreen_requested: AtomicBool,
+    maximized_requested: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2744,7 +2763,7 @@ fn android_meta_to_wayland(meta: i32) -> u32 {
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn dispatch_launcher_input_record(core: &mut CompositorCore, record: [i32; 6]) -> Result<u32, ()> {
     const MIN_COORDINATE: i32 = -8192;
-    const MAX_COORDINATE: i32 = 16384;
+    const MAX_COORDINATE: i32 = 32768;
     const MAX_AXIS_FIXED: i32 = 120_000;
     const MAX_RELATIVE_FIXED: i32 = 16_384_000;
     let [kind, a, b, c, d, e] = record;
@@ -2820,53 +2839,6 @@ fn dispatch_launcher_input_record(core: &mut CompositorCore, record: [i32; 6]) -
         12 if a == 0 && b == 0 && c == 0 && d == 0 && e == 0 => Ok(core.cancel_pointer_capture()),
         _ => Err(()),
     }
-}
-
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn scale_launcher_coordinate(value: i32, logical: i32, physical: i32) -> i32 {
-    if logical <= 0 || physical <= 0 {
-        return value;
-    }
-    let numerator = i64::from(value) * i64::from(logical);
-    let half = i64::from(physical) / 2;
-    let rounded = if numerator >= 0 {
-        numerator.saturating_add(half)
-    } else {
-        numerator.saturating_sub(half)
-    };
-    i32::try_from(rounded / i64::from(physical)).unwrap_or(if value < 0 {
-        i32::MIN
-    } else {
-        i32::MAX
-    })
-}
-
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn scale_launcher_input_record(
-    mut record: [i32; 6],
-    logical_width: i32,
-    logical_height: i32,
-    physical_width: i32,
-    physical_height: i32,
-) -> [i32; 6] {
-    match record[0] {
-        1 | 2 => {
-            record[2] = scale_launcher_coordinate(record[2], logical_width, physical_width);
-            record[3] = scale_launcher_coordinate(record[3], logical_height, physical_height);
-        }
-        6 => {
-            record[1] = scale_launcher_coordinate(record[1], logical_width, physical_width);
-            record[2] = scale_launcher_coordinate(record[2], logical_height, physical_height);
-        }
-        11 => {
-            record[1] = scale_launcher_coordinate(record[1], logical_width, physical_width);
-            record[2] = scale_launcher_coordinate(record[2], logical_height, physical_height);
-            record[3] = scale_launcher_coordinate(record[3], logical_width, physical_width);
-            record[4] = scale_launcher_coordinate(record[4], logical_height, physical_height);
-        }
-        _ => {}
-    }
-    record
 }
 
 #[cfg(target_os = "android")]
@@ -3813,6 +3785,9 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                         title: Mutex::new(String::new()),
                         app_id: Mutex::new(String::new()),
                         size_constraints: Mutex::new(ToplevelSizeConstraints::default()),
+                        windowed_size: Mutex::new(None),
+                        fullscreen_requested: AtomicBool::new(false),
+                        maximized_requested: AtomicBool::new(false),
                     },
                 );
                 surface_state.xdg_toplevel = Some(toplevel.clone());
@@ -4175,6 +4150,7 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                             serial,
                             popup_geometry: Some(geometry),
                             toplevel_size: None,
+                            restores_windowed: false,
                         });
                 }
                 resource.repositioned(token);
@@ -4278,11 +4254,25 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
             xdg_toplevel::Request::ShowWindowMenu { .. }
             | xdg_toplevel::Request::Move { .. }
             | xdg_toplevel::Request::Resize { .. }
-            | xdg_toplevel::Request::SetMaximized
-            | xdg_toplevel::Request::UnsetMaximized
-            | xdg_toplevel::Request::SetFullscreen { .. }
-            | xdg_toplevel::Request::UnsetFullscreen
             | xdg_toplevel::Request::SetMinimized => {}
+            xdg_toplevel::Request::SetMaximized => {
+                remember_windowed_toplevel_size(resource);
+                data.maximized_requested.store(true, Ordering::Release);
+                queue_requested_toplevel_configure(state, resource, false);
+            }
+            xdg_toplevel::Request::UnsetMaximized => {
+                data.maximized_requested.store(false, Ordering::Release);
+                queue_requested_toplevel_configure(state, resource, true);
+            }
+            xdg_toplevel::Request::SetFullscreen { .. } => {
+                remember_windowed_toplevel_size(resource);
+                data.fullscreen_requested.store(true, Ordering::Release);
+                queue_requested_toplevel_configure(state, resource, false);
+            }
+            xdg_toplevel::Request::UnsetFullscreen => {
+                data.fullscreen_requested.store(false, Ordering::Release);
+                queue_requested_toplevel_configure(state, resource, true);
+            }
             xdg_toplevel::Request::SetMaxSize { width, height } => {
                 if width < 0 || height < 0 {
                     resource.post_error(
@@ -4380,7 +4370,8 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
                 Some((toplevel.clone(), surface, frame))
             });
             if let Some((toplevel, surface, frame)) = replacement {
-                state.active_toplevel = Some(toplevel);
+                state.active_toplevel = Some(toplevel.clone());
+                configure_toplevel_activation(state, &toplevel, true);
                 state.root_surface = Some(surface.clone());
                 state.root_frame = Some(frame);
                 state.pointer_focus_surface = Some(surface.clone());
@@ -4516,6 +4507,68 @@ fn set_keyboard_focus(state: &mut CompositorState, mut surface: Option<WlSurface
         state.pressed_keys.clear();
         state.reported_modifiers = 0;
     }
+}
+
+fn keyboard_focus_owner(surface: &WlSurface, depth: usize) -> Option<WlSurface> {
+    if depth > 64 {
+        return None;
+    }
+    let data = surface.data::<SurfaceData>()?;
+    let (role, parent) = {
+        let surface_state = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+        (
+            surface_state.role,
+            surface_state
+                .subsurface
+                .as_ref()
+                .and_then(|subsurface| subsurface.data::<SubsurfaceData>())
+                .map(|subsurface| subsurface.parent.clone()),
+        )
+    };
+    match role {
+        Some(SurfaceRole::XdgToplevel | SurfaceRole::XdgPopup) => Some(surface.clone()),
+        Some(SurfaceRole::Subsurface) => keyboard_focus_owner(&parent?, depth.saturating_add(1)),
+        Some(SurfaceRole::Cursor) | None => None,
+    }
+}
+
+fn pointer_keyboard_focus_surface(
+    state: &CompositorState,
+    hit_surface: &WlSurface,
+) -> Option<WlSurface> {
+    if let Some(grab) = state.popup_grab.as_ref().filter(|grab| grab.active) {
+        return grab
+            .stack
+            .last()
+            .and_then(|popup| popup.data::<XdgPopupData>())
+            .and_then(|data| data.xdg_surface.data::<XdgSurfaceData>())
+            .map(|data| data.wl_surface.clone())
+            .or_else(|| Some(grab.root.clone()));
+    }
+    keyboard_focus_owner(hit_surface, 0)
+}
+
+fn keyboard_focus_toplevel(
+    state: &CompositorState,
+    focus_surface: &WlSurface,
+) -> Option<XdgToplevel> {
+    let surface_data = focus_surface.data::<SurfaceData>()?;
+    let (toplevel, xdg_surface) = {
+        let surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (surface.xdg_toplevel.clone(), surface.xdg_surface.clone())
+    };
+    if let Some(toplevel) = toplevel {
+        return Some(toplevel);
+    }
+    let ancestor = xdg_toplevel_ancestor_surface(&xdg_surface?, 0)?;
+    state.toplevels.iter().find_map(|candidate| {
+        toplevel_surface(candidate)
+            .filter(|surface| surface.id() == ancestor.id())
+            .map(|_| candidate.clone())
+    })
 }
 const TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "text/plain"];
 const HTML_MIME_TYPE: &str = "text/html";
@@ -7770,32 +7823,26 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             let maximize_primary = state.tile_toplevels
                                 && state.primary_toplevel.is_none()
                                 && !parented;
-                            let width = if maximize_primary {
-                                state.output_width
-                            } else {
-                                0
-                            };
-                            let height = if maximize_primary {
-                                state.output_height
-                            } else {
-                                0
-                            };
-                            let states = if maximize_primary {
-                                encode_xdg_toplevel_states(&[
-                                    xdg_toplevel::State::Maximized,
-                                    xdg_toplevel::State::Activated,
-                                ])
-                            } else {
-                                Vec::new()
-                            };
+                            let states =
+                                requested_toplevel_states(toplevel, maximize_primary, false);
+                            let fills_output = states.iter().any(|candidate| {
+                                matches!(
+                                    candidate,
+                                    xdg_toplevel::State::Fullscreen
+                                        | xdg_toplevel::State::Maximized
+                                )
+                            });
+                            let width = if fills_output { state.output_width } else { 0 };
+                            let height = if fills_output { state.output_height } else { 0 };
                             let (width, height) =
                                 constrain_toplevel_configure(toplevel, width, height);
                             xdg_state.pending_configures.push_back(XdgConfigure {
                                 serial,
                                 popup_geometry: None,
                                 toplevel_size: Some((width, height)),
+                                restores_windowed: false,
                             });
-                            toplevel.configure(width, height, states);
+                            toplevel.configure(width, height, encode_xdg_toplevel_states(&states));
                             xdg_surface.configure(serial);
                         }
                     } else if let Some(xdg_surface) = surface.xdg_surface.as_ref() {
@@ -7854,6 +7901,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 serial,
                                 popup_geometry: Some(geometry),
                                 toplevel_size: None,
+                                restores_windowed: false,
                             });
                             popup.configure(x, y, width, height);
                             xdg_surface.configure(serial);
@@ -8064,6 +8112,12 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
                 let latest_frame = surface.committed_frame.clone();
                 let is_xdg_toplevel = role == Some(SurfaceRole::XdgToplevel);
+                let previously_active_toplevel =
+                    if is_xdg_toplevel && !was_mapped && latest_frame.is_some() {
+                        state.active_toplevel.clone()
+                    } else {
+                        None
+                    };
                 let is_cursor = role == Some(SurfaceRole::Cursor);
                 let publishes_root_frame = surface_publishes_root_frame(
                     role,
@@ -8114,6 +8168,23 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         state.root_frame = latest_frame.clone();
                     }
                     if is_xdg_toplevel && !was_mapped {
+                        let newly_active = xdg_toplevel.as_ref().is_some_and(|current| {
+                            state
+                                .active_toplevel
+                                .as_ref()
+                                .is_some_and(|active| active.id() == current.id())
+                        });
+                        if newly_active {
+                            if let Some(previous) =
+                                previously_active_toplevel.as_ref().filter(|previous| {
+                                    xdg_toplevel
+                                        .as_ref()
+                                        .is_some_and(|current| previous.id() != current.id())
+                                })
+                            {
+                                configure_toplevel_activation(state, previous, false);
+                            }
+                        }
                         let parented = xdg_toplevel.as_ref().is_some_and(|toplevel| {
                             toplevel.data::<XdgToplevelData>().is_some_and(|data| {
                                 data.parent
@@ -8139,8 +8210,14 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                     toplevel,
                                     secondary_toplevel_canvas_width(state.output_width),
                                     state.output_height,
-                                    &[xdg_toplevel::State::Activated],
+                                    if newly_active {
+                                        &[xdg_toplevel::State::Activated]
+                                    } else {
+                                        &[]
+                                    },
                                 );
+                            } else if newly_active {
+                                configure_toplevel_activation(state, toplevel, true);
                             }
                         }
                     }
@@ -8518,10 +8595,25 @@ fn queue_toplevel_configure(
     height: i32,
     states: &[xdg_toplevel::State],
 ) -> u32 {
-    if width <= 0 || height <= 0 {
+    queue_toplevel_configure_with_restoration(state, toplevel, width, height, states, false)
+}
+
+fn queue_toplevel_configure_with_restoration(
+    state: &mut CompositorState,
+    toplevel: &XdgToplevel,
+    width: i32,
+    height: i32,
+    states: &[xdg_toplevel::State],
+    restores_windowed: bool,
+) -> u32 {
+    if (width == 0) != (height == 0) || width < 0 || height < 0 {
         return 0;
     }
-    let (width, height) = constrain_toplevel_configure(toplevel, width, height);
+    let (width, height) = if width == 0 {
+        (0, 0)
+    } else {
+        constrain_toplevel_configure(toplevel, width, height)
+    };
     let Some(surface) = toplevel_surface(toplevel) else {
         return 0;
     };
@@ -8547,11 +8639,186 @@ fn queue_toplevel_configure(
         .push_back(XdgConfigure {
             serial,
             popup_geometry: None,
-            toplevel_size: Some((width, height)),
+            toplevel_size: if width == 0 {
+                None
+            } else {
+                Some((width, height))
+            },
+            restores_windowed,
         });
     toplevel.configure(width, height, encode_xdg_toplevel_states(states));
     xdg_surface.configure(serial);
     serial
+}
+
+fn requested_toplevel_states(
+    toplevel: &XdgToplevel,
+    maximized_by_layout: bool,
+    activated: bool,
+) -> Vec<xdg_toplevel::State> {
+    let (fullscreen, maximized) = toplevel
+        .data::<XdgToplevelData>()
+        .map(|data| {
+            (
+                data.fullscreen_requested.load(Ordering::Acquire),
+                data.maximized_requested.load(Ordering::Acquire),
+            )
+        })
+        .unwrap_or((false, false));
+    configured_toplevel_states(fullscreen, maximized, maximized_by_layout, activated)
+}
+
+fn configured_toplevel_states(
+    fullscreen: bool,
+    maximized: bool,
+    maximized_by_layout: bool,
+    activated: bool,
+) -> Vec<xdg_toplevel::State> {
+    let presentation = if fullscreen {
+        Some(xdg_toplevel::State::Fullscreen)
+    } else if maximized || maximized_by_layout {
+        Some(xdg_toplevel::State::Maximized)
+    } else {
+        None
+    };
+    match (presentation, activated) {
+        (Some(presentation), true) => {
+            vec![presentation, xdg_toplevel::State::Activated]
+        }
+        (Some(presentation), false) => vec![presentation],
+        (None, true) => vec![xdg_toplevel::State::Activated],
+        (None, false) => Vec::new(),
+    }
+}
+
+fn restoring_to_windowed_state(
+    states: &[xdg_toplevel::State],
+    restoration_requested: bool,
+) -> bool {
+    restoration_requested
+        && !states.iter().any(|candidate| {
+            matches!(
+                candidate,
+                xdg_toplevel::State::Fullscreen | xdg_toplevel::State::Maximized
+            )
+        })
+}
+
+fn remember_windowed_toplevel_size(toplevel: &XdgToplevel) {
+    let Some(data) = toplevel.data::<XdgToplevelData>() else {
+        return;
+    };
+    if data.fullscreen_requested.load(Ordering::Acquire)
+        || data.maximized_requested.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let Some(surface) = toplevel_surface(toplevel) else {
+        return;
+    };
+    let Some(frame) = surface_frame(&surface) else {
+        return;
+    };
+    let size = surface_content_size(&surface, &frame);
+    if size.0 == 0 || size.1 == 0 {
+        return;
+    }
+    *data
+        .windowed_size
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(size);
+}
+
+fn retained_windowed_toplevel_size(toplevel: &XdgToplevel) -> Option<(u32, u32)> {
+    toplevel.data::<XdgToplevelData>().and_then(|data| {
+        *data
+            .windowed_size
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    })
+}
+
+fn toplevel_configure_size(
+    states: &[xdg_toplevel::State],
+    output_width: i32,
+    output_height: i32,
+    windowed_size: Option<(u32, u32)>,
+    content_size: Option<(u32, u32)>,
+    restoring_windowed: bool,
+) -> (i32, i32) {
+    let fills_output = states.iter().any(|candidate| {
+        matches!(
+            candidate,
+            xdg_toplevel::State::Fullscreen | xdg_toplevel::State::Maximized
+        )
+    });
+    if fills_output && output_width > 0 && output_height > 0 {
+        (output_width, output_height)
+    } else if let Some((content_width, content_height)) = if restoring_windowed {
+        windowed_size
+    } else {
+        content_size
+    } {
+        (
+            i32::try_from(content_width).unwrap_or(i32::MAX),
+            i32::try_from(content_height).unwrap_or(i32::MAX),
+        )
+    } else {
+        (0, 0)
+    }
+}
+
+fn queue_requested_toplevel_configure(
+    state: &mut CompositorState,
+    toplevel: &XdgToplevel,
+    restoring_windowed: bool,
+) -> u32 {
+    let initial_configure_sent = toplevel
+        .data::<XdgToplevelData>()
+        .and_then(|data| data.xdg_surface.data::<XdgSurfaceData>())
+        .is_some_and(|data| {
+            data.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .initial_configure_sent()
+        });
+    if !initial_configure_sent {
+        return 0;
+    }
+    let Some(surface) = toplevel_surface(toplevel) else {
+        return 0;
+    };
+    let primary = state
+        .primary_toplevel
+        .as_ref()
+        .is_some_and(|candidate| candidate.id() == toplevel.id());
+    let activated = state
+        .active_toplevel
+        .as_ref()
+        .is_some_and(|candidate| candidate.id() == toplevel.id());
+    let states = requested_toplevel_states(toplevel, primary && state.tile_toplevels, activated);
+    let retained_windowed_size = retained_windowed_toplevel_size(toplevel);
+    let restoring_to_windowed = restoring_to_windowed_state(
+        &states,
+        restoring_windowed || retained_windowed_size.is_some(),
+    );
+    let content_size = surface_frame(&surface).map(|frame| surface_content_size(&surface, &frame));
+    let (width, height) = toplevel_configure_size(
+        &states,
+        state.output_width,
+        state.output_height,
+        retained_windowed_size,
+        content_size,
+        restoring_to_windowed,
+    );
+    queue_toplevel_configure_with_restoration(
+        state,
+        toplevel,
+        width,
+        height,
+        &states,
+        restoring_to_windowed,
+    )
 }
 
 fn configure_toplevel_activation(
@@ -8562,31 +8829,31 @@ fn configure_toplevel_activation(
     let Some(surface) = toplevel_surface(toplevel) else {
         return 0;
     };
-    let Some(frame) = surface_frame(&surface) else {
-        return 0;
-    };
     let primary = state
         .primary_toplevel
         .as_ref()
         .is_some_and(|candidate| candidate.id() == toplevel.id());
-    let (content_width, content_height) = surface_content_size(&surface, &frame);
-    let (width, height) =
-        if primary && state.tile_toplevels && state.output_width > 0 && state.output_height > 0 {
-            (state.output_width, state.output_height)
-        } else {
-            (
-                i32::try_from(content_width).unwrap_or(i32::MAX),
-                i32::try_from(content_height).unwrap_or(i32::MAX),
-            )
-        };
-    let mut states = Vec::with_capacity(2);
-    if primary && state.tile_toplevels {
-        states.push(xdg_toplevel::State::Maximized);
-    }
-    if activated {
-        states.push(xdg_toplevel::State::Activated);
-    }
-    queue_toplevel_configure(state, toplevel, width, height, &states)
+    let states = requested_toplevel_states(toplevel, primary && state.tile_toplevels, activated);
+    let retained_windowed_size = retained_windowed_toplevel_size(toplevel);
+    let restoring_to_windowed =
+        restoring_to_windowed_state(&states, retained_windowed_size.is_some());
+    let content_size = surface_frame(&surface).map(|frame| surface_content_size(&surface, &frame));
+    let (width, height) = toplevel_configure_size(
+        &states,
+        state.output_width,
+        state.output_height,
+        retained_windowed_size,
+        content_size,
+        restoring_to_windowed,
+    );
+    queue_toplevel_configure_with_restoration(
+        state,
+        toplevel,
+        width,
+        height,
+        &states,
+        restoring_to_windowed,
+    )
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ToplevelLayout {
@@ -9101,7 +9368,7 @@ fn commit_xdg_surface_state(xdg_surface: &XdgSurface) -> bool {
     let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
         return false;
     };
-    let (window_geometry_changed, popup_geometry) = {
+    let (window_geometry_changed, popup_geometry, restores_windowed) = {
         let mut state = xdg_data
             .state
             .lock()
@@ -9111,8 +9378,30 @@ fn commit_xdg_surface_state(xdg_surface: &XdgSurface) -> bool {
             state
                 .acknowledged_configure
                 .and_then(|configure| configure.popup_geometry),
+            state.commit_windowed_restoration(),
         )
     };
+    if restores_windowed {
+        if let Some(toplevel) = xdg_data
+            .wl_surface
+            .data::<SurfaceData>()
+            .and_then(|surface_data| {
+                surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .xdg_toplevel
+                    .clone()
+            })
+        {
+            if let Some(data) = toplevel.data::<XdgToplevelData>() {
+                *data
+                    .windowed_size
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = None;
+            }
+        }
+    }
     let popup_geometry_changed = popup_geometry.is_some_and(|geometry| {
         xdg_data
             .wl_surface
@@ -9868,6 +10157,7 @@ fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Opti
                     serial,
                     popup_geometry: Some(geometry),
                     toplevel_size: None,
+                    restores_windowed: false,
                 });
         }
         popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
@@ -10361,7 +10651,13 @@ impl CompositorCore {
             .active_toplevel
             .as_ref()
             .is_none_or(|active| active.id() != toplevel.id());
-        self.state.active_toplevel = Some(toplevel);
+        if changed {
+            if let Some(previous) = self.state.active_toplevel.clone() {
+                configure_toplevel_activation(&mut self.state, &previous, false);
+            }
+            self.state.active_toplevel = Some(toplevel.clone());
+            configure_toplevel_activation(&mut self.state, &toplevel, true);
+        }
         self.state.root_surface = Some(surface.clone());
         self.state.root_frame = Some(frame);
         self.state.pointer_focus_surface = Some(surface.clone());
@@ -10510,36 +10806,20 @@ impl CompositorCore {
                 serial,
                 popup_geometry: None,
                 toplevel_size: Some((width, height)),
+                restores_windowed: false,
             });
-        toplevel.configure(width, height, Vec::new());
-        xdg_surface.configure(serial);
-        serial
-    }
-
-    fn configure_managed_toplevel(&mut self, width: i32, height: i32) -> bool {
-        let Some(toplevel) = self
-            .state
-            .active_toplevel
-            .clone()
-            .or_else(|| self.state.primary_toplevel.clone())
-        else {
-            return false;
-        };
         let primary = self
             .state
             .primary_toplevel
             .as_ref()
             .is_some_and(|candidate| candidate.id() == toplevel.id());
-        let states = if primary {
-            vec![
-                xdg_toplevel::State::Maximized,
-                xdg_toplevel::State::Activated,
-            ]
-        } else {
-            vec![xdg_toplevel::State::Activated]
-        };
-        queue_toplevel_configure(&mut self.state, &toplevel, width, height, &states) != 0
+        let states =
+            requested_toplevel_states(&toplevel, primary && self.state.tile_toplevels, true);
+        toplevel.configure(width, height, encode_xdg_toplevel_states(&states));
+        xdg_surface.configure(serial);
+        serial
     }
+
     pub fn focused_pending_configure_count(&self) -> u32 {
         let Some((xdg_surface, _)) = self.focused_xdg_resources() else {
             return 0;
@@ -10648,10 +10928,30 @@ impl CompositorCore {
             fractional.preferred_scale(fractional_scale);
         }
         self.reconfigure_reactive_popups();
-        if self.state.tile_toplevels
-            && self.configure_managed_toplevel(logical_width, logical_height)
-        {
-            updated = updated.saturating_add(1);
+        let managed = self
+            .state
+            .active_toplevel
+            .as_ref()
+            .or(self.state.primary_toplevel.as_ref())
+            .map(|resource| resource.id());
+        let resized_toplevels = self
+            .state
+            .toplevels
+            .iter()
+            .filter(|toplevel| {
+                let tiled = self.state.tile_toplevels && managed == Some(toplevel.id());
+                let requested = toplevel.data::<XdgToplevelData>().is_some_and(|data| {
+                    data.fullscreen_requested.load(Ordering::Acquire)
+                        || data.maximized_requested.load(Ordering::Acquire)
+                });
+                tiled || requested
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for toplevel in resized_toplevels {
+            if queue_requested_toplevel_configure(&mut self.state, &toplevel, false) != 0 {
+                updated = updated.saturating_add(1);
+            }
         }
         updated
     }
@@ -11998,6 +12298,22 @@ impl CompositorCore {
         let serial = self.next_input_serial();
         self.remember_selection_serial(serial, surface.clone());
         if pressed {
+            let keyboard_focus = pointer_keyboard_focus_surface(&self.state, &surface);
+            if let Some(keyboard_focus) = keyboard_focus {
+                if let Some(toplevel) = keyboard_focus_toplevel(&self.state, &keyboard_focus) {
+                    let changes_active = self
+                        .state
+                        .active_toplevel
+                        .as_ref()
+                        .is_none_or(|active| active.id() != toplevel.id());
+                    if changes_active {
+                        self.activate_window(toplevel.id().protocol_id());
+                        self.state.pointer_focus_surface = Some(surface.clone());
+                        self.state.pointer_inside = true;
+                    }
+                }
+                set_keyboard_focus(&mut self.state, Some(keyboard_focus));
+            }
             if self
                 .state
                 .popup_grab
@@ -15374,13 +15690,7 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
                     .expect("fixed input field"),
             )
         };
-        let fields = scale_launcher_input_record(
-            [field(0), field(1), field(2), field(3), field(4), field(5)],
-            compositor.core.state.output_width,
-            compositor.core.state.output_height,
-            compositor.surface_width,
-            compositor.surface_height,
-        );
+        let fields = [field(0), field(1), field(2), field(3), field(4), field(5)];
         let Ok(accepted) = dispatch_launcher_input_record(&mut compositor.core, fields) else {
             return -3;
         };
@@ -17033,6 +17343,104 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_requests_override_layout_maximization_until_unset() {
+        assert_eq!(
+            configured_toplevel_states(true, false, true, true),
+            vec![
+                xdg_toplevel::State::Fullscreen,
+                xdg_toplevel::State::Activated,
+            ],
+        );
+        assert_eq!(
+            configured_toplevel_states(false, false, true, true),
+            vec![
+                xdg_toplevel::State::Maximized,
+                xdg_toplevel::State::Activated,
+            ],
+        );
+        assert_eq!(
+            configured_toplevel_states(false, false, false, true),
+            vec![xdg_toplevel::State::Activated],
+        );
+        assert_eq!(
+            configured_toplevel_states(false, true, false, false),
+            vec![xdg_toplevel::State::Maximized],
+        );
+    }
+
+    #[test]
+    fn presentation_and_restoration_choose_current_sizes() {
+        assert!(!restoring_to_windowed_state(
+            &[xdg_toplevel::State::Maximized],
+            true,
+        ));
+        assert!(restoring_to_windowed_state(
+            &[xdg_toplevel::State::Activated],
+            true,
+        ));
+        for state in [
+            xdg_toplevel::State::Fullscreen,
+            xdg_toplevel::State::Maximized,
+        ] {
+            assert_eq!(
+                toplevel_configure_size(
+                    &[state],
+                    432,
+                    881,
+                    Some((374, 546)),
+                    Some((432, 881)),
+                    false,
+                ),
+                (432, 881),
+            );
+        }
+        assert_eq!(
+            toplevel_configure_size(
+                &[xdg_toplevel::State::Activated],
+                432,
+                881,
+                Some((374, 546)),
+                Some((432, 881)),
+                false,
+            ),
+            (432, 881),
+        );
+        assert_eq!(
+            toplevel_configure_size(
+                &[xdg_toplevel::State::Activated],
+                432,
+                881,
+                Some((374, 546)),
+                Some((432, 881)),
+                true,
+            ),
+            (374, 546),
+        );
+        assert_eq!(
+            toplevel_configure_size(
+                &[xdg_toplevel::State::Activated],
+                432,
+                881,
+                None,
+                None,
+                false,
+            ),
+            (0, 0),
+        );
+        assert_eq!(
+            toplevel_configure_size(
+                &[xdg_toplevel::State::Activated],
+                432,
+                881,
+                None,
+                Some((432, 881)),
+                true,
+            ),
+            (0, 0),
+        );
+    }
+
+    #[test]
     fn validates_runtime_program_names() {
         assert!(safe_runtime_program_name(b"glmark2-es2-wayland"));
         assert!(safe_runtime_program_name(b"app@profile:1"));
@@ -17813,6 +18221,29 @@ mod tests {
     }
 
     #[test]
+    fn does_not_send_toplevel_state_before_initial_surface_commit() {
+        let mut state = XdgSurfaceState::default();
+        assert!(!state.initial_configure_sent());
+        state.pending_configures.push_back(XdgConfigure {
+            serial: 1,
+            popup_geometry: None,
+            toplevel_size: Some((0, 0)),
+            restores_windowed: false,
+        });
+        assert!(state.initial_configure_sent());
+        state.pending_configures.clear();
+        state.acknowledged_configure = Some(XdgConfigure {
+            serial: 1,
+            popup_geometry: None,
+            toplevel_size: Some((0, 0)),
+            restores_windowed: true,
+        });
+        assert!(state.initial_configure_sent());
+        assert!(state.commit_windowed_restoration());
+        assert!(!state.commit_windowed_restoration());
+    }
+
+    #[test]
     fn text_input_commit_only_reports_android_visible_changes() {
         let mut state = TextInputState {
             pending_enabled: Some(true),
@@ -17836,8 +18267,12 @@ mod tests {
         });
         state.pending_content_type = Some((3, 7));
         state.pending_cursor_rectangle = Some((1, 2, 3, 4));
-        assert!(!apply_text_input_commit(&mut state, false));
+        assert!(apply_text_input_commit(&mut state, false));
         assert_eq!(state.cursor_rectangle, Some((1, 2, 3, 4)));
+
+        state.pending_cursor_rectangle = Some((5, 6, 7, 8));
+        assert!(!apply_text_input_commit(&mut state, false));
+        assert_eq!(state.cursor_rectangle, Some((5, 6, 7, 8)));
 
         state.pending_surrounding_text = Some(SurroundingText {
             text: "hello!".to_owned(),
@@ -17851,6 +18286,22 @@ mod tests {
         assert!(!state.enabled);
         assert!(state.surrounding_text.is_none());
         assert_eq!(state.content_type, (0, 0));
+    }
+
+    #[test]
+    fn first_cursor_rectangle_advances_empty_editor_evidence() {
+        let mut state = TextInputState {
+            enabled: true,
+            surrounding_text: Some(SurroundingText {
+                text: String::new(),
+                cursor: 0,
+                anchor: 0,
+            }),
+            pending_cursor_rectangle: Some((0, 0, 0, 0)),
+            ..TextInputState::default()
+        };
+        assert!(apply_text_input_commit(&mut state, false));
+        assert_eq!(state.cursor_rectangle, Some((0, 0, 0, 0)));
     }
 
     #[test]
@@ -18161,6 +18612,7 @@ mod tests {
             serial: 1,
             popup_geometry: None,
             toplevel_size: Some((432, 881)),
+            restores_windowed: false,
         });
         assert!(!state.has_pending_toplevel_size(432, 537));
 
@@ -18168,6 +18620,7 @@ mod tests {
             serial: 2,
             popup_geometry: None,
             toplevel_size: Some((432, 537)),
+            restores_windowed: false,
         });
         assert!(state.has_pending_toplevel_size(432, 537));
     }
@@ -18404,7 +18857,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_density_separates_android_pixels_from_wayland_coordinates() {
+    fn launcher_density_separates_android_pixels_from_wayland_output() {
         let mut core = CompositorCore::new().expect("compositor");
         core.set_toplevel_tiling(true);
         assert_eq!(configure_launcher_output(&mut core, 1080, 2316, 450, 0), 0);
@@ -18419,24 +18872,6 @@ mod tests {
         assert_eq!(core.state.output_scale, 3);
         assert_eq!(core.state.output_fractional_scale, 300);
 
-        assert_eq!(
-            scale_launcher_input_record([1, 0, 540, 1158, 7, 0], 432, 926, 1080, 2316),
-            [1, 0, 216, 463, 7, 0],
-        );
-        assert_eq!(
-            scale_launcher_input_record([6, 1080, 2316, 9, 0, 0], 432, 926, 1080, 2316),
-            [6, 432, 926, 9, 0, 0],
-        );
-        assert_eq!(
-            scale_launcher_input_record(
-                [11, 10_000, -10_000, 5_000, -5_000, 9],
-                432,
-                926,
-                1080,
-                2316,
-            ),
-            [11, 4_000, -3_998, 2_000, -1_999, 9],
-        );
     }
 
     #[test]

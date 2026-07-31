@@ -35,4 +35,35 @@ class LauncherAuthorizationTest {
             ).usesGraphicsBridge,
         )
     }
+
+    @Test
+    fun phoneLandscapePreferenceComesOnlyFromVerifiedSdlTopology() {
+        assertTrue(
+            LauncherAuthorization(
+                label = "SDL 3 app",
+                terminal = false,
+                integrationTopology = 1 shl 5,
+                bridgeCapabilities = 0,
+                mimeTypes = emptyList(),
+            ).prefersPhoneLandscape,
+        )
+        assertTrue(
+            LauncherAuthorization(
+                label = "SDL 2 app",
+                terminal = false,
+                integrationTopology = 1 shl 4,
+                bridgeCapabilities = 0,
+                mimeTypes = emptyList(),
+            ).prefersPhoneLandscape,
+        )
+        assertFalse(
+            LauncherAuthorization(
+                label = "Wayland app",
+                terminal = false,
+                integrationTopology = 1 shl 8,
+                bridgeCapabilities = 0,
+                mimeTypes = emptyList(),
+            ).prefersPhoneLandscape,
+        )
+    }
 }

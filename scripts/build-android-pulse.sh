@@ -44,6 +44,7 @@ copy_file() {
 
 copy_file "$prefix/bin/pulseaudio" libarchphene_pulseaudio.so
 copy_file "$prefix/bin/pacat" libarchphene_pulse_probe.so
+copy_file "$prefix/bin/pactl" libarchphene_pulse_control.so
 copy_file "$prefix/lib/pulseaudio/modules/module-aaudio-sink.so" \
   libarchphene_pulse_module_aaudio_sink.so
 copy_file "$prefix/lib/pulseaudio/modules/module-sles-sink.so" \

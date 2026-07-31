@@ -21,6 +21,10 @@ COMPOSITOR_SESSION = ROOT / (
     "prototypes/shared-android-bridge/src/org/archphene/bridge/"
     "ArchpheneCompositorSession.java"
 )
+PROCESS = ROOT / "crates/archphene-process/src/lib.rs"
+LAUNCHER_TEMPLATE = ROOT / (
+    "android/launcher-template/src/main/kotlin/org/archphene/launcher/LauncherActivity.kt"
+)
 
 
 def main() -> None:
@@ -96,6 +100,20 @@ def main() -> None:
         raise SystemExit("direct-Wayland wrappers must select the SDL Wayland backend")
     if 'env.put("SDL_AUDIODRIVER", "pulseaudio")' not in compositor:
         raise SystemExit("direct-Wayland wrappers must select the Android audio bridge")
+    launcher_template = LAUNCHER_TEMPLATE.read_text()
+    if "SOFT_INPUT_STATE_ALWAYS_HIDDEN" not in launcher_template:
+        raise SystemExit(
+            "generated launchers must suppress implicit Android IME display")
+    process = PROCESS.read_text()
+    for token in (
+            '.env("SDL_AUDIODRIVER", "pulseaudio")',
+            '.env("SDL_AUDIO_DRIVER", "pulseaudio")',
+            '.env("ALSOFT_DRIVERS", "pulse")',
+            'self.arch_root.join("usr/lib/pulseaudio")'):
+        if token not in process:
+            raise SystemExit(
+                "manager-owned graphical processes must select the private PulseAudio "
+                f"bridge: missing {token}")
     if 'env.put("SDL_RENDER_DRIVER"' in compositor:
         raise SystemExit("direct-Wayland wrappers must not disable accelerated SDL renderers")
     if compositor.count('"wayland".equals(toolkit)') < 2 or (

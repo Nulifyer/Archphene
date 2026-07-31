@@ -649,6 +649,10 @@ impl CommandEnvironment {
 
     fn build_command(&self, launch: &LaunchPlan, arguments: &[&str], terminal: &str) -> Command {
         let mut library_path = self.library_path.clone();
+        if self.pulse_server_address.is_some() {
+            library_path.push(":");
+            library_path.push(self.arch_root.join("usr/lib/pulseaudio"));
+        }
         for path in &launch.library_paths {
             library_path.push(":");
             library_path.push(path);
@@ -704,7 +708,7 @@ impl CommandEnvironment {
             .env("CMAKE_BUILD_PARALLEL_LEVEL", &self.build_jobs)
             .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
             .env("ARCHPHENE_RUNTIME_LOADER", &self.loader)
-            .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
+            .env("ARCHPHENE_RUNTIME_LIB", &library_path)
             .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.command_directory)
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
             .env("ARCHPHENE_RUNTIME_PROGRAM_PATH", &launch.program)
@@ -803,7 +807,11 @@ impl CommandEnvironment {
             command.env("GTK_USE_PORTAL", "0");
         }
         if let Some(address) = self.pulse_server_address.as_ref() {
-            command.env("PULSE_SERVER", address);
+            command
+                .env("PULSE_SERVER", address)
+                .env("SDL_AUDIODRIVER", "pulseaudio")
+                .env("SDL_AUDIO_DRIVER", "pulseaudio")
+                .env("ALSOFT_DRIVERS", "pulse");
         }
         if let Some(module) = self.gtk_settings_module.as_ref() {
             let mut preloads = self.path_bridge.as_os_str().to_os_string();
@@ -3319,7 +3327,42 @@ mod tests {
         assert_eq!(gui_value("GTK_A11Y"), None);
         assert_eq!(gui_value("QT_QPA_PLATFORM"), Some(OsStr::new("wayland")));
         assert_eq!(gui_value("SDL_VIDEODRIVER"), Some(OsStr::new("wayland")));
+        assert_eq!(gui_value("SDL_AUDIODRIVER"), None);
+        assert_eq!(gui_value("SDL_AUDIO_DRIVER"), None);
+        assert_eq!(gui_value("ALSOFT_DRIVERS"), None);
         assert_eq!(gui_value("GSK_RENDERER"), None);
+        let mut audio_environment = environment.clone();
+        audio_environment.pulse_server_address = Some(OsString::from(
+            "unix:/data/user/0/org.archphene/cache/audio/pulse",
+        ));
+        let audio = audio_environment.build_gui_command(&launch, &[], "launcher-audio.sock");
+        let audio_value = |name: &str| {
+            audio
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(
+            audio_value("PULSE_SERVER"),
+            Some(OsStr::new(
+                "unix:/data/user/0/org.archphene/cache/audio/pulse"
+            )),
+        );
+        assert_eq!(
+            audio_value("SDL_AUDIODRIVER"),
+            Some(OsStr::new("pulseaudio")),
+        );
+        assert_eq!(
+            audio_value("SDL_AUDIO_DRIVER"),
+            Some(OsStr::new("pulseaudio")),
+        );
+        assert_eq!(audio_value("ALSOFT_DRIVERS"), Some(OsStr::new("pulse")),);
+        let mut expected_audio_library_path = audio_environment.library_path.clone();
+        expected_audio_library_path.push(":");
+        expected_audio_library_path.push(root.0.join("usr/lib/pulseaudio"));
+        assert_eq!(
+            audio_value("ARCHPHENE_RUNTIME_LIB"),
+            Some(expected_audio_library_path.as_os_str()),
+        );
         let gtk_camera = environment
             .clone()
             .with_gtk_camera_compatibility(true)

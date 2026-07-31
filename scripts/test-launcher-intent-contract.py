@@ -22,7 +22,7 @@ require(
     ROOT
     / "android/launcher-template/src/main/kotlin/org/archphene/launcher"
     / "LauncherActivity.kt",
-    "private const val PROTOCOL_VERSION = 10",
+    "private const val PROTOCOL_VERSION = 19",
     'uri?.scheme != "content"',
     "LauncherIntentMimePolicy.matches(declared, mimeType)",
     'contentResolver.openFileDescriptor(request.uri, "r", cancellation)',
@@ -32,7 +32,7 @@ require(
     ROOT
     / "android/app/src/main/kotlin/org/archphene/app/launcher"
     / "LauncherSessionService.kt",
-    "private const val PROTOCOL_VERSION = 10",
+    "private const val PROTOCOL_VERSION = 19",
     "identity.mimeTypes != authorization.mimeTypes",
     "portalBridge.importLaunchDocument(pendingLaunchDocument)",
     "session.launchDocumentPath",

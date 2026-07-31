@@ -14,6 +14,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -52,8 +53,10 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeProvider
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -87,6 +90,7 @@ class LauncherActivity :
         val anchor: Int,
         val hint: Int,
         val purpose: Int,
+        val editorEvidence: Int = LauncherImeTouchPolicy.EDITOR_EVIDENCE_NONE,
     )
 
     private data class OpenDocument(
@@ -149,6 +153,8 @@ class LauncherActivity :
     private var attachedSurface: Surface? = null
     private var attachedWidth = 0
     private var attachedHeight = 0
+    private var attachedLogicalWidth = 0
+    private var attachedLogicalHeight = 0
     private var attachedDensityDpi = 0
     private var attachedFontScaleMillis = 0
     private var configurationSurfaceAttachFrames = 0
@@ -171,15 +177,41 @@ class LauncherActivity :
         }
     private var managerDeathSurfaceReset = false
     private var pointerButtonState = 0
+    private var desktopTouchSequenceState = LauncherDesktopTouchPolicy.IDLE
+    private var desktopTouchSlop = 0
+    private var testInputDebug = false
+    private var inputCoordinateLogsRemaining = 0
+    private var inputKeyLogsRemaining = 0
+    private var lastKeyEventTime = 0
+    private var hasKeyEventTime = false
+    private var desktopTouchDownX = 0f
+    private var desktopTouchDownY = 0f
     private var pointerCaptureRequested = false
+    private var launcherOrientationPolicy = LauncherOrientationPolicy.DEFAULT
     private var cursorSystemIcon = PointerIcon.TYPE_ARROW
     private var customCursorPointerIcon: PointerIcon? = null
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
     private var softImeRequested = false
+    private var softImeExplicitlyRequestedForAmbiguousInput = false
+    private var imeActivationTouchPending = false
+    private var ambiguousImeLongPressEligible = false
+    private val clearImeActivationTouchPending =
+        Runnable { imeActivationTouchPending = false }
     private val showImeAfterTouch =
         Runnable {
             if (softImeRequested && imeState.active) {
                 showIme(restart = true)
+            }
+        }
+    private val suppressImplicitImeAfterHardwareKey =
+        Runnable {
+            if (
+                LauncherImeTouchPolicy.suppressImplicitAfterHardwareKey(
+                    imeState.active,
+                    softImeRequested,
+                )
+            ) {
+                hideIme()
             }
         }
     private var hasPendingLinuxClipboard = false
@@ -297,6 +329,12 @@ class LauncherActivity :
                             val anchor = if (active == 1) data.readInt() else 0
                             val hint = if (active == 1) data.readInt() else 0
                             val purpose = if (active == 1) data.readInt() else 0
+                            val editorEvidence =
+                                if (active == 1) {
+                                    data.readInt()
+                                } else {
+                                    LauncherImeTouchPolicy.EDITOR_EVIDENCE_NONE
+                                }
                             if (
                                 active !in 0..1 ||
                                 (active == 1 &&
@@ -305,7 +343,10 @@ class LauncherActivity :
                                         cursor !in 0..text.length ||
                                         anchor !in 0..text.length ||
                                         hint < 0 ||
-                                        purpose !in 0..MAX_IME_PURPOSE)) ||
+                                        purpose !in 0..MAX_IME_PURPOSE ||
+                                        editorEvidence !in
+                                            LauncherImeTouchPolicy.EDITOR_EVIDENCE_NONE..
+                                            LauncherImeTouchPolicy.EDITOR_EVIDENCE_STRONG)) ||
                                 data.dataAvail() != 0
                             ) {
                                 return@runCatching false
@@ -319,6 +360,7 @@ class LauncherActivity :
                                     anchor,
                                     hint,
                                     purpose,
+                                    editorEvidence,
                                 )
                             handler.post { applyImeState(next) }
                             true
@@ -767,9 +809,14 @@ class LauncherActivity :
                 resetSurfaceAttachment()
                 recreateSurfaceView()
                 pointerButtonState = 0
+                desktopTouchSequenceState = LauncherDesktopTouchPolicy.IDLE
                 applyPointerCapture(false)
                 applyCursorSystemIcon(PointerIcon.TYPE_ARROW)
                 softImeRequested = false
+                softImeExplicitlyRequestedForAmbiguousInput = false
+                imeActivationTouchPending = false
+                ambiguousImeLongPressEligible = false
+                handler.removeCallbacks(clearImeActivationTouchPending)
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
                 pendingLinuxClipboardHtml = null
@@ -802,6 +849,22 @@ class LauncherActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setSoftInputMode(
+            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN,
+        )
+        val managerPackage = applicationMetadata().getString(MANAGER_PACKAGE).orEmpty()
+        val managerIsDebuggable =
+            SAFE_PACKAGE.matches(managerPackage) &&
+                runCatching {
+                    packageManager.getApplicationInfo(managerPackage, 0).flags and
+                        ApplicationInfo.FLAG_DEBUGGABLE != 0
+                }.getOrDefault(false)
+        testInputDebug =
+            managerIsDebuggable && intent.getBooleanExtra(TEST_INPUT_DEBUG_EXTRA, false)
+        inputCoordinateLogsRemaining = if (testInputDebug) 16 else 0
+        inputKeyLogsRemaining = if (testInputDebug) 64 else 0
+        desktopTouchSlop = ViewConfiguration.get(this).scaledTouchSlop
         runCatching { cleanupStalePrintFiles() }
             .onFailure { error ->
                 Log.w(TAG, "Could not clean private print staging", error)
@@ -1071,7 +1134,18 @@ class LauncherActivity :
             Intent(BIND_ACTION).apply {
                 setPackage(manager)
             }
-        binding = bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        /*
+         * The visible launcher and the manager intentionally use separate
+         * Android UIDs. Propagate foreground capabilities while this Activity
+         * is visible so the manager-owned AAudio stream can request focus
+         * under Android 15+'s foreground-audio hardening.
+         */
+        binding =
+            bindService(
+                intent,
+                connection,
+                Context.BIND_AUTO_CREATE or Context.BIND_INCLUDE_CAPABILITIES,
+            )
         if (!binding) {
             status.setText(R.string.launcher_unavailable)
             status.visibility = View.VISIBLE
@@ -1086,9 +1160,14 @@ class LauncherActivity :
         resetSurfaceAttachment()
         recreateSurfaceView()
         pointerButtonState = 0
+        desktopTouchSequenceState = LauncherDesktopTouchPolicy.IDLE
         applyPointerCapture(false)
         applyCursorSystemIcon(PointerIcon.TYPE_ARROW)
         softImeRequested = false
+        softImeExplicitlyRequestedForAmbiguousInput = false
+        imeActivationTouchPending = false
+        ambiguousImeLongPressEligible = false
+        handler.removeCallbacks(clearImeActivationTouchPending)
         hasPendingLinuxClipboard = false
         pendingLinuxClipboardText = null
         pendingLinuxClipboardHtml = null
@@ -1143,6 +1222,8 @@ class LauncherActivity :
         attachedSurface = null
         attachedWidth = 0
         attachedHeight = 0
+        attachedLogicalWidth = 0
+        attachedLogicalHeight = 0
         attachedDensityDpi = 0
         attachedFontScaleMillis = 0
     }
@@ -1160,6 +1241,10 @@ class LauncherActivity :
         }
         stopClipboardListening()
         softImeRequested = false
+        softImeExplicitlyRequestedForAmbiguousInput = false
+        imeActivationTouchPending = false
+        ambiguousImeLongPressEligible = false
+        handler.removeCallbacks(clearImeActivationTouchPending)
         hideIme()
         applyPointerCapture(false)
         submitHostActive(false)
@@ -1307,12 +1392,21 @@ class LauncherActivity :
 
     override fun onConfigurationChanged(configuration: Configuration) {
         super.onConfigurationChanged(configuration)
+        applyLauncherOrientationPolicy(configuration)
         applyStatusAppearance()
         applySystemBarAppearance()
         attachSurface()
         configurationSurfaceAttachFrames = CONFIGURATION_SURFACE_ATTACH_FRAMES
         surfaceView.removeCallbacks(attachSurfaceAfterConfigurationChange)
         surfaceView.postOnAnimation(attachSurfaceAfterConfigurationChange)
+    }
+
+    private fun applyLauncherOrientationPolicy(configuration: Configuration) {
+        requestedOrientation =
+            LauncherOrientationPolicy.requestedOrientation(
+                launcherOrientationPolicy,
+                configuration.smallestScreenWidthDp,
+            )
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -1428,14 +1522,98 @@ class LauncherActivity :
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             // Desktop clients commonly retain a logical text focus across
             // launches. Do not let that alone pop Android's soft keyboard and
-            // resize a newly starting application. Give the Wayland client a
-            // short chance to deactivate text input when the touch targets a
-            // menu or another non-editor control before showing Android's IME.
-            softImeRequested = true
+            // resize a newly starting application. Toolkit editors publish
+            // surrounding-text, content-type, or cursor geometry evidence.
+            // SDL clients that keep text input globally active must instead
+            // receive a deliberate long press before Android shows the IME.
+            val requestImeOnDown =
+                LauncherImeTouchPolicy.requestOnDown(
+                    imeState.active,
+                    imeState.editorEvidence,
+                )
+            if (!imeState.active) {
+                softImeRequested = false
+                softImeExplicitlyRequestedForAmbiguousInput = false
+            } else if (requestImeOnDown) {
+                softImeRequested = true
+                softImeExplicitlyRequestedForAmbiguousInput = false
+            } else if (!softImeExplicitlyRequestedForAmbiguousInput) {
+                softImeRequested = false
+            }
+            ambiguousImeLongPressEligible =
+                imeState.active &&
+                    imeState.editorEvidence != LauncherImeTouchPolicy.EDITOR_EVIDENCE_STRONG
+            imeActivationTouchPending = !imeState.active
+            handler.removeCallbacks(clearImeActivationTouchPending)
+            if (imeActivationTouchPending) {
+                handler.postDelayed(
+                    clearImeActivationTouchPending,
+                    SOFT_IME_TOUCH_DELAY_MILLIS,
+                )
+            }
             handler.removeCallbacks(showImeAfterTouch)
-            if (imeState.active) {
+            if (imeState.active && softImeRequested) {
                 handler.postDelayed(showImeAfterTouch, SOFT_IME_TOUCH_DELAY_MILLIS)
             }
+        } else {
+            if (ambiguousImeLongPressEligible) {
+                ambiguousImeLongPressEligible =
+                    LauncherImeTouchPolicy.retainLongPressEligibility(
+                        eligible = true,
+                        movedBeyondTouchSlop =
+                            event.actionMasked == MotionEvent.ACTION_MOVE &&
+                                LauncherDesktopTouchPolicy.beginsDrag(
+                                    event.x - desktopTouchDownX,
+                                    event.y - desktopTouchDownY,
+                                    desktopTouchSlop,
+                                ),
+                        pointerCount = event.pointerCount,
+                    )
+            }
+            if (
+                event.actionMasked == MotionEvent.ACTION_UP &&
+                LauncherImeTouchPolicy.requestOnUp(
+                    ambiguousImeLongPressEligible,
+                    imeState.active,
+                    imeState.editorEvidence,
+                    event.eventTime - event.downTime,
+                )
+            ) {
+                softImeRequested = true
+                softImeExplicitlyRequestedForAmbiguousInput = true
+                handler.removeCallbacks(showImeAfterTouch)
+                handler.post(showImeAfterTouch)
+            }
+        }
+        if (
+            event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            ambiguousImeLongPressEligible = false
+        }
+        val desktopTouchRoute =
+            LauncherDesktopTouchPolicy.route(
+                desktopTouchSequenceState,
+                event.actionMasked,
+            )
+        val previousDesktopTouchSequenceState = desktopTouchSequenceState
+        desktopTouchSequenceState =
+            LauncherDesktopTouchPolicy.stateAfter(
+                desktopTouchSequenceState,
+                event.actionMasked,
+            )
+        if (desktopTouchRoute == LauncherDesktopTouchPolicy.POINTER) {
+            return submitDesktopTouchPointer(event) || super.dispatchTouchEvent(event)
+        }
+        if (desktopTouchRoute == LauncherDesktopTouchPolicy.CANCEL_POINTER) {
+            val promoted = submitPointerState(event, 0) && submitNativeTouchStart(event)
+            if (!promoted) {
+                desktopTouchSequenceState = previousDesktopTouchSequenceState
+            }
+            return true
+        }
+        if (desktopTouchRoute == LauncherDesktopTouchPolicy.CONSUME) {
+            return true
         }
         val count =
             when (event.actionMasked) {
@@ -1510,19 +1688,124 @@ class LauncherActivity :
     }
 
     private fun submitPointer(event: MotionEvent): Boolean {
+        return submitPointerState(event, pointerButtonsAfter(event))
+    }
+
+    private fun submitDesktopTouchPointer(event: MotionEvent): Boolean =
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                desktopTouchDownX = event.x
+                desktopTouchDownY = event.y
+                // Establish Wayland pointer focus before a tap becomes a
+                // button event. Some desktop toolkits intentionally discard
+                // a click delivered in the same batch as pointer enter.
+                submitPointerState(event, 0)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val beginDrag =
+                    pointerButtonState == 0 &&
+                        LauncherDesktopTouchPolicy.beginsDrag(
+                            event.x - desktopTouchDownX,
+                            event.y - desktopTouchDownY,
+                            desktopTouchSlop,
+                        )
+                submitPointerState(
+                    event,
+                    if (beginDrag || pointerButtonState != 0) {
+                        pointerButtonState or MotionEvent.BUTTON_PRIMARY
+                    } else {
+                        0
+                    },
+                )
+            }
+            MotionEvent.ACTION_UP ->
+                if (pointerButtonState == 0) {
+                    submitPointerTap(event)
+                } else {
+                    submitPointerState(event, 0)
+                }
+            MotionEvent.ACTION_CANCEL -> submitPointerState(event, 0)
+            else -> false
+        }
+
+    private fun submitPointerTap(event: MotionEvent): Boolean {
+        if (sessionId <= 0) return false
+        val data = beginInputParcel(3)
+        val reply = Parcel.obtain()
+        try {
+            writeInputRecord(
+                data,
+                INPUT_POINTER_MOTION,
+                surfaceX(event),
+                surfaceY(event),
+                event.eventTime.toInt(),
+            )
+            writeInputRecord(
+                data,
+                INPUT_POINTER_BUTTON_V2,
+                MotionEvent.BUTTON_PRIMARY,
+                1,
+                event.eventTime.toInt(),
+            )
+            writeInputRecord(
+                data,
+                INPUT_POINTER_BUTTON_V2,
+                MotionEvent.BUTTON_PRIMARY,
+                0,
+                event.eventTime.toInt(),
+            )
+            val submitted = sendInputParcel(data, reply)
+            if (submitted) pointerButtonState = 0
+            return submitted
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun submitNativeTouchStart(event: MotionEvent): Boolean {
+        if (sessionId <= 0) return false
+        val count = event.pointerCount.coerceAtMost(MAX_INPUT_RECORDS)
+        if (count < 2) return false
+        val data = beginInputParcel(count)
+        val reply = Parcel.obtain()
+        try {
+            repeat(count) { index ->
+                writeInputRecord(
+                    data,
+                    INPUT_TOUCH_DOWN,
+                    event.getPointerId(index),
+                    surfaceX(event, index),
+                    surfaceY(event, index),
+                    event.eventTime.toInt(),
+                )
+            }
+            return sendInputParcel(data, reply)
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun submitPointerState(
+        event: MotionEvent,
+        nextButtons: Int,
+    ): Boolean {
         val supportedAction =
             event.actionMasked == MotionEvent.ACTION_HOVER_MOVE ||
                 event.actionMasked == MotionEvent.ACTION_MOVE ||
                 event.actionMasked == MotionEvent.ACTION_DOWN ||
+                event.actionMasked == MotionEvent.ACTION_POINTER_DOWN ||
                 event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL ||
                 event.actionMasked == MotionEvent.ACTION_SCROLL ||
                 event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS ||
                 event.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE
         if (sessionId <= 0 || !supportedAction) {
             return false
         }
-        val nextButtons = pointerButtonsAfter(event)
-        val changedButtons = pointerButtonState xor nextButtons
+        val boundedNextButtons = nextButtons and POINTER_BUTTON_MASK
+        val changedButtons = pointerButtonState xor boundedNextButtons
         val horizontal = axisToFixed(event.getAxisValue(MotionEvent.AXIS_HSCROLL))
         val vertical = axisToFixed(event.getAxisValue(MotionEvent.AXIS_VSCROLL))
         val hasAxis =
@@ -1534,6 +1817,17 @@ class LauncherActivity :
                 if (hasAxis) 1 else 0
         if (count > MAX_INPUT_RECORDS) {
             return false
+        }
+        if (inputCoordinateLogsRemaining > 0) {
+            inputCoordinateLogsRemaining--
+            Log.i(
+                TAG,
+                "Input coordinates action=${event.actionMasked} source=0x${event.source.toString(16)} " +
+                    "raw=${event.x},${event.y} view=${surfaceView.left},${surfaceView.top} " +
+                    "${surfaceView.width}x${surfaceView.height} " +
+                    "logical=${attachedLogicalWidth}x$attachedLogicalHeight " +
+                    "mapped=${surfaceX(event)},${surfaceY(event)}",
+            )
         }
         val data = beginInputParcel(count)
         val reply = Parcel.obtain()
@@ -1551,7 +1845,7 @@ class LauncherActivity :
                         data,
                         INPUT_POINTER_BUTTON_V2,
                         button,
-                        if (nextButtons and button != 0) 1 else 0,
+                        if (boundedNextButtons and button != 0) 1 else 0,
                         event.eventTime.toInt(),
                     )
                 }
@@ -1567,7 +1861,7 @@ class LauncherActivity :
             }
             val submitted = sendInputParcel(data, reply)
             if (submitted) {
-                pointerButtonState = nextButtons
+                pointerButtonState = boundedNextButtons
             }
             return submitted
         } finally {
@@ -1582,8 +1876,22 @@ class LauncherActivity :
         }
         val nextButtons = pointerButtonsAfter(event)
         val changedButtons = pointerButtonState xor nextButtons
-        val relativeX = capturedAxis(event, MotionEvent.AXIS_RELATIVE_X, MotionEvent.AXIS_X)
-        val relativeY = capturedAxis(event, MotionEvent.AXIS_RELATIVE_Y, MotionEvent.AXIS_Y)
+        val relativeX =
+            capturedAxis(
+                event,
+                MotionEvent.AXIS_RELATIVE_X,
+                MotionEvent.AXIS_X,
+                surfaceView.width,
+                attachedLogicalWidth,
+            )
+        val relativeY =
+            capturedAxis(
+                event,
+                MotionEvent.AXIS_RELATIVE_Y,
+                MotionEvent.AXIS_Y,
+                surfaceView.height,
+                attachedLogicalHeight,
+            )
         val horizontal = axisToFixed(event.getAxisValue(MotionEvent.AXIS_HSCROLL))
         val vertical = axisToFixed(event.getAxisValue(MotionEvent.AXIS_VSCROLL))
         val hasMotion = relativeX != 0 || relativeY != 0
@@ -1646,14 +1954,15 @@ class LauncherActivity :
         event: MotionEvent,
         relativeAxis: Int,
         fallbackAxis: Int,
+        viewExtent: Int,
+        bufferExtent: Int,
     ): Int {
         val relative = event.getAxisValue(relativeAxis)
         val value = if (relative != 0f) relative else event.getAxisValue(fallbackAxis)
-        if (!value.isFinite()) {
-            return 0
-        }
+        val bufferValue =
+            LauncherSurfaceCoordinatePolicy.relative(value, viewExtent, bufferExtent)
         return (
-            value.coerceIn(-MAX_RELATIVE_PIXELS, MAX_RELATIVE_PIXELS) *
+            bufferValue.coerceIn(-MAX_RELATIVE_PIXELS, MAX_RELATIVE_PIXELS) *
                 RELATIVE_FIXED_SCALE
         ).roundToInt()
     }
@@ -1676,21 +1985,24 @@ class LauncherActivity :
     private fun surfaceX(
         event: MotionEvent,
         pointerIndex: Int = 0,
-    ): Int = surfaceCoordinate(event.getX(pointerIndex), surfaceView.left, surfaceView.width)
+    ): Int =
+        LauncherSurfaceCoordinatePolicy.absolute(
+            event.getX(pointerIndex),
+            surfaceView.left,
+            surfaceView.width,
+            attachedLogicalWidth,
+        )
 
     private fun surfaceY(
         event: MotionEvent,
         pointerIndex: Int = 0,
-    ): Int = surfaceCoordinate(event.getY(pointerIndex), surfaceView.top, surfaceView.height)
-
-    private fun surfaceCoordinate(
-        windowCoordinate: Float,
-        surfaceOffset: Int,
-        surfaceExtent: Int,
     ): Int =
-        (windowCoordinate - surfaceOffset)
-            .roundToInt()
-            .coerceIn(0, (surfaceExtent - 1).coerceAtLeast(0))
+        LauncherSurfaceCoordinatePolicy.absolute(
+            event.getY(pointerIndex),
+            surfaceView.top,
+            surfaceView.height,
+            attachedLogicalHeight,
+        )
 
     private fun pointerButtonsAfter(event: MotionEvent): Int {
         val reported = event.buttonState and POINTER_BUTTON_MASK
@@ -1701,6 +2013,7 @@ class LauncherActivity :
             MotionEvent.ACTION_DOWN ->
                 if (reported != 0) reported else pointerButtonState or MotionEvent.BUTTON_PRIMARY
             MotionEvent.ACTION_UP -> 0
+            MotionEvent.ACTION_CANCEL -> 0
             MotionEvent.ACTION_MOVE ->
                 if (reported != 0) reported else pointerButtonState
             else -> reported
@@ -1715,6 +2028,15 @@ class LauncherActivity :
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (inputKeyLogsRemaining > 0) {
+            inputKeyLogsRemaining--
+            Log.i(
+                TAG,
+                "Input key action=${event.action} code=${event.keyCode} repeat=${event.repeatCount} " +
+                    "source=0x${event.source.toString(16)} flags=0x${event.flags.toString(16)} " +
+                    "time=${event.eventTime}",
+            )
+        }
         if (
             sessionId <= 0 ||
             event.keyCode == KeyEvent.KEYCODE_BACK ||
@@ -1733,15 +2055,62 @@ class LauncherActivity :
                 } else {
                     KEY_PRESSED
                 }
+            val keyEventTime =
+                LauncherInputTimestampPolicy.next(
+                    event.eventTime.toInt(),
+                    lastKeyEventTime,
+                    hasKeyEventTime,
+                )
+            lastKeyEventTime = keyEventTime
+            hasKeyEventTime = true
             writeInputRecord(
                 data,
                 INPUT_KEY,
                 event.keyCode,
                 keyAction,
-                event.eventTime.toInt(),
+                keyEventTime,
                 event.metaState,
             )
-            return sendInputParcel(data, reply)
+            val sent = sendInputParcel(data, reply)
+            if (testInputDebug) {
+                Log.i(
+                    TAG,
+                    "Submitted input key code=${event.keyCode} action=$keyAction accepted=$sent",
+                )
+            }
+            if (
+                LauncherImeTouchPolicy.suppressImplicitAfterHardwareKey(
+                    imeState.active,
+                    softImeRequested,
+                )
+            ) {
+                softImeRequested = false
+                handler.removeCallbacks(showImeAfterTouch)
+                getSystemService(InputMethodManager::class.java).restartInput(surfaceView)
+                hideIme()
+                handler.removeCallbacks(suppressImplicitImeAfterHardwareKey)
+                handler.postDelayed(
+                    suppressImplicitImeAfterHardwareKey,
+                    IMPLICIT_IME_SUPPRESSION_DELAY_MILLIS,
+                )
+                handler.postDelayed(
+                    suppressImplicitImeAfterHardwareKey,
+                    IMPLICIT_IME_SUPPRESSION_SECOND_DELAY_MILLIS,
+                )
+                handler.postDelayed(
+                    suppressImplicitImeAfterHardwareKey,
+                    IMPLICIT_IME_SUPPRESSION_THIRD_DELAY_MILLIS,
+                )
+                handler.postDelayed(
+                    suppressImplicitImeAfterHardwareKey,
+                    IMPLICIT_IME_SUPPRESSION_FOURTH_DELAY_MILLIS,
+                )
+                handler.postDelayed(
+                    suppressImplicitImeAfterHardwareKey,
+                    IMPLICIT_IME_SUPPRESSION_FINAL_DELAY_MILLIS,
+                )
+            }
+            return sent
         } finally {
             reply.recycle()
             data.recycle()
@@ -2143,10 +2512,23 @@ class LauncherActivity :
                     sessionId = reply.readInt()
                     val label = reply.readString().orEmpty().take(256)
                     reply.readInt()
+                    launcherOrientationPolicy =
+                        if (reply.dataAvail() >= Int.SIZE_BYTES) {
+                            reply.readInt()
+                        } else {
+                            LauncherOrientationPolicy.DEFAULT
+                        }
                     if (sessionId <= 0 || label.isEmpty()) {
                         showUnavailable()
                         return
                     }
+                    applyLauncherOrientationPolicy(resources.configuration)
+                    Log.i(
+                        TAG,
+                        "Applied orientation policy=$launcherOrientationPolicy " +
+                            "requested=$requestedOrientation " +
+                            "smallestWidthDp=${resources.configuration.smallestScreenWidthDp}",
+                    )
                     status.text = getString(R.string.launcher_connected, label)
                     Log.i(TAG, "Authenticated session=$sessionId")
                     attachSurface()
@@ -2159,12 +2541,14 @@ class LauncherActivity :
                     reply.readInt()
                     reply.readString()
                     reply.readInt()
+                    if (reply.dataAvail() >= Int.SIZE_BYTES) reply.readInt()
                     retryOpen()
                 }
                 else -> {
                     reply.readInt()
                     reply.readString()
                     reply.readInt()
+                    if (reply.dataAvail() >= Int.SIZE_BYTES) reply.readInt()
                     status.setText(R.string.launcher_rejected)
                 }
             }
@@ -2309,12 +2693,22 @@ class LauncherActivity :
             if (service.transact(TRANSACTION_ATTACH_SURFACE, data, reply, 0)) {
                 reply.readException()
                 if (reply.readInt() == RESULT_OK) {
+                    val logicalWidth = reply.readInt()
+                    val logicalHeight = reply.readInt()
+                    check(logicalWidth in 1..MAX_LOGICAL_SURFACE_DIMENSION)
+                    check(logicalHeight in 1..MAX_LOGICAL_SURFACE_DIMENSION)
                     attachedSurface = surface
                     attachedWidth = width
                     attachedHeight = height
+                    attachedLogicalWidth = logicalWidth
+                    attachedLogicalHeight = logicalHeight
                     attachedDensityDpi = densityDpi
                     attachedFontScaleMillis = fontScaleMillis
-                    Log.i(TAG, "Attached Surface session=$activeSession size=${width}x$height")
+                    Log.i(
+                        TAG,
+                        "Attached Surface session=$activeSession size=${width}x$height " +
+                            "logical=${logicalWidth}x$logicalHeight",
+                    )
                     accessibilityProvider.refreshBoundsAfterTransition()
                     submitHostActive(hasWindowFocus())
                     if (hasWindowFocus()) {
@@ -2336,6 +2730,7 @@ class LauncherActivity :
         val wasAttached = attachedSurface != null
         resetSurfaceAttachment()
         pointerButtonState = 0
+        desktopTouchSequenceState = LauncherDesktopTouchPolicy.IDLE
         if (service == null || activeSession <= 0 || !wasAttached) {
             return
         }
@@ -2378,6 +2773,7 @@ class LauncherActivity :
         }
         if (!active) {
             pointerButtonState = 0
+            desktopTouchSequenceState = LauncherDesktopTouchPolicy.IDLE
         }
     }
 
@@ -2525,11 +2921,11 @@ class LauncherActivity :
             }
         }
 
-        override fun onCheckIsTextEditor(): Boolean = true
+        override fun onCheckIsTextEditor(): Boolean = imeState.active && softImeRequested
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
             val state = imeState
-            if (!state.active) {
+            if (!state.active || !softImeRequested) {
                 return null
             }
             outAttrs.inputType = androidInputType(state.hint, state.purpose)
@@ -2736,11 +3132,45 @@ class LauncherActivity :
     private fun applyImeState(next: ImeState) {
         val previous = imeState
         imeState = next
+        val requestedAfterTouch =
+            LauncherImeTouchPolicy.requestOnActivationAfterTouch(
+                imeActivationTouchPending,
+                next.active,
+                next.editorEvidence,
+            )
+        val retainedSoftImeRequest =
+            LauncherImeTouchPolicy.retainSoftImeRequest(
+                softImeRequested,
+                softImeExplicitlyRequestedForAmbiguousInput,
+                next.active,
+                next.editorEvidence,
+            )
+        if (softImeRequested && !retainedSoftImeRequest && next.active && hasWindowFocus()) {
+            hideIme()
+        }
+        softImeRequested = retainedSoftImeRequest
+        if (requestedAfterTouch) {
+            softImeRequested = true
+            softImeExplicitlyRequestedForAmbiguousInput = false
+        }
+        imeActivationTouchPending =
+            LauncherImeTouchPolicy.activationTouchPendingAfterState(
+                imeActivationTouchPending,
+                next.active,
+                next.editorEvidence,
+            )
+        if (!imeActivationTouchPending) {
+            handler.removeCallbacks(clearImeActivationTouchPending)
+        }
         if (!hasWindowFocus()) {
             return
         }
         if (!next.active) {
             softImeRequested = false
+            softImeExplicitlyRequestedForAmbiguousInput = false
+            imeActivationTouchPending = false
+            ambiguousImeLongPressEligible = false
+            handler.removeCallbacks(clearImeActivationTouchPending)
             handler.removeCallbacks(showImeAfterTouch)
             if (previous.active) {
                 hideIme()
@@ -2761,6 +3191,9 @@ class LauncherActivity :
         } else {
             getSystemService(InputMethodManager::class.java)
                 .updateSelection(surfaceView, next.cursor, next.anchor, -1, -1)
+            if (requestedAfterTouch) {
+                showIme(restart = false)
+            }
         }
     }
 
@@ -4316,7 +4749,8 @@ class LauncherActivity :
             )
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 16
+        private const val PROTOCOL_VERSION = 19
+        private const val TEST_INPUT_DEBUG_EXTRA = "archphene_test_input_debug"
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -4378,6 +4812,8 @@ class LauncherActivity :
         private const val CAMERA_FACING_BACK = 0
         private const val CAMERA_FACING_FRONT = 1
         private const val MAX_CAMERA_DIMENSION = 8_192
+        private const val MAX_SURFACE_DIMENSION = 8_192
+        private const val MAX_LOGICAL_SURFACE_DIMENSION = 32_768
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val NOTIFICATION_PERMISSION_REQUEST = 7_001
@@ -4415,6 +4851,11 @@ class LauncherActivity :
         private const val MAX_CURSOR_DIMENSION = 256
         private const val MAX_CURSOR_PIXELS = 65_536L
         private const val SOFT_IME_TOUCH_DELAY_MILLIS = 300L
+        private const val IMPLICIT_IME_SUPPRESSION_DELAY_MILLIS = 100L
+        private const val IMPLICIT_IME_SUPPRESSION_SECOND_DELAY_MILLIS = 500L
+        private const val IMPLICIT_IME_SUPPRESSION_THIRD_DELAY_MILLIS = 1_000L
+        private const val IMPLICIT_IME_SUPPRESSION_FOURTH_DELAY_MILLIS = 1_500L
+        private const val IMPLICIT_IME_SUPPRESSION_FINAL_DELAY_MILLIS = 2_500L
         private val PDF_HEADER =
             byteArrayOf(
                 '%'.code.toByte(),

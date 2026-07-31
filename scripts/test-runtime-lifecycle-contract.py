@@ -50,7 +50,7 @@ require(
     service,
     "private val launcherProcessHandles = LongArray(MAX_TRACKED_LAUNCHER_PROCESSES)",
     "private const val MAX_TRACKED_LAUNCHER_PROCESSES = 16",
-    "trackLauncherProcess(launcherHandle)",
+    "trackLauncherProcess(launcherHandle, pulseServerAddress != null)",
     "promoteSessionToForeground()",
     "launcherProcessCount > 0 || hasForegroundWork()",
     "launcherProcessCount > 0 ||",
@@ -70,7 +70,7 @@ require(
 )
 require(
     ROOT / "android/app/src/main/AndroidManifest.xml",
-    'android:foregroundServiceType="specialUse"',
+    'android:foregroundServiceType="specialUse|mediaPlayback"',
     'android:stopWithTask="false"',
 )
 require(

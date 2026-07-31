@@ -230,6 +230,8 @@ impl<'a> IntegrationProfiler<'a> {
 fn classify_bridge_library(name: &str) -> u8 {
     match name {
         "libpulse.so" | "libpulse.so.0" => BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT,
+        "libopenal.so" | "libopenal.so.1" | "libSDL2.so" | "libSDL2.so.0" | "libSDL2-2.0.so.0"
+        | "libSDL3.so" | "libSDL3.so.0" => BRIDGE_AUDIO_OUTPUT,
         "libcups.so" | "libcups.so.2" => BRIDGE_PRINTING,
         "libpipewire-0.3.so" | "libpipewire-0.3.so.0" => BRIDGE_CAMERA,
         "libsecret-1.so" | "libsecret-1.so.0" | "libKF6Wallet.so" | "libKF6Wallet.so.6"
@@ -725,6 +727,15 @@ mod tests {
         assert_eq!(
             classify_bridge_library("libpulse.so.0"),
             BRIDGE_AUDIO_OUTPUT | BRIDGE_AUDIO_INPUT
+        );
+        assert_eq!(
+            classify_bridge_library("libSDL2-2.0.so.0"),
+            BRIDGE_AUDIO_OUTPUT
+        );
+        assert_eq!(classify_bridge_library("libSDL3.so.0"), BRIDGE_AUDIO_OUTPUT);
+        assert_eq!(
+            classify_bridge_library("libopenal.so.1"),
+            BRIDGE_AUDIO_OUTPUT
         );
         assert_eq!(classify_bridge_library("libcups.so.2"), BRIDGE_PRINTING);
         assert_eq!(
