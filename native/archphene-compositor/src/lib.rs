@@ -112,6 +112,12 @@ const MAX_XDG_POPUPS_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
 const MAX_XDG_POPUPS_TOTAL: usize = MAX_SURFACES;
 const MAX_SUBSURFACES_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
 const MAX_SUBSURFACES_TOTAL: usize = MAX_SURFACES;
+const MAX_POINTER_CONSTRAINTS_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
+const MAX_POINTER_CONSTRAINTS_TOTAL: usize = MAX_SURFACES;
+const MAX_VIEWPORTS_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
+const MAX_VIEWPORTS_TOTAL: usize = MAX_SURFACES;
+const MAX_FRACTIONAL_SCALES_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
+const MAX_FRACTIONAL_SCALES_TOTAL: usize = MAX_SURFACES;
 const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 2;
 const MAX_SHM_POOLS_PER_CLIENT: usize = 16;
 const MAX_SHM_POOLS_TOTAL: usize = 32;
@@ -546,6 +552,7 @@ pub struct CompositorState {
     tile_toplevels: bool,
     outputs: Vec<WlOutput>,
     fractional_scales: Vec<WpFractionalScaleV1>,
+    viewports: Vec<WpViewport>,
     seat_binds: u32,
     pointer_count: u32,
     pointer_event_count: u32,
@@ -5769,12 +5776,20 @@ fn surface_has_pointer_constraint(state: &CompositorState, surface: &WlSurface) 
         constraint.is_alive()
             && constraint
                 .data::<PointerConstraintData>()
-                .is_some_and(|data| data.surface.id() == surface.id())
+                .is_some_and(|data| {
+                    data.surface.is_alive()
+                        && data.pointer.is_alive()
+                        && data.surface.id() == surface.id()
+                })
     }) || state.confined_pointers.iter().any(|constraint| {
         constraint.is_alive()
             && constraint
                 .data::<PointerConstraintData>()
-                .is_some_and(|data| data.surface.id() == surface.id())
+                .is_some_and(|data| {
+                    data.surface.is_alive()
+                        && data.pointer.is_alive()
+                        && data.surface.id() == surface.id()
+                })
     })
 }
 
@@ -5784,13 +5799,11 @@ fn deactivate_pointer_lock(state: &mut CompositorState) {
     };
     if let Some(data) = active.data::<PointerConstraintData>() {
         data.active.store(false, Ordering::Release);
+        if !data.persistent {
+            data.eligible.store(false, Ordering::Release);
+        }
         if active.is_alive() {
             active.unlocked();
-        }
-        if !data.persistent {
-            state
-                .locked_pointers
-                .retain(|constraint| constraint.id() != active.id());
         }
     }
     state.pointer_capture_change_serial =
@@ -5803,13 +5816,11 @@ fn deactivate_pointer_confine(state: &mut CompositorState) {
     };
     if let Some(data) = active.data::<PointerConstraintData>() {
         data.active.store(false, Ordering::Release);
+        if !data.persistent {
+            data.eligible.store(false, Ordering::Release);
+        }
         if active.is_alive() {
             active.unconfined();
-        }
-        if !data.persistent {
-            state
-                .confined_pointers
-                .retain(|constraint| constraint.id() != active.id());
         }
     }
     state.pointer_capture_change_serial =
@@ -6098,11 +6109,14 @@ fn activate_pointer_lock_for_focus(state: &mut CompositorState) {
     }
     let candidate = state.locked_pointers.iter().find_map(|constraint| {
         let data = constraint.data::<PointerConstraintData>()?;
-        state
-            .pointer_focus_surface
-            .as_ref()
-            .is_some_and(|surface| surface.id() == data.surface.id())
-            .then(|| constraint.clone())
+        (data.eligible.load(Ordering::Acquire)
+            && data.surface.is_alive()
+            && data.pointer.is_alive()
+            && state
+                .pointer_focus_surface
+                .as_ref()
+                .is_some_and(|surface| surface.id() == data.surface.id()))
+        .then(|| constraint.clone())
     });
     if let Some(candidate) = candidate {
         activate_pointer_lock(state, &candidate);
@@ -6110,11 +6124,14 @@ fn activate_pointer_lock_for_focus(state: &mut CompositorState) {
     }
     let candidate = state.confined_pointers.iter().find_map(|constraint| {
         let data = constraint.data::<PointerConstraintData>()?;
-        state
-            .pointer_focus_surface
-            .as_ref()
-            .is_some_and(|surface| surface.id() == data.surface.id())
-            .then(|| constraint.clone())
+        (data.eligible.load(Ordering::Acquire)
+            && data.surface.is_alive()
+            && data.pointer.is_alive()
+            && state
+                .pointer_focus_surface
+                .as_ref()
+                .is_some_and(|surface| surface.id() == data.surface.id()))
+        .then(|| constraint.clone())
     });
     if let Some(candidate) = candidate {
         activate_pointer_confine(state, &candidate);
@@ -6305,11 +6322,11 @@ impl GlobalDispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
 impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &ZwpPointerConstraintsV1,
         request: zwp_pointer_constraints_v1::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -6336,6 +6353,22 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
                     resource.post_error(0u32, "invalid pointer-constraint lifetime");
                     return;
                 };
+                let (client_count, total_count) =
+                    live_pointer_constraint_counts(state, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_POINTER_CONSTRAINTS_PER_CLIENT,
+                    MAX_POINTER_CONSTRAINTS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained pointer-constraint limit exceeded",
+                    );
+                    return;
+                }
                 let constraint = data_init.init(id, data);
                 state.locked_pointers.push(constraint.clone());
                 activate_pointer_lock(state, &constraint);
@@ -6362,6 +6395,22 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
                     resource.post_error(0u32, "invalid pointer-constraint lifetime");
                     return;
                 };
+                let (client_count, total_count) =
+                    live_pointer_constraint_counts(state, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_POINTER_CONSTRAINTS_PER_CLIENT,
+                    MAX_POINTER_CONSTRAINTS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained pointer-constraint limit exceeded",
+                    );
+                    return;
+                }
                 let constraint = data_init.init(id, data);
                 state.confined_pointers.push(constraint.clone());
                 activate_pointer_confine(state, &constraint);
@@ -6664,12 +6713,12 @@ impl GlobalDispatch<WpViewporter, ()> for CompositorState {
 
 impl Dispatch<WpViewporter, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
-        _client: &Client,
+        state: &mut Self,
+        client: &Client,
         resource: &WpViewporter,
         request: wp_viewporter::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -6678,14 +6727,34 @@ impl Dispatch<WpViewporter, ()> for CompositorState {
                 let Some(surface_data) = surface.data::<SurfaceData>() else {
                     return;
                 };
-                let mut state = surface_data
+                let mut surface_state = surface_data
                     .inner
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if state.viewport.as_ref().is_some_and(Resource::is_alive) {
+                if surface_state
+                    .viewport
+                    .as_ref()
+                    .is_some_and(Resource::is_alive)
+                {
                     resource.post_error(
                         wp_viewporter::Error::ViewportExists,
                         "wl_surface already has a wp_viewport",
+                    );
+                    return;
+                }
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.viewports, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_VIEWPORTS_PER_CLIENT,
+                    MAX_VIEWPORTS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained viewport limit exceeded",
                     );
                     return;
                 }
@@ -6695,7 +6764,8 @@ impl Dispatch<WpViewporter, ()> for CompositorState {
                         surface: surface.clone(),
                     },
                 );
-                state.viewport = Some(viewport);
+                surface_state.viewport = Some(viewport.clone());
+                state.viewports.push(viewport);
             }
             _ => unreachable!("wp_viewporter request added without an implementation"),
         }
@@ -6777,7 +6847,10 @@ impl Dispatch<WpViewport, ViewportData> for CompositorState {
         }
     }
 
-    fn destroyed(_state: &mut Self, _client: ClientId, resource: &WpViewport, data: &ViewportData) {
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WpViewport, data: &ViewportData) {
+        state
+            .viewports
+            .retain(|viewport| viewport.id() != resource.id());
         if let Some(surface_data) = data.surface.data::<SurfaceData>() {
             let mut surface = surface_data
                 .inner
@@ -6811,11 +6884,11 @@ impl GlobalDispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
 impl Dispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &WpFractionalScaleManagerV1,
         request: wp_fractional_scale_manager_v1::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -6836,6 +6909,22 @@ impl Dispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
                     resource.post_error(
                         wp_fractional_scale_manager_v1::Error::FractionalScaleExists,
                         "wl_surface already has fractional-scale feedback",
+                    );
+                    return;
+                }
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.fractional_scales, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_FRACTIONAL_SCALES_PER_CLIENT,
+                    MAX_FRACTIONAL_SCALES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained fractional-scale limit exceeded",
                     );
                     return;
                 }
@@ -8078,16 +8167,6 @@ impl Dispatch<WlPointer, ()> for CompositorState {
         {
             deactivate_pointer_confine(state);
         }
-        state.locked_pointers.retain(|constraint| {
-            constraint
-                .data::<PointerConstraintData>()
-                .is_none_or(|data| data.pointer.id() != resource.id())
-        });
-        state.confined_pointers.retain(|constraint| {
-            constraint
-                .data::<PointerConstraintData>()
-                .is_none_or(|data| data.pointer.id() != resource.id())
-        });
         state
             .pointers
             .retain(|pointer| pointer.id() != resource.id());
@@ -8282,6 +8361,29 @@ fn live_pointer_gesture_counts(
             .filter(|resource| owned_by_client(resource.client()))
             .count();
     let total = state.swipe_gestures.len() + state.pinch_gestures.len() + state.hold_gestures.len();
+    (client, total)
+}
+
+fn live_pointer_constraint_counts(
+    state: &mut CompositorState,
+    client_id: &ClientId,
+) -> (usize, usize) {
+    state.locked_pointers.retain(Resource::is_alive);
+    state.confined_pointers.retain(Resource::is_alive);
+    let owned_by_client = |resource_client: Option<Client>| {
+        resource_client.is_some_and(|owner| &owner.id() == client_id)
+    };
+    let client = state
+        .locked_pointers
+        .iter()
+        .filter(|resource| owned_by_client(resource.client()))
+        .count()
+        + state
+            .confined_pointers
+            .iter()
+            .filter(|resource| owned_by_client(resource.client()))
+            .count();
+    let total = state.locked_pointers.len() + state.confined_pointers.len();
     (client, total)
 }
 
@@ -10198,16 +10300,6 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         {
             deactivate_pointer_confine(state);
         }
-        state.locked_pointers.retain(|constraint| {
-            constraint
-                .data::<PointerConstraintData>()
-                .is_none_or(|data| data.surface.id() != resource.id())
-        });
-        state.confined_pointers.retain(|constraint| {
-            constraint
-                .data::<PointerConstraintData>()
-                .is_none_or(|data| data.surface.id() != resource.id())
-        });
         if state
             .root_surface
             .as_ref()
@@ -18579,9 +18671,11 @@ mod tests {
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1 as client_cursor_shape_device;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1 as client_cursor_shape_manager;
     use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1 as client_fractional_scale_manager;
+    use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1 as client_fractional_scale;
     use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3 as client_text_input_manager;
     use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3 as client_text_input;
     use wayland_protocols::wp::viewporter::client::wp_viewporter as client_viewporter;
+    use wayland_protocols::wp::viewporter::client::wp_viewport as client_viewport;
     use wayland_protocols::xdg::shell::client::{
         xdg_positioner as client_xdg_positioner, xdg_surface as client_xdg_surface,
         xdg_toplevel as client_xdg_toplevel, xdg_wm_base as client_xdg_wm_base,
@@ -18658,6 +18752,8 @@ mod tests {
         PointerProtocolClient: client_fractional_scale_manager::WpFractionalScaleManagerV1
     );
     wayland_client::delegate_noop!(PointerProtocolClient: client_viewporter::WpViewporter);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_viewport::WpViewport);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_fractional_scale::WpFractionalScaleV1);
     wayland_client::delegate_noop!(
         PointerProtocolClient: ignore client_cursor_shape_device::WpCursorShapeDeviceV1
     );
@@ -23179,6 +23275,378 @@ mod tests {
         assert_eq!(MAX_XDG_POPUPS_TOTAL, MAX_SURFACES);
         assert_eq!(MAX_SUBSURFACES_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
         assert_eq!(MAX_SUBSURFACES_TOTAL, MAX_SURFACES);
+    }
+
+    #[test]
+    fn auxiliary_surface_resources_remain_bounded_after_parent_destruction() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-auxiliary-surface-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while server_stage.load(Ordering::Acquire) != 13 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "auxiliary-surface-limit server timed out"
+                );
+                core.dispatch_once()
+                    .expect("dispatch auxiliary-surface clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.viewports.len() == MAX_VIEWPORTS_PER_CLIENT
+                        && core.state.surfaces.is_empty() =>
+                    {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.viewports.is_empty() && core.state.surfaces.is_empty() => {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.fractional_scales.len()
+                        == MAX_FRACTIONAL_SCALES_PER_CLIENT
+                        && core.state.surfaces.is_empty() =>
+                    {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.fractional_scales.is_empty()
+                        && core.state.surfaces.is_empty() =>
+                    {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.locked_pointers.len() + core.state.confined_pointers.len()
+                        == MAX_POINTER_CONSTRAINTS_PER_CLIENT
+                        && core.state.surfaces.is_empty()
+                        && core.state.pointers.is_empty() =>
+                    {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.locked_pointers.is_empty()
+                        && core.state.confined_pointers.is_empty()
+                        && core.state.surfaces.is_empty() =>
+                    {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting auxiliary-surface client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream)
+                            .expect("auxiliary-surface connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect auxiliary-surface client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for auxiliary-surface stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let viewport_connection = connect();
+        let (viewport_globals, mut viewport_events) =
+            registry_queue_init::<PointerProtocolClient>(&viewport_connection)
+                .expect("viewport registry");
+        let viewport_queue = viewport_events.handle();
+        let viewport_compositor = viewport_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&viewport_queue, 1..=6, ())
+            .expect("viewport compositor");
+        let viewporter = viewport_globals
+            .bind::<client_viewporter::WpViewporter, _, _>(&viewport_queue, 1..=1, ())
+            .expect("viewporter");
+        let mut viewport_surfaces = Vec::with_capacity(MAX_VIEWPORTS_PER_CLIENT);
+        let mut viewports = Vec::with_capacity(MAX_VIEWPORTS_PER_CLIENT);
+        for _ in 0..MAX_VIEWPORTS_PER_CLIENT {
+            let surface = viewport_compositor.create_surface(&viewport_queue, ());
+            viewports.push(viewporter.get_viewport(&surface, &viewport_queue, ()));
+            viewport_surfaces.push(surface);
+        }
+        viewports.pop().expect("viewport to recycle").destroy();
+        viewport_surfaces
+            .pop()
+            .expect("viewport surface to recycle")
+            .destroy();
+        viewport_connection
+            .flush()
+            .expect("flush viewport capacity release");
+        viewport_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("viewport capacity release remains connected");
+        let replacement_surface = viewport_compositor.create_surface(&viewport_queue, ());
+        viewports.push(viewporter.get_viewport(&replacement_surface, &viewport_queue, ()));
+        viewport_surfaces.push(replacement_surface);
+        for surface in viewport_surfaces.drain(..) {
+            surface.destroy();
+        }
+        viewport_connection
+            .flush()
+            .expect("flush viewport backing-surface destruction");
+        viewport_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("viewports may outlive backing surfaces");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        let overflow_surface = viewport_compositor.create_surface(&viewport_queue, ());
+        let _overflow_viewport =
+            viewporter.get_viewport(&overflow_surface, &viewport_queue, ());
+        viewport_connection.flush().expect("flush viewport overflow");
+        assert!(
+            viewport_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "viewport 129 must fail after backing surfaces release their quota"
+        );
+        drop((
+            viewports,
+            viewporter,
+            viewport_compositor,
+            viewport_globals,
+            viewport_events,
+            viewport_connection,
+        ));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let fractional_connection = connect();
+        let (fractional_globals, mut fractional_events) =
+            registry_queue_init::<PointerProtocolClient>(&fractional_connection)
+                .expect("fractional-scale registry");
+        let fractional_queue = fractional_events.handle();
+        let fractional_compositor = fractional_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&fractional_queue, 1..=6, ())
+            .expect("fractional-scale compositor");
+        let fractional_manager = fractional_globals
+            .bind::<client_fractional_scale_manager::WpFractionalScaleManagerV1, _, _>(
+                &fractional_queue,
+                1..=1,
+                (),
+            )
+            .expect("fractional-scale manager");
+        let mut fractional_surfaces = Vec::with_capacity(MAX_FRACTIONAL_SCALES_PER_CLIENT);
+        let mut fractional_scales = Vec::with_capacity(MAX_FRACTIONAL_SCALES_PER_CLIENT);
+        for _ in 0..MAX_FRACTIONAL_SCALES_PER_CLIENT {
+            let surface = fractional_compositor.create_surface(&fractional_queue, ());
+            fractional_scales.push(fractional_manager.get_fractional_scale(
+                &surface,
+                &fractional_queue,
+                (),
+            ));
+            fractional_surfaces.push(surface);
+        }
+        fractional_scales
+            .pop()
+            .expect("fractional scale to recycle")
+            .destroy();
+        fractional_surfaces
+            .pop()
+            .expect("fractional surface to recycle")
+            .destroy();
+        fractional_connection
+            .flush()
+            .expect("flush fractional-scale capacity release");
+        fractional_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("fractional-scale capacity release remains connected");
+        let replacement_surface = fractional_compositor.create_surface(&fractional_queue, ());
+        fractional_scales.push(fractional_manager.get_fractional_scale(
+            &replacement_surface,
+            &fractional_queue,
+            (),
+        ));
+        fractional_surfaces.push(replacement_surface);
+        for surface in fractional_surfaces.drain(..) {
+            surface.destroy();
+        }
+        fractional_connection
+            .flush()
+            .expect("flush fractional backing-surface destruction");
+        fractional_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("fractional scales may outlive backing surfaces");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        let overflow_surface = fractional_compositor.create_surface(&fractional_queue, ());
+        let _overflow_scale = fractional_manager.get_fractional_scale(
+            &overflow_surface,
+            &fractional_queue,
+            (),
+        );
+        fractional_connection
+            .flush()
+            .expect("flush fractional-scale overflow");
+        assert!(
+            fractional_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "fractional scale 129 must fail after backing surfaces release their quota"
+        );
+        drop((
+            fractional_scales,
+            fractional_manager,
+            fractional_compositor,
+            fractional_globals,
+            fractional_events,
+            fractional_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+
+        let constraint_connection = connect();
+        let (constraint_globals, mut constraint_events) =
+            registry_queue_init::<PointerProtocolClient>(&constraint_connection)
+                .expect("pointer-constraint registry");
+        let constraint_queue = constraint_events.handle();
+        let constraint_compositor = constraint_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&constraint_queue, 1..=6, ())
+            .expect("pointer-constraint compositor");
+        let constraint_seat = constraint_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&constraint_queue, 1..=9, ())
+            .expect("pointer-constraint seat");
+        let constraint_manager = constraint_globals
+            .bind::<client_pointer_constraints::ZwpPointerConstraintsV1, _, _>(
+                &constraint_queue,
+                1..=1,
+                (),
+            )
+            .expect("pointer-constraint manager");
+        let constraint_pointer = constraint_seat.get_pointer(&constraint_queue, ());
+        let mut constraint_surfaces = Vec::with_capacity(MAX_POINTER_CONSTRAINTS_PER_CLIENT);
+        let mut locks = Vec::with_capacity(MAX_POINTER_CONSTRAINTS_PER_CLIENT / 2);
+        let mut confines = Vec::with_capacity(MAX_POINTER_CONSTRAINTS_PER_CLIENT / 2);
+        for index in 0..MAX_POINTER_CONSTRAINTS_PER_CLIENT {
+            let surface = constraint_compositor.create_surface(&constraint_queue, ());
+            if index % 2 == 0 {
+                locks.push(constraint_manager.lock_pointer(
+                    &surface,
+                    &constraint_pointer,
+                    None,
+                    client_pointer_constraints::Lifetime::Persistent,
+                    &constraint_queue,
+                    (),
+                ));
+            } else {
+                confines.push(constraint_manager.confine_pointer(
+                    &surface,
+                    &constraint_pointer,
+                    None,
+                    client_pointer_constraints::Lifetime::Persistent,
+                    &constraint_queue,
+                    (),
+                ));
+            }
+            constraint_surfaces.push(surface);
+        }
+        confines
+            .pop()
+            .expect("pointer confinement to recycle")
+            .destroy();
+        constraint_surfaces
+            .pop()
+            .expect("constraint surface to recycle")
+            .destroy();
+        constraint_connection
+            .flush()
+            .expect("flush pointer-constraint capacity release");
+        constraint_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("pointer-constraint capacity release remains connected");
+        let replacement_surface = constraint_compositor.create_surface(&constraint_queue, ());
+        locks.push(constraint_manager.lock_pointer(
+            &replacement_surface,
+            &constraint_pointer,
+            None,
+            client_pointer_constraints::Lifetime::Persistent,
+            &constraint_queue,
+            (),
+        ));
+        constraint_surfaces.push(replacement_surface);
+        for surface in constraint_surfaces.drain(..) {
+            surface.destroy();
+        }
+        constraint_pointer.release();
+        constraint_connection
+            .flush()
+            .expect("flush pointer-constraint parent destruction");
+        constraint_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("constraints may outlive backing surfaces and pointer");
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+        let overflow_pointer = constraint_seat.get_pointer(&constraint_queue, ());
+        let overflow_surface = constraint_compositor.create_surface(&constraint_queue, ());
+        let _overflow_constraint = constraint_manager.lock_pointer(
+            &overflow_surface,
+            &overflow_pointer,
+            None,
+            client_pointer_constraints::Lifetime::Persistent,
+            &constraint_queue,
+            (),
+        );
+        constraint_connection
+            .flush()
+            .expect("flush pointer-constraint overflow");
+        assert!(
+            constraint_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "combined pointer constraint 129 must fail after parents release their quotas"
+        );
+        drop((
+            locks,
+            confines,
+            constraint_manager,
+            constraint_seat,
+            constraint_compositor,
+            constraint_globals,
+            constraint_events,
+            constraint_connection,
+        ));
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        stage.store(13, Ordering::Release);
+
+        server
+            .join()
+            .expect("auxiliary-surface-limit server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn auxiliary_surface_limits_match_bounded_parent_capacity() {
+        assert_eq!(MAX_POINTER_CONSTRAINTS_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
+        assert_eq!(MAX_POINTER_CONSTRAINTS_TOTAL, MAX_SURFACES);
+        assert_eq!(MAX_VIEWPORTS_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
+        assert_eq!(MAX_VIEWPORTS_TOTAL, MAX_SURFACES);
+        assert_eq!(MAX_FRACTIONAL_SCALES_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
+        assert_eq!(MAX_FRACTIONAL_SCALES_TOTAL, MAX_SURFACES);
     }
 
     #[test]

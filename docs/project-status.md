@@ -3348,6 +3348,23 @@ to the existing per-client and compositor-wide surface bounds. The full
 workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64 Android
 probes pass.
 
+Auxiliary Wayland surface resources now remain bounded even after their backing
+objects become inert. One client may retain 128 combined locked and confined
+pointer constraints, 128 `wp_viewport` objects, and 128 fractional-scale
+feedback objects; each compositor-wide ceiling is 256. Pointer-constraint
+activation eligibility is tracked separately from live protocol ownership, so
+an ended one-shot constraint cannot reactivate but remains charged until its
+resource is destroyed. Dead backing surfaces and pointers stop functional
+activation without prematurely releasing child-object quota. Viewports now have
+compositor-level ownership tracking equivalent to fractional-scale feedback. A
+real protocol fixture fills each exact per-client boundary, mixes locked and
+confined constraints, destroys and replaces one object, removes every backing
+surface and pointer while the children remain live, independently rejects object
+129 for all three categories, and verifies cleanup before the next client. Direct
+tests tie all six limits to the existing surface ceilings. The full workspace
+and strict Clippy gates plus rebuilt exact x86_64 and AArch64 Android probes
+pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
