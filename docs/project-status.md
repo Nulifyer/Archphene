@@ -3265,6 +3265,20 @@ and proves both holders remain connected. Direct tests cover every
 per-client/global admission pair. The full workspace and strict Clippy gates
 plus rebuilt exact x86_64 and AArch64 Android probes pass.
 
+Wayland client admission is bounded before protocol-resource quotas apply. One
+compositor retains at most 32 active clients. Filesystem-socket admission may
+consume 24 slots, reserving eight for clients supplied through the runtime's
+owned-descriptor path. Each compositor dispatch accepts at most eight queued
+socket clients and inserts them directly without building a temporary stream
+collection; further connections remain in the kernel's bounded listen backlog.
+Backend disconnect callbacks release both total and source-specific capacity,
+while failed insertion rolls back its reservations. Host fixtures fill socket
+capacity in exact eight-client batches, verify filesystem backpressure and
+reserved descriptor admission, disconnect one holder and accept the queued
+replacement, fill all 32 descriptor-adopted slots, reject slot 33, and reuse a
+released slot. The full workspace and strict Clippy gates plus rebuilt exact
+x86_64 and AArch64 Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

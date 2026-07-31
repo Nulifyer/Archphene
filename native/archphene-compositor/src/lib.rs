@@ -11,7 +11,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -90,9 +90,13 @@ use wayland_server::protocol::wl_surface::{self, WlSurface};
 use wayland_server::protocol::wl_touch::{self, WlTouch};
 use wayland_server::{
     Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
-    backend::ClientId, backend::protocol::ProtocolError,
+    backend::protocol::ProtocolError,
+    backend::{ClientData, ClientId, DisconnectReason},
 };
 
+const MAX_WAYLAND_CLIENTS: usize = 32;
+const MAX_FILESYSTEM_WAYLAND_CLIENTS: usize = 24;
+const MAX_CLIENT_ACCEPTS_PER_DISPATCH: usize = 8;
 const MAX_TOPLEVELS: usize = 32;
 const MAX_SURFACES: usize = 256;
 const MAX_SURFACES_PER_CLIENT: usize = 128;
@@ -430,6 +434,8 @@ pub struct CompositorCore {
     socket_path: Option<PathBuf>,
     socket_identity: Option<SocketIdentity>,
     accepted_client_count: u32,
+    active_client_count: Arc<AtomicUsize>,
+    filesystem_client_count: Arc<AtomicUsize>,
     stopping: AtomicBool,
 }
 
@@ -437,6 +443,37 @@ pub struct CompositorCore {
 struct SocketIdentity {
     device: u64,
     inode: u64,
+}
+
+struct CompositorClientData {
+    active_client_count: Arc<AtomicUsize>,
+    filesystem_client_count: Option<Arc<AtomicUsize>>,
+    counted: AtomicBool,
+}
+
+impl ClientData for CompositorClientData {
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+        if self.counted.swap(false, Ordering::AcqRel) {
+            release_wayland_client_reservation(&self.active_client_count);
+            if let Some(filesystem_client_count) = &self.filesystem_client_count {
+                release_wayland_client_reservation(filesystem_client_count);
+            }
+        }
+    }
+}
+
+fn reserve_wayland_client(active_client_count: &AtomicUsize, limit: usize) -> bool {
+    active_client_count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < limit).then_some(count + 1)
+        })
+        .is_ok()
+}
+
+fn release_wayland_client_reservation(active_client_count: &AtomicUsize) {
+    let _ = active_client_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        Some(count.saturating_sub(1))
+    });
 }
 
 #[derive(Default)]
@@ -11755,6 +11792,8 @@ impl CompositorCore {
             socket_path: None,
             socket_identity: None,
             accepted_client_count: 0,
+            active_client_count: Arc::new(AtomicUsize::new(0)),
+            filesystem_client_count: Arc::new(AtomicUsize::new(0)),
             stopping: AtomicBool::new(false),
         })
     }
@@ -11804,41 +11843,86 @@ impl CompositorCore {
     }
 
     fn accept_pending_clients(&mut self) -> std::io::Result<usize> {
-        let Some(listener) = self.listener.as_ref() else {
+        if self.listener.is_none() {
             return Ok(0);
-        };
-        let mut streams = Vec::new();
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => streams.push(stream),
+        }
+        let mut accepted = 0;
+        while accepted < MAX_CLIENT_ACCEPTS_PER_DISPATCH
+            && self.active_client_count.load(Ordering::Acquire) < MAX_WAYLAND_CLIENTS
+            && self.filesystem_client_count.load(Ordering::Acquire) < MAX_FILESYSTEM_WAYLAND_CLIENTS
+        {
+            let accept_result = self.listener.as_ref().expect("listener checked").accept();
+            match accept_result {
+                Ok((stream, _)) => {
+                    self.insert_client_stream(stream, true)?;
+                    self.accepted_client_count = self.accepted_client_count.saturating_add(1);
+                    accepted += 1;
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error),
             }
         }
-        let accepted = streams.len();
-        for stream in streams {
-            stream.set_nonblocking(true)?;
+        Ok(accepted)
+    }
+
+    fn insert_client_stream(
+        &mut self,
+        stream: UnixStream,
+        filesystem_client: bool,
+    ) -> std::io::Result<()> {
+        if filesystem_client
+            && !reserve_wayland_client(
+                &self.filesystem_client_count,
+                MAX_FILESYSTEM_WAYLAND_CLIENTS,
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Wayland filesystem-client limit reached",
+            ));
+        }
+        if !reserve_wayland_client(&self.active_client_count, MAX_WAYLAND_CLIENTS) {
+            if filesystem_client {
+                release_wayland_client_reservation(&self.filesystem_client_count);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Wayland client limit reached",
+            ));
+        }
+        let data = Arc::new(CompositorClientData {
+            active_client_count: Arc::clone(&self.active_client_count),
+            filesystem_client_count: filesystem_client
+                .then(|| Arc::clone(&self.filesystem_client_count)),
+            counted: AtomicBool::new(true),
+        });
+        let result = stream.set_nonblocking(true).and_then(|()| {
             self.display
                 .handle()
-                .insert_client(stream, Arc::new(()))
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            self.accepted_client_count = self.accepted_client_count.saturating_add(1);
+                .insert_client(stream, Arc::clone(&data) as Arc<dyn ClientData>)
+                .map(|_| ())
+                .map_err(|error| io::Error::other(error.to_string()))
+        });
+        if result.is_err() && data.counted.swap(false, Ordering::AcqRel) {
+            release_wayland_client_reservation(&self.active_client_count);
+            if filesystem_client {
+                release_wayland_client_reservation(&self.filesystem_client_count);
+            }
         }
-        Ok(accepted)
+        result
     }
 
     pub fn accepted_client_count(&self) -> u32 {
         self.accepted_client_count
     }
 
+    pub fn active_client_count(&self) -> usize {
+        self.active_client_count.load(Ordering::Acquire)
+    }
+
     pub fn adopt_client(&mut self, fd: OwnedFd) -> std::io::Result<()> {
         let stream = UnixStream::from(fd);
-        stream.set_nonblocking(true)?;
-        let mut handle = self.display.handle();
-        handle
-            .insert_client(stream, Arc::new(()))
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(())
+        self.insert_client_stream(stream, false)
     }
 
     pub fn request_stop(&self) {
@@ -20247,13 +20331,15 @@ mod tests {
                         server_stage.store(12, Ordering::Release);
                     }
                     13 => {
-                        let device = core
+                        let Some(device) = core
                             .state
                             .data_devices
                             .iter()
                             .find(|device| device.is_alive())
                             .cloned()
-                            .expect("offer-limit data device");
+                        else {
+                            continue;
+                        };
                         let handle = core.display.handle();
                         for _ in 0..MAX_DATA_OFFERS_PER_CLIENT {
                             publish_offer_to_device(
@@ -20271,13 +20357,15 @@ mod tests {
                         server_stage.store(14, Ordering::Release);
                     }
                     15 => {
-                        let device = core
+                        let Some(device) = core
                             .state
                             .data_devices
                             .iter()
                             .find(|device| device.is_alive())
                             .cloned()
-                            .expect("overflow data device");
+                        else {
+                            continue;
+                        };
                         let handle = core.display.handle();
                         publish_offer_to_device(
                             &mut core.state,
@@ -23027,6 +23115,140 @@ mod tests {
         assert_eq!(core.accepted_client_count(), 1);
         drop(core);
         assert!(!socket.exists());
+    }
+
+    #[test]
+    fn filesystem_client_acceptance_is_bounded_and_backpressured() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-client-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let mut core = CompositorCore::new().expect("Wayland display");
+        core.bind_socket(&socket).expect("bind socket");
+        let mut clients = (0..MAX_FILESYSTEM_WAYLAND_CLIENTS / 2)
+            .map(|_| UnixStream::connect(&socket).expect("connect first client batch"))
+            .collect::<Vec<_>>();
+
+        core.dispatch_once().expect("accept bounded first batch");
+        assert_eq!(core.active_client_count(), MAX_CLIENT_ACCEPTS_PER_DISPATCH);
+        assert_eq!(
+            core.accepted_client_count(),
+            u32::try_from(MAX_CLIENT_ACCEPTS_PER_DISPATCH).expect("accept batch fits u32")
+        );
+        core.dispatch_once().expect("accept remaining first batch");
+        assert_eq!(
+            core.active_client_count(),
+            MAX_FILESYSTEM_WAYLAND_CLIENTS / 2
+        );
+
+        clients.extend(
+            (MAX_FILESYSTEM_WAYLAND_CLIENTS / 2..MAX_FILESYSTEM_WAYLAND_CLIENTS).map(
+                |_| UnixStream::connect(&socket).expect("connect second client batch"),
+            ),
+        );
+        core.dispatch_once().expect("accept bounded second batch");
+        assert_eq!(
+            core.active_client_count(),
+            MAX_FILESYSTEM_WAYLAND_CLIENTS / 2 + MAX_CLIENT_ACCEPTS_PER_DISPATCH
+        );
+        core.dispatch_once().expect("fill client capacity");
+        assert_eq!(
+            core.active_client_count(),
+            MAX_FILESYSTEM_WAYLAND_CLIENTS
+        );
+        assert_eq!(
+            core.accepted_client_count(),
+            u32::try_from(MAX_FILESYSTEM_WAYLAND_CLIENTS).expect("client limit fits u32")
+        );
+
+        let overflow = UnixStream::connect(&socket).expect("queue overflow client");
+        core.dispatch_once().expect("backpressure overflow client");
+        assert_eq!(
+            core.active_client_count(),
+            MAX_FILESYSTEM_WAYLAND_CLIENTS
+        );
+        assert_eq!(
+            core.accepted_client_count(),
+            u32::try_from(MAX_FILESYSTEM_WAYLAND_CLIENTS).expect("client limit fits u32")
+        );
+
+        let (adopted_server, adopted_peer) = UnixStream::pair().expect("reserved client pair");
+        core.adopt_client(adopted_server.into())
+            .expect("filesystem clients leave adopted capacity");
+        assert_eq!(
+            core.active_client_count(),
+            MAX_FILESYSTEM_WAYLAND_CLIENTS + 1
+        );
+
+        drop(clients.pop());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while core.active_client_count() == MAX_FILESYSTEM_WAYLAND_CLIENTS + 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "disconnected client did not release capacity"
+            );
+            core.dispatch_once().expect("dispatch disconnected client");
+        }
+        core.dispatch_once().expect("accept queued replacement");
+        assert_eq!(
+            core.active_client_count(),
+            MAX_FILESYSTEM_WAYLAND_CLIENTS + 1
+        );
+        assert_eq!(
+            core.accepted_client_count(),
+            u32::try_from(MAX_FILESYSTEM_WAYLAND_CLIENTS + 1)
+                .expect("accepted count fits u32")
+        );
+
+        drop((adopted_peer, overflow, clients));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while core.active_client_count() != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "client cleanup did not drain active count"
+            );
+            core.dispatch_once().expect("dispatch client cleanup");
+        }
+        drop(core);
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn adopted_client_limit_releases_capacity_after_disconnect() {
+        let mut core = CompositorCore::new().expect("Wayland display");
+        let mut peers = Vec::with_capacity(MAX_WAYLAND_CLIENTS);
+        for _ in 0..MAX_WAYLAND_CLIENTS {
+            let (server, peer) = UnixStream::pair().expect("adopted client pair");
+            core.adopt_client(server.into())
+                .expect("adopt client within limit");
+            peers.push(peer);
+        }
+        assert_eq!(core.active_client_count(), MAX_WAYLAND_CLIENTS);
+
+        let (rejected_server, rejected_peer) = UnixStream::pair().expect("rejected client pair");
+        let error = core
+            .adopt_client(rejected_server.into())
+            .expect_err("adopted client above limit must fail");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(core.active_client_count(), MAX_WAYLAND_CLIENTS);
+
+        drop(peers.pop());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while core.active_client_count() == MAX_WAYLAND_CLIENTS {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "adopted disconnect did not release capacity"
+            );
+            core.dispatch_once().expect("dispatch adopted disconnect");
+        }
+        let (replacement_server, replacement_peer) =
+            UnixStream::pair().expect("replacement client pair");
+        core.adopt_client(replacement_server.into())
+            .expect("reuse adopted client capacity");
+        assert_eq!(core.active_client_count(), MAX_WAYLAND_CLIENTS);
+
+        drop((replacement_peer, rejected_peer, peers));
     }
 
     #[test]
