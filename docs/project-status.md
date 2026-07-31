@@ -55,7 +55,20 @@ OpenAL can load `libpulsecommon-17.0.so`. Generated launchers also suppress an
 implicit ambiguous-text IME after hardware gameplay keys while preserving
 explicit long-press and editor-backed IME requests, including fields that become
 empty after editing. Pulse sink suspension is serialized and completes before
-Android audio focus is abandoned. SuperTux pointer capture remains open.
+Android audio focus is abandoned.
+
+Pointer capture is not an applicable SuperTux 0.7.0 workflow. An audit of the
+exact upstream `v0.7.0` commit found no SDL relative-mode, mouse-grab, capture,
+or pointer-lock request. Its [window creation][supertux-window] sets only
+resizable and optional fullscreen flags; its [editor mouse path][supertux-mouse]
+uses absolute coordinates; and cursor hiding calls only `SDL_ShowCursor`.
+Archphene's generic relative/locked/confined-pointer bridge remains validated by
+its real Wayland client and exact-ABI compositor probes. The SDL release lane
+still requires a different unmodified application that explicitly requests
+relative mode; no SuperTux-specific workaround or false capture claim was added.
+
+[supertux-window]: https://github.com/SuperTux/supertux/blob/c11dfb2a2aa429be3db8de96b7fca6a6236eddc3/src/video/sdlbase_video_system.cpp#L85-L122
+[supertux-mouse]: https://github.com/SuperTux/supertux/blob/c11dfb2a2aa429be3db8de96b7fca6a6236eddc3/src/editor/editor.cpp#L1222-L1225
 
 The unrelated user-owned modification to
 `scripts/test-archphene-package-update.sh` remains excluded from this work.
