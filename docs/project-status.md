@@ -3210,6 +3210,29 @@ state automatically, verifies cleanup after overflow, and presents a callback
 for a final healthy client. The full workspace and strict Clippy gates plus
 rebuilt exact x86_64 and AArch64 Android probes pass.
 
+Wayland SHM descriptor, buffer, and client-surface frame memory now has explicit
+ownership quotas. A client can retain at most 16 SHM pools and 128 SHM buffers;
+the compositor-wide limits are 32 and 256. Each pool is capped at 128 MiB, with
+256 MiB per client and 512 MiB total across pool creation and growth. Potential
+buffer patch storage uses the same byte limits. Destroying a `wl_shm_pool` or
+`wl_buffer` resource does not release its charge while a buffer or pending
+surface attachment still owns the backing descriptor. The charge disappears
+only when the final retained owner does. Committed and synchronized-cache frame
+chains deduplicate shared source rasters and are capped at 512 MiB per surface
+and client and 1 GiB total. Before valid replacement work allocates, the
+compositor checks the transient union of current and projected snapshot,
+transform, and viewport chains. Any individual raster allocation is capped at
+128 MiB, including viewport destinations. Compositor-owned output and popup-base
+rasters remain outside these client quotas and follow the configured Android
+output size. Invalid geometry still reaches its normal protocol error rather
+than being reclassified as quota exhaustion. Real
+protocol clients verify pool 17 and buffer 129 rejection, two-client saturation
+of the 32-pool and 256-buffer global boundaries, exact 256 MiB pool growth,
+rejected one-byte growth, retention after protocol-object destruction, release
+after the pending attachment commits, and complete cleanup after each offending
+client disconnects. The full workspace and strict Clippy gates plus rebuilt
+exact x86_64 and AArch64 Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

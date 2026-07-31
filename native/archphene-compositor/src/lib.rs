@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "android")]
@@ -101,6 +101,20 @@ const MAX_FRAME_CALLBACKS_TOTAL: usize = 256;
 const MAX_FRAME_CALLBACKS_PER_CLIENT: usize = 128;
 const MAX_PENDING_XDG_CONFIGURES: usize = 64;
 const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 2;
+const MAX_SHM_POOLS_PER_CLIENT: usize = 16;
+const MAX_SHM_POOLS_TOTAL: usize = 32;
+const MAX_SHM_BUFFERS_PER_CLIENT: usize = 128;
+const MAX_SHM_BUFFERS_TOTAL: usize = 256;
+const MAX_FRAME_ALLOCATION_BYTES: usize = 128 * 1024 * 1024;
+const MAX_SHM_POOL_BYTES: usize = MAX_FRAME_ALLOCATION_BYTES;
+const MAX_SHM_POOL_BYTES_PER_CLIENT: usize = 256 * 1024 * 1024;
+const MAX_SHM_POOL_BYTES_TOTAL: usize = 512 * 1024 * 1024;
+const MAX_SHM_BUFFER_BYTES: usize = MAX_FRAME_ALLOCATION_BYTES;
+const MAX_SHM_BUFFER_BYTES_PER_CLIENT: usize = 256 * 1024 * 1024;
+const MAX_SHM_BUFFER_BYTES_TOTAL: usize = 512 * 1024 * 1024;
+const MAX_SURFACE_FRAME_BYTES: usize = 512 * 1024 * 1024;
+const MAX_SURFACE_FRAME_BYTES_PER_CLIENT: usize = 512 * 1024 * 1024;
+const MAX_SURFACE_FRAME_BYTES_TOTAL: usize = 1024 * 1024 * 1024;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -408,6 +422,9 @@ pub struct CompositorState {
     shm_binds: u32,
     shm_pool_count: u32,
     shm_buffer_count: u32,
+    retained_shm_pools: Vec<RetainedShmPool>,
+    retained_shm_buffers: Vec<RetainedShmBuffer>,
+    surface_frame_usage: Vec<SurfaceFrameUsage>,
     last_buffer_checksum: u32,
     surface_count: u32,
     surfaces: Vec<WlSurface>,
@@ -584,6 +601,12 @@ struct FrameCallback {
     resource: WlCallback,
     surface: WlSurface,
     client_id: ClientId,
+}
+
+struct SurfaceFrameUsage {
+    surface: WlSurface,
+    owner: ClientId,
+    bytes: usize,
 }
 
 fn take_pending_damage(
@@ -1376,6 +1399,94 @@ impl CommittedFrame {
     }
 }
 
+fn committed_frame_retained_bytes(frame: &Arc<CommittedFrame>) -> usize {
+    let own = frame.pixels().len();
+    frame.source.as_ref().map_or(own, |source| {
+        own.saturating_add(committed_frame_retained_bytes(source))
+    })
+}
+
+fn committed_frame_chain_contains(
+    root: &Arc<CommittedFrame>,
+    candidate: &Arc<CommittedFrame>,
+) -> bool {
+    let mut current = Some(root);
+    while let Some(frame) = current {
+        if Arc::ptr_eq(frame, candidate) {
+            return true;
+        }
+        current = frame.source.as_ref();
+    }
+    false
+}
+
+fn retained_surface_frame_bytes(
+    committed: Option<&Arc<CommittedFrame>>,
+    cached: Option<&Arc<CommittedFrame>>,
+) -> usize {
+    let committed_bytes = committed.map_or(0, committed_frame_retained_bytes);
+    let mut cached_bytes = 0usize;
+    let mut current = cached;
+    while let Some(frame) = current {
+        let shared =
+            committed.is_some_and(|committed| committed_frame_chain_contains(committed, frame));
+        if shared {
+            break;
+        }
+        cached_bytes = cached_bytes.saturating_add(frame.pixels().len());
+        current = frame.source.as_ref();
+    }
+    committed_bytes.saturating_add(cached_bytes)
+}
+
+fn surface_frame_usage_exceeded(
+    state: &CompositorState,
+    surface: &WlSurface,
+    owner: &ClientId,
+    bytes: usize,
+) -> bool {
+    let mut client_bytes = 0usize;
+    let mut total_bytes = 0usize;
+    for usage in &state.surface_frame_usage {
+        if usage.surface.id() == surface.id() {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(usage.bytes);
+        if &usage.owner == owner {
+            client_bytes = client_bytes.saturating_add(usage.bytes);
+        }
+    }
+    surface_frame_bytes_limit_exceeded(bytes, client_bytes, total_bytes)
+}
+
+fn surface_frame_bytes_limit_exceeded(
+    surface_bytes: usize,
+    other_client_bytes: usize,
+    other_total_bytes: usize,
+) -> bool {
+    surface_bytes > MAX_SURFACE_FRAME_BYTES
+        || other_client_bytes.saturating_add(surface_bytes) > MAX_SURFACE_FRAME_BYTES_PER_CLIENT
+        || other_total_bytes.saturating_add(surface_bytes) > MAX_SURFACE_FRAME_BYTES_TOTAL
+}
+
+fn update_surface_frame_usage(
+    state: &mut CompositorState,
+    surface: &WlSurface,
+    owner: ClientId,
+    bytes: usize,
+) {
+    state
+        .surface_frame_usage
+        .retain(|usage| usage.surface.id() != surface.id());
+    if bytes > 0 {
+        state.surface_frame_usage.push(SurfaceFrameUsage {
+            surface: surface.clone(),
+            owner,
+            bytes,
+        });
+    }
+}
+
 impl BufferTransform {
     fn surface_size(self, buffer_width: u32, buffer_height: u32) -> (u32, u32) {
         match self {
@@ -1632,10 +1743,97 @@ fn transform_buffer_frame(
     )))
 }
 
+fn projected_frame_chain_bytes(
+    source_width: u32,
+    source_height: u32,
+    source_bytes: usize,
+    transform: BufferTransform,
+    scale: i32,
+    viewport_source: Option<ViewportSource>,
+    viewport_destination: Option<(i32, i32)>,
+) -> Option<usize> {
+    if source_bytes > MAX_FRAME_ALLOCATION_BYTES {
+        return None;
+    }
+    let scale = u32::try_from(scale).ok().filter(|scale| *scale > 0)?;
+    let (physical_width, physical_height) = transform.surface_size(source_width, source_height);
+    if physical_width % scale != 0 || physical_height % scale != 0 {
+        return None;
+    }
+    let transformed_width = physical_width / scale;
+    let transformed_height = physical_height / scale;
+    let transformed_bytes = usize::try_from(transformed_width)
+        .ok()?
+        .checked_mul(usize::try_from(transformed_height).ok()?)?
+        .checked_mul(4)?;
+    if transformed_bytes > MAX_FRAME_ALLOCATION_BYTES {
+        return None;
+    }
+    let transformed_allocates = transform != BufferTransform::Normal || scale != 1;
+    let mut retained = source_bytes;
+    if transformed_allocates {
+        retained = retained.checked_add(transformed_bytes)?;
+    }
+    if viewport_source.is_none() && viewport_destination.is_none() {
+        return Some(retained);
+    }
+    let source = viewport_source.unwrap_or(ViewportSource {
+        x: 0.0,
+        y: 0.0,
+        width: f64::from(transformed_width),
+        height: f64::from(transformed_height),
+    });
+    let right = source.x + source.width;
+    let bottom = source.y + source.height;
+    if !source.x.is_finite()
+        || !source.y.is_finite()
+        || !source.width.is_finite()
+        || !source.height.is_finite()
+        || source.x < 0.0
+        || source.y < 0.0
+        || source.width <= 0.0
+        || source.height <= 0.0
+        || right > f64::from(transformed_width)
+        || bottom > f64::from(transformed_height)
+    {
+        return None;
+    }
+    let (viewport_width, viewport_height) = match viewport_destination {
+        Some((width, height)) => (
+            u32::try_from(width).ok().filter(|width| *width > 0)?,
+            u32::try_from(height).ok().filter(|height| *height > 0)?,
+        ),
+        None => {
+            if source.width.fract() != 0.0 || source.height.fract() != 0.0 {
+                return None;
+            }
+            (source.width as u32, source.height as u32)
+        }
+    };
+    let viewport_allocates = source.x != 0.0
+        || source.y != 0.0
+        || source.width != f64::from(transformed_width)
+        || source.height != f64::from(transformed_height)
+        || viewport_width != transformed_width
+        || viewport_height != transformed_height;
+    if !viewport_allocates {
+        return Some(retained);
+    }
+    let viewport_bytes = usize::try_from(viewport_width)
+        .ok()?
+        .checked_mul(usize::try_from(viewport_height).ok()?)?
+        .checked_mul(4)?;
+    if viewport_bytes > MAX_FRAME_ALLOCATION_BYTES {
+        return None;
+    }
+    retained.checked_add(viewport_bytes)
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ViewportApplyError {
     BadSize,
     OutOfBuffer,
+    ResourceLimit,
 }
 
 fn apply_viewport_to_frame(
@@ -1697,6 +1895,9 @@ fn apply_viewport_to_frame(
         .and_then(|count| count.checked_mul(4))
         .and_then(|count| usize::try_from(count).ok())
         .ok_or(ViewportApplyError::BadSize)?;
+    if byte_count > MAX_FRAME_ALLOCATION_BYTES {
+        return Err(ViewportApplyError::ResourceLimit);
+    }
     let frame_pixels = frame.pixels();
     let mut pixels = vec![0; byte_count];
     for destination_y in 0..height {
@@ -3708,8 +3909,19 @@ struct ShmPoolInner {
     size: usize,
 }
 
+struct RetainedShmPool {
+    owner: ClientId,
+    inner: Weak<Mutex<ShmPoolInner>>,
+}
+
+struct RetainedShmBuffer {
+    owner: ClientId,
+    inner: Weak<ShmBufferInner>,
+}
+
 pub struct ShmPoolData {
     inner: Arc<Mutex<ShmPoolInner>>,
+    owner: ClientId,
 }
 
 struct ShmBufferInner {
@@ -3749,7 +3961,6 @@ impl ShmBufferInner {
         previous: Option<&Arc<CommittedFrame>>,
         state: ShmSnapshotState<'_>,
     ) -> io::Result<Arc<CommittedFrame>> {
-        const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
         let row_bytes = self
             .width
             .checked_mul(4)
@@ -3757,7 +3968,7 @@ impl ShmBufferInner {
         let frame_bytes = row_bytes
             .checked_mul(self.height)
             .ok_or_else(|| io::Error::other("SHM frame size overflow"))?;
-        if frame_bytes > MAX_FRAME_BYTES {
+        if frame_bytes > MAX_FRAME_ALLOCATION_BYTES {
             return Err(io::Error::other("SHM frame exceeds the bridge limit"));
         }
 
@@ -7425,6 +7636,92 @@ impl Dispatch<WlKeyboard, ()> for CompositorState {
     }
 }
 
+#[derive(Default)]
+struct ShmPoolUsage {
+    client_count: usize,
+    total_count: usize,
+    client_bytes: usize,
+    total_bytes: usize,
+}
+
+fn retained_shm_pool_usage(state: &mut CompositorState, client_id: &ClientId) -> ShmPoolUsage {
+    state
+        .retained_shm_pools
+        .retain(|pool| pool.inner.strong_count() > 0);
+    let mut usage = ShmPoolUsage::default();
+    for pool in &state.retained_shm_pools {
+        let Some(inner) = pool.inner.upgrade() else {
+            continue;
+        };
+        let size = inner.lock().unwrap_or_else(|error| error.into_inner()).size;
+        usage.total_count = usage.total_count.saturating_add(1);
+        usage.total_bytes = usage.total_bytes.saturating_add(size);
+        if &pool.owner == client_id {
+            usage.client_count = usage.client_count.saturating_add(1);
+            usage.client_bytes = usage.client_bytes.saturating_add(size);
+        }
+    }
+    usage
+}
+
+fn shm_pool_limit_exceeded(usage: &ShmPoolUsage, additional_bytes: usize) -> bool {
+    additional_bytes > MAX_SHM_POOL_BYTES
+        || usage.client_count >= MAX_SHM_POOLS_PER_CLIENT
+        || usage.total_count >= MAX_SHM_POOLS_TOTAL
+        || usage.client_bytes.saturating_add(additional_bytes) > MAX_SHM_POOL_BYTES_PER_CLIENT
+        || usage.total_bytes.saturating_add(additional_bytes) > MAX_SHM_POOL_BYTES_TOTAL
+}
+
+fn shm_pool_resize_limit_exceeded(usage: &ShmPoolUsage, old_size: usize, new_size: usize) -> bool {
+    new_size > MAX_SHM_POOL_BYTES
+        || usage
+            .client_bytes
+            .saturating_sub(old_size)
+            .saturating_add(new_size)
+            > MAX_SHM_POOL_BYTES_PER_CLIENT
+        || usage
+            .total_bytes
+            .saturating_sub(old_size)
+            .saturating_add(new_size)
+            > MAX_SHM_POOL_BYTES_TOTAL
+}
+
+#[derive(Default)]
+struct ShmBufferUsage {
+    client_count: usize,
+    total_count: usize,
+    client_bytes: usize,
+    total_bytes: usize,
+}
+
+fn retained_shm_buffer_usage(state: &mut CompositorState, client_id: &ClientId) -> ShmBufferUsage {
+    state
+        .retained_shm_buffers
+        .retain(|buffer| buffer.inner.strong_count() > 0);
+    let mut usage = ShmBufferUsage::default();
+    for buffer in &state.retained_shm_buffers {
+        let Some(inner) = buffer.inner.upgrade() else {
+            continue;
+        };
+        let bytes = inner.width.saturating_mul(inner.height).saturating_mul(4);
+        usage.total_count = usage.total_count.saturating_add(1);
+        usage.total_bytes = usage.total_bytes.saturating_add(bytes);
+        if &buffer.owner == client_id {
+            usage.client_count = usage.client_count.saturating_add(1);
+            usage.client_bytes = usage.client_bytes.saturating_add(bytes);
+        }
+    }
+    usage
+}
+
+fn shm_buffer_limit_exceeded(usage: &ShmBufferUsage, additional_bytes: usize) -> bool {
+    additional_bytes > MAX_SHM_BUFFER_BYTES
+        || usage.client_count >= MAX_SHM_BUFFERS_PER_CLIENT
+        || usage.total_count >= MAX_SHM_BUFFERS_TOTAL
+        || usage.client_bytes.saturating_add(additional_bytes) > MAX_SHM_BUFFER_BYTES_PER_CLIENT
+        || usage.total_bytes.saturating_add(additional_bytes) > MAX_SHM_BUFFER_BYTES_TOTAL
+}
+
 impl GlobalDispatch<WlCompositor, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -7472,11 +7769,11 @@ impl GlobalDispatch<WlShm, ()> for CompositorState {
 impl Dispatch<WlShm, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &WlShm,
         request: wl_shm::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -7507,13 +7804,30 @@ impl Dispatch<WlShm, ()> for CompositorState {
                     );
                     return;
                 }
+                let client_id = client.id();
+                let usage = retained_shm_pool_usage(state, &client_id);
+                if shm_pool_limit_exceeded(&usage, pool_size) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained SHM pool limit exceeded",
+                    );
+                    return;
+                }
+                let inner = Arc::new(Mutex::new(ShmPoolInner {
+                    file,
+                    size: pool_size,
+                }));
+                state.retained_shm_pools.push(RetainedShmPool {
+                    owner: client_id.clone(),
+                    inner: Arc::downgrade(&inner),
+                });
                 data_init.init(
                     id,
                     ShmPoolData {
-                        inner: Arc::new(Mutex::new(ShmPoolInner {
-                            file,
-                            size: pool_size,
-                        })),
+                        inner,
+                        owner: client_id,
                     },
                 );
                 state.shm_pool_count = state.shm_pool_count.saturating_add(1);
@@ -7526,11 +7840,11 @@ impl Dispatch<WlShm, ()> for CompositorState {
 impl Dispatch<WlShmPool, ShmPoolData> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &WlShmPool,
         request: wl_shm_pool::Request,
         data: &ShmPoolData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -7578,20 +7892,36 @@ impl Dispatch<WlShmPool, ShmPoolData> for CompositorState {
                 ) else {
                     unreachable!("validated SHM geometry became invalid");
                 };
-                data_init.init(
-                    id,
-                    ShmBufferData {
-                        inner: Arc::new(ShmBufferInner {
-                            pool: Arc::clone(&data.inner),
-                            patch: Mutex::new(Vec::new()),
-                            offset: range.start,
-                            width,
-                            height,
-                            stride,
-                            format,
-                        }),
-                    },
-                );
+                let Some(buffer_bytes) = width
+                    .checked_mul(height)
+                    .and_then(|pixels| pixels.checked_mul(4))
+                else {
+                    unreachable!("validated SHM buffer size became invalid");
+                };
+                let usage = retained_shm_buffer_usage(state, &data.owner);
+                if shm_buffer_limit_exceeded(&usage, buffer_bytes) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained SHM buffer limit exceeded",
+                    );
+                    return;
+                }
+                let inner = Arc::new(ShmBufferInner {
+                    pool: Arc::clone(&data.inner),
+                    patch: Mutex::new(Vec::new()),
+                    offset: range.start,
+                    width,
+                    height,
+                    stride,
+                    format,
+                });
+                state.retained_shm_buffers.push(RetainedShmBuffer {
+                    owner: data.owner.clone(),
+                    inner: Arc::downgrade(&inner),
+                });
+                data_init.init(id, ShmBufferData { inner });
                 state.shm_buffer_count = state.shm_buffer_count.saturating_add(1);
             }
             wl_shm_pool::Request::Destroy => {}
@@ -7600,13 +7930,14 @@ impl Dispatch<WlShmPool, ShmPoolData> for CompositorState {
                     resource.post_error(wl_shm::Error::InvalidStride, "invalid SHM pool resize");
                     return;
                 };
-                let mut guard = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                let guard = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                let old_size = guard.size;
                 let valid_file_size = guard
                     .file
                     .metadata()
                     .map(|metadata| metadata.len() >= new_size as u64)
                     .unwrap_or(false);
-                if new_size <= guard.size {
+                if new_size <= old_size {
                     resource.post_error(wl_shm::Error::InvalidStride, "SHM pool resize must grow");
                     return;
                 }
@@ -7617,7 +7948,21 @@ impl Dispatch<WlShmPool, ShmPoolData> for CompositorState {
                     );
                     return;
                 }
-                guard.size = new_size;
+                drop(guard);
+                let usage = retained_shm_pool_usage(state, &data.owner);
+                if shm_pool_resize_limit_exceeded(&usage, old_size, new_size) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained SHM pool byte limit exceeded",
+                    );
+                    return;
+                }
+                data.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .size = new_size;
             }
             _ => unreachable!("wl_shm_pool request added without an implementation"),
         }
@@ -7859,7 +8204,7 @@ fn apply_cached_subsurface_stack(
                 }
             }
         }
-        let mut local_damage = {
+        let (mut local_damage, retained_frame_bytes) = {
             let mut surface_state = surface_data
                 .inner
                 .lock()
@@ -7899,8 +8244,21 @@ fn apply_cached_subsurface_stack(
                     .cloned()
                     .map(|child| (child, next_depth)),
             );
-            std::mem::take(&mut surface_state.cached_damage)
+            let retained_frame_bytes = retained_surface_frame_bytes(
+                surface_state.committed_frame.as_ref(),
+                surface_state
+                    .cached_frame
+                    .as_ref()
+                    .and_then(|frame| frame.as_ref()),
+            );
+            (
+                std::mem::take(&mut surface_state.cached_damage),
+                retained_frame_bytes,
+            )
         };
+        if let Some(owner) = surface.client() {
+            update_surface_frame_usage(state, &surface, owner.id(), retained_frame_bytes);
+        }
         apply_pointer_constraint_regions(state, &surface);
         if !local_damage.is_empty() {
             let output_width = state.output_width.max(0) as u32;
@@ -8262,7 +8620,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         resource: &WlSurface,
         request: wl_surface::Request,
         data: &SurfaceData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -8646,6 +9004,79 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     viewport_source_update.is_some() || viewport_destination_update.is_some();
                 let viewport_active =
                     next_viewport_source.is_some() || next_viewport_destination.is_some();
+                let buffer_state_changed = buffer_assignment.is_some()
+                    || buffer_scale_update.is_some()
+                    || buffer_transform_update.is_some()
+                    || viewport_state_changed;
+                let client_id = client.id();
+                if buffer_state_changed {
+                    let projected_source = match buffer_assignment.as_ref() {
+                        Some(Some(buffer)) => Some((
+                            buffer.inner.width as u32,
+                            buffer.inner.height as u32,
+                            buffer
+                                .inner
+                                .width
+                                .saturating_mul(buffer.inner.height)
+                                .saturating_mul(4),
+                            None,
+                        )),
+                        Some(None) => None,
+                        None => base_frame.as_ref().map(|frame| {
+                            let source = original_buffer_frame(frame);
+                            let bytes = source.pixels().len();
+                            (source.width, source.height, bytes, Some(source))
+                        }),
+                    };
+                    let projection = match projected_source {
+                        Some(source) => projected_frame_chain_bytes(
+                            source.0,
+                            source.1,
+                            source.2,
+                            next_transform,
+                            next_scale,
+                            next_viewport_source,
+                            next_viewport_destination,
+                        )
+                        .map(|bytes| (bytes, source.3, source.2)),
+                        None if buffer_assignment.is_some() => Some((0, None, 0)),
+                        None => None,
+                    };
+                    if let Some((projected_next_frame_bytes, source, source_bytes)) = projection {
+                        let existing_committed = surface.committed_frame.as_ref();
+                        let existing_cached = surface
+                            .cached_frame
+                            .as_ref()
+                            .and_then(|frame| frame.as_ref());
+                        let overlap = source.as_ref().is_some_and(|source| {
+                            existing_committed.is_some_and(|committed| {
+                                committed_frame_chain_contains(committed, source)
+                            }) || existing_cached.is_some_and(|cached| {
+                                committed_frame_chain_contains(cached, source)
+                            })
+                        });
+                        let existing_bytes =
+                            retained_surface_frame_bytes(existing_committed, existing_cached);
+                        let projected_retained_bytes = existing_bytes
+                            .saturating_add(projected_next_frame_bytes)
+                            .saturating_sub(if overlap { source_bytes } else { 0 });
+                        if surface_frame_usage_exceeded(
+                            state,
+                            resource,
+                            &client_id,
+                            projected_retained_bytes,
+                        ) {
+                            drop(surface);
+                            disconnect_for_resource_limit(
+                                client,
+                                handle,
+                                resource,
+                                "projected surface frame byte limit exceeded",
+                            );
+                            return;
+                        }
+                    }
+                }
                 let frame_update = if let Some(assignment) = buffer_assignment {
                     Some(match assignment {
                         Some(buffer) => match buffer.inner.snapshot(
@@ -8679,10 +9110,6 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 } else {
                     None
                 };
-                let buffer_state_changed = frame_update.is_some()
-                    || buffer_scale_update.is_some()
-                    || buffer_transform_update.is_some()
-                    || viewport_state_changed;
                 let next_frame = if buffer_state_changed {
                     let source = frame_update
                         .clone()
@@ -8723,6 +9150,14 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                             wp_viewport::Error::OutOfBuffer,
                                             "viewport source extends outside the transformed buffer",
                                         ),
+                                        ViewportApplyError::ResourceLimit => {
+                                            disconnect_for_resource_limit(
+                                                client,
+                                                handle,
+                                                resource,
+                                                "viewport frame byte limit exceeded",
+                                            );
+                                        }
                                     }
                                     return;
                                 }
@@ -8733,6 +9168,34 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 } else {
                     base_frame
                 };
+                let existing_cached_frame = surface
+                    .cached_frame
+                    .as_ref()
+                    .and_then(|frame| frame.as_ref());
+                let candidate_committed_frame = if synchronized {
+                    surface.committed_frame.as_ref()
+                } else if buffer_state_changed {
+                    next_frame.as_ref()
+                } else {
+                    surface.committed_frame.as_ref()
+                };
+                let candidate_cached_frame = if synchronized && buffer_state_changed {
+                    next_frame.as_ref()
+                } else {
+                    existing_cached_frame
+                };
+                let retained_frame_bytes =
+                    retained_surface_frame_bytes(candidate_committed_frame, candidate_cached_frame);
+                if surface_frame_usage_exceeded(state, resource, &client_id, retained_frame_bytes) {
+                    drop(surface);
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained surface frame byte limit exceeded",
+                    );
+                    return;
+                }
                 let force_full_damage = buffer_scale_update.is_some()
                     || buffer_transform_update.is_some()
                     || viewport_state_changed
@@ -8750,6 +9213,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     force_full_damage,
                 );
                 restore_pending_damage_buffers(&mut surface, surface_damage, buffer_damage);
+                update_surface_frame_usage(state, resource, client_id, retained_frame_bytes);
 
                 if synchronized {
                     if let Some(input_region) = input_region_update {
@@ -8999,6 +9463,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSurface, data: &SurfaceData) {
+        state
+            .surface_frame_usage
+            .retain(|usage| usage.surface.id() != resource.id());
         {
             let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
             for callback in surface.pending_callbacks.drain(..) {
@@ -11163,27 +11630,41 @@ impl CompositorCore {
 
     pub fn dismiss_popups(&mut self) -> u32 {
         let mut dismissed = 0u32;
-        for popup in self
-            .state
-            .popups
-            .iter()
-            .rev()
-            .filter(|popup| popup.is_alive())
-        {
+        let popups = self.state.popups.clone();
+        for popup in popups.iter().rev().filter(|popup| popup.is_alive()) {
             let Some(data) = popup.data::<XdgPopupData>() else {
                 continue;
             };
             if !data.dismissed.swap(true, Ordering::AcqRel) {
-                if let Some(surface_data) = data
+                if let Some(surface) = data
                     .xdg_surface
                     .data::<XdgSurfaceData>()
-                    .and_then(|xdg_data| xdg_data.wl_surface.data::<SurfaceData>())
+                    .map(|xdg_data| xdg_data.wl_surface.clone())
                 {
-                    surface_data
-                        .inner
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .committed_frame = None;
+                    if let Some(surface_data) = surface.data::<SurfaceData>() {
+                        let retained_frame_bytes = {
+                            let mut surface_state = surface_data
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            surface_state.committed_frame = None;
+                            retained_surface_frame_bytes(
+                                None,
+                                surface_state
+                                    .cached_frame
+                                    .as_ref()
+                                    .and_then(|frame| frame.as_ref()),
+                            )
+                        };
+                        if let Some(owner) = surface.client() {
+                            update_surface_frame_usage(
+                                &mut self.state,
+                                &surface,
+                                owner.id(),
+                                retained_frame_bytes,
+                            );
+                        }
+                    }
                 }
                 popup.popup_done();
                 dismissed = dismissed.saturating_add(1);
@@ -17345,10 +17826,11 @@ mod tests {
     use std::sync::atomic::AtomicU8;
     use wayland_client::globals::{GlobalListContents, registry_queue_init};
     use wayland_client::protocol::{
-        wl_callback as client_wl_callback,
+        wl_buffer as client_wl_buffer, wl_callback as client_wl_callback,
         wl_compositor as client_wl_compositor, wl_pointer as client_wl_pointer,
-        wl_registry as client_wl_registry, wl_seat as client_wl_seat,
-        wl_region as client_wl_region, wl_subcompositor as client_wl_subcompositor,
+        wl_region as client_wl_region, wl_registry as client_wl_registry,
+        wl_seat as client_wl_seat, wl_shm as client_wl_shm,
+        wl_shm_pool as client_wl_shm_pool, wl_subcompositor as client_wl_subcompositor,
         wl_subsurface as client_wl_subsurface, wl_surface as client_wl_surface,
     };
     use wayland_client::{Connection, QueueHandle};
@@ -17397,6 +17879,9 @@ mod tests {
         PointerProtocolClient: ignore client_wl_surface::WlSurface
     );
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_callback::WlCallback);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_buffer::WlBuffer);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_shm::WlShm);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_wl_shm_pool::WlShmPool);
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_subcompositor::WlSubcompositor);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_subsurface::WlSubsurface);
     wayland_client::delegate_noop!(PointerProtocolClient: client_xdg_wm_base::XdgWmBase);
@@ -18460,6 +18945,889 @@ mod tests {
         stage.store(23, Ordering::Release);
 
         server.join().expect("pending-queue server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn shm_resource_limits_retain_attached_buffers_and_recover_after_overflow() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-shm-resource-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 15 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "SHM resource-limit server timed out"
+                );
+                core.dispatch_once().expect("dispatch SHM resource clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 => {
+                        let retained = core
+                            .state
+                            .retained_shm_pools
+                            .iter()
+                            .filter(|pool| pool.inner.strong_count() > 0)
+                            .count();
+                        if retained == MAX_SHM_POOLS_PER_CLIENT
+                            && core.state.shm_pool_count as usize == retained
+                        {
+                            server_stage.store(2, Ordering::Release);
+                        }
+                    }
+                    3 if core.state.shm_pool_count == 0 => {
+                        assert!(
+                            core.state
+                                .retained_shm_pools
+                                .iter()
+                                .all(|pool| pool.inner.strong_count() == 0)
+                        );
+                        core.state.retained_shm_pools.clear();
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 => {
+                        let retained = core
+                            .state
+                            .retained_shm_buffers
+                            .iter()
+                            .filter(|buffer| buffer.inner.strong_count() > 0)
+                            .count();
+                        if retained == MAX_SHM_BUFFERS_PER_CLIENT
+                            && core.state.shm_buffer_count as usize == retained
+                        {
+                            server_stage.store(6, Ordering::Release);
+                        }
+                    }
+                    7 if core.state.shm_pool_count == 0 && core.state.shm_buffer_count == 0 => {
+                        assert!(
+                            core.state
+                                .retained_shm_pools
+                                .iter()
+                                .all(|pool| pool.inner.strong_count() == 0)
+                        );
+                        assert!(
+                            core.state
+                                .retained_shm_buffers
+                                .iter()
+                                .all(|buffer| buffer.inner.strong_count() == 0)
+                        );
+                        core.state.retained_shm_pools.clear();
+                        core.state.retained_shm_buffers.clear();
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.shm_pool_count == 0
+                        && core.state.shm_buffer_count == 0
+                        && core.state.surface_count == 1 =>
+                    {
+                        assert_eq!(
+                            core.state
+                                .retained_shm_pools
+                                .iter()
+                                .filter(|pool| pool.inner.strong_count() > 0)
+                                .count(),
+                            1
+                        );
+                        assert_eq!(
+                            core.state
+                                .retained_shm_buffers
+                                .iter()
+                                .filter(|buffer| buffer.inner.strong_count() > 0)
+                                .count(),
+                            1
+                        );
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 => {
+                        let retained_pools = core
+                            .state
+                            .retained_shm_pools
+                            .iter()
+                            .filter(|pool| pool.inner.strong_count() > 0)
+                            .count();
+                        let retained_buffers = core
+                            .state
+                            .retained_shm_buffers
+                            .iter()
+                            .filter(|buffer| buffer.inner.strong_count() > 0)
+                            .count();
+                        if retained_pools == 0 && retained_buffers == 0 {
+                            assert_eq!(core.last_frame_width(), 1);
+                            assert_eq!(core.last_frame_height(), 1);
+                            assert_eq!(core.state.surface_frame_usage.len(), 1);
+                            assert_eq!(core.state.surface_frame_usage[0].bytes, 4);
+                            server_stage.store(12, Ordering::Release);
+                        }
+                    }
+                    13 if core.state.surface_count == 0 => {
+                        core.state.surfaces.retain(|surface| surface.is_alive());
+                        assert!(core.state.surfaces.is_empty());
+                        assert!(core.state.surface_frame_usage.is_empty());
+                        server_stage.store(14, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting SHM resource client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("SHM client connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect SHM resource client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for SHM resource stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+        let make_file = || {
+            let file = syscall_ffi::memfd(c"archphene-shm-limit", libc::MFD_CLOEXEC)
+                .expect("create SHM limit memfd");
+            file.set_len(4).expect("size SHM limit memfd");
+            file
+        };
+
+        let pool_connection = connect();
+        let (pool_globals, mut pool_events) =
+            registry_queue_init::<PointerProtocolClient>(&pool_connection)
+                .expect("pool-limit registry");
+        let pool_queue = pool_events.handle();
+        let pool_shm = pool_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&pool_queue, 1..=1, ())
+            .expect("pool-limit wl_shm");
+        let mut pool_files = Vec::new();
+        let mut pools = Vec::new();
+        for _ in 0..MAX_SHM_POOLS_PER_CLIENT {
+            let file = make_file();
+            pools.push(pool_shm.create_pool(file.as_fd(), 4, &pool_queue, ()));
+            pool_files.push(file);
+        }
+        pool_connection.flush().expect("flush exact SHM pool limit");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        pool_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact SHM pool limit remains connected");
+        let overflow_pool_file = make_file();
+        let _overflow_pool =
+            pool_shm.create_pool(overflow_pool_file.as_fd(), 4, &pool_queue, ());
+        pool_connection.flush().expect("flush SHM pool overflow");
+        assert!(
+            pool_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "SHM pool 17 must disconnect its client"
+        );
+        drop((pools, pool_files, pool_shm, pool_events, pool_connection));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let buffer_connection = connect();
+        let (buffer_globals, mut buffer_events) =
+            registry_queue_init::<PointerProtocolClient>(&buffer_connection)
+                .expect("buffer-limit registry");
+        let buffer_queue = buffer_events.handle();
+        let buffer_shm = buffer_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&buffer_queue, 1..=1, ())
+            .expect("buffer-limit wl_shm");
+        let buffer_file = make_file();
+        let buffer_pool = buffer_shm.create_pool(buffer_file.as_fd(), 4, &buffer_queue, ());
+        let buffers = (0..MAX_SHM_BUFFERS_PER_CLIENT)
+            .map(|_| {
+                buffer_pool.create_buffer(
+                    0,
+                    1,
+                    1,
+                    4,
+                    client_wl_shm::Format::Xrgb8888,
+                    &buffer_queue,
+                    (),
+                )
+            })
+            .collect::<Vec<_>>();
+        buffer_connection
+            .flush()
+            .expect("flush exact SHM buffer limit");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        buffer_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact SHM buffer limit remains connected");
+        let _overflow_buffer = buffer_pool.create_buffer(
+            0,
+            1,
+            1,
+            4,
+            client_wl_shm::Format::Xrgb8888,
+            &buffer_queue,
+            (),
+        );
+        buffer_connection
+            .flush()
+            .expect("flush SHM buffer overflow");
+        assert!(
+            buffer_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "SHM buffer 129 must disconnect its client"
+        );
+        drop((
+            buffers,
+            buffer_pool,
+            buffer_file,
+            buffer_shm,
+            buffer_events,
+            buffer_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+
+        let retained_connection = connect();
+        let (retained_globals, mut retained_events) =
+            registry_queue_init::<PointerProtocolClient>(&retained_connection)
+                .expect("retained-SHM registry");
+        let retained_queue = retained_events.handle();
+        let retained_compositor = retained_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&retained_queue, 1..=6, ())
+            .expect("retained-SHM compositor");
+        let retained_shm = retained_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&retained_queue, 1..=1, ())
+            .expect("retained-SHM wl_shm");
+        let retained_file = make_file();
+        let retained_pool =
+            retained_shm.create_pool(retained_file.as_fd(), 4, &retained_queue, ());
+        let retained_buffer = retained_pool.create_buffer(
+            0,
+            1,
+            1,
+            4,
+            client_wl_shm::Format::Xrgb8888,
+            &retained_queue,
+            (),
+        );
+        let retained_surface = retained_compositor.create_surface(&retained_queue, ());
+        retained_surface.attach(Some(&retained_buffer), 0, 0);
+        retained_buffer.destroy();
+        retained_pool.destroy();
+        retained_connection
+            .flush()
+            .expect("flush retained destroyed SHM resources");
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+        retained_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("pending attachment retains destroyed SHM resources");
+        retained_surface.commit();
+        retained_connection
+            .flush()
+            .expect("flush retained SHM commit");
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        retained_surface.destroy();
+        retained_connection
+            .flush()
+            .expect("flush retained surface destroy");
+        drop((
+            retained_buffer,
+            retained_pool,
+            retained_file,
+            retained_shm,
+            retained_compositor,
+            retained_events,
+            retained_connection,
+        ));
+        stage.store(13, Ordering::Release);
+        wait_for_stage(14);
+        stage.store(15, Ordering::Release);
+
+        server.join().expect("SHM resource-limit server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn shm_pool_byte_limits_account_for_resize_and_retained_backings() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-shm-byte-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 11 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "SHM byte-limit server timed out"
+                );
+                core.dispatch_once().expect("dispatch SHM byte clients");
+                let retained_bytes = || {
+                    core.state
+                        .retained_shm_pools
+                        .iter()
+                        .filter_map(|pool| pool.inner.upgrade())
+                        .map(|pool| {
+                            pool.lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .size
+                        })
+                        .sum::<usize>()
+                };
+                match server_stage.load(Ordering::Acquire) {
+                    1 if retained_bytes()
+                        == MAX_SHM_POOL_BYTES + MAX_SHM_POOL_BYTES / 2 + MAX_SHM_POOL_BYTES / 4 =>
+                    {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if retained_bytes() == MAX_SHM_POOL_BYTES_PER_CLIENT => {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.shm_pool_count == 0 => {
+                        assert!(
+                            core.state
+                                .retained_shm_pools
+                                .iter()
+                                .all(|pool| pool.inner.strong_count() == 0)
+                        );
+                        core.state.retained_shm_pools.clear();
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if retained_bytes() == MAX_SHM_POOL_BYTES_PER_CLIENT => {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.shm_pool_count == 0 => {
+                        assert!(
+                            core.state
+                                .retained_shm_pools
+                                .iter()
+                                .all(|pool| pool.inner.strong_count() == 0)
+                        );
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting SHM byte client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("SHM byte connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect SHM byte client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for SHM byte stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+        let make_file = |size: usize| {
+            let file = syscall_ffi::memfd(c"archphene-shm-bytes", libc::MFD_CLOEXEC)
+                .expect("create SHM byte memfd");
+            file.set_len(size as u64).expect("size SHM byte memfd");
+            file
+        };
+
+        let resize_connection = connect();
+        let (resize_globals, mut resize_events) =
+            registry_queue_init::<PointerProtocolClient>(&resize_connection)
+                .expect("SHM resize registry");
+        let resize_queue = resize_events.handle();
+        let resize_shm = resize_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&resize_queue, 1..=1, ())
+            .expect("SHM resize global");
+        let resize_file_a = make_file(MAX_SHM_POOL_BYTES);
+        let resize_file_b = make_file(MAX_SHM_POOL_BYTES / 2);
+        let resize_file_c = make_file(MAX_SHM_POOL_BYTES / 4);
+        let resize_pool_a = resize_shm.create_pool(
+            resize_file_a.as_fd(),
+            MAX_SHM_POOL_BYTES as i32,
+            &resize_queue,
+            (),
+        );
+        let resize_pool_b = resize_shm.create_pool(
+            resize_file_b.as_fd(),
+            (MAX_SHM_POOL_BYTES / 2) as i32,
+            &resize_queue,
+            (),
+        );
+        let resize_pool_c = resize_shm.create_pool(
+            resize_file_c.as_fd(),
+            (MAX_SHM_POOL_BYTES / 4) as i32,
+            &resize_queue,
+            (),
+        );
+        resize_connection.flush().expect("flush SHM byte pools");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        resize_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("initial SHM bytes remain connected");
+        resize_file_c
+            .set_len((MAX_SHM_POOL_BYTES / 2) as u64)
+            .expect("grow SHM resize backing");
+        resize_pool_c.resize((MAX_SHM_POOL_BYTES / 2) as i32);
+        resize_connection
+            .flush()
+            .expect("flush exact SHM byte resize");
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+        resize_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact SHM byte capacity remains connected");
+        let overflow_file = make_file(1);
+        let _overflow_pool =
+            resize_shm.create_pool(overflow_file.as_fd(), 1, &resize_queue, ());
+        resize_connection
+            .flush()
+            .expect("flush SHM byte overflow");
+        assert!(
+            resize_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "one byte beyond aggregate SHM pool capacity must disconnect"
+        );
+        drop((
+            resize_pool_a,
+            resize_pool_b,
+            resize_pool_c,
+            resize_file_a,
+            resize_file_b,
+            resize_file_c,
+            resize_shm,
+            resize_events,
+            resize_connection,
+        ));
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+
+        let rejected_resize_connection = connect();
+        let (rejected_globals, mut rejected_events) =
+            registry_queue_init::<PointerProtocolClient>(&rejected_resize_connection)
+                .expect("rejected SHM resize registry");
+        let rejected_queue = rejected_events.handle();
+        let rejected_shm = rejected_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&rejected_queue, 1..=1, ())
+            .expect("rejected SHM resize global");
+        let rejected_file_a = make_file(MAX_SHM_POOL_BYTES);
+        let rejected_file_b = make_file(MAX_SHM_POOL_BYTES / 2);
+        let rejected_file_c = make_file(MAX_SHM_POOL_BYTES / 2 + 1);
+        let _rejected_pool_a = rejected_shm.create_pool(
+            rejected_file_a.as_fd(),
+            MAX_SHM_POOL_BYTES as i32,
+            &rejected_queue,
+            (),
+        );
+        let _rejected_pool_b = rejected_shm.create_pool(
+            rejected_file_b.as_fd(),
+            (MAX_SHM_POOL_BYTES / 2) as i32,
+            &rejected_queue,
+            (),
+        );
+        let rejected_pool_c = rejected_shm.create_pool(
+            rejected_file_c.as_fd(),
+            (MAX_SHM_POOL_BYTES / 2) as i32,
+            &rejected_queue,
+            (),
+        );
+        rejected_resize_connection
+            .flush()
+            .expect("flush exact rejected-resize baseline");
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        rejected_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact rejected-resize baseline remains connected");
+        rejected_pool_c.resize((MAX_SHM_POOL_BYTES / 2 + 1) as i32);
+        rejected_resize_connection
+            .flush()
+            .expect("flush rejected SHM resize");
+        assert!(
+            rejected_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "aggregate-overflow SHM resize must disconnect"
+        );
+        drop(rejected_resize_connection);
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+        stage.store(11, Ordering::Release);
+
+        server.join().expect("SHM byte-limit server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn shm_global_limits_preserve_capacity_for_independent_clients() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-shm-global-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 9 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "SHM global-limit server timed out"
+                );
+                core.dispatch_once().expect("dispatch SHM global clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 => {
+                        let retained = core
+                            .state
+                            .retained_shm_pools
+                            .iter()
+                            .filter(|pool| pool.inner.strong_count() > 0)
+                            .count();
+                        if retained == MAX_SHM_POOLS_TOTAL {
+                            server_stage.store(2, Ordering::Release);
+                        }
+                    }
+                    3 if core.state.shm_pool_count == 0 => {
+                        assert!(
+                            core.state
+                                .retained_shm_pools
+                                .iter()
+                                .all(|pool| pool.inner.strong_count() == 0)
+                        );
+                        core.state.retained_shm_pools.clear();
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 => {
+                        let retained = core
+                            .state
+                            .retained_shm_buffers
+                            .iter()
+                            .filter(|buffer| buffer.inner.strong_count() > 0)
+                            .count();
+                        if retained == MAX_SHM_BUFFERS_TOTAL {
+                            server_stage.store(6, Ordering::Release);
+                        }
+                    }
+                    7 if core.state.shm_pool_count == 0 && core.state.shm_buffer_count == 0 => {
+                        assert!(
+                            core.state
+                                .retained_shm_pools
+                                .iter()
+                                .all(|pool| pool.inner.strong_count() == 0)
+                        );
+                        assert!(
+                            core.state
+                                .retained_shm_buffers
+                                .iter()
+                                .all(|buffer| buffer.inner.strong_count() == 0)
+                        );
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting SHM global client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("SHM global connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect SHM global client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for SHM global stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+        let make_file = || {
+            let file = syscall_ffi::memfd(c"archphene-shm-global", libc::MFD_CLOEXEC)
+                .expect("create SHM global memfd");
+            file.set_len(4).expect("size SHM global memfd");
+            file
+        };
+
+        let pool_a_connection = connect();
+        let (pool_a_globals, mut pool_a_events) =
+            registry_queue_init::<PointerProtocolClient>(&pool_a_connection)
+                .expect("first global-pool registry");
+        let pool_a_queue = pool_a_events.handle();
+        let pool_a_shm = pool_a_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&pool_a_queue, 1..=1, ())
+            .expect("first global-pool wl_shm");
+        let pool_a_files = (0..MAX_SHM_POOLS_PER_CLIENT)
+            .map(|_| make_file())
+            .collect::<Vec<_>>();
+        let pool_a_resources = pool_a_files
+            .iter()
+            .map(|file| pool_a_shm.create_pool(file.as_fd(), 4, &pool_a_queue, ()))
+            .collect::<Vec<_>>();
+        pool_a_connection
+            .flush()
+            .expect("flush first global-pool holder");
+        pool_a_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("first global-pool holder roundtrip");
+
+        let pool_b_connection = connect();
+        let (pool_b_globals, mut pool_b_events) =
+            registry_queue_init::<PointerProtocolClient>(&pool_b_connection)
+                .expect("second global-pool registry");
+        let pool_b_queue = pool_b_events.handle();
+        let pool_b_shm = pool_b_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&pool_b_queue, 1..=1, ())
+            .expect("second global-pool wl_shm");
+        let pool_b_files = (0..MAX_SHM_POOLS_PER_CLIENT)
+            .map(|_| make_file())
+            .collect::<Vec<_>>();
+        let pool_b_resources = pool_b_files
+            .iter()
+            .map(|file| pool_b_shm.create_pool(file.as_fd(), 4, &pool_b_queue, ()))
+            .collect::<Vec<_>>();
+        pool_b_connection
+            .flush()
+            .expect("flush second global-pool holder");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        pool_b_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact global SHM pool capacity remains connected");
+
+        let pool_overflow_connection = connect();
+        let (pool_overflow_globals, mut pool_overflow_events) =
+            registry_queue_init::<PointerProtocolClient>(&pool_overflow_connection)
+                .expect("global-pool overflow registry");
+        let pool_overflow_queue = pool_overflow_events.handle();
+        let pool_overflow_shm = pool_overflow_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&pool_overflow_queue, 1..=1, ())
+            .expect("global-pool overflow wl_shm");
+        let pool_overflow_file = make_file();
+        let _pool_overflow = pool_overflow_shm.create_pool(
+            pool_overflow_file.as_fd(),
+            4,
+            &pool_overflow_queue,
+            (),
+        );
+        pool_overflow_connection
+            .flush()
+            .expect("flush global SHM pool overflow");
+        assert!(
+            pool_overflow_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "global SHM pool 33 must disconnect only the third client"
+        );
+        drop((
+            pool_a_resources,
+            pool_a_files,
+            pool_a_shm,
+            pool_a_events,
+            pool_a_connection,
+            pool_b_resources,
+            pool_b_files,
+            pool_b_shm,
+            pool_b_events,
+            pool_b_connection,
+            pool_overflow_events,
+            pool_overflow_connection,
+        ));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let buffer_a_connection = connect();
+        let (buffer_a_globals, mut buffer_a_events) =
+            registry_queue_init::<PointerProtocolClient>(&buffer_a_connection)
+                .expect("first global-buffer registry");
+        let buffer_a_queue = buffer_a_events.handle();
+        let buffer_a_shm = buffer_a_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&buffer_a_queue, 1..=1, ())
+            .expect("first global-buffer wl_shm");
+        let buffer_a_file = make_file();
+        let buffer_a_pool =
+            buffer_a_shm.create_pool(buffer_a_file.as_fd(), 4, &buffer_a_queue, ());
+        let buffer_a_resources = (0..MAX_SHM_BUFFERS_PER_CLIENT)
+            .map(|_| {
+                buffer_a_pool.create_buffer(
+                    0,
+                    1,
+                    1,
+                    4,
+                    client_wl_shm::Format::Xrgb8888,
+                    &buffer_a_queue,
+                    (),
+                )
+            })
+            .collect::<Vec<_>>();
+        buffer_a_connection
+            .flush()
+            .expect("flush first global-buffer holder");
+        buffer_a_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("first global-buffer holder roundtrip");
+
+        let buffer_b_connection = connect();
+        let (buffer_b_globals, mut buffer_b_events) =
+            registry_queue_init::<PointerProtocolClient>(&buffer_b_connection)
+                .expect("second global-buffer registry");
+        let buffer_b_queue = buffer_b_events.handle();
+        let buffer_b_shm = buffer_b_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&buffer_b_queue, 1..=1, ())
+            .expect("second global-buffer wl_shm");
+        let buffer_b_file = make_file();
+        let buffer_b_pool =
+            buffer_b_shm.create_pool(buffer_b_file.as_fd(), 4, &buffer_b_queue, ());
+        let buffer_b_resources = (0..MAX_SHM_BUFFERS_PER_CLIENT)
+            .map(|_| {
+                buffer_b_pool.create_buffer(
+                    0,
+                    1,
+                    1,
+                    4,
+                    client_wl_shm::Format::Xrgb8888,
+                    &buffer_b_queue,
+                    (),
+                )
+            })
+            .collect::<Vec<_>>();
+        buffer_b_connection
+            .flush()
+            .expect("flush second global-buffer holder");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        buffer_b_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact global SHM buffer capacity remains connected");
+
+        let buffer_overflow_connection = connect();
+        let (buffer_overflow_globals, mut buffer_overflow_events) =
+            registry_queue_init::<PointerProtocolClient>(&buffer_overflow_connection)
+                .expect("global-buffer overflow registry");
+        let buffer_overflow_queue = buffer_overflow_events.handle();
+        let buffer_overflow_shm = buffer_overflow_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&buffer_overflow_queue, 1..=1, ())
+            .expect("global-buffer overflow wl_shm");
+        let buffer_overflow_file = make_file();
+        let buffer_overflow_pool = buffer_overflow_shm.create_pool(
+            buffer_overflow_file.as_fd(),
+            4,
+            &buffer_overflow_queue,
+            (),
+        );
+        let _buffer_overflow = buffer_overflow_pool.create_buffer(
+            0,
+            1,
+            1,
+            4,
+            client_wl_shm::Format::Xrgb8888,
+            &buffer_overflow_queue,
+            (),
+        );
+        buffer_overflow_connection
+            .flush()
+            .expect("flush global SHM buffer overflow");
+        assert!(
+            buffer_overflow_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "global SHM buffer 257 must disconnect only the third client"
+        );
+        drop((
+            buffer_a_resources,
+            buffer_a_pool,
+            buffer_a_file,
+            buffer_a_shm,
+            buffer_a_events,
+            buffer_a_connection,
+            buffer_b_resources,
+            buffer_b_pool,
+            buffer_b_file,
+            buffer_b_shm,
+            buffer_b_events,
+            buffer_b_connection,
+            buffer_overflow_events,
+            buffer_overflow_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        stage.store(9, Ordering::Release);
+
+        server.join().expect("SHM global-limit server");
         assert!(!socket.exists());
     }
 
@@ -19832,6 +21200,98 @@ mod tests {
     }
 
     #[test]
+    fn shm_retention_limits_accept_exact_capacity_and_reject_growth() {
+        let usage = ShmPoolUsage {
+            client_count: MAX_SHM_POOLS_PER_CLIENT - 1,
+            total_count: MAX_SHM_POOLS_TOTAL - 1,
+            client_bytes: MAX_SHM_POOL_BYTES_PER_CLIENT - MAX_SHM_POOL_BYTES,
+            total_bytes: MAX_SHM_POOL_BYTES_TOTAL - MAX_SHM_POOL_BYTES,
+        };
+        assert!(!shm_pool_limit_exceeded(&usage, MAX_SHM_POOL_BYTES));
+        assert!(shm_pool_limit_exceeded(
+            &usage,
+            MAX_SHM_POOL_BYTES + 1
+        ));
+        assert!(shm_pool_limit_exceeded(
+            &ShmPoolUsage {
+                client_count: MAX_SHM_POOLS_PER_CLIENT,
+                ..ShmPoolUsage::default()
+            },
+            1
+        ));
+        assert!(shm_pool_limit_exceeded(
+            &ShmPoolUsage {
+                total_count: MAX_SHM_POOLS_TOTAL,
+                ..ShmPoolUsage::default()
+            },
+            1
+        ));
+        let resize_usage = ShmPoolUsage {
+            client_bytes: MAX_SHM_POOL_BYTES_PER_CLIENT - MAX_SHM_POOL_BYTES / 2,
+            total_bytes: MAX_SHM_POOL_BYTES_TOTAL - MAX_SHM_POOL_BYTES / 2,
+            ..ShmPoolUsage::default()
+        };
+        assert!(!shm_pool_resize_limit_exceeded(
+            &resize_usage,
+            MAX_SHM_POOL_BYTES / 2,
+            MAX_SHM_POOL_BYTES
+        ));
+        assert!(shm_pool_resize_limit_exceeded(
+            &resize_usage,
+            MAX_SHM_POOL_BYTES / 2,
+            MAX_SHM_POOL_BYTES + 1
+        ));
+        let buffer_usage = ShmBufferUsage {
+            client_count: MAX_SHM_BUFFERS_PER_CLIENT - 1,
+            total_count: MAX_SHM_BUFFERS_TOTAL - 1,
+            client_bytes: MAX_SHM_BUFFER_BYTES_PER_CLIENT - MAX_SHM_BUFFER_BYTES,
+            total_bytes: MAX_SHM_BUFFER_BYTES_TOTAL - MAX_SHM_BUFFER_BYTES,
+        };
+        assert!(!shm_buffer_limit_exceeded(
+            &buffer_usage,
+            MAX_SHM_BUFFER_BYTES
+        ));
+        assert!(shm_buffer_limit_exceeded(
+            &buffer_usage,
+            MAX_SHM_BUFFER_BYTES + 1
+        ));
+        assert!(shm_buffer_limit_exceeded(
+            &ShmBufferUsage {
+                client_count: MAX_SHM_BUFFERS_PER_CLIENT,
+                ..ShmBufferUsage::default()
+            },
+            1
+        ));
+        assert!(shm_buffer_limit_exceeded(
+            &ShmBufferUsage {
+                total_count: MAX_SHM_BUFFERS_TOTAL,
+                ..ShmBufferUsage::default()
+            },
+            1
+        ));
+        assert!(!surface_frame_bytes_limit_exceeded(
+            MAX_SURFACE_FRAME_BYTES,
+            0,
+            MAX_SURFACE_FRAME_BYTES_TOTAL - MAX_SURFACE_FRAME_BYTES,
+        ));
+        assert!(surface_frame_bytes_limit_exceeded(
+            MAX_SURFACE_FRAME_BYTES + 1,
+            0,
+            0,
+        ));
+        assert!(surface_frame_bytes_limit_exceeded(
+            1,
+            MAX_SURFACE_FRAME_BYTES_PER_CLIENT,
+            0,
+        ));
+        assert!(surface_frame_bytes_limit_exceeded(
+            1,
+            0,
+            MAX_SURFACE_FRAME_BYTES_TOTAL,
+        ));
+    }
+
+    #[test]
     fn crops_and_scales_viewport_after_buffer_transform() {
         let source = test_frame(4, 2, &[1, 2, 3, 4, 5, 6, 7, 8]);
 
@@ -19874,6 +21334,34 @@ mod tests {
             ),
             Err(ViewportApplyError::BadSize)
         ));
+    }
+
+    #[test]
+    fn rejects_viewport_destination_before_oversized_allocation() {
+        let source = test_frame(1, 1, &[0]);
+        assert!(matches!(
+            apply_viewport_to_frame(
+                source,
+                None,
+                Some(((MAX_FRAME_ALLOCATION_BYTES / 4 + 1) as i32, 1)),
+            ),
+            Err(ViewportApplyError::ResourceLimit)
+        ));
+
+        let original = test_frame(1, 1, &[0]);
+        let derived = Arc::new(CommittedFrame::new(
+            2,
+            1,
+            wl_shm::Format::Xrgb8888,
+            vec![0; 8],
+            Some(Arc::clone(&original)),
+        ));
+        assert_eq!(committed_frame_retained_bytes(&derived), 12);
+        assert_eq!(retained_surface_frame_bytes(Some(&derived), Some(&derived)), 12);
+        assert_eq!(
+            retained_surface_frame_bytes(Some(&original), Some(&derived)),
+            12
+        );
     }
     #[test]
     fn scales_frame_pixels_into_the_configured_rectangle() {
