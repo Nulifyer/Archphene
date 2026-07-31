@@ -2817,7 +2817,8 @@ class LauncherSessionService : Service() {
                 "${session.presentationComponent(30)}x" +
                 "${session.presentationComponent(31)} " +
                 "presentation=${session.presentationComponent(32)}x" +
-                "${session.presentationComponent(33)}",
+                "${session.presentationComponent(33)} " +
+                "windowStates=${session.presentationComponent(34)}",
         )
     }
 

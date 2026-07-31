@@ -2356,7 +2356,7 @@ struct LauncherSurfaceCompositor {
     buffer_width: i32,
     buffer_height: i32,
     last_presented_commit: u32,
-    last_presentation_signature: Option<[i32; 5]>,
+    last_presentation_signature: Option<[i32; 6]>,
     last_reported_ime_serial: Option<u32>,
     last_reported_pointer_capture_serial: Option<u32>,
     last_reported_cursor_serial: Option<u32>,
@@ -3065,12 +3065,30 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
             33 => i32::try_from(layout.output_height).unwrap_or(i32::MAX),
             _ => 0,
         }),
+        34 => requested_window_state_flags(state),
         _ => -1,
     }
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn launcher_presentation_signature(state: &CompositorState) -> [i32; 5] {
+fn requested_window_state_flags(state: &CompositorState) -> i32 {
+    active_or_primary(
+        state.active_toplevel.as_ref(),
+        state.primary_toplevel.as_ref(),
+    )
+    .and_then(|toplevel| toplevel.data::<XdgToplevelData>())
+    .map_or(0, |data| {
+        i32::from(data.fullscreen_requested.load(Ordering::Acquire))
+            | (i32::from(data.maximized_requested.load(Ordering::Acquire)) << 1)
+    })
+}
+
+fn active_or_primary<'a, T>(active: Option<&'a T>, primary: Option<&'a T>) -> Option<&'a T> {
+    active.or(primary)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn launcher_presentation_signature(state: &CompositorState) -> [i32; 6] {
     let root = state.root_surface.as_ref().and_then(surface_frame);
     let original = root.as_ref().map(original_buffer_frame);
     let buffer_scale = state
@@ -3085,6 +3103,7 @@ fn launcher_presentation_signature(state: &CompositorState) -> [i32; 5] {
         root.as_ref().map_or(0, |frame| frame.width as i32),
         root.as_ref().map_or(0, |frame| frame.height as i32),
         buffer_scale,
+        requested_window_state_flags(state),
     ]
 }
 
@@ -15177,7 +15196,7 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
     let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
-    const COMPONENTS: usize = 34;
+    const COMPONENTS: usize = 35;
     const BYTES: usize = COMPONENTS * std::mem::size_of::<i32>();
     let (Ok(capacity), Ok(address)) = (
         environment.get_direct_buffer_capacity(&output),
@@ -17366,6 +17385,15 @@ mod tests {
             configured_toplevel_states(false, true, false, false),
             vec![xdg_toplevel::State::Maximized],
         );
+    }
+
+    #[test]
+    fn presentation_prefers_active_toplevel_with_primary_fallback() {
+        let primary = 1;
+        let active = 2;
+        assert_eq!(active_or_primary(Some(&active), Some(&primary)), Some(&active));
+        assert_eq!(active_or_primary(None, Some(&primary)), Some(&primary));
+        assert_eq!(active_or_primary::<i32>(None, None), None);
     }
 
     #[test]

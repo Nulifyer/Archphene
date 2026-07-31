@@ -247,31 +247,19 @@ PY
   printf '%s\n' "$text" >"$artifact_dir/$name-ocr.txt"
   printf '%s\n' "$text"
 }
+main_menu_pattern='start|stare|stdre|sta.{0,5}(game|gane|cane)|game|gane|contrib|contr|levels|cevel|options|spaons|opd.{0,4}s|qpti|level.{0,5}(editor|tor)|credits|credi|gred|donate|dodote|quit|qul'
 assert_main_menu() {
   local name="$1" text
   text="$(screen_text "$name")"
   ! archphene_regex_contains "$text" \
     'ternet|onnec|ondec|ddition|new release|startup' \
     || archphene_die "$name still shows a SuperTux first-run prompt"
-  archphene_regex_contains "$text" \
-    'start|stare|game|gane|contrib|contr|levels|cevel|options|qpti|credits|gred|quit|qul' \
+  archphene_regex_contains "$text" "$main_menu_pattern" \
     || archphene_die "$name does not show the SuperTux main menu"
-}
-assert_options_menu() {
-  local name="$1" text
-  text="$(screen_text "$name")"
-  if archphene_regex_contains "$text" 'options|op[eai].{0,8}s|or[eai].{0,4}ens'; then
-    return 0
-  fi
-  archphene_regex_contains "$text" \
-      'locale|loern|losoi|video|vide|videos|wvidea|audio|au.{0,2}io|avio|avdi|controls|codi|codt|codil' \
-    && archphene_regex_contains "$text" \
-      'extras|extio|exitto|xis|heto|advanced|adv|adyv|back|baen' \
-    || archphene_die "$name does not show the SuperTux Options menu"
 }
 clear_first_run_dialogs() {
   local attempt text probe="$artifact_dir/.first-run-probe.png"
-  for attempt in 1 2 3; do
+  for attempt in 1 2 3 4 5 6; do
     archphene_adb_run exec-out screencap -p >"$probe"
     text="$(
       {
@@ -280,11 +268,15 @@ clear_first_run_dialogs() {
       } |
         tr '[:upper:]' '[:lower:]'
     )"
-    if archphene_regex_contains "$text" \
-        'start|stare|game|gane|contrib|contr|levels|cevel|options|qpti|credits|gred|quit|qul'; then
+    if archphene_regex_contains "$text" "$main_menu_pattern"; then
       return 0
     fi
-    archphene_adb_run shell input keyboard keyevent --longpress KEYCODE_ESCAPE
+    if archphene_regex_contains "$text" \
+        'ternet|onnec|ondec|ddition|new release|startup'; then
+      held_key KEYCODE_ENTER 500
+    else
+      held_key KEYCODE_ESCAPE 500
+    fi
     sleep 1
   done
   archphene_adb_run exec-out screencap -p >"$probe"
@@ -295,8 +287,7 @@ clear_first_run_dialogs() {
     } |
       tr '[:upper:]' '[:lower:]'
   )"
-  archphene_regex_contains "$text" \
-    'start|stare|game|gane|contrib|contr|levels|cevel|options|qpti|credits|gred|quit|qul'
+  archphene_regex_contains "$text" "$main_menu_pattern"
 }
 ime_shown() {
   local state
@@ -378,6 +369,31 @@ other = row_luma(sys.argv[3])
 print(f"selected_luma={selected:.2f} other_luma={other:.2f}")
 if selected < other + threshold:
     raise SystemExit("expected SuperTux menu row is not visibly selected")
+PY
+}
+assert_option_category_selection() {
+  local image="$1" selected_x="$2" other_x="$3" output="$4"
+  python3 - "$image" "$selected_x" "$other_x" >"$output" <<'PY'
+from PIL import Image, ImageStat
+import sys
+
+image = Image.open(sys.argv[1]).convert("L")
+width, height = image.size
+
+def category_luma(center):
+    x = float(center)
+    return ImageStat.Stat(image.crop((
+        int(width * (x - .045)),
+        int(height * .365),
+        int(width * (x + .045)),
+        int(height * .625),
+    ))).mean[0]
+
+selected = category_luma(sys.argv[2])
+other = category_luma(sys.argv[3])
+print(f"selected_luma={selected:.2f} other_luma={other:.2f}")
+if selected < other + 20:
+    raise SystemExit("expected SuperTux option category is not visibly selected")
 PY
 }
 archphene_adb_run shell input keyevent WAKEUP
@@ -502,10 +518,50 @@ capture options-menu
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" different \
   "$artifact_dir/activation-returned.raw" "$artifact_dir/options-menu.raw" \
   --minimum-difference .2 --minimum-changed-ratio .01 >/dev/null
-assert_options_menu options-menu
-for _ in 1 2; do
-  held_key KEYCODE_DPAD_RIGHT
-done
+screen_text options-menu >/dev/null
+assert_option_category_selection "$artifact_dir/options-menu.png" .25 .36 \
+  "$artifact_dir/options-menu-selection-visual.txt"
+held_key KEYCODE_DPAD_RIGHT
+held_key KEYCODE_ENTER
+sleep 2
+capture video-windowed
+screen_text video-windowed >/dev/null
+assert_menu_selection "$artifact_dir/video-windowed.png" .207 .249 \
+  "$artifact_dir/video-windowed-selection-visual.txt" 8
+held_key KEYCODE_DPAD_DOWN 200
+held_key KEYCODE_DPAD_DOWN 200
+capture fullscreen-row-selected
+assert_menu_selection "$artifact_dir/fullscreen-row-selected.png" .292 .249 \
+  "$artifact_dir/fullscreen-row-selected-visual.txt" 8
+clear_scoped_logcat
+held_key KEYCODE_ENTER 200
+fullscreen_enabled_log="$(archphene_wait_log \
+  'Presented Linux frame session=.*windowStates=1' 20 \
+  'ArchpheneLauncherSession:I AndroidRuntime:E *:S')"
+printf '%s\n' "$fullscreen_enabled_log" \
+  | tee "$artifact_dir/fullscreen-enabled-logcat.txt" >>"$scoped_log"
+sleep 2
+capture fullscreen-enabled
+assert_pids "$wrapper_pid" "$manager_pid" "$linux_pid" \
+  'fullscreen enable transition'
+clear_scoped_logcat
+held_key KEYCODE_ENTER 200
+fullscreen_disabled_log="$(archphene_wait_log \
+  'Presented Linux frame session=.*windowStates=0' 20 \
+  'ArchpheneLauncherSession:I AndroidRuntime:E *:S')"
+printf '%s\n' "$fullscreen_disabled_log" \
+  | tee "$artifact_dir/fullscreen-disabled-logcat.txt" >>"$scoped_log"
+sleep 2
+capture fullscreen-disabled
+assert_pids "$wrapper_pid" "$manager_pid" "$linux_pid" \
+  'fullscreen disable transition'
+held_key KEYCODE_ESCAPE 300
+sleep 2
+capture options-after-video
+screen_text options-after-video >/dev/null
+assert_option_category_selection "$artifact_dir/options-after-video.png" .36 .25 \
+  "$artifact_dir/options-after-video-selection-visual.txt"
+held_key KEYCODE_DPAD_RIGHT
 held_key KEYCODE_ENTER
 sleep 2
 capture audio-options
@@ -677,7 +733,7 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
   --field "serial=$serial" --field "package=$package" --field 'app=SuperTux' \
   --field 'toolkit=wayland-sdl' --field "wrapperPid=$wrapper_pid" \
   --field "managerPid=$manager_pid" --field "linuxPid=$linux_pid" \
-  --field 'state=automatic orientation audio-focus gameplay input pause resume tablet resize' \
+  --field 'state=automatic orientation audio-focus fullscreen windowed gameplay input pause resume tablet resize' \
   --artifact "$artifact_dir/landscape-a.raw" \
   --artifact "$artifact_dir/landscape-a.png" \
   --artifact "$artifact_dir/landscape-b.raw" \
@@ -705,6 +761,24 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
   --artifact "$artifact_dir/options-menu.raw" \
   --artifact "$artifact_dir/options-menu.png" \
   --artifact "$artifact_dir/options-menu-ocr.txt" \
+  --artifact "$artifact_dir/options-menu-selection-visual.txt" \
+  --artifact "$artifact_dir/video-windowed.raw" \
+  --artifact "$artifact_dir/video-windowed.png" \
+  --artifact "$artifact_dir/video-windowed-ocr.txt" \
+  --artifact "$artifact_dir/video-windowed-selection-visual.txt" \
+  --artifact "$artifact_dir/fullscreen-row-selected.raw" \
+  --artifact "$artifact_dir/fullscreen-row-selected.png" \
+  --artifact "$artifact_dir/fullscreen-row-selected-visual.txt" \
+  --artifact "$artifact_dir/fullscreen-enabled.raw" \
+  --artifact "$artifact_dir/fullscreen-enabled.png" \
+  --artifact "$artifact_dir/fullscreen-enabled-logcat.txt" \
+  --artifact "$artifact_dir/fullscreen-disabled.raw" \
+  --artifact "$artifact_dir/fullscreen-disabled.png" \
+  --artifact "$artifact_dir/fullscreen-disabled-logcat.txt" \
+  --artifact "$artifact_dir/options-after-video.raw" \
+  --artifact "$artifact_dir/options-after-video.png" \
+  --artifact "$artifact_dir/options-after-video-ocr.txt" \
+  --artifact "$artifact_dir/options-after-video-selection-visual.txt" \
   --artifact "$artifact_dir/options-returned.raw" \
   --artifact "$artifact_dir/options-returned.png" \
   --artifact "$artifact_dir/options-returned-ocr.txt" \
@@ -737,4 +811,4 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
 
 restore
 trap - EXIT
-archphene_note "SuperTux workflows passed on $serial: automatic SDL landscape, animated EGL rendering, PulseAudio with Android focus handoff, full-device OCR finger input, real gameplay movement/jump, HOME/resume, tablet resize, stable process pair, and exact prior state restored. Evidence: $artifact_dir"
+archphene_note "SuperTux workflows passed on $serial: automatic SDL landscape, animated EGL rendering, PulseAudio with Android focus handoff, explicit fullscreen/windowed transitions, full-device OCR finger input, real gameplay movement/jump, HOME/resume, tablet resize, stable process pair, and exact prior state restored. Evidence: $artifact_dir"

@@ -38,10 +38,15 @@ rows and enters a real contributed level. Full-device frames prove movement
 and jumping without an Android IME, and the same wrapper, manager, and Linux
 process survive Home/resume plus a live 1920×1200 resize. Pulse logs identify
 `application.name = "supertux2"` and prove Android audio-focus grant, abandon,
-and reacquisition. Both runs reject scoped fatal logs and restore the exact
-prior SuperTux and Android state. Signed manifests and inspected evidence are
-under `tooling/artifacts/supertux-workflows/emulator-5554/review-fixes-final-13`
-and `tooling/artifacts/supertux-workflows/RFCT90AEEFA/review-fixes-final-6`.
+and reacquisition. The same state-preserving workflow now enters the stock
+Video menu, enables fullscreen, and restores windowed mode. Compositor
+snapshots prove requested-state transitions from `windowStates=1` to
+`windowStates=0` with advancing configure serials; full-device frames show the
+corresponding checked and unchecked controls without process replacement. Both
+runs reject scoped fatal logs and restore the exact prior SuperTux and Android
+state. Signed manifests and inspected evidence are under
+`tooling/artifacts/supertux-workflows/emulator-5554/fullscreen-final-3` and
+`tooling/artifacts/supertux-workflows/RFCT90AEEFA/fullscreen-final-5`.
 
 The audio failure exposed a package-generic loader gap rather than a SuperTux
 special case. Pulse-enabled graphical launches now select SDL and OpenAL Pulse
@@ -50,12 +55,10 @@ OpenAL can load `libpulsecommon-17.0.so`. Generated launchers also suppress an
 implicit ambiguous-text IME after hardware gameplay keys while preserving
 explicit long-press and editor-backed IME requests, including fields that become
 empty after editing. Pulse sink suspension is serialized and completes before
-Android audio focus is abandoned. SuperTux pointer capture and an explicit
-in-app fullscreen/window-mode transition remain open.
+Android audio focus is abandoned. SuperTux pointer capture remains open.
 
-Two unrelated user-owned test-script changes remain excluded from this work:
-the modified `scripts/test-archphene-package-update.sh` and untracked
-`scripts/test-archphene-signed-scriptlet-rollback.sh`.
+The unrelated user-owned modification to
+`scripts/test-archphene-package-update.sh` remains excluded from this work.
 
 ## Greenfield Rust + Kotlin replacement
 
