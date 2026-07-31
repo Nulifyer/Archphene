@@ -115,6 +115,15 @@ const MAX_SHM_BUFFER_BYTES_TOTAL: usize = 512 * 1024 * 1024;
 const MAX_SURFACE_FRAME_BYTES: usize = 512 * 1024 * 1024;
 const MAX_SURFACE_FRAME_BYTES_PER_CLIENT: usize = 512 * 1024 * 1024;
 const MAX_SURFACE_FRAME_BYTES_TOTAL: usize = 1024 * 1024 * 1024;
+const MAX_DATA_SOURCES_PER_CLIENT: usize = 16;
+const MAX_DATA_SOURCES_TOTAL: usize = 32;
+const MAX_DATA_DEVICES_PER_CLIENT: usize = 8;
+const MAX_DATA_DEVICES_TOTAL: usize = 16;
+const MAX_DATA_OFFERS_PER_CLIENT: usize = 64;
+const MAX_DATA_OFFERS_TOTAL: usize = 128;
+const MAX_SOURCE_MIME_TYPES: usize = 32;
+const MAX_MIME_TYPE_BYTES: usize = 256;
+const MAX_SOURCE_MIME_BYTES: usize = 4 * 1024;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -5315,6 +5324,22 @@ fn publish_offer_to_device(
     let Ok(client) = handle.get_client(device.id()) else {
         return;
     };
+    let client_id = client.id();
+    let (client_offers, total_offers) = live_resource_counts(&mut state.data_offers, &client_id);
+    if resource_limit_exceeded(
+        client_offers,
+        total_offers,
+        MAX_DATA_OFFERS_PER_CLIENT,
+        MAX_DATA_OFFERS_TOTAL,
+    ) {
+        disconnect_for_resource_limit(
+            &client,
+            handle,
+            device,
+            "retained data-offer limit exceeded",
+        );
+        return;
+    }
     let Ok(offer) = client.create_resource::<WlDataOffer, _, CompositorState>(
         handle,
         device.version().min(3),
@@ -6847,8 +6872,8 @@ impl GlobalDispatch<WlDataDeviceManager, ()> for CompositorState {
 impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
-        _resource: &WlDataDeviceManager,
+        client: &Client,
+        resource: &WlDataDeviceManager,
         request: wl_data_device_manager::Request,
         _data: &(),
         handle: &DisplayHandle,
@@ -6856,11 +6881,45 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
     ) {
         match request {
             wl_data_device_manager::Request::CreateDataSource { id } => {
+                let client_id = client.id();
+                let (client_sources, total_sources) =
+                    live_resource_counts(&mut state.data_sources, &client_id);
+                if resource_limit_exceeded(
+                    client_sources,
+                    total_sources,
+                    MAX_DATA_SOURCES_PER_CLIENT,
+                    MAX_DATA_SOURCES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained data-source limit exceeded",
+                    );
+                    return;
+                }
                 let source = data_init.init(id, DataSourceData::default());
                 state.data_source_count = state.data_source_count.saturating_add(1);
                 state.data_sources.push(source);
             }
             wl_data_device_manager::Request::GetDataDevice { id, seat } => {
+                let client_id = client.id();
+                let (client_devices, total_devices) =
+                    live_resource_counts(&mut state.data_devices, &client_id);
+                if resource_limit_exceeded(
+                    client_devices,
+                    total_devices,
+                    MAX_DATA_DEVICES_PER_CLIENT,
+                    MAX_DATA_DEVICES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained data-device limit exceeded",
+                    );
+                    return;
+                }
                 let device = data_init.init(id, DataDeviceData { seat });
                 state.data_device_count = state.data_device_count.saturating_add(1);
                 state.data_devices.push(device.clone());
@@ -6886,11 +6945,11 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
 impl Dispatch<WlDataSource, DataSourceData> for CompositorState {
     fn request(
         _state: &mut Self,
-        _client: &Client,
-        _resource: &WlDataSource,
+        client: &Client,
+        resource: &WlDataSource,
         request: wl_data_source::Request,
         data: &DataSourceData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -6899,9 +6958,20 @@ impl Dispatch<WlDataSource, DataSourceData> for CompositorState {
                     .mime_types
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if !mime_types.contains(&mime_type) {
-                    mime_types.push(mime_type);
+                if mime_types.contains(&mime_type) {
+                    return;
                 }
+                if source_mime_limit_exceeded(&mime_types, &mime_type) {
+                    drop(mime_types);
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "data-source MIME limit exceeded",
+                    );
+                    return;
+                }
+                mime_types.push(mime_type);
             }
             wl_data_source::Request::Destroy | wl_data_source::Request::SetActions { .. } => {}
             _ => unreachable!("wl_data_source request added without an implementation"),
@@ -7720,6 +7790,44 @@ fn shm_buffer_limit_exceeded(usage: &ShmBufferUsage, additional_bytes: usize) ->
         || usage.total_count >= MAX_SHM_BUFFERS_TOTAL
         || usage.client_bytes.saturating_add(additional_bytes) > MAX_SHM_BUFFER_BYTES_PER_CLIENT
         || usage.total_bytes.saturating_add(additional_bytes) > MAX_SHM_BUFFER_BYTES_TOTAL
+}
+
+fn live_resource_counts<R: Resource>(
+    resources: &mut Vec<R>,
+    client_id: &ClientId,
+) -> (usize, usize) {
+    resources.retain(Resource::is_alive);
+    let total = resources.len();
+    let client = resources
+        .iter()
+        .filter(|resource| {
+            resource
+                .client()
+                .is_some_and(|client| &client.id() == client_id)
+        })
+        .count();
+    (client, total)
+}
+
+fn resource_limit_exceeded(
+    client: usize,
+    total: usize,
+    per_client_limit: usize,
+    total_limit: usize,
+) -> bool {
+    client >= per_client_limit || total >= total_limit
+}
+
+fn source_mime_limit_exceeded(mime_types: &[String], candidate: &str) -> bool {
+    candidate.is_empty()
+        || candidate.len() > MAX_MIME_TYPE_BYTES
+        || mime_types.len() >= MAX_SOURCE_MIME_TYPES
+        || mime_types
+            .iter()
+            .map(String::len)
+            .sum::<usize>()
+            .saturating_add(candidate.len())
+            > MAX_SOURCE_MIME_BYTES
 }
 
 impl GlobalDispatch<WlCompositor, ()> for CompositorState {
@@ -12374,16 +12482,34 @@ impl CompositorCore {
         else {
             return 0;
         };
-        let Ok(client) = self.display.handle().get_client(device.id()) else {
+        let handle = self.display.handle();
+        let Ok(client) = handle.get_client(device.id()) else {
             return 0;
         };
+        let client_id = client.id();
+        let (client_offers, total_offers) =
+            live_resource_counts(&mut self.state.data_offers, &client_id);
+        if resource_limit_exceeded(
+            client_offers,
+            total_offers,
+            MAX_DATA_OFFERS_PER_CLIENT,
+            MAX_DATA_OFFERS_TOTAL,
+        ) {
+            disconnect_for_resource_limit(
+                &client,
+                &handle,
+                &device,
+                "retained data-offer limit exceeded",
+            );
+            return 0;
+        }
         let payloads = Arc::new(Mutex::new(HashMap::new()));
         let mime_types = ANDROID_DRAG_MIME_TYPES
             .iter()
             .map(|mime_type| (*mime_type).to_owned())
             .collect::<Vec<_>>();
         let Ok(offer) = client.create_resource::<WlDataOffer, _, CompositorState>(
-            &self.display.handle(),
+            &handle,
             device.version().min(3),
             DataOfferData {
                 source: ClipboardOfferSource::AndroidDrag(payloads.clone()),
@@ -17827,9 +17953,12 @@ mod tests {
     use wayland_client::globals::{GlobalListContents, registry_queue_init};
     use wayland_client::protocol::{
         wl_buffer as client_wl_buffer, wl_callback as client_wl_callback,
-        wl_compositor as client_wl_compositor, wl_pointer as client_wl_pointer,
-        wl_region as client_wl_region, wl_registry as client_wl_registry,
-        wl_seat as client_wl_seat, wl_shm as client_wl_shm,
+        wl_compositor as client_wl_compositor, wl_data_device as client_wl_data_device,
+        wl_data_device_manager as client_wl_data_device_manager,
+        wl_data_offer as client_wl_data_offer, wl_data_source as client_wl_data_source,
+        wl_pointer as client_wl_pointer, wl_region as client_wl_region,
+        wl_registry as client_wl_registry, wl_seat as client_wl_seat,
+        wl_shm as client_wl_shm,
         wl_shm_pool as client_wl_shm_pool, wl_subcompositor as client_wl_subcompositor,
         wl_subsurface as client_wl_subsurface, wl_surface as client_wl_surface,
     };
@@ -17882,6 +18011,9 @@ mod tests {
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_buffer::WlBuffer);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_shm::WlShm);
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_shm_pool::WlShmPool);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_wl_data_device_manager::WlDataDeviceManager);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_data_source::WlDataSource);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_data_offer::WlDataOffer);
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_subcompositor::WlSubcompositor);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_subsurface::WlSubsurface);
     wayland_client::delegate_noop!(PointerProtocolClient: client_xdg_wm_base::XdgWmBase);
@@ -17988,6 +18120,26 @@ mod tests {
                 state.xdg_configure_serial = serial;
             }
         }
+    }
+
+    impl wayland_client::Dispatch<client_wl_data_device::WlDataDevice, ()>
+        for PointerProtocolClient
+    {
+        fn event(
+            _state: &mut Self,
+            _proxy: &client_wl_data_device::WlDataDevice,
+            _event: client_wl_data_device::Event,
+            _data: &(),
+            _connection: &Connection,
+            _queue: &QueueHandle<Self>,
+        ) {
+        }
+
+        wayland_client::event_created_child!(
+            PointerProtocolClient,
+            client_wl_data_device::WlDataDevice,
+            [client_wl_data_device::EVT_DATA_OFFER_OPCODE => (client_wl_data_offer::WlDataOffer, ())]
+        );
     }
 
     impl wayland_client::Dispatch<client_relative_pointer::ZwpRelativePointerV1, ()>
@@ -19828,6 +19980,367 @@ mod tests {
         stage.store(9, Ordering::Release);
 
         server.join().expect("SHM global-limit server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn wayland_data_resource_and_mime_limits_recover_after_overflow() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-data-resource-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 21 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "data-resource server timed out"
+                );
+                core.dispatch_once().expect("dispatch data-resource clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.data_source_count as usize == MAX_DATA_SOURCES_PER_CLIENT => {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.data_source_count == 0 => {
+                        assert!(core.state.data_sources.is_empty());
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.data_device_count as usize == MAX_DATA_DEVICES_PER_CLIENT => {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.data_device_count == 0 => {
+                        assert!(core.state.data_devices.is_empty());
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 => {
+                        let mime_count = core
+                            .state
+                            .data_sources
+                            .iter()
+                            .filter_map(|source| source.data::<DataSourceData>())
+                            .map(|data| {
+                                data.mime_types
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .len()
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        if mime_count == MAX_SOURCE_MIME_TYPES {
+                            server_stage.store(10, Ordering::Release);
+                        }
+                    }
+                    11 if core.state.data_source_count == 0 => {
+                        assert!(core.state.data_sources.is_empty());
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    13 => {
+                        let device = core
+                            .state
+                            .data_devices
+                            .iter()
+                            .find(|device| device.is_alive())
+                            .cloned()
+                            .expect("offer-limit data device");
+                        let handle = core.display.handle();
+                        for _ in 0..MAX_DATA_OFFERS_PER_CLIENT {
+                            publish_offer_to_device(
+                                &mut core.state,
+                                &handle,
+                                &device,
+                                ClipboardOfferSource::AndroidClipboard,
+                                vec![TEXT_MIME_TYPES[0].to_owned()],
+                            );
+                        }
+                        assert_eq!(
+                            core.state.data_offer_count as usize,
+                            MAX_DATA_OFFERS_PER_CLIENT
+                        );
+                        server_stage.store(14, Ordering::Release);
+                    }
+                    15 => {
+                        let device = core
+                            .state
+                            .data_devices
+                            .iter()
+                            .find(|device| device.is_alive())
+                            .cloned()
+                            .expect("overflow data device");
+                        let handle = core.display.handle();
+                        publish_offer_to_device(
+                            &mut core.state,
+                            &handle,
+                            &device,
+                            ClipboardOfferSource::AndroidClipboard,
+                            vec![TEXT_MIME_TYPES[0].to_owned()],
+                        );
+                        assert_eq!(
+                            core.state.data_offer_count as usize,
+                            MAX_DATA_OFFERS_PER_CLIENT
+                        );
+                        server_stage.store(16, Ordering::Release);
+                    }
+                    17 if core.state.data_device_count == 0
+                        && core.state.data_offer_count == 0 =>
+                    {
+                        assert!(core.state.data_devices.is_empty());
+                        assert!(core.state.data_offers.is_empty());
+                        server_stage.store(18, Ordering::Release);
+                    }
+                    19 if core.state.data_source_count == 1 => {
+                        server_stage.store(20, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting data-resource client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("data-resource connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect data-resource client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for data-resource stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let source_connection = connect();
+        let (source_globals, mut source_events) =
+            registry_queue_init::<PointerProtocolClient>(&source_connection)
+                .expect("source-limit registry");
+        let source_queue = source_events.handle();
+        let source_manager = source_globals
+            .bind::<client_wl_data_device_manager::WlDataDeviceManager, _, _>(
+                &source_queue,
+                1..=3,
+                (),
+            )
+            .expect("source-limit manager");
+        let mut sources = (0..MAX_DATA_SOURCES_PER_CLIENT)
+            .map(|_| source_manager.create_data_source(&source_queue, ()))
+            .collect::<Vec<_>>();
+        source_connection
+            .flush()
+            .expect("flush exact data-source limit");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        source_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact data-source limit remains connected");
+        sources.pop().expect("source to recycle").destroy();
+        source_connection
+            .flush()
+            .expect("flush recycled data source destroy");
+        source_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("data-source destruction releases capacity");
+        sources.push(source_manager.create_data_source(&source_queue, ()));
+        source_connection
+            .flush()
+            .expect("flush replacement data source");
+        source_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("data-source capacity is reusable");
+        let _overflow_source = source_manager.create_data_source(&source_queue, ());
+        source_connection
+            .flush()
+            .expect("flush data-source overflow");
+        assert!(
+            source_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "data source 17 must disconnect its client"
+        );
+        drop((sources, source_manager, source_events, source_connection));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let device_connection = connect();
+        let (device_globals, mut device_events) =
+            registry_queue_init::<PointerProtocolClient>(&device_connection)
+                .expect("device-limit registry");
+        let device_queue = device_events.handle();
+        let device_manager = device_globals
+            .bind::<client_wl_data_device_manager::WlDataDeviceManager, _, _>(
+                &device_queue,
+                1..=3,
+                (),
+            )
+            .expect("device-limit manager");
+        let device_seat = device_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&device_queue, 1..=9, ())
+            .expect("device-limit seat");
+        let mut devices = (0..MAX_DATA_DEVICES_PER_CLIENT)
+            .map(|_| device_manager.get_data_device(&device_seat, &device_queue, ()))
+            .collect::<Vec<_>>();
+        device_connection
+            .flush()
+            .expect("flush exact data-device limit");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        device_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact data-device limit remains connected");
+        devices.pop().expect("device to recycle").release();
+        device_connection
+            .flush()
+            .expect("flush recycled data device release");
+        device_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("data-device release frees capacity");
+        devices.push(device_manager.get_data_device(&device_seat, &device_queue, ()));
+        device_connection
+            .flush()
+            .expect("flush replacement data device");
+        device_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("data-device capacity is reusable");
+        let _overflow_device =
+            device_manager.get_data_device(&device_seat, &device_queue, ());
+        device_connection
+            .flush()
+            .expect("flush data-device overflow");
+        assert!(
+            device_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "data device 9 must disconnect its client"
+        );
+        drop((
+            devices,
+            device_seat,
+            device_manager,
+            device_events,
+            device_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+
+        let mime_connection = connect();
+        let (mime_globals, mut mime_events) =
+            registry_queue_init::<PointerProtocolClient>(&mime_connection)
+                .expect("MIME-limit registry");
+        let mime_queue = mime_events.handle();
+        let mime_manager = mime_globals
+            .bind::<client_wl_data_device_manager::WlDataDeviceManager, _, _>(
+                &mime_queue,
+                1..=3,
+                (),
+            )
+            .expect("MIME-limit manager");
+        let mime_source = mime_manager.create_data_source(&mime_queue, ());
+        for index in 0..MAX_SOURCE_MIME_TYPES {
+            mime_source.offer(format!("application/x-archphene-{index}"));
+        }
+        mime_connection.flush().expect("flush exact MIME limit");
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+        mime_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact MIME limit remains connected");
+        mime_source.offer("application/x-archphene-overflow".to_owned());
+        mime_connection.flush().expect("flush MIME overflow");
+        assert!(
+            mime_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "MIME type 33 must disconnect its client"
+        );
+        drop((mime_source, mime_manager, mime_events, mime_connection));
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+
+        let offer_connection = connect();
+        let (offer_globals, mut offer_events) =
+            registry_queue_init::<PointerProtocolClient>(&offer_connection)
+                .expect("offer-limit registry");
+        let offer_queue = offer_events.handle();
+        let offer_manager = offer_globals
+            .bind::<client_wl_data_device_manager::WlDataDeviceManager, _, _>(
+                &offer_queue,
+                1..=3,
+                (),
+            )
+            .expect("offer-limit manager");
+        let offer_seat = offer_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&offer_queue, 1..=9, ())
+            .expect("offer-limit seat");
+        let _offer_device = offer_manager.get_data_device(&offer_seat, &offer_queue, ());
+        offer_connection.flush().expect("flush offer-limit device");
+        stage.store(13, Ordering::Release);
+        wait_for_stage(14);
+        offer_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact data-offer limit remains connected");
+        stage.store(15, Ordering::Release);
+        wait_for_stage(16);
+        assert!(
+            offer_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "data offer 65 must disconnect its client"
+        );
+        drop((
+            offer_seat,
+            offer_manager,
+            offer_events,
+            offer_connection,
+        ));
+        stage.store(17, Ordering::Release);
+        wait_for_stage(18);
+
+        let healthy_connection = connect();
+        let (healthy_globals, _healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy data-resource registry");
+        let healthy_queue = _healthy_events.handle();
+        let healthy_manager = healthy_globals
+            .bind::<client_wl_data_device_manager::WlDataDeviceManager, _, _>(
+                &healthy_queue,
+                1..=3,
+                (),
+            )
+            .expect("healthy data-resource manager");
+        let _healthy_source = healthy_manager.create_data_source(&healthy_queue, ());
+        healthy_connection
+            .flush()
+            .expect("flush healthy data source");
+        stage.store(19, Ordering::Release);
+        wait_for_stage(20);
+        stage.store(21, Ordering::Release);
+
+        server.join().expect("data-resource server");
         assert!(!socket.exists());
     }
 
@@ -22374,6 +22887,44 @@ mod tests {
             android_clipboard_mime_types(true),
             vec![HTML_MIME_TYPE, TEXT_MIME_TYPES[0], TEXT_MIME_TYPES[1]],
         );
+    }
+
+    #[test]
+    fn data_resource_and_mime_boundaries_accept_exact_capacity() {
+        assert!(!resource_limit_exceeded(15, 31, 16, 32));
+        assert!(resource_limit_exceeded(16, 31, 16, 32));
+        assert!(resource_limit_exceeded(15, 32, 16, 32));
+
+        assert!(!source_mime_limit_exceeded(
+            &[],
+            &"a".repeat(MAX_MIME_TYPE_BYTES)
+        ));
+        assert!(source_mime_limit_exceeded(&[], ""));
+        assert!(source_mime_limit_exceeded(
+            &[],
+            &"a".repeat(MAX_MIME_TYPE_BYTES + 1)
+        ));
+        let exact_count = (0..MAX_SOURCE_MIME_TYPES - 1)
+            .map(|index| format!("application/x-{index}"))
+            .collect::<Vec<_>>();
+        assert!(!source_mime_limit_exceeded(
+            &exact_count,
+            "application/x-final"
+        ));
+        let full_count = (0..MAX_SOURCE_MIME_TYPES)
+            .map(|index| format!("application/x-{index}"))
+            .collect::<Vec<_>>();
+        assert!(source_mime_limit_exceeded(
+            &full_count,
+            "application/x-overflow"
+        ));
+        let exact_bytes = vec!["a".repeat(MAX_MIME_TYPE_BYTES); 15];
+        assert!(!source_mime_limit_exceeded(
+            &exact_bytes,
+            &"b".repeat(MAX_MIME_TYPE_BYTES)
+        ));
+        let full_bytes = vec!["a".repeat(MAX_MIME_TYPE_BYTES); 16];
+        assert!(source_mime_limit_exceeded(&full_bytes, "b"));
     }
 
     #[test]

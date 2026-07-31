@@ -3233,6 +3233,22 @@ after the pending attachment commits, and complete cleanup after each offending
 client disconnects. The full workspace and strict Clippy gates plus rebuilt
 exact x86_64 and AArch64 Android probes pass.
 
+Wayland clipboard and drag protocol resources are bounded independently of
+payload-transfer limits. One client may retain 16 data sources, eight data
+devices, and 64 generated data offers; compositor-wide limits are 32, 16, and
+128. A source can retain at most 32 unique MIME types, 256 bytes for one type,
+and 4 KiB in aggregate. Repeated identical MIME offers do not consume quota.
+Admission removes dead resources before counting, explicit source destruction
+and device release make capacity reusable, and an offer-hoarding client
+is disconnected before another offer is allocated. A real protocol fixture
+holds each exact per-client boundary, destroys and replaces a source and device,
+rejects source 17, device nine, MIME 33, and offer 65, verifies every MIME
+count edge, checks cleanup after each offending client, and creates a source from
+a final healthy client. Direct boundary tests cover exact and overflowing MIME
+length and aggregate-byte limits plus per-client/global admission arithmetic.
+The full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
+Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
