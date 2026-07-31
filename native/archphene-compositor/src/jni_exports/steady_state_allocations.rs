@@ -2,18 +2,53 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{
+    wl_callback as client_wl_callback,
+    wl_compositor as client_wl_compositor, wl_registry as client_wl_registry,
+    wl_subcompositor as client_wl_subcompositor, wl_subsurface as client_wl_subsurface,
+    wl_surface as client_wl_surface,
+};
+use wayland_client::{Connection, QueueHandle};
 use wayland_server::protocol::wl_shm;
+use wayland_server::Resource;
 
 use super::{
-    BufferTransform, CommittedFrame, RegionRectangle, ShmBufferInner, ShmPoolInner,
-    ShmSnapshotState, SurfaceState, damage_for_commit_into, push_bounded_damage,
-    restore_commit_damage_scratch, restore_pending_damage_buffers, take_pending_damage,
+    BufferTransform, CommittedFrame, CompositorCore, RegionRectangle, ShmBufferInner,
+    ShmPoolInner, ShmSnapshotState, SurfaceData, SurfaceState, apply_cached_subsurface_children,
+    damage_for_commit_into, push_bounded_damage, restore_commit_damage_scratch,
+    restore_pending_damage_buffers, take_pending_damage,
 };
+
+#[derive(Default)]
+struct SubsurfaceClient;
+
+impl wayland_client::Dispatch<client_wl_registry::WlRegistry, GlobalListContents>
+    for SubsurfaceClient
+{
+    fn event(
+        _state: &mut Self,
+        _proxy: &client_wl_registry::WlRegistry,
+        _event: client_wl_registry::Event,
+        _data: &GlobalListContents,
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+wayland_client::delegate_noop!(SubsurfaceClient: client_wl_compositor::WlCompositor);
+wayland_client::delegate_noop!(SubsurfaceClient: client_wl_subcompositor::WlSubcompositor);
+wayland_client::delegate_noop!(SubsurfaceClient: ignore client_wl_surface::WlSurface);
+wayland_client::delegate_noop!(SubsurfaceClient: ignore client_wl_subsurface::WlSubsurface);
+wayland_client::delegate_noop!(SubsurfaceClient: ignore client_wl_callback::WlCallback);
 
 struct ThreadCountingAllocator;
 
@@ -196,4 +231,164 @@ fn warmed_retained_shm_damage_does_not_allocate() {
     });
 
     assert_eq!(allocations, 0);
+}
+
+#[test]
+fn warmed_synchronized_subsurface_release_does_not_allocate() {
+    let socket = std::env::temp_dir().join(format!(
+        "archphene-subsurface-allocation-{}-{}.sock",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos(),
+    ));
+    let allocations = Arc::new(AtomicUsize::new(usize::MAX));
+    let server_allocations = Arc::clone(&allocations);
+    let server_socket = socket.clone();
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    let (parent_release_sender, parent_release_receiver) = mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let mut core = CompositorCore::new().expect("Wayland display");
+        core.bind_socket(&server_socket).expect("bind socket");
+        ready_sender.send(()).expect("publish bound socket");
+        let setup_deadline = Instant::now() + Duration::from_secs(5);
+        while core.state.presentation_callbacks.len() != 1 {
+            assert!(
+                Instant::now() < setup_deadline,
+                "timed out waiting for parent-commit release"
+            );
+            core.dispatch_once().expect("dispatch subsurface client");
+        }
+        parent_release_sender
+            .send(())
+            .expect("publish parent-commit release");
+        while core.state.presentation_callbacks.len() != 2 {
+            assert!(
+                Instant::now() < setup_deadline,
+                "timed out waiting for desync release"
+            );
+            core.dispatch_once().expect("dispatch desync request");
+        }
+        let parent = core.state.surfaces[0].clone();
+        let child = core.state.surfaces[1].clone();
+        core.state.root_surface = Some(parent.clone());
+        let damage = RegionRectangle::new(1, 2, 3, 4).expect("cached damage");
+        assert!(
+            child
+                .data::<SurfaceData>()
+                .expect("child surface data")
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .cached_callbacks
+                .is_empty(),
+            "protocol releases must drain cached callbacks"
+        );
+        let callback = core
+            .state
+            .presentation_callbacks
+            .pop()
+            .expect("recyclable released callback");
+        let callback_capacity = core.state.presentation_callbacks.capacity();
+        assert_eq!(core.present_frame(1), 1);
+        assert_eq!(
+            core.state.presentation_callbacks.capacity(),
+            callback_capacity
+        );
+        {
+            let mut child_state = child
+                .data::<SurfaceData>()
+                .expect("child surface data")
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            child_state.cached_callbacks.push(callback);
+        }
+        let cache_damage = || {
+            child
+                .data::<SurfaceData>()
+                .expect("child surface data")
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .cached_damage
+                .push(damage);
+        };
+
+        cache_damage();
+        apply_cached_subsurface_children(&mut core.state, &parent);
+        assert_eq!(core.state.presentation_damage.as_slice(), &[damage]);
+        assert_eq!(core.state.presentation_callbacks.len(), 1);
+        core.state.presentation_damage.clear();
+        child
+            .data::<SurfaceData>()
+            .expect("child surface data")
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cached_callbacks
+            .push(core.state.presentation_callbacks.pop().expect("callback"));
+
+        let count = count_allocations(|| {
+            for _ in 0..1_000 {
+                cache_damage();
+                apply_cached_subsurface_children(&mut core.state, &parent);
+                assert_eq!(core.state.presentation_damage.as_slice(), &[damage]);
+                assert_eq!(core.state.presentation_callbacks.len(), 1);
+                core.state.presentation_damage.clear();
+                child
+                    .data::<SurfaceData>()
+                    .expect("child surface data")
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                .cached_callbacks
+                .push(core.state.presentation_callbacks.pop().expect("callback"));
+            }
+        });
+        cache_damage();
+        apply_cached_subsurface_children(&mut core.state, &parent);
+        let callback_capacity = core.state.presentation_callbacks.capacity();
+        assert_eq!(core.present_frame(2), 1);
+        assert_eq!(
+            core.state.presentation_callbacks.capacity(),
+            callback_capacity
+        );
+        server_allocations.store(count, Ordering::Release);
+    });
+
+    ready_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server socket readiness");
+    let connection = Connection::from_socket(UnixStream::connect(&socket).expect("connect client"))
+        .expect("client connection");
+    let (globals, events) =
+        registry_queue_init::<SubsurfaceClient>(&connection).expect("registry");
+    let queue = events.handle();
+    let compositor = globals
+        .bind::<client_wl_compositor::WlCompositor, _, _>(&queue, 1..=6, ())
+        .expect("wl_compositor");
+    let subcompositor = globals
+        .bind::<client_wl_subcompositor::WlSubcompositor, _, _>(&queue, 1..=1, ())
+        .expect("wl_subcompositor");
+    let parent = compositor.create_surface(&queue, ());
+    let child = compositor.create_surface(&queue, ());
+    let subsurface = subcompositor.get_subsurface(&child, &parent, &queue, ());
+    let _parent_release_callback = child.frame(&queue, ());
+    child.damage(1, 2, 3, 4);
+    child.commit();
+    parent.commit();
+    connection.flush().expect("flush parent-commit release");
+    parent_release_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("parent-commit callback release");
+    let _desync_release_callback = child.frame(&queue, ());
+    child.commit();
+    subsurface.set_desync();
+    connection.flush().expect("flush desync release");
+
+    server.join().expect("server thread");
+    assert_eq!(allocations.load(Ordering::Acquire), 0);
+    assert!(!socket.exists());
 }

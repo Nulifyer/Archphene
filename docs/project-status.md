@@ -3098,13 +3098,20 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 
 The pinned Rust 1.88 workspace is now a separate pull-request and main-branch
 gate. It checks formatting, all locked host tests (including the warmed
-zero-allocation core, job, Terminal, and retained-SHM snapshot-patch steps), and
+zero-allocation core, job, Terminal, retained-SHM snapshot-patch, and
+synchronized-subsurface release steps), and
 all-target Clippy with warnings denied. The compositor gate performs 1,000
 warmed in-place snapshot patches and the associated pending-damage
 take/convert/restore handoff while proving scratch-buffer and committed-frame
 reuse, exact damaged-pixel updates, and zero allocations on the measured test
-thread. It does not claim zero allocation for synchronized-tree traversal,
-synchronized frame detachment, or the remaining full Android presentation copy.
+thread. A second real Wayland fixture first drives parent-commit and explicit-
+desynchronization releases through the protocol, verifies callback publication
+and retained callback-queue capacity, then invokes the same release path 1,000
+warmed times while recycling cached damage, one live frame callback, the
+compositor traversal stack, and callback and damage queue capacity. That
+measured release step also performs zero allocations. It does not claim zero
+allocation for synchronized frame detachment or the remaining full Android
+presentation copy.
 Exact Android performance soaks remain local until a maintained physical-device
 runner is available.
 
@@ -3119,9 +3126,17 @@ capacity to the surface. The thread-isolated gate now performs the actual
 take/convert/restore handoff alongside each retained-SHM patch for 1,000 warmed
 iterations with zero measured allocations. Direct regressions verify overflow
 reset on the next commit, forced full-raster reads, bounded union coverage, and
-preservation of undamaged pixels. Synchronized-tree traversal allocations and
-the full Android presentation copy remain open. Rebuilt exact x86_64 and
-AArch64 compositor probes pass. The probe now accounts explicitly for the
+preservation of undamaged pixels. Synchronized-subsurface release now uses one
+retained depth-first traversal stack, translates cached rectangles directly into
+presentation damage, returns cleared cached vectors to their surfaces, appends
+callbacks directly to the retained presentation queue, retains stacking-request
+capacity, and drains presented callbacks without discarding queue capacity. A
+real Wayland parent/child fixture first drives both
+release triggers through the protocol, then invokes the same warmed release path
+1,000 times with cached damage and a live callback and measures zero allocations
+on the test thread. Synchronized frame detachment and the full
+Android presentation copy remain open. Rebuilt exact x86_64 and AArch64
+compositor probes pass. The probe now accounts explicitly for the
 mapped toplevel's retained activation configure before proving that two later
 resize configures remain ordered and independently acknowledged.
 

@@ -449,6 +449,7 @@ pub struct CompositorState {
     pointer_event_count: u32,
     presentation_callbacks: Vec<WlCallback>,
     presentation_damage: Vec<RegionRectangle>,
+    cached_subsurface_traversal: Vec<(WlSurface, usize)>,
     next_input_serial: u32,
     pointers: Vec<WlPointer>,
     pointer_focus_surface: Option<WlSurface>,
@@ -7319,142 +7320,146 @@ fn subsurface_effectively_synchronized(surface: &WlSurface, surface_count: u32) 
 fn apply_cached_subsurface_tree(
     state: &mut CompositorState,
     surface: &WlSurface,
-    depth: usize,
     apply_parent_state: bool,
-    callbacks: &mut Vec<WlCallback>,
-    damage_batches: &mut Vec<(WlSurface, Vec<RegionRectangle>)>,
 ) {
-    if depth > state.surface_count as usize {
-        return;
-    }
-    let Some(surface_data) = surface.data::<SurfaceData>() else {
-        return;
-    };
-    let subsurface = surface_data
-        .inner
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .subsurface
-        .clone();
-    if apply_parent_state {
-        if let Some(data) = subsurface
-            .as_ref()
-            .and_then(|subsurface| subsurface.data::<SubsurfaceData>())
-        {
-            if let Some(position) = data
-                .pending_position
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take()
-            {
-                *data
-                    .position
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = position;
-            }
+    let mut traversal = std::mem::take(&mut state.cached_subsurface_traversal);
+    traversal.push((surface.clone(), 0));
+    apply_cached_subsurface_stack(state, &mut traversal, apply_parent_state);
+    traversal.clear();
+    state.cached_subsurface_traversal = traversal;
+}
+
+fn apply_cached_subsurface_stack(
+    state: &mut CompositorState,
+    traversal: &mut Vec<(WlSurface, usize)>,
+    apply_parent_state: bool,
+) {
+    while let Some((surface, depth)) = traversal.pop() {
+        if depth > state.surface_count as usize || !surface.is_alive() {
+            continue;
         }
-    }
-    let (children, local_damage) = {
-        let mut surface_state = surface_data
+        let Some(surface_data) = surface.data::<SurfaceData>() else {
+            continue;
+        };
+        let subsurface = surface_data
             .inner
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(input_region) = surface_state.cached_input_region.take() {
-            surface_state.committed_input_region = input_region;
+            .unwrap_or_else(|error| error.into_inner())
+            .subsurface
+            .clone();
+        if apply_parent_state {
+            if let Some(data) = subsurface
+                .as_ref()
+                .and_then(|subsurface| subsurface.data::<SubsurfaceData>())
+            {
+                if let Some(position) = data
+                    .pending_position
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    *data
+                        .position
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = position;
+                }
+            }
         }
-        if let Some(opaque_region) = surface_state.cached_opaque_region.take() {
-            surface_state.committed_opaque_region = opaque_region;
+        let mut local_damage = {
+            let mut surface_state = surface_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(input_region) = surface_state.cached_input_region.take() {
+                surface_state.committed_input_region = input_region;
+            }
+            if let Some(opaque_region) = surface_state.cached_opaque_region.take() {
+                surface_state.committed_opaque_region = opaque_region;
+            }
+            if let Some(scale) = surface_state.cached_buffer_scale.take() {
+                surface_state.committed_buffer_scale = scale;
+            }
+            if let Some(transform) = surface_state.cached_buffer_transform.take() {
+                surface_state.committed_buffer_transform = transform;
+            }
+            if let Some(source) = surface_state.cached_viewport_source.take() {
+                surface_state.committed_viewport_source = source;
+            }
+            if let Some(destination) = surface_state.cached_viewport_destination.take() {
+                surface_state.committed_viewport_destination = destination;
+            }
+            if let Some(frame) = surface_state.cached_frame.take() {
+                surface_state.committed_frame = frame;
+            }
+            state
+                .presentation_callbacks
+                .append(&mut surface_state.cached_callbacks);
+            let next_depth = depth.saturating_add(1);
+            traversal.extend(
+                surface_state
+                    .children_below
+                    .iter()
+                    .chain(surface_state.children_above.iter())
+                    .rev()
+                    .filter(|child| child.is_alive())
+                    .cloned()
+                    .map(|child| (child, next_depth)),
+            );
+            std::mem::take(&mut surface_state.cached_damage)
+        };
+        apply_pointer_constraint_regions(state, &surface);
+        if !local_damage.is_empty() {
+            let output_width = state.output_width.max(0) as u32;
+            let output_height = state.output_height.max(0) as u32;
+            if let Some((origin_x, origin_y)) = surface_origin_in_root(state, &surface, 0) {
+                for rectangle in local_damage.iter().filter_map(|rectangle| {
+                    rectangle
+                        .translated(origin_x, origin_y)
+                        .clip(output_width, output_height)
+                }) {
+                    push_accumulated_damage(&mut state.presentation_damage, rectangle);
+                }
+            }
         }
-        if let Some(scale) = surface_state.cached_buffer_scale.take() {
-            surface_state.committed_buffer_scale = scale;
-        }
-        if let Some(transform) = surface_state.cached_buffer_transform.take() {
-            surface_state.committed_buffer_transform = transform;
-        }
-        if let Some(source) = surface_state.cached_viewport_source.take() {
-            surface_state.committed_viewport_source = source;
-        }
-        if let Some(destination) = surface_state.cached_viewport_destination.take() {
-            surface_state.committed_viewport_destination = destination;
-        }
-        if let Some(frame) = surface_state.cached_frame.take() {
-            surface_state.committed_frame = frame;
-        }
-        callbacks.append(&mut surface_state.cached_callbacks);
-        let local_damage = std::mem::take(&mut surface_state.cached_damage);
-        let children = surface_state
-            .children_below
-            .iter()
-            .chain(surface_state.children_above.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        (children, local_damage)
-    };
-    apply_pointer_constraint_regions(state, surface);
-    if !local_damage.is_empty() {
-        damage_batches.push((surface.clone(), local_damage));
-    }
-    for child in children.iter().filter(|child| child.is_alive()) {
-        apply_cached_subsurface_tree(
-            state,
-            child,
-            depth.saturating_add(1),
-            apply_parent_state,
-            callbacks,
-            damage_batches,
-        );
+        local_damage.clear();
+        surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cached_damage = local_damage;
     }
 }
 
-fn apply_cached_subsurface_children(
-    state: &mut CompositorState,
-    parent: &WlSurface,
-) -> (Vec<WlCallback>, Vec<(WlSurface, Vec<RegionRectangle>)>) {
+fn apply_cached_subsurface_children(state: &mut CompositorState, parent: &WlSurface) {
     let Some(parent_data) = parent.data::<SurfaceData>() else {
-        return (Vec::new(), Vec::new());
+        return;
     };
-    let children = {
+    let mut traversal = std::mem::take(&mut state.cached_subsurface_traversal);
+    {
         let mut parent_state = parent_data
             .inner
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let pending_stack = std::mem::take(&mut parent_state.pending_subsurface_stack);
-        for (surface, sibling, above) in pending_stack {
+        let pending_count = parent_state.pending_subsurface_stack.len();
+        for index in 0..pending_count {
+            let (surface, sibling, above) = parent_state.pending_subsurface_stack[index].clone();
             apply_subsurface_order(&mut parent_state, &surface, &sibling, parent, above);
         }
-        parent_state
-            .children_below
-            .iter()
-            .chain(parent_state.children_above.iter())
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    let mut callbacks = Vec::new();
-    let mut damage_batches = Vec::new();
-    for child in children.iter().filter(|child| child.is_alive()) {
-        apply_cached_subsurface_tree(state, child, 0, true, &mut callbacks, &mut damage_batches);
+        parent_state.pending_subsurface_stack.clear();
+        traversal.extend(
+            parent_state
+                .children_below
+                .iter()
+                .chain(parent_state.children_above.iter())
+                .rev()
+                .filter(|child| child.is_alive())
+                .cloned()
+                .map(|child| (child, 0)),
+        );
     }
-    (callbacks, damage_batches)
-}
-
-fn append_damage_batches(
-    state: &mut CompositorState,
-    damage_batches: Vec<(WlSurface, Vec<RegionRectangle>)>,
-) {
-    let output_width = state.output_width.max(0) as u32;
-    let output_height = state.output_height.max(0) as u32;
-    for (surface, damage) in damage_batches {
-        let Some((origin_x, origin_y)) = surface_origin_in_root(state, &surface, 0) else {
-            continue;
-        };
-        for rectangle in damage.into_iter().filter_map(|rectangle| {
-            rectangle
-                .translated(origin_x, origin_y)
-                .clip(output_width, output_height)
-        }) {
-            push_accumulated_damage(&mut state.presentation_damage, rectangle);
-        }
-    }
+    apply_cached_subsurface_stack(state, &mut traversal, true);
+    traversal.clear();
+    state.cached_subsurface_traversal = traversal;
 }
 impl Dispatch<WlSubcompositor, ()> for CompositorState {
     fn request(
@@ -7639,19 +7644,8 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
             wl_subsurface::Request::SetDesync => {
                 data.synchronized.store(false, Ordering::Release);
                 if !subsurface_effectively_synchronized(&data.surface, state.surface_count) {
-                    let mut callbacks = Vec::new();
-                    let mut damage_batches = Vec::new();
-                    apply_cached_subsurface_tree(
-                        state,
-                        &data.surface,
-                        0,
-                        false,
-                        &mut callbacks,
-                        &mut damage_batches,
-                    );
-                    append_damage_batches(state, damage_batches);
+                    apply_cached_subsurface_tree(state, &data.surface, false);
                     update_composited_frame(state);
-                    state.presentation_callbacks.extend(callbacks);
                 }
             }
             _ => unreachable!("wl_subsurface request added without an implementation"),
@@ -8418,16 +8412,13 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         set_keyboard_focus(state, None);
                     }
                 }
-                let (child_callbacks, child_damage) =
-                    apply_cached_subsurface_children(state, resource);
-                callbacks.extend(child_callbacks);
-                append_damage_batches(state, child_damage);
+                state.presentation_callbacks.append(&mut callbacks);
+                apply_cached_subsurface_children(state, resource);
                 if parent_geometry_changed {
                     state.window_change_serial = state.window_change_serial.wrapping_add(1).max(1);
                     reconfigure_reactive_popups(state, xdg_surface.as_ref());
                 }
                 update_composited_frame(state);
-                state.presentation_callbacks.extend(callbacks);
             }
             _ => unreachable!("wl_surface request added without an implementation"),
         }
@@ -12563,9 +12554,8 @@ impl CompositorCore {
 
     pub fn present_frame(&mut self, time: u32) -> u32 {
         self.state.presentation_damage.clear();
-        let callbacks = std::mem::take(&mut self.state.presentation_callbacks);
         let mut presented = 0u32;
-        for callback in callbacks {
+        for callback in self.state.presentation_callbacks.drain(..) {
             if callback.is_alive() {
                 callback.done(time);
                 presented = presented.saturating_add(1);
