@@ -104,6 +104,8 @@ const MAX_FRAME_CALLBACKS_PER_SURFACE: usize = 64;
 const MAX_FRAME_CALLBACKS_TOTAL: usize = 256;
 const MAX_FRAME_CALLBACKS_PER_CLIENT: usize = 128;
 const MAX_PENDING_XDG_CONFIGURES: usize = 64;
+const MAX_XDG_POSITIONERS_PER_CLIENT: usize = 64;
+const MAX_XDG_POSITIONERS_TOTAL: usize = 128;
 const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 2;
 const MAX_SHM_POOLS_PER_CLIENT: usize = 16;
 const MAX_SHM_POOLS_TOTAL: usize = 32;
@@ -505,6 +507,7 @@ pub struct CompositorState {
     popup_base_armed: bool,
     xdg_wm_base_binds: u32,
     xdg_positioner_count: u32,
+    xdg_positioners: Vec<XdgPositioner>,
     xdg_positioner_request_count: u32,
     xdg_popup_count: u32,
     xdg_popup_done_count: u32,
@@ -4261,11 +4264,11 @@ impl GlobalDispatch<XdgWmBase, ()> for CompositorState {
 impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &XdgWmBase,
         request: xdg_wm_base::Request,
         data: &XdgWmBaseData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -4278,7 +4281,24 @@ impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
                 }
             }
             xdg_wm_base::Request::CreatePositioner { id } => {
-                data_init.init(id, XdgPositionerData::default());
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.xdg_positioners, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_XDG_POSITIONERS_PER_CLIENT,
+                    MAX_XDG_POSITIONERS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained XDG positioner limit exceeded",
+                    );
+                    return;
+                }
+                let positioner = data_init.init(id, XdgPositionerData::default());
+                state.xdg_positioners.push(positioner);
                 state.xdg_positioner_count = state.xdg_positioner_count.saturating_add(1);
             }
             xdg_wm_base::Request::GetXdgSurface { id, surface } => {
@@ -4441,9 +4461,12 @@ impl Dispatch<XdgPositioner, XdgPositionerData> for CompositorState {
     fn destroyed(
         state: &mut Self,
         _client: ClientId,
-        _resource: &XdgPositioner,
+        resource: &XdgPositioner,
         _data: &XdgPositionerData,
     ) {
+        state
+            .xdg_positioners
+            .retain(|positioner| positioner.id() != resource.id());
         state.xdg_positioner_count = state.xdg_positioner_count.saturating_sub(1);
     }
 }
@@ -18274,8 +18297,8 @@ mod tests {
     use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3 as client_text_input_manager;
     use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3 as client_text_input;
     use wayland_protocols::xdg::shell::client::{
-        xdg_surface as client_xdg_surface, xdg_toplevel as client_xdg_toplevel,
-        xdg_wm_base as client_xdg_wm_base,
+        xdg_positioner as client_xdg_positioner, xdg_surface as client_xdg_surface,
+        xdg_toplevel as client_xdg_toplevel, xdg_wm_base as client_xdg_wm_base,
     };
 
     #[derive(Default)]
@@ -18323,6 +18346,7 @@ mod tests {
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_subcompositor::WlSubcompositor);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_subsurface::WlSubsurface);
     wayland_client::delegate_noop!(PointerProtocolClient: client_xdg_wm_base::XdgWmBase);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_xdg_positioner::XdgPositioner);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_xdg_toplevel::XdgToplevel);
     wayland_client::delegate_noop!(
         PointerProtocolClient: ignore client_wl_region::WlRegion
@@ -21494,6 +21518,233 @@ mod tests {
         stage.store(13, Ordering::Release);
 
         server.join().expect("output-resource server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn xdg_positioner_limits_release_and_preserve_independent_clients() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-positioner-resource-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 13 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "positioner-resource server timed out"
+                );
+                core.dispatch_once()
+                    .expect("dispatch positioner-resource clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.xdg_positioners.len() == MAX_XDG_POSITIONERS_PER_CLIENT => {
+                        assert_eq!(
+                            core.state.xdg_positioner_count as usize,
+                            MAX_XDG_POSITIONERS_PER_CLIENT
+                        );
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.xdg_positioners.is_empty()
+                        && core.state.xdg_positioner_count == 0 =>
+                    {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.xdg_positioners.len() == MAX_XDG_POSITIONERS_TOTAL => {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.xdg_positioners.len() == MAX_XDG_POSITIONERS_TOTAL => {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.xdg_positioners.is_empty()
+                        && core.state.xdg_positioner_count == 0 =>
+                    {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.xdg_positioners.len() == 1 => {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting positioner-resource client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream)
+                            .expect("positioner-resource connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect positioner-resource client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for positioner-resource stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let limit_connection = connect();
+        let (limit_globals, mut limit_events) =
+            registry_queue_init::<PointerProtocolClient>(&limit_connection)
+                .expect("positioner per-client registry");
+        let limit_queue = limit_events.handle();
+        let limit_wm_base = limit_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&limit_queue, 1..=6, ())
+            .expect("positioner per-client wm base");
+        let mut positioners = (0..MAX_XDG_POSITIONERS_PER_CLIENT)
+            .map(|_| limit_wm_base.create_positioner(&limit_queue, ()))
+            .collect::<Vec<_>>();
+        limit_connection
+            .flush()
+            .expect("flush exact positioner limit");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact positioner limit remains connected");
+        positioners
+            .pop()
+            .expect("positioner to recycle")
+            .destroy();
+        limit_connection
+            .flush()
+            .expect("flush positioner destroy");
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("positioner destroy frees capacity");
+        positioners.push(limit_wm_base.create_positioner(&limit_queue, ()));
+        limit_connection
+            .flush()
+            .expect("flush replacement positioner");
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("positioner capacity is reusable");
+        let _overflow_positioner = limit_wm_base.create_positioner(&limit_queue, ());
+        limit_connection
+            .flush()
+            .expect("flush per-client positioner overflow");
+        assert!(
+            limit_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "positioner 65 must disconnect its client"
+        );
+        drop((
+            positioners,
+            limit_wm_base,
+            limit_globals,
+            limit_events,
+            limit_connection,
+        ));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let mut holders = Vec::new();
+        for _ in 0..MAX_XDG_POSITIONERS_TOTAL / MAX_XDG_POSITIONERS_PER_CLIENT {
+            let connection = connect();
+            let (globals, events) = registry_queue_init::<PointerProtocolClient>(&connection)
+                .expect("global positioner holder registry");
+            let queue = events.handle();
+            let wm_base = globals
+                .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&queue, 1..=6, ())
+                .expect("global positioner holder wm base");
+            let holder_positioners = (0..MAX_XDG_POSITIONERS_PER_CLIENT)
+                .map(|_| wm_base.create_positioner(&queue, ()))
+                .collect::<Vec<_>>();
+            connection
+                .flush()
+                .expect("flush global positioner holder");
+            holders.push((connection, globals, events, wm_base, holder_positioners));
+        }
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        for (_, _, events, _, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("global positioner holder remains connected");
+        }
+
+        let overflow_connection = connect();
+        let (overflow_globals, mut overflow_events) =
+            registry_queue_init::<PointerProtocolClient>(&overflow_connection)
+                .expect("global positioner overflow registry");
+        let overflow_queue = overflow_events.handle();
+        let overflow_wm_base = overflow_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&overflow_queue, 1..=6, ())
+            .expect("global positioner overflow wm base");
+        let _overflow_positioner = overflow_wm_base.create_positioner(&overflow_queue, ());
+        overflow_connection
+            .flush()
+            .expect("flush global positioner overflow");
+        assert!(
+            overflow_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "positioner 129 must disconnect only its client"
+        );
+        drop((
+            overflow_wm_base,
+            overflow_globals,
+            overflow_events,
+            overflow_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        for (_, _, events, _, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("positioner holder survives another client's overflow");
+        }
+        drop(holders);
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+
+        let healthy_connection = connect();
+        let (healthy_globals, mut healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy positioner registry");
+        let healthy_queue = healthy_events.handle();
+        let healthy_wm_base = healthy_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&healthy_queue, 1..=6, ())
+            .expect("healthy positioner wm base");
+        let _healthy_positioner = healthy_wm_base.create_positioner(&healthy_queue, ());
+        healthy_connection
+            .flush()
+            .expect("flush healthy positioner");
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("healthy positioner client remains connected");
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        stage.store(13, Ordering::Release);
+
+        server.join().expect("positioner-resource server");
         assert!(!socket.exists());
     }
 

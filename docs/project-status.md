@@ -3292,6 +3292,17 @@ same-numbered output cleanup isolation across their surfaces, complete cleanup,
 and a successful final binding and round trip. The full workspace and strict
 Clippy gates plus rebuilt exact x86_64 and AArch64 Android probes pass.
 
+XDG popup-positioner resources are now bounded independently of surfaces. One
+client may retain 64 `xdg_positioner` objects and the compositor may retain 128.
+Admission removes dead resources before counting. Explicit destruction and
+client disconnect remove the retained object and update the existing diagnostic
+count. A real protocol fixture holds the exact per-client boundary, destroys and
+replaces one positioner, rejects positioner 65, uses two independent clients to
+saturate the global boundary, rejects positioner 129 without disconnecting either
+holder, verifies complete cleanup, and creates a final healthy positioner. The
+full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
+Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
