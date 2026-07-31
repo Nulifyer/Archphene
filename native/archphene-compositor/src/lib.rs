@@ -90,7 +90,7 @@ use wayland_server::protocol::wl_surface::{self, WlSurface};
 use wayland_server::protocol::wl_touch::{self, WlTouch};
 use wayland_server::{
     Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
-    backend::ClientId,
+    backend::ClientId, backend::protocol::ProtocolError,
 };
 
 const MAX_TOPLEVELS: usize = 32;
@@ -99,6 +99,8 @@ const MAX_SURFACES_PER_CLIENT: usize = 128;
 const MAX_FRAME_CALLBACKS_PER_SURFACE: usize = 64;
 const MAX_FRAME_CALLBACKS_TOTAL: usize = 256;
 const MAX_FRAME_CALLBACKS_PER_CLIENT: usize = 128;
+const MAX_PENDING_XDG_CONFIGURES: usize = 64;
+const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 2;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -566,9 +568,16 @@ struct SurfaceState {
     subsurface: Option<WlSubsurface>,
     children_below: Vec<WlSurface>,
     children_above: Vec<WlSurface>,
-    pending_subsurface_stack: Vec<(WlSurface, WlSurface, bool)>,
+    pending_subsurface_order: Option<SubsurfaceOrder>,
+    recycled_subsurface_order: SubsurfaceOrder,
     xdg_configured: bool,
     entered_outputs: Vec<u32>,
+}
+
+#[derive(Default)]
+struct SubsurfaceOrder {
+    children_below: Vec<WlSurface>,
+    children_above: Vec<WlSurface>,
 }
 
 struct FrameCallback {
@@ -1091,6 +1100,7 @@ struct XdgSurfaceState {
     role_active: bool,
     pending_configures: VecDeque<XdgConfigure>,
     acknowledged_configure: Option<XdgConfigure>,
+    deferred_configure: Option<DeferredXdgConfigure>,
     pending_window_geometry: Option<WindowGeometry>,
     committed_window_geometry: Option<WindowGeometry>,
 }
@@ -1101,6 +1111,20 @@ struct XdgConfigure {
     popup_geometry: Option<(i32, i32, i32, i32)>,
     toplevel_size: Option<(i32, i32)>,
     restores_windowed: bool,
+}
+
+enum DeferredXdgConfigure {
+    Toplevel {
+        toplevel: XdgToplevel,
+        width: i32,
+        height: i32,
+        states: Vec<u8>,
+        restores_windowed: bool,
+    },
+    Popup {
+        popup: XdgPopup,
+        geometry: (i32, i32, i32, i32),
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1117,6 +1141,14 @@ impl XdgSurfaceState {
     }
 
     fn has_pending_toplevel_size(&self, width: i32, height: i32) -> bool {
+        if let Some(DeferredXdgConfigure::Toplevel {
+            width: deferred_width,
+            height: deferred_height,
+            ..
+        }) = self.deferred_configure.as_ref()
+        {
+            return (*deferred_width, *deferred_height) == (width, height);
+        }
         self.pending_configures
             .iter()
             .rev()
@@ -1141,6 +1173,97 @@ impl XdgSurfaceState {
         self.committed_window_geometry = Some(geometry);
         changed
     }
+}
+
+fn queue_xdg_configure(xdg_surface: &XdgSurface, configure: XdgConfigure) -> bool {
+    let Some(data) = xdg_surface.data::<XdgSurfaceData>() else {
+        return false;
+    };
+    let mut state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+    if state.pending_configures.len() >= MAX_PENDING_XDG_CONFIGURES {
+        return false;
+    }
+    state.pending_configures.push_back(configure);
+    true
+}
+
+fn xdg_configure_queue_full(xdg_surface: &XdgSurface) -> bool {
+    xdg_surface.data::<XdgSurfaceData>().is_none_or(|data| {
+        data.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending_configures
+            .len()
+            >= MAX_PENDING_XDG_CONFIGURES
+    })
+}
+
+fn disconnect_for_resource_limit<R: Resource>(
+    client: &Client,
+    handle: &DisplayHandle,
+    resource: &R,
+    message: &str,
+) {
+    client.kill(
+        handle,
+        ProtocolError {
+            code: WL_DISPLAY_ERROR_NO_MEMORY,
+            object_id: resource.id().protocol_id(),
+            object_interface: R::interface().name.to_owned(),
+            message: message.to_owned(),
+        },
+    );
+}
+
+fn send_deferred_xdg_configure(
+    state: &mut CompositorState,
+    xdg_surface: &XdgSurface,
+    deferred: DeferredXdgConfigure,
+) -> u32 {
+    state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
+    let serial = state.next_configure_serial;
+    match deferred {
+        DeferredXdgConfigure::Toplevel {
+            toplevel,
+            width,
+            height,
+            states,
+            restores_windowed,
+        } => {
+            if !queue_xdg_configure(
+                xdg_surface,
+                XdgConfigure {
+                    serial,
+                    popup_geometry: None,
+                    toplevel_size: if width == 0 {
+                        None
+                    } else {
+                        Some((width, height))
+                    },
+                    restores_windowed,
+                },
+            ) {
+                return 0;
+            }
+            toplevel.configure(width, height, states);
+        }
+        DeferredXdgConfigure::Popup { popup, geometry } => {
+            if !queue_xdg_configure(
+                xdg_surface,
+                XdgConfigure {
+                    serial,
+                    popup_geometry: Some(geometry),
+                    toplevel_size: None,
+                    restores_windowed: false,
+                },
+            ) {
+                return 0;
+            }
+            popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
+        }
+    }
+    xdg_surface.configure(serial);
+    serial
 }
 
 struct XdgToplevelData {
@@ -4275,6 +4398,8 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                 let acknowledged = xdg_state.pending_configures[position];
                 xdg_state.pending_configures.drain(..=position);
                 xdg_state.acknowledged_configure = Some(acknowledged);
+                let deferred = xdg_state.deferred_configure.take();
+                drop(xdg_state);
                 if let Some(surface_data) = data.wl_surface.data::<SurfaceData>() {
                     surface_data
                         .inner
@@ -4283,6 +4408,9 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                         .xdg_configured = true;
                 }
                 state.xdg_ack_count = state.xdg_ack_count.saturating_add(1);
+                if let Some(deferred) = deferred {
+                    send_deferred_xdg_configure(state, resource, deferred);
+                }
             }
             _ => unreachable!("xdg_surface request added without an implementation"),
         }
@@ -4311,11 +4439,11 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
 impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &XdgPopup,
         request: xdg_popup::Request,
         data: &XdgPopupData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -4468,6 +4596,15 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                     );
                     return;
                 };
+                if xdg_configure_queue_full(&data.xdg_surface) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "unacknowledged xdg_surface configure limit exceeded",
+                    );
+                    return;
+                }
                 let (x, y, width, height) = geometry;
                 *data
                     .positioner
@@ -4475,18 +4612,16 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                     .unwrap_or_else(|error| error.into_inner()) = positioner;
                 state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
                 let serial = state.next_configure_serial;
-                if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
-                    xdg_data
-                        .state
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .pending_configures
-                        .push_back(XdgConfigure {
-                            serial,
-                            popup_geometry: Some(geometry),
-                            toplevel_size: None,
-                            restores_windowed: false,
-                        });
+                if !queue_xdg_configure(
+                    &data.xdg_surface,
+                    XdgConfigure {
+                        serial,
+                        popup_geometry: Some(geometry),
+                        toplevel_size: None,
+                        restores_windowed: false,
+                    },
+                ) {
+                    return;
                 }
                 resource.repositioned(token);
                 resource.configure(x, y, width, height);
@@ -4522,11 +4657,15 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
             }
         }
         if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
-            xdg_data
+            let mut xdg_state = xdg_data
                 .state
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .role_active = false;
+                .unwrap_or_else(|error| error.into_inner());
+            xdg_state.role_active = false;
+            xdg_state.pending_configures.clear();
+            xdg_state.acknowledged_configure = None;
+            xdg_state.deferred_configure = None;
+            drop(xdg_state);
             if let Some(surface_data) = xdg_data.wl_surface.data::<SurfaceData>() {
                 let mut surface = surface_data
                     .inner
@@ -4552,11 +4691,11 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
 impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &XdgToplevel,
         request: xdg_toplevel::Request,
         data: &XdgToplevelData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -4591,20 +4730,56 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
             | xdg_toplevel::Request::Resize { .. }
             | xdg_toplevel::Request::SetMinimized => {}
             xdg_toplevel::Request::SetMaximized => {
+                if xdg_configure_queue_full(&data.xdg_surface) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "unacknowledged xdg_surface configure limit exceeded",
+                    );
+                    return;
+                }
                 remember_windowed_toplevel_size(resource);
                 data.maximized_requested.store(true, Ordering::Release);
                 queue_requested_toplevel_configure(state, resource, false);
             }
             xdg_toplevel::Request::UnsetMaximized => {
+                if xdg_configure_queue_full(&data.xdg_surface) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "unacknowledged xdg_surface configure limit exceeded",
+                    );
+                    return;
+                }
                 data.maximized_requested.store(false, Ordering::Release);
                 queue_requested_toplevel_configure(state, resource, true);
             }
             xdg_toplevel::Request::SetFullscreen { .. } => {
+                if xdg_configure_queue_full(&data.xdg_surface) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "unacknowledged xdg_surface configure limit exceeded",
+                    );
+                    return;
+                }
                 remember_windowed_toplevel_size(resource);
                 data.fullscreen_requested.store(true, Ordering::Release);
                 queue_requested_toplevel_configure(state, resource, false);
             }
             xdg_toplevel::Request::UnsetFullscreen => {
+                if xdg_configure_queue_full(&data.xdg_surface) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "unacknowledged xdg_surface configure limit exceeded",
+                    );
+                    return;
+                }
                 data.fullscreen_requested.store(false, Ordering::Release);
                 queue_requested_toplevel_configure(state, resource, true);
             }
@@ -4657,6 +4832,7 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
                 xdg_state.role_active = false;
                 xdg_state.pending_configures.clear();
                 xdg_state.acknowledged_configure = None;
+                xdg_state.deferred_configure = None;
             }
             if let Some(wl_surface_data) = surface_data.wl_surface.data::<SurfaceData>() {
                 let mut surface = wl_surface_data
@@ -7758,12 +7934,19 @@ fn apply_cached_subsurface_children(state: &mut CompositorState, parent: &WlSurf
             .inner
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let pending_count = parent_state.pending_subsurface_stack.len();
-        for index in 0..pending_count {
-            let (surface, sibling, above) = parent_state.pending_subsurface_stack[index].clone();
-            apply_subsurface_order(&mut parent_state, &surface, &sibling, parent, above);
+        if let Some(mut pending) = parent_state.pending_subsurface_order.take() {
+            std::mem::swap(
+                &mut parent_state.children_below,
+                &mut pending.children_below,
+            );
+            std::mem::swap(
+                &mut parent_state.children_above,
+                &mut pending.children_above,
+            );
+            pending.children_below.clear();
+            pending.children_above.clear();
+            parent_state.recycled_subsurface_order = pending;
         }
-        parent_state.pending_subsurface_stack.clear();
         traversal.extend(
             parent_state
                 .children_below
@@ -7844,12 +8027,14 @@ impl Dispatch<WlSubcompositor, ()> for CompositorState {
                 child_state.role = Some(SurfaceRole::Subsurface);
                 child_state.subsurface = Some(subsurface.clone());
                 drop(child_state);
-                parent_data
+                let mut parent_state = parent_data
                     .inner
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .children_above
-                    .push(surface);
+                    .unwrap_or_else(|error| error.into_inner());
+                parent_state.children_above.push(surface.clone());
+                if let Some(pending) = parent_state.pending_subsurface_order.as_mut() {
+                    pending.children_above.push(surface);
+                }
                 state.subsurfaces.push(subsurface);
                 state.subsurface_count = state.subsurface_count.saturating_add(1);
             }
@@ -7864,39 +8049,66 @@ fn subsurface_sibling_is_valid(data: &SubsurfaceData, sibling: &WlSurface) -> bo
             || subsurface_parent(sibling).is_some_and(|parent| parent.id() == data.parent.id()))
 }
 
+fn queue_pending_subsurface_order(data: &SubsurfaceData, sibling: WlSurface, above: bool) -> bool {
+    let Some(parent_data) = data.parent.data::<SurfaceData>() else {
+        return false;
+    };
+    let mut parent = parent_data
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if parent.pending_subsurface_order.is_none() {
+        let mut pending = std::mem::take(&mut parent.recycled_subsurface_order);
+        pending
+            .children_below
+            .extend(parent.children_below.iter().cloned());
+        pending
+            .children_above
+            .extend(parent.children_above.iter().cloned());
+        parent.pending_subsurface_order = Some(pending);
+    }
+    let pending = parent
+        .pending_subsurface_order
+        .as_mut()
+        .expect("pending subsurface order initialized");
+    apply_subsurface_order(
+        &mut pending.children_below,
+        &mut pending.children_above,
+        &data.surface,
+        &sibling,
+        &data.parent,
+        above,
+    )
+}
+
 fn apply_subsurface_order(
-    parent: &mut SurfaceState,
+    children_below: &mut Vec<WlSurface>,
+    children_above: &mut Vec<WlSurface>,
     surface: &WlSurface,
     sibling: &WlSurface,
     parent_surface: &WlSurface,
     above: bool,
 ) -> bool {
-    parent
-        .children_below
-        .retain(|candidate| candidate.id() != surface.id());
-    parent
-        .children_above
-        .retain(|candidate| candidate.id() != surface.id());
+    children_below.retain(|candidate| candidate.id() != surface.id());
+    children_above.retain(|candidate| candidate.id() != surface.id());
     if sibling.id() == parent_surface.id() {
         if above {
-            parent.children_above.insert(0, surface.clone());
+            children_above.insert(0, surface.clone());
         } else {
-            parent.children_below.push(surface.clone());
+            children_below.push(surface.clone());
         }
         return true;
     }
-    let target = if let Some(index) = parent
-        .children_below
+    let target = if let Some(index) = children_below
         .iter()
         .position(|candidate| candidate.id() == sibling.id())
     {
-        (&mut parent.children_below, index)
-    } else if let Some(index) = parent
-        .children_above
+        (children_below, index)
+    } else if let Some(index) = children_above
         .iter()
         .position(|candidate| candidate.id() == sibling.id())
     {
-        (&mut parent.children_above, index)
+        (children_above, index)
     } else {
         return false;
     };
@@ -7930,14 +8142,7 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
                     );
                     return;
                 }
-                if let Some(parent_data) = data.parent.data::<SurfaceData>() {
-                    parent_data
-                        .inner
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .pending_subsurface_stack
-                        .push((data.surface.clone(), sibling, true));
-                }
+                queue_pending_subsurface_order(data, sibling, true);
             }
             wl_subsurface::Request::PlaceBelow { sibling } => {
                 if !subsurface_sibling_is_valid(data, &sibling) {
@@ -7947,14 +8152,7 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
                     );
                     return;
                 }
-                if let Some(parent_data) = data.parent.data::<SurfaceData>() {
-                    parent_data
-                        .inner
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .pending_subsurface_stack
-                        .push((data.surface.clone(), sibling, false));
-                }
+                queue_pending_subsurface_order(data, sibling, false);
             }
             wl_subsurface::Request::SetSync => {
                 data.synchronized.store(true, Ordering::Release);
@@ -7987,6 +8185,14 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
             parent
                 .children_above
                 .retain(|surface| surface.id() != data.surface.id());
+            if let Some(pending) = parent.pending_subsurface_order.as_mut() {
+                pending
+                    .children_below
+                    .retain(|surface| surface.id() != data.surface.id());
+                pending
+                    .children_above
+                    .retain(|surface| surface.id() != data.surface.id());
+            }
         }
         if let Some(surface_data) = data.surface.data::<SurfaceData>() {
             let mut surface = surface_data
@@ -8247,7 +8453,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
                             return;
                         };
-                        let mut xdg_state = xdg_data
+                        let xdg_state = xdg_data
                             .state
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
@@ -8279,12 +8485,18 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             let height = if fills_output { state.output_height } else { 0 };
                             let (width, height) =
                                 constrain_toplevel_configure(toplevel, width, height);
-                            xdg_state.pending_configures.push_back(XdgConfigure {
-                                serial,
-                                popup_geometry: None,
-                                toplevel_size: Some((width, height)),
-                                restores_windowed: false,
-                            });
+                            drop(xdg_state);
+                            if !queue_xdg_configure(
+                                xdg_surface,
+                                XdgConfigure {
+                                    serial,
+                                    popup_geometry: None,
+                                    toplevel_size: Some((width, height)),
+                                    restores_windowed: false,
+                                },
+                            ) {
+                                return;
+                            }
                             toplevel.configure(width, height, encode_xdg_toplevel_states(&states));
                             xdg_surface.configure(serial);
                         }
@@ -8315,7 +8527,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         let Some(popup_data) = popup.data::<XdgPopupData>() else {
                             return;
                         };
-                        let mut xdg_state = xdg_data
+                        let xdg_state = xdg_data
                             .state
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
@@ -8340,12 +8552,18 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             state.next_configure_serial =
                                 state.next_configure_serial.wrapping_add(1).max(1);
                             let serial = state.next_configure_serial;
-                            xdg_state.pending_configures.push_back(XdgConfigure {
-                                serial,
-                                popup_geometry: Some(geometry),
-                                toplevel_size: None,
-                                restores_windowed: false,
-                            });
+                            drop(xdg_state);
+                            if !queue_xdg_configure(
+                                xdg_surface,
+                                XdgConfigure {
+                                    serial,
+                                    popup_geometry: Some(geometry),
+                                    toplevel_size: None,
+                                    restores_windowed: false,
+                                },
+                            ) {
+                                return;
+                            }
                             popup.configure(x, y, width, height);
                             xdg_surface.configure(serial);
                         }
@@ -8794,6 +9012,29 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
             }
         }
+        for candidate in &state.surfaces {
+            let Some(candidate_data) = candidate.data::<SurfaceData>() else {
+                continue;
+            };
+            let mut candidate_state = candidate_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            candidate_state
+                .children_below
+                .retain(|child| child.id() != resource.id());
+            candidate_state
+                .children_above
+                .retain(|child| child.id() != resource.id());
+            if let Some(pending) = candidate_state.pending_subsurface_order.as_mut() {
+                pending
+                    .children_below
+                    .retain(|child| child.id() != resource.id());
+                pending
+                    .children_above
+                    .retain(|child| child.id() != resource.id());
+            }
+        }
         state.presentation_callbacks.retain(|callback| {
             if callback.surface.id() != resource.id() {
                 return true;
@@ -9112,14 +9353,25 @@ fn queue_toplevel_configure_with_restoration(
     let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
         return 0;
     };
+    if xdg_configure_queue_full(&xdg_surface) {
+        xdg_data
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .deferred_configure = Some(DeferredXdgConfigure::Toplevel {
+            toplevel: toplevel.clone(),
+            width,
+            height,
+            states: encode_xdg_toplevel_states(states),
+            restores_windowed,
+        });
+        return 0;
+    }
     state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
     let serial = state.next_configure_serial;
-    xdg_data
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .pending_configures
-        .push_back(XdgConfigure {
+    if !queue_xdg_configure(
+        &xdg_surface,
+        XdgConfigure {
             serial,
             popup_geometry: None,
             toplevel_size: if width == 0 {
@@ -9128,7 +9380,10 @@ fn queue_toplevel_configure_with_restoration(
                 Some((width, height))
             },
             restores_windowed,
-        });
+        },
+    ) {
+        return 0;
+    }
     toplevel.configure(width, height, encode_xdg_toplevel_states(states));
     xdg_surface.configure(serial);
     serial
@@ -10642,20 +10897,31 @@ fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Opti
         if old_geometry == Some(geometry) {
             continue;
         }
+        if xdg_configure_queue_full(&data.xdg_surface) {
+            if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+                xdg_data
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .deferred_configure = Some(DeferredXdgConfigure::Popup {
+                    popup: popup.clone(),
+                    geometry,
+                });
+            }
+            continue;
+        }
         state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
         let serial = state.next_configure_serial;
-        if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
-            xdg_data
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .pending_configures
-                .push_back(XdgConfigure {
-                    serial,
-                    popup_geometry: Some(geometry),
-                    toplevel_size: None,
-                    restores_windowed: false,
-                });
+        if !queue_xdg_configure(
+            &data.xdg_surface,
+            XdgConfigure {
+                serial,
+                popup_geometry: Some(geometry),
+                toplevel_size: None,
+                restores_windowed: false,
+            },
+        ) {
+            continue;
         }
         popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
         data.xdg_surface.configure(serial);
@@ -11285,26 +11551,10 @@ impl CompositorCore {
         if width <= 0 || height <= 0 {
             return 0;
         }
-        let Some((xdg_surface, toplevel)) = self.focused_xdg_resources() else {
+        let Some((_xdg_surface, toplevel)) = self.focused_xdg_resources() else {
             return 0;
         };
-        let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
-            return 0;
-        };
-        self.state.next_configure_serial = self.state.next_configure_serial.wrapping_add(1).max(1);
-        let serial = self.state.next_configure_serial;
         let (width, height) = constrain_toplevel_configure(&toplevel, width, height);
-        xdg_data
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .pending_configures
-            .push_back(XdgConfigure {
-                serial,
-                popup_geometry: None,
-                toplevel_size: Some((width, height)),
-                restores_windowed: false,
-            });
         let primary = self
             .state
             .primary_toplevel
@@ -11312,9 +11562,7 @@ impl CompositorCore {
             .is_some_and(|candidate| candidate.id() == toplevel.id());
         let states =
             requested_toplevel_states(&toplevel, primary && self.state.tile_toplevels, true);
-        toplevel.configure(width, height, encode_xdg_toplevel_states(&states));
-        xdg_surface.configure(serial);
-        serial
+        queue_toplevel_configure(&mut self.state, &toplevel, width, height, &states)
     }
 
     pub fn focused_pending_configure_count(&self) -> u32 {
@@ -17111,6 +17359,10 @@ mod tests {
     use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1 as client_relative_pointer;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1 as client_cursor_shape_device;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1 as client_cursor_shape_manager;
+    use wayland_protocols::xdg::shell::client::{
+        xdg_surface as client_xdg_surface, xdg_toplevel as client_xdg_toplevel,
+        xdg_wm_base as client_xdg_wm_base,
+    };
 
     #[derive(Default)]
     struct PointerProtocolClient {
@@ -17121,6 +17373,7 @@ mod tests {
         relative_motion: Option<(f64, f64)>,
         pointer_motion: Option<(f64, f64)>,
         pointer_enter_serial: u32,
+        xdg_configure_serial: u32,
     }
 
     impl wayland_client::Dispatch<client_wl_registry::WlRegistry, GlobalListContents>
@@ -17146,6 +17399,8 @@ mod tests {
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_callback::WlCallback);
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_subcompositor::WlSubcompositor);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_subsurface::WlSubsurface);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_xdg_wm_base::XdgWmBase);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_xdg_toplevel::XdgToplevel);
     wayland_client::delegate_noop!(
         PointerProtocolClient: ignore client_wl_region::WlRegion
     );
@@ -17231,6 +17486,21 @@ mod tests {
                     state.pointer_motion = Some((surface_x, surface_y));
                 }
                 _ => {}
+            }
+        }
+    }
+
+    impl wayland_client::Dispatch<client_xdg_surface::XdgSurface, ()> for PointerProtocolClient {
+        fn event(
+            state: &mut Self,
+            _proxy: &client_xdg_surface::XdgSurface,
+            event: client_xdg_surface::Event,
+            _data: &(),
+            _connection: &Connection,
+            _queue: &QueueHandle<Self>,
+        ) {
+            if let client_xdg_surface::Event::Configure { serial } = event {
+                state.xdg_configure_serial = serial;
             }
         }
     }
@@ -17689,6 +17959,507 @@ mod tests {
         stage.store(9, Ordering::Release);
 
         server.join().expect("callback-limit server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn pending_protocol_queues_remain_bounded_and_reusable() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-pending-queue-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 23 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pending-queue server timed out"
+                );
+                core.dispatch_once().expect("dispatch pending-queue clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 => {
+                        let pending_below = core
+                            .state
+                            .surfaces
+                            .iter()
+                            .filter_map(|surface| surface.data::<SurfaceData>())
+                            .map(|data| {
+                                data.inner
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .pending_subsurface_order
+                                    .as_ref()
+                                    .map_or(0, |pending| pending.children_below.len())
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        let pending_total = core
+                            .state
+                            .surfaces
+                            .iter()
+                            .filter_map(|surface| surface.data::<SurfaceData>())
+                            .map(|data| {
+                                data.inner
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .pending_subsurface_order
+                                    .as_ref()
+                                    .map_or(0, |pending| {
+                                        pending.children_below.len()
+                                            + pending.children_above.len()
+                                    })
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        let sibling_ordered = core
+                            .state
+                            .surfaces
+                            .iter()
+                            .filter_map(|surface| surface.data::<SurfaceData>())
+                            .any(|data| {
+                                let surface = data
+                                    .inner
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner());
+                                surface.pending_subsurface_order.as_ref().is_some_and(|pending| {
+                                    pending.children_below.len() == 2
+                                        && pending.children_below[0].id().protocol_id()
+                                            > pending.children_below[1].id().protocol_id()
+                                })
+                            });
+                        if pending_below == 2 && pending_total == 2 && sibling_ordered {
+                            server_stage.store(2, Ordering::Release);
+                        }
+                    }
+                    3 => {
+                        let applied = {
+                            core.state
+                                .surfaces
+                                .iter()
+                                .filter_map(|surface| surface.data::<SurfaceData>())
+                                .any(|data| {
+                                let surface = data
+                                    .inner
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner());
+                                surface.pending_subsurface_order.is_none()
+                                    && surface.children_below.len() == 2
+                                    && surface.children_above.is_empty()
+                                    && surface.children_below[0].id().protocol_id()
+                                        > surface.children_below[1].id().protocol_id()
+                                })
+                        };
+                        if applied {
+                            server_stage.store(4, Ordering::Release);
+                        }
+                    }
+                    5 if core.state.surface_count == 0 => {
+                        assert_eq!(core.state.subsurface_count, 0);
+                        core.state.surfaces.retain(|surface| surface.is_alive());
+                        assert!(core.state.surfaces.is_empty());
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 | 17 => {
+                        let pending = core
+                            .state
+                            .toplevels
+                            .iter()
+                            .filter_map(|toplevel| {
+                                toplevel
+                                    .data::<XdgToplevelData>()?
+                                    .xdg_surface
+                                    .data::<XdgSurfaceData>()
+                            })
+                            .map(|data| {
+                                data.state
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .pending_configures
+                                    .len()
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        if pending == MAX_PENDING_XDG_CONFIGURES {
+                            server_stage.store(
+                                if server_stage.load(Ordering::Acquire) == 7 {
+                                    8
+                                } else {
+                                    18
+                                },
+                                Ordering::Release,
+                            );
+                        }
+                    }
+                    9 => {
+                        let toplevel = core
+                            .state
+                            .toplevels
+                            .iter()
+                            .find(|toplevel| toplevel.is_alive())
+                            .cloned()
+                            .expect("deferred-configure toplevel");
+                        assert_eq!(
+                            queue_toplevel_configure(
+                                &mut core.state,
+                                &toplevel,
+                                333,
+                                222,
+                                &[],
+                            ),
+                            0
+                        );
+                        assert_eq!(
+                            queue_toplevel_configure(
+                                &mut core.state,
+                                &toplevel,
+                                444,
+                                277,
+                                &[],
+                            ),
+                            0
+                        );
+                        let deferred = toplevel
+                            .data::<XdgToplevelData>()
+                            .and_then(|data| data.xdg_surface.data::<XdgSurfaceData>())
+                            .is_some_and(|data| {
+                                let state = data
+                                    .state
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner());
+                                state.has_pending_toplevel_size(444, 277)
+                                    && !state.has_pending_toplevel_size(333, 222)
+                            });
+                        assert!(deferred);
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 => {
+                        let pending = core
+                            .state
+                            .toplevels
+                            .iter()
+                            .filter_map(|toplevel| {
+                                toplevel
+                                    .data::<XdgToplevelData>()?
+                                    .xdg_surface
+                                    .data::<XdgSurfaceData>()
+                            })
+                            .map(|data| {
+                                data.state
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .pending_configures
+                                    .len()
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        let latest_size = core
+                            .state
+                            .toplevels
+                            .iter()
+                            .filter_map(|toplevel| {
+                                toplevel
+                                    .data::<XdgToplevelData>()?
+                                    .xdg_surface
+                                    .data::<XdgSurfaceData>()
+                            })
+                            .find_map(|data| {
+                                data.state
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .pending_configures
+                                    .back()
+                                    .and_then(|configure| configure.toplevel_size)
+                            });
+                        if pending == 1 && latest_size == Some((444, 277)) {
+                            server_stage.store(12, Ordering::Release);
+                        }
+                    }
+                    13 => {
+                        let pending = core
+                            .state
+                            .toplevels
+                            .iter()
+                            .filter_map(|toplevel| {
+                                toplevel
+                                    .data::<XdgToplevelData>()?
+                                    .xdg_surface
+                                    .data::<XdgSurfaceData>()
+                            })
+                            .map(|data| {
+                                data.state
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .pending_configures
+                                    .len()
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        if pending == 0 {
+                            server_stage.store(14, Ordering::Release);
+                        }
+                    }
+                    15 if core.state.surface_count == 0 && core.state.xdg_surface_count == 0 => {
+                        core.state.surfaces.retain(|surface| surface.is_alive());
+                        core.state.toplevels.retain(|toplevel| toplevel.is_alive());
+                        assert!(core.state.surfaces.is_empty());
+                        assert!(core.state.toplevels.is_empty());
+                        server_stage.store(16, Ordering::Release);
+                    }
+                    19 if core.state.surface_count == 0 && core.state.xdg_surface_count == 0 => {
+                        core.state.surfaces.retain(|surface| surface.is_alive());
+                        core.state.toplevels.retain(|toplevel| toplevel.is_alive());
+                        assert!(core.state.surfaces.is_empty());
+                        assert!(core.state.toplevels.is_empty());
+                        server_stage.store(20, Ordering::Release);
+                    }
+                    21 if core.state.presentation_callbacks.len() == 1 => {
+                        assert_eq!(core.present_frame(29), 1);
+                        server_stage.store(22, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting pending-queue client"
+                );
+                match UnixStream::connect(&socket) {
+                Ok(stream) => break Connection::from_socket(stream).expect("client connection"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    std::thread::yield_now();
+                }
+                    Err(error) => panic!("connect pending-queue client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for pending-queue stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let stack_connection = connect();
+        let (stack_globals, mut stack_events) =
+            registry_queue_init::<PointerProtocolClient>(&stack_connection)
+                .expect("stack-limit registry");
+        let stack_queue = stack_events.handle();
+        let stack_compositor = stack_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&stack_queue, 1..=6, ())
+            .expect("stack-limit compositor");
+        let stack_subcompositor = stack_globals
+            .bind::<client_wl_subcompositor::WlSubcompositor, _, _>(&stack_queue, 1..=1, ())
+            .expect("stack-limit subcompositor");
+        let stack_parent = stack_compositor.create_surface(&stack_queue, ());
+        let stack_child_a = stack_compositor.create_surface(&stack_queue, ());
+        let stack_child_b = stack_compositor.create_surface(&stack_queue, ());
+        let stack_subsurface_a = stack_subcompositor.get_subsurface(
+            &stack_child_a,
+            &stack_parent,
+            &stack_queue,
+            (),
+        );
+        let stack_subsurface_b = stack_subcompositor.get_subsurface(
+            &stack_child_b,
+            &stack_parent,
+            &stack_queue,
+            (),
+        );
+        for _ in 0..1_024 {
+            stack_subsurface_a.place_below(&stack_parent);
+            stack_subsurface_b.place_below(&stack_child_a);
+            stack_subsurface_a.place_above(&stack_child_b);
+        }
+        stack_connection.flush().expect("flush bounded stack requests");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        stack_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("stack request coalescing keeps client connected");
+        stack_parent.commit();
+        stack_connection.flush().expect("flush stack parent commit");
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+        stack_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("applied stack order keeps client connected");
+        stack_subsurface_a.place_above(&stack_parent);
+        stack_subsurface_b.place_above(&stack_child_a);
+        stack_parent.commit();
+        stack_connection
+            .flush()
+            .expect("flush recycled stack snapshot");
+        stack_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("recycled stack snapshot preserves sibling order");
+        stack_subsurface_a.place_below(&stack_child_b);
+        stack_subsurface_b.destroy();
+        stack_child_b.destroy();
+        stack_parent.commit();
+        stack_connection
+            .flush()
+            .expect("flush destroyed pending sibling");
+        stack_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("destroyed pending sibling is removed safely");
+        drop(stack_subsurface_a);
+        drop(stack_subsurface_b);
+        drop(stack_child_a);
+        drop(stack_child_b);
+        drop(stack_parent);
+        drop(stack_subcompositor);
+        drop(stack_compositor);
+        drop(stack_events);
+        drop(stack_connection);
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+
+        let configure_connection = connect();
+        let (configure_globals, mut configure_events) =
+            registry_queue_init::<PointerProtocolClient>(&configure_connection)
+                .expect("configure-limit registry");
+        let configure_queue = configure_events.handle();
+        let configure_compositor = configure_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&configure_queue, 1..=6, ())
+            .expect("configure-limit compositor");
+        let configure_wm_base = configure_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&configure_queue, 1..=6, ())
+            .expect("configure-limit xdg_wm_base");
+        let configure_surface = configure_compositor.create_surface(&configure_queue, ());
+        let configure_xdg_surface =
+            configure_wm_base.get_xdg_surface(&configure_surface, &configure_queue, ());
+        let configure_toplevel = configure_xdg_surface.get_toplevel(&configure_queue, ());
+        configure_surface.commit();
+        configure_connection
+            .flush()
+            .expect("flush initial configure");
+        let mut configure_client = PointerProtocolClient::default();
+        configure_events
+            .roundtrip(&mut configure_client)
+            .expect("receive initial configure");
+        for _ in 1..MAX_PENDING_XDG_CONFIGURES {
+            configure_toplevel.set_maximized();
+        }
+        configure_connection
+            .flush()
+            .expect("flush exact configure limit");
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        configure_events
+            .roundtrip(&mut configure_client)
+            .expect("exact configure limit remains connected");
+        assert_ne!(configure_client.xdg_configure_serial, 0);
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+        configure_events
+            .roundtrip(&mut configure_client)
+            .expect("configure backpressure keeps client connected");
+        configure_xdg_surface.ack_configure(configure_client.xdg_configure_serial);
+        configure_connection.flush().expect("flush configure ack");
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        configure_events
+            .roundtrip(&mut configure_client)
+            .expect("receive automatically deferred configure");
+        configure_xdg_surface.ack_configure(configure_client.xdg_configure_serial);
+        configure_connection
+            .flush()
+            .expect("flush deferred configure ack");
+        stage.store(13, Ordering::Release);
+        wait_for_stage(14);
+        drop(configure_toplevel);
+        drop(configure_xdg_surface);
+        drop(configure_surface);
+        drop(configure_wm_base);
+        drop(configure_compositor);
+        drop(configure_events);
+        drop(configure_connection);
+        stage.store(15, Ordering::Release);
+        wait_for_stage(16);
+
+        let overflow_connection = connect();
+        let (overflow_globals, mut overflow_events) =
+            registry_queue_init::<PointerProtocolClient>(&overflow_connection)
+                .expect("configure-overflow registry");
+        let overflow_queue = overflow_events.handle();
+        let overflow_compositor = overflow_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&overflow_queue, 1..=6, ())
+            .expect("configure-overflow compositor");
+        let overflow_wm_base = overflow_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&overflow_queue, 1..=6, ())
+            .expect("configure-overflow xdg_wm_base");
+        let overflow_surface = overflow_compositor.create_surface(&overflow_queue, ());
+        let overflow_xdg_surface =
+            overflow_wm_base.get_xdg_surface(&overflow_surface, &overflow_queue, ());
+        let overflow_toplevel = overflow_xdg_surface.get_toplevel(&overflow_queue, ());
+        overflow_surface.commit();
+        overflow_connection
+            .flush()
+            .expect("flush overflow initial configure");
+        overflow_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("receive overflow initial configure");
+        for _ in 1..MAX_PENDING_XDG_CONFIGURES {
+            overflow_toplevel.set_maximized();
+        }
+        overflow_connection
+            .flush()
+            .expect("flush exact overflow boundary");
+        stage.store(17, Ordering::Release);
+        wait_for_stage(18);
+        overflow_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact overflow boundary remains connected");
+        overflow_toplevel.unset_maximized();
+        overflow_connection
+            .flush()
+            .expect("flush configure overflow");
+        assert!(
+            overflow_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "configure 65 must disconnect the resource-exhausting client"
+        );
+        stage.store(19, Ordering::Release);
+        wait_for_stage(20);
+
+        let healthy_connection = connect();
+        let (healthy_globals, _healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy registry");
+        let healthy_queue = _healthy_events.handle();
+        let healthy_compositor = healthy_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&healthy_queue, 1..=6, ())
+            .expect("healthy compositor");
+        let healthy_surface = healthy_compositor.create_surface(&healthy_queue, ());
+        let _healthy_callback = healthy_surface.frame(&healthy_queue, ());
+        healthy_surface.commit();
+        healthy_connection.flush().expect("flush healthy callback");
+        stage.store(21, Ordering::Release);
+        wait_for_stage(22);
+        stage.store(23, Ordering::Release);
+
+        server.join().expect("pending-queue server");
         assert!(!socket.exists());
     }
 

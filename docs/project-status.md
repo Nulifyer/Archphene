@@ -3191,6 +3191,25 @@ reconnects to the same compositor, commits, and has its callback presented. The
 full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
 Android probes pass.
 
+Pending subsurface order and XDG configure state are also bounded without
+discarding compositor state. Repeated `place_above` and `place_below` requests
+update one final-order snapshot containing only the parent's bounded child
+surfaces. A parent commit applies that snapshot, the old vectors become
+reusable storage, and subsurface or surface destruction removes stale children
+from committed and pending order. Each XDG surface retains at most 64 sent,
+unacknowledged configures and one latest-wins deferred compositor configure.
+Acknowledging a valid serial drains it and every predecessor, then immediately
+sends the deferred configure. Deferred output sizes remain visible to layout
+and input mapping while backpressured. A client request that would exceed the
+64-configure boundary is rejected by disconnecting only that client before its
+requested window state changes. A real protocol fixture applies 3,072
+sibling-relative order requests, crosses above/below lists, reuses the retained
+snapshot, destroys a referenced pending sibling, saturates the configure
+boundary, replaces deferred state twice, acknowledges and receives the latest
+state automatically, verifies cleanup after overflow, and presents a callback
+for a final healthy client. The full workspace and strict Clippy gates plus
+rebuilt exact x86_64 and AArch64 Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
