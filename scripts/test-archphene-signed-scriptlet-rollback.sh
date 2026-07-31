@@ -8,6 +8,7 @@ old_archive=
 old_signature=
 old_version=
 new_version=
+install_apk=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
@@ -16,8 +17,9 @@ while (($#)); do
     --old-signature) old_signature="${2:?missing value for --old-signature}"; shift 2 ;;
     --old-version) old_version="${2:?missing value for --old-version}"; shift 2 ;;
     --new-version) new_version="${2:?missing value for --new-version}"; shift 2 ;;
+    --install-apk) install_apk=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --old-archive PATH --old-signature PATH --old-version VERSION --new-version VERSION"
+      echo "usage: $0 --serial SERIAL --apk PATH --old-archive PATH --old-signature PATH --old-version VERSION --new-version VERSION [--install-apk]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -60,6 +62,10 @@ script_path="$root/$script_file"
 run_id="$RANDOM-$RANDOM-$$"
 backup_root="files/test-fixtures/signed-scriptlet-rollback-$serial-$run_id"
 script_backup="$backup_root/shells"
+job_store="$root/var/lib/archphene/package-jobs.v1"
+job_backup="$backup_root/package-jobs.v1"
+recovery_preferences=shared_prefs/package_recovery.xml
+recovery_backup="$backup_root/package-recovery.xml"
 output_dir="$ARCHPHENE_ROOT/tooling/build/signed-scriptlet-rollback/$serial"
 mkdir -p "$output_dir"
 
@@ -105,7 +111,25 @@ for payload in "$pacman_payload" "$gpgv_payload" "$bsdtar_payload"; do
     archphene_die "APK package-runtime manifest is invalid"
 done
 
-archphene_adb_run install -r "$apk" >/dev/null
+manager_was_running=false
+if archphene_android_pid "$manager" >/dev/null 2>&1; then
+  manager_was_running=true
+fi
+early_setup=true
+restore_early_lifecycle() {
+  local status=$?
+  trap - EXIT
+  if [[ "$early_setup" == true && "$manager_was_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+trap restore_early_lifecycle EXIT
+if [[ "$install_apk" == true ]]; then
+  archphene_adb_run install -r "$apk" >/dev/null
+fi
+archphene_adb_run shell pm path "$manager" >/dev/null ||
+  archphene_die "$manager is not installed; pass --install-apk"
 app_root="$(
   archphene_adb_run exec-out run-as "$manager" pwd 2>/dev/null | tr -d '\r'
 )"
@@ -188,6 +212,13 @@ old_signature_temporary_owned=false
 backup_root_owned=false
 backup_ready=false
 backup_hash=
+job_existed=false
+job_snapshot_ready=false
+job_hash=
+recovery_existed=false
+recovery_snapshot_ready=false
+recovery_hash=
+original_section=
 runtime_ready=false
 mutation_started=false
 current_archive=
@@ -197,6 +228,7 @@ current_reason_flag=
 cleanup() {
   local status=$?
   local cleanup_failed=false
+  local actual_hash=
   local -a temporaries=()
   set +e
   archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1
@@ -218,6 +250,62 @@ cleanup() {
       printf 'error: could not restore %s during cleanup\n' "$script_file" >&2
     fi
   fi
+  if [[ "$job_snapshot_ready" == true ]]; then
+    if [[ "$job_existed" == true ]]; then
+      if ! archphene_adb_run shell run-as "$manager" cp -p \
+          "$job_backup" "$job_store" >/dev/null 2>&1; then
+        cleanup_failed=true
+        printf 'error: could not restore package job state\n' >&2
+      fi
+    elif ! archphene_adb_run shell run-as "$manager" rm -f \
+        "$job_store" >/dev/null 2>&1; then
+      cleanup_failed=true
+    fi
+  fi
+  if [[ "$recovery_snapshot_ready" == true ]]; then
+    if [[ "$recovery_existed" == true ]]; then
+      if ! archphene_adb_run shell run-as "$manager" cp -p \
+          "$recovery_backup" "$recovery_preferences" >/dev/null 2>&1; then
+        cleanup_failed=true
+        printf 'error: could not restore package recovery preferences\n' >&2
+      fi
+    elif ! archphene_adb_run shell run-as "$manager" rm -f \
+        "$recovery_preferences" >/dev/null 2>&1; then
+      cleanup_failed=true
+    fi
+  fi
+  if [[ "$job_existed" == true ]]; then
+    actual_hash="$(
+      archphene_adb_run exec-out run-as "$manager" sha256sum "$job_store" \
+        2>/dev/null |
+        tr -d '\r' |
+        awk '{print $1}'
+    )"
+    if [[ "$actual_hash" != "$job_hash" ]]; then
+      cleanup_failed=true
+      printf 'error: restored package job state has the wrong digest\n' >&2
+    fi
+  elif [[ "$job_snapshot_ready" == true ]] &&
+      archphene_adb_run shell run-as "$manager" test -e "$job_store"; then
+    cleanup_failed=true
+    printf 'error: cleanup retained a new package job store\n' >&2
+  fi
+  if [[ "$recovery_existed" == true ]]; then
+    actual_hash="$(
+      archphene_adb_run exec-out run-as "$manager" \
+        sha256sum "$recovery_preferences" 2>/dev/null |
+        tr -d '\r' |
+        awk '{print $1}'
+    )"
+    if [[ "$actual_hash" != "$recovery_hash" ]]; then
+      cleanup_failed=true
+      printf 'error: restored recovery preferences have the wrong digest\n' >&2
+    fi
+  elif [[ "$recovery_snapshot_ready" == true ]] &&
+      archphene_adb_run shell run-as "$manager" test -e "$recovery_preferences"; then
+    cleanup_failed=true
+    printf 'error: cleanup retained new recovery preferences\n' >&2
+  fi
   if [[ "$introduced_archive" == true ]]; then
     if ! archphene_adb_run shell run-as "$manager" rm -f \
         "$cache/$old_archive_name" >/dev/null 2>&1 ||
@@ -238,7 +326,7 @@ cleanup() {
   fi
   if [[ "$backup_root_owned" == true ]]; then
     archphene_adb_run shell run-as "$manager" rm -f \
-      "$script_backup" >/dev/null 2>&1
+      "$script_backup" "$job_backup" "$recovery_backup" >/dev/null 2>&1
     if ! archphene_adb_run shell run-as "$manager" rmdir \
         "$backup_root" >/dev/null 2>&1 ||
         archphene_adb_run shell run-as "$manager" test -e "$backup_root"; then
@@ -259,12 +347,45 @@ cleanup() {
       printf 'error: could not remove staging file %s\n' "$temporary" >&2
     fi
   done
+  if [[ -n "$original_section" ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1
+    sleep 1
+    local ui center x y
+    ui="$(archphene_capture_ui "scriptlet-restore-$serial" 2>/dev/null || true)"
+    center="$(
+      archphene_ui_node_center \
+        "$ui" \
+        "text=\"$original_section\"[^>]*class=\"android\\.widget\\.Button\"" \
+        "$original_section" 2>/dev/null || true
+    )"
+    if [[ "$center" =~ ^[0-9]+[[:space:]][0-9]+$ ]]; then
+      read -r x y <<<"$center"
+      archphene_adb_run shell input tap "$x" "$y" >/dev/null 2>&1
+      sleep 1
+      ui="$(archphene_capture_ui "scriptlet-restored-$serial" 2>/dev/null || true)"
+      if ! archphene_regex_contains "$ui" \
+          "text=\"$original_section\"[^>]*selected=\"true\""; then
+        cleanup_failed=true
+        printf 'error: manager section %s did not restore\n' "$original_section" >&2
+      fi
+    else
+      cleanup_failed=true
+      printf 'error: could not restore manager section %s\n' "$original_section" >&2
+    fi
+  elif [[ "$manager_was_running" == true ]]; then
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null 2>&1 ||
+      cleanup_failed=true
+  fi
+  if [[ "$manager_was_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1
+  fi
   trap - EXIT
   if [[ "$cleanup_failed" == true && "$status" == 0 ]]; then
     status=1
   fi
   exit "$status"
 }
+early_setup=false
 trap cleanup EXIT
 
 archphene_adb_run shell am force-stop "$manager" >/dev/null
@@ -272,6 +393,22 @@ archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
 runtime_ready=true
+initial_ui="$(archphene_capture_ui "scriptlet-initial-$serial")"
+original_section="$(
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+for name in ("Packages", "Files", "Terminal", "Settings"):
+    if re.search(
+        rf"text=\"{name}\"[^>]*class=\"android\.widget\.Button\"[^>]*selected=\"true\"",
+        text,
+    ):
+        print(name)
+        break
+' <<<"$initial_ui"
+)"
+[[ -n "$original_section" ]] ||
+  archphene_die "could not determine the original manager section"
 
 for residue in \
   "$intent" "$reason_intent" "$database_repair" "$replacement_repair" "$database_lock"; do
@@ -312,6 +449,28 @@ archphene_adb_run shell run-as "$manager" mkdir "$backup_root"
 backup_root_owned=true
 archphene_adb_run shell run-as "$manager" cp -p "$script_path" "$script_backup"
 backup_ready=true
+if archphene_adb_run shell run-as "$manager" test -f "$job_store"; then
+  job_existed=true
+  archphene_adb_run shell run-as "$manager" cp -p "$job_store" "$job_backup"
+  job_hash="$(
+    archphene_adb_run exec-out run-as "$manager" sha256sum "$job_backup" |
+      tr -d '\r' |
+      awk '{print $1}'
+  )"
+fi
+job_snapshot_ready=true
+if archphene_adb_run shell run-as "$manager" test -f "$recovery_preferences"; then
+  recovery_existed=true
+  archphene_adb_run shell run-as "$manager" cp -p \
+    "$recovery_preferences" "$recovery_backup"
+  recovery_hash="$(
+    archphene_adb_run exec-out run-as "$manager" \
+      sha256sum "$recovery_backup" |
+      tr -d '\r' |
+      awk '{print $1}'
+  )"
+fi
+recovery_snapshot_ready=true
 backup_without_script_hash="$(
   archphene_adb_run exec-out run-as "$manager" cat "$script_backup" |
     grep -Fvx "$script_line" |

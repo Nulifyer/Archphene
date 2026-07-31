@@ -89,7 +89,9 @@ the normal update after commit, exposes Repair and Roll back, restores the older
 archive, and proves its `post_upgrade` script restores `/usr/bin/zsh` exactly
 once without changing unrelated `/etc/shells` content. It preserves the install
 reason, clears transaction residue, restores current `zsh` 5.9.2-1, and retains
-full-device evidence under
+the exact prior package job/recovery state, manager section/lifecycle, and
+test-owned cache/staging state. APK replacement requires `--install-apk`;
+the validated default run used the installed manager. Full-device evidence is under
 `tooling/build/signed-scriptlet-rollback/emulator-5554`.
 
 Graphical Linux sessions now retain the same Android foreground-service
