@@ -146,6 +146,8 @@ const MAX_REGIONS_PER_CLIENT: usize = 64;
 const MAX_REGIONS_TOTAL: usize = 128;
 const MAX_OUTPUTS_PER_CLIENT: usize = 1;
 const MAX_OUTPUTS_TOTAL: usize = MAX_WAYLAND_CLIENTS;
+const MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT: usize = 8;
+const MAX_CURSOR_SHAPE_DEVICES_TOTAL: usize = 16;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -550,6 +552,7 @@ pub struct CompositorState {
     cursor_hotspot_y: i32,
     cursor_system_icon: i32,
     cursor_change_serial: u32,
+    cursor_shape_devices: Vec<WpCursorShapeDeviceV1>,
     touches: Vec<WlTouch>,
     active_touches: Vec<ActiveTouch>,
     touch_event_count: u32,
@@ -7710,12 +7713,12 @@ impl GlobalDispatch<WpCursorShapeManagerV1, ()> for CompositorState {
 
 impl Dispatch<WpCursorShapeManagerV1, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
-        _client: &Client,
-        _resource: &WpCursorShapeManagerV1,
+        state: &mut Self,
+        client: &Client,
+        resource: &WpCursorShapeManagerV1,
         request: wp_cursor_shape_manager_v1::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -7724,23 +7727,57 @@ impl Dispatch<WpCursorShapeManagerV1, ()> for CompositorState {
                 cursor_shape_device,
                 pointer,
             } => {
-                data_init.init(
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.cursor_shape_devices, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT,
+                    MAX_CURSOR_SHAPE_DEVICES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained cursor-shape device limit exceeded",
+                    );
+                    return;
+                }
+                let device = data_init.init(
                     cursor_shape_device,
                     CursorShapeDeviceData {
                         target: CursorShapeTarget::Pointer(pointer),
                     },
                 );
+                state.cursor_shape_devices.push(device);
             }
             wp_cursor_shape_manager_v1::Request::GetTabletToolV2 {
                 cursor_shape_device,
                 ..
             } => {
-                data_init.init(
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.cursor_shape_devices, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT,
+                    MAX_CURSOR_SHAPE_DEVICES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained cursor-shape device limit exceeded",
+                    );
+                    return;
+                }
+                let device = data_init.init(
                     cursor_shape_device,
                     CursorShapeDeviceData {
                         target: CursorShapeTarget::Tablet,
                     },
                 );
+                state.cursor_shape_devices.push(device);
             }
             _ => unreachable!("cursor-shape manager request added without an implementation"),
         }
@@ -7788,6 +7825,17 @@ impl Dispatch<WpCursorShapeDeviceV1, CursorShapeDeviceData> for CompositorState 
             }
             _ => unreachable!("cursor-shape device request added without an implementation"),
         }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WpCursorShapeDeviceV1,
+        _data: &CursorShapeDeviceData,
+    ) {
+        state
+            .cursor_shape_devices
+            .retain(|device| device.id() != resource.id());
     }
 }
 
@@ -21745,6 +21793,271 @@ mod tests {
         stage.store(13, Ordering::Release);
 
         server.join().expect("positioner-resource server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn cursor_shape_device_limits_release_and_preserve_independent_clients() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-cursor-device-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 13 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cursor-device server timed out"
+                );
+                core.dispatch_once().expect("dispatch cursor-device clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.cursor_shape_devices.len()
+                        == MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT =>
+                    {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.cursor_shape_devices.is_empty()
+                        && core.state.pointers.is_empty() =>
+                    {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.cursor_shape_devices.len()
+                        == MAX_CURSOR_SHAPE_DEVICES_TOTAL =>
+                    {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.cursor_shape_devices.len()
+                        == MAX_CURSOR_SHAPE_DEVICES_TOTAL =>
+                    {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.cursor_shape_devices.is_empty()
+                        && core.state.pointers.is_empty() =>
+                    {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.cursor_shape_devices.len() == 1 => {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting cursor-device client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("cursor-device connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect cursor-device client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for cursor-device stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let limit_connection = connect();
+        let (limit_globals, mut limit_events) =
+            registry_queue_init::<PointerProtocolClient>(&limit_connection)
+                .expect("cursor-device per-client registry");
+        let limit_queue = limit_events.handle();
+        let limit_seat = limit_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&limit_queue, 1..=9, ())
+            .expect("cursor-device per-client seat");
+        let limit_pointer = limit_seat.get_pointer(&limit_queue, ());
+        let limit_manager = limit_globals
+            .bind::<client_cursor_shape_manager::WpCursorShapeManagerV1, _, _>(
+                &limit_queue,
+                1..=2,
+                (),
+            )
+            .expect("cursor-device per-client manager");
+        let mut devices = (0..MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT)
+            .map(|_| limit_manager.get_pointer(&limit_pointer, &limit_queue, ()))
+            .collect::<Vec<_>>();
+        limit_connection
+            .flush()
+            .expect("flush exact cursor-device limit");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact cursor-device limit remains connected");
+        devices
+            .pop()
+            .expect("cursor device to recycle")
+            .destroy();
+        limit_connection
+            .flush()
+            .expect("flush cursor-device destroy");
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("cursor-device destroy frees capacity");
+        devices.push(limit_manager.get_pointer(&limit_pointer, &limit_queue, ()));
+        limit_connection
+            .flush()
+            .expect("flush replacement cursor device");
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("cursor-device capacity is reusable");
+        let _overflow_device = limit_manager.get_pointer(&limit_pointer, &limit_queue, ());
+        limit_connection
+            .flush()
+            .expect("flush per-client cursor-device overflow");
+        assert!(
+            limit_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "cursor-shape device 9 must disconnect its client"
+        );
+        drop((
+            devices,
+            limit_manager,
+            limit_pointer,
+            limit_seat,
+            limit_globals,
+            limit_events,
+            limit_connection,
+        ));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let mut holders = Vec::new();
+        for _ in 0..MAX_CURSOR_SHAPE_DEVICES_TOTAL / MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT {
+            let connection = connect();
+            let (globals, events) = registry_queue_init::<PointerProtocolClient>(&connection)
+                .expect("global cursor-device holder registry");
+            let queue = events.handle();
+            let seat = globals
+                .bind::<client_wl_seat::WlSeat, _, _>(&queue, 1..=9, ())
+                .expect("global cursor-device holder seat");
+            let pointer = seat.get_pointer(&queue, ());
+            let manager = globals
+                .bind::<client_cursor_shape_manager::WpCursorShapeManagerV1, _, _>(
+                    &queue,
+                    1..=2,
+                    (),
+                )
+                .expect("global cursor-device holder manager");
+            let holder_devices = (0..MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT)
+                .map(|_| manager.get_pointer(&pointer, &queue, ()))
+                .collect::<Vec<_>>();
+            connection
+                .flush()
+                .expect("flush global cursor-device holder");
+            holders.push((connection, globals, events, seat, pointer, manager, holder_devices));
+        }
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        for (_, _, events, _, _, _, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("global cursor-device holder remains connected");
+        }
+
+        let overflow_connection = connect();
+        let (overflow_globals, mut overflow_events) =
+            registry_queue_init::<PointerProtocolClient>(&overflow_connection)
+                .expect("global cursor-device overflow registry");
+        let overflow_queue = overflow_events.handle();
+        let overflow_seat = overflow_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&overflow_queue, 1..=9, ())
+            .expect("global cursor-device overflow seat");
+        let overflow_pointer = overflow_seat.get_pointer(&overflow_queue, ());
+        let overflow_manager = overflow_globals
+            .bind::<client_cursor_shape_manager::WpCursorShapeManagerV1, _, _>(
+                &overflow_queue,
+                1..=2,
+                (),
+            )
+            .expect("global cursor-device overflow manager");
+        let _overflow_device =
+            overflow_manager.get_pointer(&overflow_pointer, &overflow_queue, ());
+        overflow_connection
+            .flush()
+            .expect("flush global cursor-device overflow");
+        assert!(
+            overflow_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "cursor-shape device 17 must disconnect only its client"
+        );
+        drop((
+            overflow_manager,
+            overflow_pointer,
+            overflow_seat,
+            overflow_globals,
+            overflow_events,
+            overflow_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        for (_, _, events, _, _, _, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("cursor-device holder survives another client's overflow");
+        }
+        drop(holders);
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+
+        let healthy_connection = connect();
+        let (healthy_globals, mut healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy cursor-device registry");
+        let healthy_queue = healthy_events.handle();
+        let healthy_seat = healthy_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&healthy_queue, 1..=9, ())
+            .expect("healthy cursor-device seat");
+        let healthy_pointer = healthy_seat.get_pointer(&healthy_queue, ());
+        let healthy_manager = healthy_globals
+            .bind::<client_cursor_shape_manager::WpCursorShapeManagerV1, _, _>(
+                &healthy_queue,
+                1..=2,
+                (),
+            )
+            .expect("healthy cursor-device manager");
+        let _healthy_device =
+            healthy_manager.get_pointer(&healthy_pointer, &healthy_queue, ());
+        healthy_connection
+            .flush()
+            .expect("flush healthy cursor device");
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("healthy cursor-device client remains connected");
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        stage.store(13, Ordering::Release);
+
+        server.join().expect("cursor-device server");
         assert!(!socket.exists());
     }
 

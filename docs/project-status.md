@@ -3303,6 +3303,17 @@ holder, verifies complete cleanup, and creates a final healthy positioner. The
 full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
 Android probes pass.
 
+Cursor-shape protocol devices are also bounded. One client may retain eight
+`wp_cursor_shape_device_v1` objects and the compositor may retain 16 across
+pointer and tablet targets. Both manager creation requests use the same retained
+resource quota. Explicit destruction restores capacity immediately, and client
+disconnect removes every owned device. A real pointer-protocol fixture holds the
+exact per-client boundary, destroys and replaces one device, rejects device
+nine, uses two independent clients to saturate the global boundary, rejects
+device 17 without disconnecting either holder, verifies complete cleanup, and
+creates a final healthy device. The full workspace and strict Clippy gates plus
+rebuilt exact x86_64 and AArch64 Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
