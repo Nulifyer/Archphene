@@ -3109,9 +3109,12 @@ desynchronization releases through the protocol, verifies callback publication
 and retained callback-queue capacity, then invokes the same release path 1,000
 warmed times while recycling cached damage, one live frame callback, the
 compositor traversal stack, and callback and damage queue capacity. That
-measured release step also performs zero allocations. It does not claim zero
-allocation for synchronized frame detachment or the remaining full Android
-presentation copy.
+measured release step also performs zero allocations. The retained-SHM gate now
+also patches an already-detached synchronized cache 1,000 times through the
+production `SurfaceState` ownership decision without changing the visible
+committed raster or allocating. The first pending synchronized snapshot still
+requires semantic detachment from visible content. The remaining full Android
+presentation copy is outside these claims.
 Exact Android performance soaks remain local until a maintained physical-device
 runner is available.
 
@@ -3134,8 +3137,14 @@ capacity, and drains presented callbacks without discarding queue capacity. A
 real Wayland parent/child fixture first drives both
 release triggers through the protocol, then invokes the same warmed release path
 1,000 times with cached damage and a live callback and measures zero allocations
-on the test thread. Synchronized frame detachment and the full
-Android presentation copy remain open. Rebuilt exact x86_64 and AArch64
+on the test thread. An already-detached synchronized raster is also reusable
+across additional cached commits: the ownership check follows transform and
+viewport source chains, preserves the visible committed raster byte-exact, and
+disables in-place mutation after publication. The warmed gate performs this
+production cache-state decision and retained patch for 1,000 iterations with
+zero measured allocations. The first pending synchronized snapshot remains
+intentionally detached, and the full Android presentation copy remains open.
+Rebuilt exact x86_64 and AArch64
 compositor probes pass. The probe now accounts explicitly for the
 mapped toplevel's retained activation configure before proving that two later
 resize configures remain ordered and independently acknowledged.

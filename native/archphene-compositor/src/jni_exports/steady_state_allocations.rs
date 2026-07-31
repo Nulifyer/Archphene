@@ -24,7 +24,7 @@ use super::{
     BufferTransform, CommittedFrame, CompositorCore, RegionRectangle, ShmBufferInner,
     ShmPoolInner, ShmSnapshotState, SurfaceData, SurfaceState, apply_cached_subsurface_children,
     damage_for_commit_into, push_bounded_damage, restore_commit_damage_scratch,
-    restore_pending_damage_buffers, take_pending_damage,
+    restore_pending_damage_buffers, surface_snapshot_allows_in_place, take_pending_damage,
 };
 
 #[derive(Default)]
@@ -204,6 +204,52 @@ fn warmed_retained_shm_damage_does_not_allocate() {
         .file
         .write_all_at(&[9, 0, 0, 0], 0)
         .expect("diverge undamaged SHM pixel");
+    let visible = Arc::new(CommittedFrame::new(
+        2,
+        1,
+        wl_shm::Format::Xrgb8888,
+        vec![1, 0, 0, 0, 2, 0, 0, 0],
+        None,
+    ));
+    let detached = buffer
+        .snapshot(
+            Some(&visible),
+            ShmSnapshotState {
+                surface_damage: &[],
+                buffer_damage: &damage,
+                transform: BufferTransform::Normal,
+                scale: 1,
+                viewport_active: false,
+                allow_in_place: false,
+                force_full_damage: false,
+            },
+        )
+        .expect("warm detached synchronized snapshot");
+    let detached_original = Arc::clone(&detached);
+    let transformed = Arc::new(CommittedFrame::new(
+        2,
+        1,
+        wl_shm::Format::Xrgb8888,
+        vec![0; 8],
+        Some(detached),
+    ));
+    let viewport = Arc::new(CommittedFrame::new(
+        2,
+        1,
+        wl_shm::Format::Xrgb8888,
+        vec![0; 8],
+        Some(transformed),
+    ));
+    let mut synchronized_surface = SurfaceState {
+        committed_frame: Some(Arc::clone(&visible)),
+        cached_frame: Some(Some(viewport)),
+        ..SurfaceState::default()
+    };
+    assert!(surface_snapshot_allows_in_place(
+        &synchronized_surface,
+        true,
+        false,
+    ));
 
     let allocations = count_allocations(|| {
         for iteration in 0..1_000 {
@@ -223,6 +269,33 @@ fn warmed_retained_shm_damage_does_not_allocate() {
             assert_eq!(pixels[0], 1);
             assert_eq!(pixels[4], value);
             drop(pixels);
+            let cached = synchronized_surface
+                .cached_frame
+                .as_ref()
+                .and_then(Option::as_ref)
+                .cloned()
+                .expect("detached synchronized cache");
+            let synchronized = buffer
+                .snapshot(
+                    Some(&cached),
+                    ShmSnapshotState {
+                        surface_damage: &[],
+                        buffer_damage: &damage,
+                        transform: BufferTransform::Normal,
+                        scale: 1,
+                        viewport_active: false,
+                        allow_in_place: surface_snapshot_allows_in_place(
+                            &synchronized_surface,
+                            true,
+                            false,
+                        ),
+                        force_full_damage: false,
+                    },
+                )
+                .expect("reuse detached synchronized snapshot");
+            assert!(Arc::ptr_eq(&synchronized, &detached_original));
+            assert_eq!(synchronized.pixels()[4], value);
+            assert_eq!(visible.pixels()[4], 2);
             assert_eq!(
                 collect_commit_damage(&mut surface, &previous, surface_damage, buffer_damage),
                 2,
@@ -231,6 +304,16 @@ fn warmed_retained_shm_damage_does_not_allocate() {
     });
 
     assert_eq!(allocations, 0);
+    synchronized_surface.committed_frame = synchronized_surface
+        .cached_frame
+        .take()
+        .expect("publish synchronized cache");
+    synchronized_surface.cached_frame = Some(synchronized_surface.committed_frame.clone());
+    assert!(!surface_snapshot_allows_in_place(
+        &synchronized_surface,
+        true,
+        false,
+    ));
 }
 
 #[test]

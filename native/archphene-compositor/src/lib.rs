@@ -1413,6 +1413,25 @@ fn original_buffer_frame(frame: &Arc<CommittedFrame>) -> Arc<CommittedFrame> {
     source
 }
 
+fn synchronized_cache_frame_is_detached(surface: &SurfaceState) -> bool {
+    let Some(cached) = surface.cached_frame.as_ref().and_then(Option::as_ref) else {
+        return false;
+    };
+    let cached = original_buffer_frame(cached);
+    surface
+        .committed_frame
+        .as_ref()
+        .is_none_or(|committed| !Arc::ptr_eq(&cached, &original_buffer_frame(committed)))
+}
+
+fn surface_snapshot_allows_in_place(
+    surface: &SurfaceState,
+    synchronized: bool,
+    metadata_changed: bool,
+) -> bool {
+    !metadata_changed && (!synchronized || synchronized_cache_frame_is_detached(surface))
+}
+
 fn presentation_buffer_frame(
     frame: &Arc<CommittedFrame>,
     prefer_original: bool,
@@ -8026,6 +8045,14 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     && subsurface_effectively_synchronized(resource, state.surface_count);
 
                 let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                let snapshot_allows_in_place = surface_snapshot_allows_in_place(
+                    &surface,
+                    synchronized,
+                    buffer_scale_update.is_some()
+                        || buffer_transform_update.is_some()
+                        || viewport_source_update.is_some()
+                        || viewport_destination_update.is_some(),
+                );
                 let committed_scale = surface.committed_buffer_scale.max(1);
                 let base_scale = if synchronized {
                     surface.cached_buffer_scale.unwrap_or(committed_scale)
@@ -8082,7 +8109,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 transform: next_transform,
                                 scale: next_scale,
                                 viewport_active,
-                                allow_in_place: !synchronized,
+                                allow_in_place: snapshot_allows_in_place,
                                 force_full_damage: damage_overflow,
                             },
                         ) {
@@ -17989,6 +18016,52 @@ mod tests {
         assert!(!Arc::ptr_eq(&synchronized, &previous));
         assert_eq!(frame_values(&synchronized), [50, 20, 3, 4]);
         assert_eq!(frame_values(&previous), [1, 20, 3, 4]);
+        let mut synchronized_surface = SurfaceState {
+            committed_frame: Some(Arc::clone(&previous)),
+            cached_frame: Some(Some(Arc::clone(&synchronized))),
+            ..SurfaceState::default()
+        };
+        assert!(synchronized_cache_frame_is_detached(&synchronized_surface));
+        buffer
+            .pool
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .file
+            .write_all_at(&[90, 0, 0, 0], 4)
+            .expect("update detached synchronized pixel");
+        let reused_synchronized = buffer
+            .snapshot(
+                Some(&synchronized),
+                ShmSnapshotState {
+                    surface_damage: &[],
+                    buffer_damage: &[RegionRectangle::new(1, 0, 1, 1).expect("damage")],
+                    transform: BufferTransform::Normal,
+                    scale: 1,
+                    viewport_active: false,
+                    allow_in_place: surface_snapshot_allows_in_place(
+                        &synchronized_surface,
+                        true,
+                        false,
+                    ),
+                    force_full_damage: false,
+                },
+            )
+            .expect("reused synchronized snapshot");
+        assert!(Arc::ptr_eq(&reused_synchronized, &synchronized));
+        assert_eq!(frame_values(&reused_synchronized), [50, 90, 3, 4]);
+        assert_eq!(frame_values(&previous), [1, 20, 3, 4]);
+        synchronized_surface.cached_frame = Some(Some(reused_synchronized));
+        assert!(!surface_snapshot_allows_in_place(
+            &synchronized_surface,
+            true,
+            true,
+        ));
+        synchronized_surface.committed_frame = synchronized_surface
+            .cached_frame
+            .take()
+            .expect("cached synchronized state");
+        synchronized_surface.cached_frame = Some(synchronized_surface.committed_frame.clone());
+        assert!(!synchronized_cache_frame_is_detached(&synchronized_surface));
 
         let forced = buffer
             .snapshot(
@@ -18005,7 +18078,7 @@ mod tests {
             )
             .expect("forced full SHM snapshot");
         assert!(!Arc::ptr_eq(&forced, &previous));
-        assert_eq!(frame_values(&forced), [50, 60, 70, 80]);
+        assert_eq!(frame_values(&forced), [50, 90, 70, 80]);
 
         buffer
             .pool
