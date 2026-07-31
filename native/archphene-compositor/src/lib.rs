@@ -16611,6 +16611,10 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
+mod steady_state_allocations;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU8;

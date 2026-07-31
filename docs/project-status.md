@@ -3098,9 +3098,14 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 
 The pinned Rust 1.88 workspace is now a separate pull-request and main-branch
 gate. It checks formatting, all locked host tests (including the warmed
-zero-allocation core, job, and Terminal paths), and all-target Clippy with
-warnings denied. Exact Android performance soaks remain local until a maintained
-physical-device runner is available.
+zero-allocation core, job, Terminal, and retained-SHM snapshot-patch steps), and
+all-target Clippy with warnings denied. The compositor gate calls the snapshot
+patch step directly for 1,000 warmed in-place patches while proving
+scratch-buffer and committed-frame reuse, exact damaged-pixel updates, and zero
+allocations on the measured test thread. It does not claim zero allocation for
+commit damage collection, synchronized detachment, or the remaining full Android
+presentation copy. Exact Android performance soaks remain local until a
+maintained physical-device runner is available.
 
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
