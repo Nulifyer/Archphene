@@ -106,6 +106,12 @@ const MAX_FRAME_CALLBACKS_PER_CLIENT: usize = 128;
 const MAX_PENDING_XDG_CONFIGURES: usize = 64;
 const MAX_XDG_POSITIONERS_PER_CLIENT: usize = 64;
 const MAX_XDG_POSITIONERS_TOTAL: usize = 128;
+const MAX_XDG_SURFACES_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
+const MAX_XDG_SURFACES_TOTAL: usize = MAX_SURFACES;
+const MAX_XDG_POPUPS_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
+const MAX_XDG_POPUPS_TOTAL: usize = MAX_SURFACES;
+const MAX_SUBSURFACES_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
+const MAX_SUBSURFACES_TOTAL: usize = MAX_SURFACES;
 const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 2;
 const MAX_SHM_POOLS_PER_CLIENT: usize = 16;
 const MAX_SHM_POOLS_TOTAL: usize = 32;
@@ -521,6 +527,7 @@ pub struct CompositorState {
     popup_grab_serial: Option<PopupGrabSerial>,
     selection_serials: VecDeque<PopupGrabSerial>,
     xdg_surface_count: u32,
+    xdg_surfaces: Vec<XdgSurface>,
     xdg_toplevel_count: u32,
     toplevels: Vec<XdgToplevel>,
     primary_toplevel: Option<XdgToplevel>,
@@ -4327,6 +4334,27 @@ impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
                         );
                         return;
                     }
+                    if surface_state.role.is_some() {
+                        resource
+                            .post_error(xdg_wm_base::Error::Role, "wl_surface already has a role");
+                        return;
+                    }
+                    let (client_count, total_count) =
+                        live_resource_counts(&mut state.xdg_surfaces, &client.id());
+                    if resource_limit_exceeded(
+                        client_count,
+                        total_count,
+                        MAX_XDG_SURFACES_PER_CLIENT,
+                        MAX_XDG_SURFACES_TOTAL,
+                    ) {
+                        disconnect_for_resource_limit(
+                            client,
+                            handle,
+                            resource,
+                            "retained XDG surface limit exceeded",
+                        );
+                        return;
+                    }
                     surface_state.has_xdg_surface = true;
                 }
                 let xdg_surface = data_init.init(
@@ -4342,7 +4370,8 @@ impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
                     .inner
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .xdg_surface = Some(xdg_surface);
+                    .xdg_surface = Some(xdg_surface.clone());
+                state.xdg_surfaces.push(xdg_surface);
                 data.child_count.fetch_add(1, Ordering::AcqRel);
                 state.xdg_surface_count = state.xdg_surface_count.saturating_add(1);
             }
@@ -4487,11 +4516,11 @@ impl Dispatch<XdgPositioner, XdgPositionerData> for CompositorState {
 impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &XdgSurface,
         request: xdg_surface::Request,
         data: &XdgSurfaceData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -4534,7 +4563,9 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                     return;
                 }
                 match surface_state.role {
-                    None => surface_state.role = Some(SurfaceRole::XdgToplevel),
+                    None | Some(SurfaceRole::XdgToplevel) => {
+                        surface_state.role = Some(SurfaceRole::XdgToplevel);
+                    }
                     Some(_) => {
                         resource.post_error(
                             xdg_surface::Error::AlreadyConstructed,
@@ -4633,10 +4664,30 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 let mut xdg_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
-                if xdg_state.role_active || surface_state.role.is_some() {
+                if xdg_state.role_active
+                    || surface_state
+                        .role
+                        .is_some_and(|role| role != SurfaceRole::XdgPopup)
+                {
                     resource.post_error(
                         xdg_surface::Error::AlreadyConstructed,
                         "xdg_surface already has an active role",
+                    );
+                    return;
+                }
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.popups, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_XDG_POPUPS_PER_CLIENT,
+                    MAX_XDG_POPUPS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained XDG popup limit exceeded",
                     );
                     return;
                 }
@@ -4729,9 +4780,12 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
     fn destroyed(
         state: &mut Self,
         _client: ClientId,
-        _resource: &XdgSurface,
+        resource: &XdgSurface,
         data: &XdgSurfaceData,
     ) {
+        state
+            .xdg_surfaces
+            .retain(|surface| surface.id() != resource.id());
         data.wm_child_count.fetch_sub(1, Ordering::AcqRel);
         state.xdg_surface_count = state.xdg_surface_count.saturating_sub(1);
         if let Some(surface_data) = data.wl_surface.data::<SurfaceData>() {
@@ -4981,7 +5035,6 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                     .inner
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                surface.role = None;
                 surface.xdg_popup = None;
                 surface.xdg_configured = false;
             }
@@ -8867,11 +8920,11 @@ fn apply_cached_subsurface_children(state: &mut CompositorState, parent: &WlSurf
 impl Dispatch<WlSubcompositor, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &WlSubcompositor,
         request: wl_subcompositor::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -8909,10 +8962,33 @@ impl Dispatch<WlSubcompositor, ()> for CompositorState {
                     .inner
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if child_state.role.is_some() {
+                if child_state
+                    .role
+                    .is_some_and(|role| role != SurfaceRole::Subsurface)
+                    || child_state
+                        .subsurface
+                        .as_ref()
+                        .is_some_and(Resource::is_alive)
+                {
                     resource.post_error(
                         wl_subcompositor::Error::BadSurface,
                         "wl_surface already has a role",
+                    );
+                    return;
+                }
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.subsurfaces, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_SUBSURFACES_PER_CLIENT,
+                    MAX_SUBSURFACES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained subsurface limit exceeded",
                     );
                     return;
                 }
@@ -9111,7 +9187,6 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
                 .is_some_and(|subsurface| subsurface.id() == resource.id())
             {
                 surface.subsurface = None;
-                surface.role = None;
             }
         }
         state
@@ -9193,7 +9268,22 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            wl_surface::Request::Destroy => {}
+            wl_surface::Request::Destroy => {
+                let surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                let live_role_object = surface
+                    .xdg_toplevel
+                    .as_ref()
+                    .is_some_and(Resource::is_alive)
+                    || surface.xdg_popup.as_ref().is_some_and(Resource::is_alive)
+                    || surface.subsurface.as_ref().is_some_and(Resource::is_alive);
+                drop(surface);
+                if live_role_object {
+                    resource.post_error(
+                        wl_surface::Error::DefunctRoleObject,
+                        "wl_surface destroyed before its role object",
+                    );
+                }
+            }
             wl_surface::Request::Attach { buffer, x, y } => {
                 if resource.version() >= 5 && (x != 0 || y != 0) {
                     resource.post_error(
@@ -22558,6 +22648,537 @@ mod tests {
         drop(healthy_bindings);
         server.join().expect("global-binding server");
         assert!(!socket.exists());
+    }
+
+    #[test]
+    fn surface_role_objects_must_precede_surface_destruction() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-surface-role-order-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while server_stage.load(Ordering::Acquire) != 13 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "surface-role-order server timed out"
+                );
+                core.dispatch_once().expect("dispatch role-order clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.surfaces.len() == 1
+                        && core.state.xdg_surfaces.len() == 1 =>
+                    {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.surfaces.is_empty()
+                        && core.state.xdg_surfaces.is_empty() =>
+                    {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.surfaces.len() == 2
+                        && core.state.subsurfaces.len() == 1 =>
+                    {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.surfaces.is_empty() && core.state.subsurfaces.is_empty() => {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.surfaces.len() == 1
+                        && core.state.xdg_surfaces.len() == 1 =>
+                    {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.surfaces.is_empty()
+                        && core.state.xdg_surfaces.is_empty() =>
+                    {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting role-order client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("role-order connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect role-order client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for role-order stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let xdg_connection = connect();
+        let (xdg_globals, mut xdg_events) =
+            registry_queue_init::<PointerProtocolClient>(&xdg_connection)
+                .expect("role-order XDG registry");
+        let xdg_queue = xdg_events.handle();
+        let xdg_compositor = xdg_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&xdg_queue, 1..=6, ())
+            .expect("role-order XDG compositor");
+        let xdg_wm_base = xdg_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&xdg_queue, 1..=6, ())
+            .expect("role-order XDG wm base");
+        let xdg_surface_parent = xdg_compositor.create_surface(&xdg_queue, ());
+        let xdg_surface = xdg_wm_base.get_xdg_surface(&xdg_surface_parent, &xdg_queue, ());
+        let _xdg_toplevel = xdg_surface.get_toplevel(&xdg_queue, ());
+        xdg_connection.flush().expect("flush XDG role object");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        xdg_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("XDG role baseline remains connected");
+        xdg_surface_parent.destroy();
+        xdg_connection
+            .flush()
+            .expect("flush defunct XDG role order");
+        assert!(
+            xdg_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "destroying wl_surface before xdg_surface must disconnect"
+        );
+        drop((xdg_wm_base, xdg_compositor, xdg_globals, xdg_events, xdg_connection));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let sub_connection = connect();
+        let (sub_globals, mut sub_events) =
+            registry_queue_init::<PointerProtocolClient>(&sub_connection)
+                .expect("role-order subsurface registry");
+        let sub_queue = sub_events.handle();
+        let sub_compositor = sub_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&sub_queue, 1..=6, ())
+            .expect("role-order subsurface compositor");
+        let sub_manager = sub_globals
+            .bind::<client_wl_subcompositor::WlSubcompositor, _, _>(&sub_queue, 1..=1, ())
+            .expect("role-order subcompositor");
+        let parent_surface = sub_compositor.create_surface(&sub_queue, ());
+        let child_surface = sub_compositor.create_surface(&sub_queue, ());
+        let _subsurface =
+            sub_manager.get_subsurface(&child_surface, &parent_surface, &sub_queue, ());
+        sub_connection.flush().expect("flush subsurface role");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        sub_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("subsurface role baseline remains connected");
+        child_surface.destroy();
+        sub_connection
+            .flush()
+            .expect("flush defunct subsurface role order");
+        assert!(
+            sub_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "destroying child wl_surface before wl_subsurface must disconnect"
+        );
+        drop((
+            parent_surface,
+            sub_manager,
+            sub_compositor,
+            sub_globals,
+            sub_events,
+            sub_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+
+        let healthy_connection = connect();
+        let (healthy_globals, mut healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy role-order registry");
+        let healthy_queue = healthy_events.handle();
+        let healthy_compositor = healthy_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&healthy_queue, 1..=6, ())
+            .expect("healthy role-order compositor");
+        let healthy_wm_base = healthy_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&healthy_queue, 1..=6, ())
+            .expect("healthy role-order wm base");
+        let healthy_surface = healthy_compositor.create_surface(&healthy_queue, ());
+        let healthy_xdg_surface =
+            healthy_wm_base.get_xdg_surface(&healthy_surface, &healthy_queue, ());
+        let healthy_toplevel = healthy_xdg_surface.get_toplevel(&healthy_queue, ());
+        healthy_connection
+            .flush()
+            .expect("flush healthy role objects");
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("healthy role baseline remains connected");
+        healthy_toplevel.destroy();
+        healthy_connection
+            .flush()
+            .expect("flush healthy role destruction");
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("role-first destruction remains connected");
+        healthy_surface.destroy();
+        healthy_connection
+            .flush()
+            .expect("flush healthy surface destruction");
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("surface destruction after role remains connected");
+        healthy_xdg_surface.destroy();
+        healthy_connection
+            .flush()
+            .expect("flush inert xdg_surface destruction");
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("xdg_surface may outlive its backing wl_surface");
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        stage.store(13, Ordering::Release);
+
+        server.join().expect("surface-role-order server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn surface_child_resource_limits_reuse_parent_capacity() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-surface-child-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while server_stage.load(Ordering::Acquire) != 19 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "surface-child-limit server timed out"
+                );
+                core.dispatch_once().expect("dispatch surface-child clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.xdg_surfaces.len() == MAX_XDG_SURFACES_PER_CLIENT
+                        && core.state.surfaces.len() == MAX_SURFACES_PER_CLIENT =>
+                    {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.xdg_surfaces.len() == MAX_XDG_SURFACES_PER_CLIENT - 1
+                        && core.state.surfaces.len() == MAX_SURFACES_PER_CLIENT - 1 =>
+                    {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.xdg_surfaces.len() == MAX_XDG_SURFACES_PER_CLIENT
+                        && core.state.surfaces.len() == MAX_SURFACES_PER_CLIENT =>
+                    {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.xdg_surfaces.len() == MAX_XDG_SURFACES_PER_CLIENT
+                        && core.state.surfaces.is_empty() =>
+                    {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.xdg_surfaces.is_empty() && core.state.surfaces.is_empty() => {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.subsurfaces.len() == MAX_SUBSURFACES_PER_CLIENT
+                        && core.state.surfaces.len() == MAX_SURFACES_PER_CLIENT =>
+                    {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    13 if core.state.subsurfaces.len() == MAX_SUBSURFACES_PER_CLIENT - 1
+                        && core.state.surfaces.len() == MAX_SURFACES_PER_CLIENT - 1 =>
+                    {
+                        server_stage.store(14, Ordering::Release);
+                    }
+                    15 if core.state.subsurfaces.len() == MAX_SUBSURFACES_PER_CLIENT
+                        && core.state.surfaces.len() == MAX_SURFACES_PER_CLIENT =>
+                    {
+                        server_stage.store(16, Ordering::Release);
+                    }
+                    17 if core.state.subsurfaces.is_empty() && core.state.surfaces.is_empty() => {
+                        server_stage.store(18, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting surface-child client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("surface-child connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect surface-child client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for surface-child stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let xdg_connection = connect();
+        let (xdg_globals, mut xdg_events) =
+            registry_queue_init::<PointerProtocolClient>(&xdg_connection)
+                .expect("surface-child XDG registry");
+        let xdg_queue = xdg_events.handle();
+        let xdg_compositor = xdg_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&xdg_queue, 1..=6, ())
+            .expect("surface-child XDG compositor");
+        let xdg_wm_base = xdg_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&xdg_queue, 1..=6, ())
+            .expect("surface-child XDG wm base");
+        let mut xdg_parents = Vec::with_capacity(MAX_XDG_SURFACES_PER_CLIENT);
+        let mut xdg_children = Vec::with_capacity(MAX_XDG_SURFACES_PER_CLIENT);
+        for _ in 0..MAX_XDG_SURFACES_PER_CLIENT {
+            let surface = xdg_compositor.create_surface(&xdg_queue, ());
+            let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, &xdg_queue, ());
+            xdg_parents.push(surface);
+            xdg_children.push(xdg_surface);
+        }
+        xdg_connection
+            .flush()
+            .expect("flush exact XDG surface capacity");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        xdg_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact XDG surface capacity remains connected");
+        xdg_children
+            .pop()
+            .expect("XDG surface to recycle")
+            .destroy();
+        xdg_connection
+            .flush()
+            .expect("flush XDG surface destroy");
+        xdg_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("XDG child destruction remains connected");
+        xdg_parents
+            .pop()
+            .expect("wl_surface to recycle")
+            .destroy();
+        xdg_connection
+            .flush()
+            .expect("flush XDG backing-surface destroy");
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+        xdg_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("XDG surface destruction frees capacity");
+        let replacement_parent = xdg_compositor.create_surface(&xdg_queue, ());
+        let replacement_child =
+            xdg_wm_base.get_xdg_surface(&replacement_parent, &xdg_queue, ());
+        xdg_parents.push(replacement_parent);
+        xdg_children.push(replacement_child);
+        xdg_connection
+            .flush()
+            .expect("flush replacement XDG surface");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        xdg_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("XDG surface capacity is reusable");
+        for surface in xdg_parents.drain(..) {
+            surface.destroy();
+        }
+        xdg_connection
+            .flush()
+            .expect("flush roleless XDG backing-surface destruction");
+        xdg_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("roleless XDG surfaces may outlive their backing surfaces");
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        let overflow_parent = xdg_compositor.create_surface(&xdg_queue, ());
+        let _overflow_child =
+            xdg_wm_base.get_xdg_surface(&overflow_parent, &xdg_queue, ());
+        xdg_connection
+            .flush()
+            .expect("flush independent XDG surface overflow");
+        assert!(
+            xdg_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "XDG surface 129 must fail after backing surfaces release their quota"
+        );
+        drop((
+            xdg_children,
+            xdg_parents,
+            xdg_wm_base,
+            xdg_compositor,
+            xdg_globals,
+            xdg_events,
+            xdg_connection,
+        ));
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+
+        let sub_connection = connect();
+        let (sub_globals, mut sub_events) =
+            registry_queue_init::<PointerProtocolClient>(&sub_connection)
+                .expect("surface-child subsurface registry");
+        let sub_queue = sub_events.handle();
+        let sub_compositor = sub_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&sub_queue, 1..=6, ())
+            .expect("surface-child compositor");
+        let sub_manager = sub_globals
+            .bind::<client_wl_subcompositor::WlSubcompositor, _, _>(&sub_queue, 1..=1, ())
+            .expect("surface-child subcompositor");
+        let hierarchy_parent = sub_compositor.create_surface(&sub_queue, ());
+        let mut child_surfaces = Vec::with_capacity(MAX_SUBSURFACES_PER_CLIENT);
+        let mut subsurfaces = Vec::with_capacity(MAX_SUBSURFACES_PER_CLIENT);
+        for _ in 0..MAX_SUBSURFACES_PER_CLIENT - 1 {
+            let child = sub_compositor.create_surface(&sub_queue, ());
+            let subsurface =
+                sub_manager.get_subsurface(&child, &hierarchy_parent, &sub_queue, ());
+            child_surfaces.push(child);
+            subsurfaces.push(subsurface);
+        }
+        sub_connection
+            .flush()
+            .expect("flush initial subsurface capacity");
+        sub_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("initial subsurface capacity remains connected");
+        hierarchy_parent.destroy();
+        sub_connection
+            .flush()
+            .expect("flush hierarchy-parent destruction");
+        sub_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("hierarchy parent may die before subsurfaces");
+        let final_child = sub_compositor.create_surface(&sub_queue, ());
+        let final_subsurface = sub_manager.get_subsurface(
+            &final_child,
+            child_surfaces.first().expect("remaining hierarchy parent"),
+            &sub_queue,
+            (),
+        );
+        child_surfaces.push(final_child);
+        subsurfaces.push(final_subsurface);
+        sub_connection
+            .flush()
+            .expect("flush exact subsurface capacity");
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        sub_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact subsurface capacity remains connected");
+        subsurfaces
+            .pop()
+            .expect("subsurface to recycle")
+            .destroy();
+        sub_connection
+            .flush()
+            .expect("flush subsurface destroy");
+        sub_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("subsurface destruction remains connected");
+        child_surfaces
+            .pop()
+            .expect("subsurface target to recycle")
+            .destroy();
+        sub_connection
+            .flush()
+            .expect("flush subsurface target destroy");
+        stage.store(13, Ordering::Release);
+        wait_for_stage(14);
+        sub_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("subsurface destruction frees capacity");
+        let replacement_child = sub_compositor.create_surface(&sub_queue, ());
+        let replacement_subsurface = sub_manager.get_subsurface(
+            &replacement_child,
+            child_surfaces.first().expect("replacement hierarchy parent"),
+            &sub_queue,
+            (),
+        );
+        child_surfaces.push(replacement_child);
+        subsurfaces.push(replacement_subsurface);
+        sub_connection
+            .flush()
+            .expect("flush replacement subsurface");
+        stage.store(15, Ordering::Release);
+        wait_for_stage(16);
+        sub_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("subsurface capacity is reusable");
+        drop((
+            subsurfaces,
+            child_surfaces,
+            sub_manager,
+            sub_compositor,
+            sub_globals,
+            sub_events,
+            sub_connection,
+        ));
+        stage.store(17, Ordering::Release);
+        wait_for_stage(18);
+        stage.store(19, Ordering::Release);
+
+        server.join().expect("surface-child-limit server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn surface_child_limits_match_bounded_parent_capacity() {
+        assert_eq!(MAX_XDG_SURFACES_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
+        assert_eq!(MAX_XDG_SURFACES_TOTAL, MAX_SURFACES);
+        assert_eq!(MAX_XDG_POPUPS_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
+        assert_eq!(MAX_XDG_POPUPS_TOTAL, MAX_SURFACES);
+        assert_eq!(MAX_SUBSURFACES_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
+        assert_eq!(MAX_SUBSURFACES_TOTAL, MAX_SURFACES);
     }
 
     #[test]

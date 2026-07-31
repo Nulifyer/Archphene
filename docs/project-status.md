@@ -3330,6 +3330,24 @@ Hyprland's protocol ownership and retained bound-output handling. The full
 workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64 Android
 probes pass.
 
+Wayland XDG-surface and subsurface role objects now have explicit ownership
+quotas matching their backing-surface ceiling. One client may retain 128
+`xdg_surface`, 128 `xdg_popup`, and 128 `wl_subsurface` objects; each
+compositor-wide limit is 256. The equal `wl_surface` limits make the popup
+ceiling intrinsic while preserving an independent defensive admission check.
+Role validation happens before quota admission, and destroying a live role
+object restores object capacity without erasing the surface's permanent XDG
+popup, XDG toplevel, or subsurface role. `wl_surface.destroy` reports a defunct
+role object only while the corresponding toplevel, popup, or subsurface object
+is still alive. Real protocol fixtures hold exact XDG-surface and subsurface
+capacity, destroy and replace resources, remove a hierarchy parent while its
+children remain valid, reject XDG surface 129 after all backing surfaces have
+been destroyed, reject parent-first destruction with live role objects, and
+accept role-object-first teardown. Direct tests tie all six role-object limits
+to the existing per-client and compositor-wide surface bounds. The full
+workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64 Android
+probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
