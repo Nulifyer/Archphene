@@ -124,6 +124,20 @@ const MAX_DATA_OFFERS_TOTAL: usize = 128;
 const MAX_SOURCE_MIME_TYPES: usize = 32;
 const MAX_MIME_TYPE_BYTES: usize = 256;
 const MAX_SOURCE_MIME_BYTES: usize = 4 * 1024;
+const MAX_POINTERS_PER_CLIENT: usize = 8;
+const MAX_POINTERS_TOTAL: usize = 16;
+const MAX_KEYBOARDS_PER_CLIENT: usize = 4;
+const MAX_KEYBOARDS_TOTAL: usize = 8;
+const MAX_TOUCHES_PER_CLIENT: usize = 4;
+const MAX_TOUCHES_TOTAL: usize = 8;
+const MAX_TEXT_INPUTS_PER_CLIENT: usize = 4;
+const MAX_TEXT_INPUTS_TOTAL: usize = 8;
+const MAX_RELATIVE_POINTERS_PER_CLIENT: usize = 8;
+const MAX_RELATIVE_POINTERS_TOTAL: usize = 16;
+const MAX_POINTER_GESTURES_PER_CLIENT: usize = 8;
+const MAX_POINTER_GESTURES_TOTAL: usize = 16;
+const MAX_REGIONS_PER_CLIENT: usize = 64;
+const MAX_REGIONS_TOTAL: usize = 128;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -437,6 +451,7 @@ pub struct CompositorState {
     last_buffer_checksum: u32,
     surface_count: u32,
     surfaces: Vec<WlSurface>,
+    regions: Vec<WlRegion>,
     surface_commit_count: u32,
     subcompositor_binds: u32,
     subsurface_count: u32,
@@ -5549,16 +5564,32 @@ impl GlobalDispatch<ZwpRelativePointerManagerV1, ()> for CompositorState {
 impl Dispatch<ZwpRelativePointerManagerV1, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
-        _resource: &ZwpRelativePointerManagerV1,
+        client: &Client,
+        resource: &ZwpRelativePointerManagerV1,
         request: zwp_relative_pointer_manager_v1::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             zwp_relative_pointer_manager_v1::Request::Destroy => {}
             zwp_relative_pointer_manager_v1::Request::GetRelativePointer { id, pointer } => {
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.relative_pointers, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_RELATIVE_POINTERS_PER_CLIENT,
+                    MAX_RELATIVE_POINTERS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained relative-pointer limit exceeded",
+                    );
+                    return;
+                }
                 let relative = data_init.init(id, RelativePointerData { pointer });
                 state.relative_pointers.push(relative);
             }
@@ -6310,23 +6341,68 @@ impl GlobalDispatch<ZwpPointerGesturesV1, ()> for CompositorState {
 impl Dispatch<ZwpPointerGesturesV1, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
-        _resource: &ZwpPointerGesturesV1,
+        client: &Client,
+        resource: &ZwpPointerGesturesV1,
         request: zwp_pointer_gestures_v1::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             zwp_pointer_gestures_v1::Request::GetSwipeGesture { id, pointer } => {
+                let (client_count, total_count) = live_pointer_gesture_counts(state, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_POINTER_GESTURES_PER_CLIENT,
+                    MAX_POINTER_GESTURES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained swipe-gesture limit exceeded",
+                    );
+                    return;
+                }
                 let gesture = data_init.init(id, PointerGestureData { pointer });
                 state.swipe_gestures.push(gesture);
             }
             zwp_pointer_gestures_v1::Request::GetPinchGesture { id, pointer } => {
+                let (client_count, total_count) = live_pointer_gesture_counts(state, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_POINTER_GESTURES_PER_CLIENT,
+                    MAX_POINTER_GESTURES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained pinch-gesture limit exceeded",
+                    );
+                    return;
+                }
                 let gesture = data_init.init(id, PointerGestureData { pointer });
                 state.pinch_gestures.push(gesture);
             }
             zwp_pointer_gestures_v1::Request::GetHoldGesture { id, pointer } => {
+                let (client_count, total_count) = live_pointer_gesture_counts(state, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_POINTER_GESTURES_PER_CLIENT,
+                    MAX_POINTER_GESTURES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained hold-gesture limit exceeded",
+                    );
+                    return;
+                }
                 let gesture = data_init.init(id, PointerGestureData { pointer });
                 state.hold_gestures.push(gesture);
             }
@@ -6676,15 +6752,31 @@ impl GlobalDispatch<ZwpTextInputManagerV3, ()> for CompositorState {
 impl Dispatch<ZwpTextInputManagerV3, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
-        _resource: &ZwpTextInputManagerV3,
+        client: &Client,
+        resource: &ZwpTextInputManagerV3,
         request: zwp_text_input_manager_v3::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             zwp_text_input_manager_v3::Request::GetTextInput { id, seat } => {
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.text_inputs, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_TEXT_INPUTS_PER_CLIENT,
+                    MAX_TEXT_INPUTS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained text-input limit exceeded",
+                    );
+                    return;
+                }
                 let focused_surface = state
                     .keyboard_focus_surface
                     .as_ref()
@@ -7329,20 +7421,52 @@ impl GlobalDispatch<WlSeat, ()> for CompositorState {
 impl Dispatch<WlSeat, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &WlSeat,
         request: wl_seat::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wl_seat::Request::GetPointer { id } => {
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.pointers, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_POINTERS_PER_CLIENT,
+                    MAX_POINTERS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained pointer limit exceeded",
+                    );
+                    return;
+                }
                 let pointer = data_init.init(id, ());
                 state.pointer_count = state.pointer_count.saturating_add(1);
                 state.pointers.push(pointer);
             }
             wl_seat::Request::GetKeyboard { id } => {
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.keyboards, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_KEYBOARDS_PER_CLIENT,
+                    MAX_KEYBOARDS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained keyboard limit exceeded",
+                    );
+                    return;
+                }
                 let keyboard = data_init.init(id, ());
                 match create_keymap_file() {
                     Ok(file) => {
@@ -7381,6 +7505,22 @@ impl Dispatch<WlSeat, ()> for CompositorState {
                 state.keyboards.push(keyboard);
             }
             wl_seat::Request::GetTouch { id } => {
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.touches, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_TOUCHES_PER_CLIENT,
+                    MAX_TOUCHES_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained touch limit exceeded",
+                    );
+                    return;
+                }
                 let touch = data_init.init(id, ());
                 state.touches.push(touch);
             }
@@ -7806,6 +7946,35 @@ fn live_resource_counts<R: Resource>(
                 .is_some_and(|client| &client.id() == client_id)
         })
         .count();
+    (client, total)
+}
+
+fn live_pointer_gesture_counts(
+    state: &mut CompositorState,
+    client_id: &ClientId,
+) -> (usize, usize) {
+    state.swipe_gestures.retain(Resource::is_alive);
+    state.pinch_gestures.retain(Resource::is_alive);
+    state.hold_gestures.retain(Resource::is_alive);
+    let owned_by_client = |resource_client: Option<Client>| {
+        resource_client.is_some_and(|owner| &owner.id() == client_id)
+    };
+    let client = state
+        .swipe_gestures
+        .iter()
+        .filter(|resource| owned_by_client(resource.client()))
+        .count()
+        + state
+            .pinch_gestures
+            .iter()
+            .filter(|resource| owned_by_client(resource.client()))
+            .count()
+        + state
+            .hold_gestures
+            .iter()
+            .filter(|resource| owned_by_client(resource.client()))
+            .count();
+    let total = state.swipe_gestures.len() + state.pinch_gestures.len() + state.hold_gestures.len();
     (client, total)
 }
 
@@ -8689,7 +8858,7 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
         resource: &WlCompositor,
         request: wl_compositor::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -8714,7 +8883,24 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
                 state.surface_count = state.surface_count.saturating_add(1);
             }
             wl_compositor::Request::CreateRegion { id } => {
-                data_init.init(id, RegionData::default());
+                let (client_count, total_count) =
+                    live_resource_counts(&mut state.regions, &client.id());
+                if resource_limit_exceeded(
+                    client_count,
+                    total_count,
+                    MAX_REGIONS_PER_CLIENT,
+                    MAX_REGIONS_TOTAL,
+                ) {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "retained region limit exceeded",
+                    );
+                    return;
+                }
+                let region = data_init.init(id, RegionData::default());
+                state.regions.push(region);
             }
             _ => unreachable!("wl_compositor request added without an implementation"),
         }
@@ -9758,6 +9944,10 @@ impl Dispatch<WlRegion, RegionData> for CompositorState {
             }
             region.operations.push(operation);
         }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlRegion, _data: &RegionData) {
+        state.regions.retain(|region| region.id() != resource.id());
     }
 }
 
@@ -17956,20 +18146,28 @@ mod tests {
         wl_compositor as client_wl_compositor, wl_data_device as client_wl_data_device,
         wl_data_device_manager as client_wl_data_device_manager,
         wl_data_offer as client_wl_data_offer, wl_data_source as client_wl_data_source,
-        wl_pointer as client_wl_pointer, wl_region as client_wl_region,
+        wl_keyboard as client_wl_keyboard, wl_pointer as client_wl_pointer,
+        wl_region as client_wl_region,
         wl_registry as client_wl_registry, wl_seat as client_wl_seat,
         wl_shm as client_wl_shm,
         wl_shm_pool as client_wl_shm_pool, wl_subcompositor as client_wl_subcompositor,
         wl_subsurface as client_wl_subsurface, wl_surface as client_wl_surface,
+        wl_touch as client_wl_touch,
     };
     use wayland_client::{Connection, QueueHandle};
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_confined_pointer_v1 as client_confined_pointer;
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1 as client_locked_pointer;
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1 as client_pointer_constraints;
+    use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_hold_v1 as client_pointer_hold;
+    use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_pinch_v1 as client_pointer_pinch;
+    use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_swipe_v1 as client_pointer_swipe;
+    use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v1 as client_pointer_gestures;
     use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_manager_v1 as client_relative_pointer_manager;
     use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1 as client_relative_pointer;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1 as client_cursor_shape_device;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1 as client_cursor_shape_manager;
+    use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3 as client_text_input_manager;
+    use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3 as client_text_input;
     use wayland_protocols::xdg::shell::client::{
         xdg_surface as client_xdg_surface, xdg_toplevel as client_xdg_toplevel,
         xdg_wm_base as client_xdg_wm_base,
@@ -18009,6 +18207,8 @@ mod tests {
     );
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_callback::WlCallback);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_buffer::WlBuffer);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_keyboard::WlKeyboard);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_touch::WlTouch);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_shm::WlShm);
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_shm_pool::WlShmPool);
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_data_device_manager::WlDataDeviceManager);
@@ -18029,6 +18229,12 @@ mod tests {
     wayland_client::delegate_noop!(
         PointerProtocolClient: client_pointer_constraints::ZwpPointerConstraintsV1
     );
+    wayland_client::delegate_noop!(PointerProtocolClient: client_pointer_gestures::ZwpPointerGesturesV1);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_pointer_swipe::ZwpPointerGestureSwipeV1);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_pointer_pinch::ZwpPointerGesturePinchV1);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_pointer_hold::ZwpPointerGestureHoldV1);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_text_input_manager::ZwpTextInputManagerV3);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_text_input::ZwpTextInputV3);
     wayland_client::delegate_noop!(
         PointerProtocolClient: client_cursor_shape_manager::WpCursorShapeManagerV1
     );
@@ -20341,6 +20547,586 @@ mod tests {
         stage.store(21, Ordering::Release);
 
         server.join().expect("data-resource server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn input_protocol_resource_limits_release_and_recover() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-input-resource-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 23 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "input-resource server timed out"
+                );
+                core.dispatch_once().expect("dispatch input-resource clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.pointers.len() == MAX_POINTERS_PER_CLIENT
+                        && core.state.keyboards.len() == MAX_KEYBOARDS_PER_CLIENT
+                        && core.state.touches.len() == MAX_TOUCHES_PER_CLIENT =>
+                    {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.pointers.is_empty()
+                        && core.state.keyboards.is_empty()
+                        && core.state.touches.is_empty() =>
+                    {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.text_inputs.len() == MAX_TEXT_INPUTS_PER_CLIENT => {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.text_inputs.is_empty() => {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.swipe_gestures.len() == 3
+                        && core.state.pinch_gestures.len() == 3
+                        && core.state.hold_gestures.len() == 2 =>
+                    {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.swipe_gestures.is_empty()
+                        && core.state.pinch_gestures.is_empty()
+                        && core.state.hold_gestures.is_empty() =>
+                    {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    13 if core.state.relative_pointers.len()
+                        == MAX_RELATIVE_POINTERS_PER_CLIENT =>
+                    {
+                        server_stage.store(14, Ordering::Release);
+                    }
+                    15 if core.state.relative_pointers.is_empty() => {
+                        server_stage.store(16, Ordering::Release);
+                    }
+                    17 if core.state.regions.len() == MAX_REGIONS_PER_CLIENT => {
+                        server_stage.store(18, Ordering::Release);
+                    }
+                    19 if core.state.regions.is_empty() => {
+                        server_stage.store(20, Ordering::Release);
+                    }
+                    21 if core.state.pointers.len() == 1 => {
+                        server_stage.store(22, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting input-resource client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("input-resource connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect input-resource client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for input-resource stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let seat_connection = connect();
+        let (seat_globals, mut seat_events) =
+            registry_queue_init::<PointerProtocolClient>(&seat_connection)
+                .expect("seat-resource registry");
+        let seat_queue = seat_events.handle();
+        let seat = seat_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&seat_queue, 1..=9, ())
+            .expect("seat-resource seat");
+        let mut pointers = (0..MAX_POINTERS_PER_CLIENT)
+            .map(|_| seat.get_pointer(&seat_queue, ()))
+            .collect::<Vec<_>>();
+        let mut keyboards = (0..MAX_KEYBOARDS_PER_CLIENT)
+            .map(|_| seat.get_keyboard(&seat_queue, ()))
+            .collect::<Vec<_>>();
+        let mut touches = (0..MAX_TOUCHES_PER_CLIENT)
+            .map(|_| seat.get_touch(&seat_queue, ()))
+            .collect::<Vec<_>>();
+        seat_connection.flush().expect("flush exact seat children");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        seat_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact seat-child limits remain connected");
+        pointers.pop().expect("pointer to recycle").release();
+        keyboards.pop().expect("keyboard to recycle").release();
+        touches.pop().expect("touch to recycle").release();
+        seat_connection
+            .flush()
+            .expect("flush seat-child releases");
+        seat_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("seat-child releases free capacity");
+        pointers.push(seat.get_pointer(&seat_queue, ()));
+        keyboards.push(seat.get_keyboard(&seat_queue, ()));
+        touches.push(seat.get_touch(&seat_queue, ()));
+        seat_connection
+            .flush()
+            .expect("flush replacement seat children");
+        seat_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("seat-child capacity is reusable");
+        let _overflow_pointer = seat.get_pointer(&seat_queue, ());
+        seat_connection
+            .flush()
+            .expect("flush pointer overflow");
+        assert!(
+            seat_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "pointer 9 must disconnect its client"
+        );
+        drop((pointers, keyboards, touches, seat, seat_events, seat_connection));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let text_connection = connect();
+        let (text_globals, mut text_events) =
+            registry_queue_init::<PointerProtocolClient>(&text_connection)
+                .expect("text-input resource registry");
+        let text_queue = text_events.handle();
+        let text_seat = text_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&text_queue, 1..=9, ())
+            .expect("text-input seat");
+        let text_manager = text_globals
+            .bind::<client_text_input_manager::ZwpTextInputManagerV3, _, _>(
+                &text_queue,
+                1..=1,
+                (),
+            )
+            .expect("text-input manager");
+        let mut text_inputs = (0..MAX_TEXT_INPUTS_PER_CLIENT)
+            .map(|_| text_manager.get_text_input(&text_seat, &text_queue, ()))
+            .collect::<Vec<_>>();
+        text_connection
+            .flush()
+            .expect("flush exact text-input limit");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        text_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact text-input limit remains connected");
+        text_inputs.pop().expect("text input to recycle").destroy();
+        text_connection
+            .flush()
+            .expect("flush text-input destroy");
+        text_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("text-input destroy frees capacity");
+        text_inputs.push(text_manager.get_text_input(&text_seat, &text_queue, ()));
+        text_connection
+            .flush()
+            .expect("flush replacement text input");
+        text_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("text-input capacity is reusable");
+        let _overflow_text = text_manager.get_text_input(&text_seat, &text_queue, ());
+        text_connection
+            .flush()
+            .expect("flush text-input overflow");
+        assert!(
+            text_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "text input 5 must disconnect its client"
+        );
+        drop((
+            text_inputs,
+            text_manager,
+            text_seat,
+            text_events,
+            text_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+
+        let extended_connection = connect();
+        let (extended_globals, mut extended_events) =
+            registry_queue_init::<PointerProtocolClient>(&extended_connection)
+                .expect("extended-pointer registry");
+        let extended_queue = extended_events.handle();
+        let extended_seat = extended_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&extended_queue, 1..=9, ())
+            .expect("extended-pointer seat");
+        let extended_pointer = extended_seat.get_pointer(&extended_queue, ());
+        let gesture_manager = extended_globals
+            .bind::<client_pointer_gestures::ZwpPointerGesturesV1, _, _>(
+                &extended_queue,
+                1..=3,
+                (),
+            )
+            .expect("pointer-gesture manager");
+        let swipes = (0..3)
+            .map(|_| gesture_manager.get_swipe_gesture(&extended_pointer, &extended_queue, ()))
+            .collect::<Vec<_>>();
+        let pinches = (0..3)
+            .map(|_| gesture_manager.get_pinch_gesture(&extended_pointer, &extended_queue, ()))
+            .collect::<Vec<_>>();
+        let mut holds = (0..2)
+            .map(|_| gesture_manager.get_hold_gesture(&extended_pointer, &extended_queue, ()))
+            .collect::<Vec<_>>();
+        extended_connection
+            .flush()
+            .expect("flush exact extended-pointer limits");
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+        extended_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact extended-pointer limits remain connected");
+        holds.pop().expect("hold gesture to recycle").destroy();
+        extended_connection
+            .flush()
+            .expect("flush pointer-gesture destroy");
+        extended_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("pointer-gesture destroy frees capacity");
+        holds.push(gesture_manager.get_hold_gesture(&extended_pointer, &extended_queue, ()));
+        extended_connection
+            .flush()
+            .expect("flush replacement pointer gesture");
+        extended_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("combined pointer-gesture capacity is reusable");
+        let _overflow_gesture =
+            gesture_manager.get_swipe_gesture(&extended_pointer, &extended_queue, ());
+        extended_connection
+            .flush()
+            .expect("flush pointer-gesture overflow");
+        assert!(
+            extended_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "combined pointer gesture 9 must disconnect its client"
+        );
+        drop((
+            swipes,
+            pinches,
+            holds,
+            gesture_manager,
+            extended_pointer,
+            extended_seat,
+            extended_events,
+            extended_connection,
+        ));
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+
+        let relative_connection = connect();
+        let (relative_globals, mut relative_events) =
+            registry_queue_init::<PointerProtocolClient>(&relative_connection)
+                .expect("relative-pointer resource registry");
+        let relative_queue = relative_events.handle();
+        let relative_seat = relative_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&relative_queue, 1..=9, ())
+            .expect("relative-pointer resource seat");
+        let relative_pointer = relative_seat.get_pointer(&relative_queue, ());
+        let relative_manager = relative_globals
+            .bind::<client_relative_pointer_manager::ZwpRelativePointerManagerV1, _, _>(
+                &relative_queue,
+                1..=1,
+                (),
+            )
+            .expect("relative-pointer resource manager");
+        let mut relatives = (0..MAX_RELATIVE_POINTERS_PER_CLIENT)
+            .map(|_| relative_manager.get_relative_pointer(&relative_pointer, &relative_queue, ()))
+            .collect::<Vec<_>>();
+        relative_connection
+            .flush()
+            .expect("flush exact relative-pointer limit");
+        stage.store(13, Ordering::Release);
+        wait_for_stage(14);
+        relative_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact relative-pointer limit remains connected");
+        relatives
+            .pop()
+            .expect("relative pointer to recycle")
+            .destroy();
+        relative_connection
+            .flush()
+            .expect("flush relative-pointer destroy");
+        relative_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("relative-pointer destroy frees capacity");
+        relatives.push(relative_manager.get_relative_pointer(
+            &relative_pointer,
+            &relative_queue,
+            (),
+        ));
+        relative_connection
+            .flush()
+            .expect("flush replacement relative pointer");
+        relative_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("relative-pointer capacity is reusable");
+        let _overflow_relative =
+            relative_manager.get_relative_pointer(&relative_pointer, &relative_queue, ());
+        relative_connection
+            .flush()
+            .expect("flush relative-pointer overflow");
+        assert!(
+            relative_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "relative pointer 9 must disconnect its client"
+        );
+        drop((
+            relatives,
+            relative_manager,
+            relative_pointer,
+            relative_seat,
+            relative_events,
+            relative_connection,
+        ));
+        stage.store(15, Ordering::Release);
+        wait_for_stage(16);
+
+        let region_connection = connect();
+        let (region_globals, mut region_events) =
+            registry_queue_init::<PointerProtocolClient>(&region_connection)
+                .expect("region-resource registry");
+        let region_queue = region_events.handle();
+        let region_compositor = region_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&region_queue, 1..=6, ())
+            .expect("region-resource compositor");
+        let mut regions = (0..MAX_REGIONS_PER_CLIENT)
+            .map(|_| region_compositor.create_region(&region_queue, ()))
+            .collect::<Vec<_>>();
+        region_connection
+            .flush()
+            .expect("flush exact region limit");
+        stage.store(17, Ordering::Release);
+        wait_for_stage(18);
+        region_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact region limit remains connected");
+        regions.pop().expect("region to recycle").destroy();
+        region_connection.flush().expect("flush region destroy");
+        region_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("region destroy frees capacity");
+        regions.push(region_compositor.create_region(&region_queue, ()));
+        region_connection
+            .flush()
+            .expect("flush replacement region");
+        region_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("region capacity is reusable");
+        let _overflow_region = region_compositor.create_region(&region_queue, ());
+        region_connection
+            .flush()
+            .expect("flush region overflow");
+        assert!(
+            region_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "region 65 must disconnect its client"
+        );
+        drop((regions, region_compositor, region_events, region_connection));
+        stage.store(19, Ordering::Release);
+        wait_for_stage(20);
+
+        let healthy_connection = connect();
+        let (healthy_globals, _healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy input-resource registry");
+        let healthy_queue = _healthy_events.handle();
+        let healthy_seat = healthy_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&healthy_queue, 1..=9, ())
+            .expect("healthy input-resource seat");
+        let _healthy_pointer = healthy_seat.get_pointer(&healthy_queue, ());
+        healthy_connection
+            .flush()
+            .expect("flush healthy pointer");
+        stage.store(21, Ordering::Release);
+        wait_for_stage(22);
+        stage.store(23, Ordering::Release);
+
+        server.join().expect("input-resource server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn pointer_global_limit_preserves_independent_clients() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-pointer-global-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 7 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pointer-global server timed out"
+                );
+                core.dispatch_once().expect("dispatch pointer-global clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.pointers.len() == MAX_POINTERS_TOTAL => {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.pointers.len() == MAX_POINTERS_TOTAL => {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.pointers.is_empty() => {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting pointer-global client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("pointer-global connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect pointer-global client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for pointer-global stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let first_connection = connect();
+        let (first_globals, mut first_events) =
+            registry_queue_init::<PointerProtocolClient>(&first_connection)
+                .expect("first pointer-global registry");
+        let first_queue = first_events.handle();
+        let first_seat = first_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&first_queue, 1..=9, ())
+            .expect("first pointer-global seat");
+        let first_pointers = (0..MAX_POINTERS_PER_CLIENT)
+            .map(|_| first_seat.get_pointer(&first_queue, ()))
+            .collect::<Vec<_>>();
+
+        let second_connection = connect();
+        let (second_globals, mut second_events) =
+            registry_queue_init::<PointerProtocolClient>(&second_connection)
+                .expect("second pointer-global registry");
+        let second_queue = second_events.handle();
+        let second_seat = second_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&second_queue, 1..=9, ())
+            .expect("second pointer-global seat");
+        let second_pointers = (0..MAX_POINTERS_PER_CLIENT)
+            .map(|_| second_seat.get_pointer(&second_queue, ()))
+            .collect::<Vec<_>>();
+        first_connection.flush().expect("flush first pointers");
+        second_connection.flush().expect("flush second pointers");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        first_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("first quota-holding client remains connected");
+        second_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("second quota-holding client remains connected");
+
+        let overflow_connection = connect();
+        let (overflow_globals, mut overflow_events) =
+            registry_queue_init::<PointerProtocolClient>(&overflow_connection)
+                .expect("overflow pointer-global registry");
+        let overflow_queue = overflow_events.handle();
+        let overflow_seat = overflow_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&overflow_queue, 1..=9, ())
+            .expect("overflow pointer-global seat");
+        let _overflow_pointer = overflow_seat.get_pointer(&overflow_queue, ());
+        overflow_connection
+            .flush()
+            .expect("flush global pointer overflow");
+        assert!(
+            overflow_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "pointer 17 must disconnect only its client"
+        );
+        drop((
+            overflow_seat,
+            overflow_events,
+            overflow_connection,
+        ));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+        first_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("first holder survives another client's overflow");
+        second_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("second holder survives another client's overflow");
+        drop((
+            first_pointers,
+            first_seat,
+            first_events,
+            first_connection,
+            second_pointers,
+            second_seat,
+            second_events,
+            second_connection,
+        ));
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        stage.store(7, Ordering::Release);
+
+        server.join().expect("pointer-global server");
         assert!(!socket.exists());
     }
 
@@ -22925,6 +23711,44 @@ mod tests {
         ));
         let full_bytes = vec!["a".repeat(MAX_MIME_TYPE_BYTES); 16];
         assert!(source_mime_limit_exceeded(&full_bytes, "b"));
+    }
+
+    #[test]
+    fn input_resource_boundaries_enforce_client_and_global_capacity() {
+        for (per_client, total) in [
+            (MAX_POINTERS_PER_CLIENT, MAX_POINTERS_TOTAL),
+            (MAX_KEYBOARDS_PER_CLIENT, MAX_KEYBOARDS_TOTAL),
+            (MAX_TOUCHES_PER_CLIENT, MAX_TOUCHES_TOTAL),
+            (MAX_TEXT_INPUTS_PER_CLIENT, MAX_TEXT_INPUTS_TOTAL),
+            (
+                MAX_RELATIVE_POINTERS_PER_CLIENT,
+                MAX_RELATIVE_POINTERS_TOTAL,
+            ),
+            (
+                MAX_POINTER_GESTURES_PER_CLIENT,
+                MAX_POINTER_GESTURES_TOTAL,
+            ),
+            (MAX_REGIONS_PER_CLIENT, MAX_REGIONS_TOTAL),
+        ] {
+            assert!(!resource_limit_exceeded(
+                per_client - 1,
+                total - 1,
+                per_client,
+                total
+            ));
+            assert!(resource_limit_exceeded(
+                per_client,
+                total - 1,
+                per_client,
+                total
+            ));
+            assert!(resource_limit_exceeded(
+                per_client - 1,
+                total,
+                per_client,
+                total
+            ));
+        }
     }
 
     #[test]

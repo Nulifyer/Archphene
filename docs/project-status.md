@@ -3249,6 +3249,22 @@ length and aggregate-byte limits plus per-client/global admission arithmetic.
 The full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
 Android probes pass.
 
+Retained Wayland input and region protocol objects now have explicit ownership
+quotas. One client may retain eight pointers, four keyboards, four touches,
+four text inputs, eight relative pointers, eight combined swipe, pinch, and hold
+gestures, and 64 regions. The corresponding compositor-wide limits are 16,
+eight, eight, eight, 16, 16, and 128. Admission removes dead resources before
+counting. Explicit release or destruction immediately restores capacity, while
+overflow disconnects only the offending client. A real protocol fixture holds
+every exact per-client boundary, mixes all three gesture types under one shared
+quota, destroys and replaces each resource category, rejects the next pointer,
+text input, gesture, relative pointer, and region, verifies cleanup, and creates
+a pointer from a final healthy client. A second fixture uses two independent
+clients to saturate the global pointer boundary, rejects only a third client,
+and proves both holders remain connected. Direct tests cover every
+per-client/global admission pair. The full workspace and strict Clippy gates
+plus rebuilt exact x86_64 and AArch64 Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
