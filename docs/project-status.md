@@ -3175,6 +3175,22 @@ the full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
 Android probes pass. CPU conversion remains damage-driven until direct client
 dmabuf import removes it.
 
+Untrusted Wayland surface and frame-callback growth is now bounded. One client
+can retain at most 128 surfaces and one compositor 256. Callback ownership is
+limited to 64 for any one surface, 128 per client, and 256 total across pending,
+synchronized-cache, and presentation phases. Admission first removes dead
+callback resources. Surface destruction completes and drains callbacks from
+every ownership phase, so churn
+cannot strand protocol objects or quota. Real protocol clients verify pending,
+synchronized-cache, and presentation cleanup, then exercise three independent
+fatal boundaries: callback 65 on one surface, surface 129, and callback 129
+distributed across surfaces. Two-client fixtures then saturate the 256-surface
+and 256-callback global limits independently and prove a third client fails
+closed. After the offending and quota-holding clients disconnect, a final client
+reconnects to the same compositor, commits, and has its callback presented. The
+full workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64
+Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

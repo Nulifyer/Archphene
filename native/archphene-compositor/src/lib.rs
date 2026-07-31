@@ -94,6 +94,11 @@ use wayland_server::{
 };
 
 const MAX_TOPLEVELS: usize = 32;
+const MAX_SURFACES: usize = 256;
+const MAX_SURFACES_PER_CLIENT: usize = 128;
+const MAX_FRAME_CALLBACKS_PER_SURFACE: usize = 64;
+const MAX_FRAME_CALLBACKS_TOTAL: usize = 256;
+const MAX_FRAME_CALLBACKS_PER_CLIENT: usize = 128;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -447,7 +452,7 @@ pub struct CompositorState {
     seat_binds: u32,
     pointer_count: u32,
     pointer_event_count: u32,
-    presentation_callbacks: Vec<WlCallback>,
+    presentation_callbacks: Vec<FrameCallback>,
     presentation_damage: Vec<RegionRectangle>,
     cached_subsurface_traversal: Vec<(WlSurface, usize)>,
     next_input_serial: u32,
@@ -528,7 +533,7 @@ struct SurfaceState {
     pending_buffer_damage: Vec<RegionRectangle>,
     pending_buffer_damage_full: bool,
     commit_damage_scratch: Vec<RegionRectangle>,
-    pending_callbacks: Vec<WlCallback>,
+    pending_callbacks: Vec<FrameCallback>,
     pending_input_region: Option<Option<RegionState>>,
     committed_input_region: Option<RegionState>,
     cached_input_region: Option<Option<RegionState>>,
@@ -551,7 +556,7 @@ struct SurfaceState {
     fractional_scale: Option<WpFractionalScaleV1>,
     committed_frame: Option<Arc<CommittedFrame>>,
     cached_frame: Option<Option<Arc<CommittedFrame>>>,
-    cached_callbacks: Vec<WlCallback>,
+    cached_callbacks: Vec<FrameCallback>,
     cached_damage: Vec<RegionRectangle>,
     has_xdg_surface: bool,
     role: Option<SurfaceRole>,
@@ -564,6 +569,12 @@ struct SurfaceState {
     pending_subsurface_stack: Vec<(WlSurface, WlSurface, bool)>,
     xdg_configured: bool,
     entered_outputs: Vec<u32>,
+}
+
+struct FrameCallback {
+    resource: WlCallback,
+    surface: WlSurface,
+    client_id: ClientId,
 }
 
 fn take_pending_damage(
@@ -7559,6 +7570,83 @@ fn apply_cached_subsurface_tree(
     state.cached_subsurface_traversal = traversal;
 }
 
+fn prune_and_count_frame_callbacks(
+    state: &mut CompositorState,
+    target: &WlSurface,
+    target_client: &ClientId,
+) -> (usize, usize, usize) {
+    state
+        .presentation_callbacks
+        .retain(|callback| callback.resource.is_alive());
+    let mut total = state.presentation_callbacks.len();
+    let mut target_total = state
+        .presentation_callbacks
+        .iter()
+        .filter(|callback| callback.surface.id() == target.id())
+        .count();
+    let mut client_total = state
+        .presentation_callbacks
+        .iter()
+        .filter(|callback| &callback.client_id == target_client)
+        .count();
+    for surface in &state.surfaces {
+        let Some(data) = surface.data::<SurfaceData>() else {
+            continue;
+        };
+        let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+        surface
+            .pending_callbacks
+            .retain(|callback| callback.resource.is_alive());
+        surface
+            .cached_callbacks
+            .retain(|callback| callback.resource.is_alive());
+        target_total = target_total
+            .saturating_add(
+                surface
+                    .pending_callbacks
+                    .iter()
+                    .filter(|callback| callback.surface.id() == target.id())
+                    .count(),
+            )
+            .saturating_add(
+                surface
+                    .cached_callbacks
+                    .iter()
+                    .filter(|callback| callback.surface.id() == target.id())
+                    .count(),
+            );
+        client_total = client_total
+            .saturating_add(
+                surface
+                    .pending_callbacks
+                    .iter()
+                    .filter(|callback| &callback.client_id == target_client)
+                    .count(),
+            )
+            .saturating_add(
+                surface
+                    .cached_callbacks
+                    .iter()
+                    .filter(|callback| &callback.client_id == target_client)
+                    .count(),
+            );
+        total = total
+            .saturating_add(surface.pending_callbacks.len())
+            .saturating_add(surface.cached_callbacks.len());
+    }
+    (target_total, client_total, total)
+}
+
+fn frame_callback_limit_exceeded(surface: usize, client: usize, total: usize) -> bool {
+    surface >= MAX_FRAME_CALLBACKS_PER_SURFACE
+        || client >= MAX_FRAME_CALLBACKS_PER_CLIENT
+        || total >= MAX_FRAME_CALLBACKS_TOTAL
+}
+
+fn surface_limit_exceeded(client: usize, total: usize) -> bool {
+    client >= MAX_SURFACES_PER_CLIENT || total >= MAX_SURFACES
+}
+
 fn apply_cached_subsurface_stack(
     state: &mut CompositorState,
     traversal: &mut Vec<(WlSurface, usize)>,
@@ -7925,8 +8013,8 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
 impl Dispatch<WlCompositor, ()> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
-        _resource: &WlCompositor,
+        client: &Client,
+        resource: &WlCompositor,
         request: wl_compositor::Request,
         _data: &(),
         _handle: &DisplayHandle,
@@ -7934,6 +8022,21 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
     ) {
         match request {
             wl_compositor::Request::CreateSurface { id } => {
+                state.surfaces.retain(|surface| surface.is_alive());
+                let client_id = client.id();
+                let client_surfaces = state
+                    .surfaces
+                    .iter()
+                    .filter(|surface| {
+                        surface
+                            .client()
+                            .is_some_and(|owner| owner.id() == client_id)
+                    })
+                    .count();
+                if surface_limit_exceeded(client_surfaces, state.surfaces.len()) {
+                    resource.post_error(0u32, "surface limit exceeded");
+                    return;
+                }
                 let surface = data_init.init(id, SurfaceData::default());
                 state.surfaces.push(surface);
                 state.surface_count = state.surface_count.saturating_add(1);
@@ -7949,7 +8052,7 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
 impl Dispatch<WlSurface, SurfaceData> for CompositorState {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &WlSurface,
         request: wl_surface::Request,
         data: &SurfaceData,
@@ -8023,9 +8126,24 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
             }
             wl_surface::Request::Frame { callback } => {
+                let client_id = client.id();
+                let (surface_callbacks, client_callbacks, total_callbacks) =
+                    prune_and_count_frame_callbacks(state, resource, &client_id);
+                if frame_callback_limit_exceeded(
+                    surface_callbacks,
+                    client_callbacks,
+                    total_callbacks,
+                ) {
+                    resource.post_error(0u32, "frame callback limit exceeded");
+                    return;
+                }
                 let callback = data_init.init(callback, ());
                 let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
-                surface.pending_callbacks.push(callback);
+                surface.pending_callbacks.push(FrameCallback {
+                    resource: callback,
+                    surface: resource.clone(),
+                    client_id,
+                });
             }
             wl_surface::Request::SetInputRegion { region } => {
                 let region = match region {
@@ -8662,7 +8780,29 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         }
     }
 
-    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSurface, _data: &SurfaceData) {
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSurface, data: &SurfaceData) {
+        {
+            let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+            for callback in surface.pending_callbacks.drain(..) {
+                if callback.resource.is_alive() {
+                    callback.resource.done(0);
+                }
+            }
+            for callback in surface.cached_callbacks.drain(..) {
+                if callback.resource.is_alive() {
+                    callback.resource.done(0);
+                }
+            }
+        }
+        state.presentation_callbacks.retain(|callback| {
+            if callback.surface.id() != resource.id() {
+                return true;
+            }
+            if callback.resource.is_alive() {
+                callback.resource.done(0);
+            }
+            false
+        });
         if state
             .cursor_surface
             .as_ref()
@@ -12808,8 +12948,8 @@ impl CompositorCore {
         self.state.presentation_damage.clear();
         let mut presented = 0u32;
         for callback in self.state.presentation_callbacks.drain(..) {
-            if callback.is_alive() {
-                callback.done(time);
+            if callback.resource.is_alive() {
+                callback.resource.done(time);
                 presented = presented.saturating_add(1);
             }
         }
@@ -16957,9 +17097,11 @@ mod tests {
     use std::sync::atomic::AtomicU8;
     use wayland_client::globals::{GlobalListContents, registry_queue_init};
     use wayland_client::protocol::{
+        wl_callback as client_wl_callback,
         wl_compositor as client_wl_compositor, wl_pointer as client_wl_pointer,
         wl_registry as client_wl_registry, wl_seat as client_wl_seat,
-        wl_region as client_wl_region, wl_surface as client_wl_surface,
+        wl_region as client_wl_region, wl_subcompositor as client_wl_subcompositor,
+        wl_subsurface as client_wl_subsurface, wl_surface as client_wl_surface,
     };
     use wayland_client::{Connection, QueueHandle};
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_confined_pointer_v1 as client_confined_pointer;
@@ -17001,6 +17143,9 @@ mod tests {
     wayland_client::delegate_noop!(
         PointerProtocolClient: ignore client_wl_surface::WlSurface
     );
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_callback::WlCallback);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_wl_subcompositor::WlSubcompositor);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_subsurface::WlSubsurface);
     wayland_client::delegate_noop!(
         PointerProtocolClient: ignore client_wl_region::WlRegion
     );
@@ -17198,6 +17343,352 @@ mod tests {
         connection.flush().expect("flush crosshair cursor");
         stage.store(5, Ordering::Release);
         server.join().expect("server thread");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn wayland_resource_overflow_disconnects_only_the_offending_client() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-frame-callback-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            while server_stage.load(Ordering::Acquire) != 9 {
+                core.dispatch_once().expect("dispatch callback-limit clients");
+                if server_stage.load(Ordering::Acquire) == 1 && core.state.surface_count == 0 {
+                    assert!(core.state.presentation_callbacks.is_empty());
+                    assert!(core.state.surfaces.is_empty());
+                    server_stage.store(2, Ordering::Release);
+                }
+                if server_stage.load(Ordering::Acquire) == 3
+                    && core.state.surface_count == 0
+                {
+                    server_stage.store(4, Ordering::Release);
+                }
+                if server_stage.load(Ordering::Acquire) == 5 {
+                    core.state.surfaces.retain(|surface| surface.is_alive());
+                    core.state
+                        .presentation_callbacks
+                        .retain(|callback| callback.resource.is_alive());
+                    let queued = core
+                        .state
+                        .surfaces
+                        .iter()
+                        .filter_map(|surface| surface.data::<SurfaceData>())
+                        .map(|data| {
+                            let mut surface = data
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            surface
+                                .pending_callbacks
+                                .retain(|callback| callback.resource.is_alive());
+                            surface
+                                .cached_callbacks
+                                .retain(|callback| callback.resource.is_alive());
+                            surface.pending_callbacks.len() + surface.cached_callbacks.len()
+                        })
+                        .sum::<usize>();
+                    if core.state.surfaces.is_empty()
+                        && core.state.presentation_callbacks.is_empty()
+                        && queued == 0
+                    {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                }
+                if server_stage.load(Ordering::Acquire) == 7
+                    && core.state.presentation_callbacks.len() == 1
+                {
+                    assert_eq!(core.present_frame(17), 1);
+                    server_stage.store(8, Ordering::Release);
+                }
+            }
+        });
+
+        let connect = || loop {
+            match UnixStream::connect(&socket) {
+                Ok(stream) => break Connection::from_socket(stream).expect("client connection"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("connect callback-limit client: {error}"),
+            }
+        };
+
+        let first_connection = connect();
+        let (first_globals, mut first_events) =
+            registry_queue_init::<PointerProtocolClient>(&first_connection).expect("first registry");
+        let first_queue = first_events.handle();
+        let first_compositor = first_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&first_queue, 1..=6, ())
+            .expect("first wl_compositor");
+        let first_subcompositor = first_globals
+            .bind::<client_wl_subcompositor::WlSubcompositor, _, _>(&first_queue, 1..=1, ())
+            .expect("first wl_subcompositor");
+        let pending_surface = first_compositor.create_surface(&first_queue, ());
+        let _pending_callback = pending_surface.frame(&first_queue, ());
+        pending_surface.destroy();
+        let presentation_surface = first_compositor.create_surface(&first_queue, ());
+        let _presentation_callback = presentation_surface.frame(&first_queue, ());
+        presentation_surface.commit();
+        presentation_surface.destroy();
+        let synchronized_parent = first_compositor.create_surface(&first_queue, ());
+        let synchronized_child = first_compositor.create_surface(&first_queue, ());
+        let synchronized_subsurface = first_subcompositor.get_subsurface(
+            &synchronized_child,
+            &synchronized_parent,
+            &first_queue,
+            (),
+        );
+        let _synchronized_callback = synchronized_child.frame(&first_queue, ());
+        synchronized_child.commit();
+        synchronized_subsurface.destroy();
+        synchronized_child.destroy();
+        synchronized_parent.destroy();
+        first_connection
+            .flush()
+            .expect("flush callback ownership cleanup");
+        first_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("callback ownership cleanup roundtrip");
+        stage.store(1, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 2 {
+            first_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("callback cleanup verification");
+        }
+        let first_surface = first_compositor.create_surface(&first_queue, ());
+        let _callbacks = (0..=MAX_FRAME_CALLBACKS_PER_SURFACE)
+            .map(|_| first_surface.frame(&first_queue, ()))
+            .collect::<Vec<_>>();
+        first_connection.flush().expect("flush callback overflow");
+        assert!(
+            first_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "callback overflow must disconnect its client"
+        );
+
+        let surface_connection = connect();
+        let (surface_globals, mut surface_events) =
+            registry_queue_init::<PointerProtocolClient>(&surface_connection)
+                .expect("surface-limit registry");
+        let surface_queue = surface_events.handle();
+        let surface_compositor = surface_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&surface_queue, 1..=6, ())
+            .expect("surface-limit wl_compositor");
+        let _surfaces = (0..=MAX_SURFACES)
+            .map(|_| surface_compositor.create_surface(&surface_queue, ()))
+            .collect::<Vec<_>>();
+        surface_connection.flush().expect("flush surface overflow");
+        assert!(
+            surface_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "surface overflow must disconnect its client"
+        );
+
+        let total_connection = connect();
+        let (total_globals, mut total_events) =
+            registry_queue_init::<PointerProtocolClient>(&total_connection)
+                .expect("total-callback registry");
+        let total_queue = total_events.handle();
+        let total_compositor = total_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&total_queue, 1..=6, ())
+            .expect("total-callback wl_compositor");
+        let total_surfaces = (0..3)
+            .map(|_| total_compositor.create_surface(&total_queue, ()))
+            .collect::<Vec<_>>();
+        let _total_callbacks = total_surfaces[..2]
+            .iter()
+            .flat_map(|surface| {
+                (0..MAX_FRAME_CALLBACKS_PER_SURFACE)
+                    .map(|_| surface.frame(&total_queue, ()))
+            })
+            .chain(std::iter::once(total_surfaces[2].frame(&total_queue, ())))
+            .collect::<Vec<_>>();
+        total_connection
+            .flush()
+            .expect("flush total callback overflow");
+        assert!(
+            total_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "total callback overflow must disconnect its client"
+        );
+
+        {
+            let first_holder_connection = connect();
+            let (first_holder_globals, mut first_holder_events) =
+                registry_queue_init::<PointerProtocolClient>(&first_holder_connection)
+                    .expect("first global-surface holder registry");
+            let first_holder_queue = first_holder_events.handle();
+            let first_holder_compositor = first_holder_globals
+                .bind::<client_wl_compositor::WlCompositor, _, _>(
+                    &first_holder_queue,
+                    1..=6,
+                    (),
+                )
+                .expect("first global-surface holder compositor");
+            let _first_holder_surfaces = (0..MAX_SURFACES_PER_CLIENT)
+                .map(|_| first_holder_compositor.create_surface(&first_holder_queue, ()))
+                .collect::<Vec<_>>();
+            first_holder_connection
+                .flush()
+                .expect("flush first global-surface holder");
+            first_holder_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("first global-surface holder roundtrip");
+
+            let second_holder_connection = connect();
+            let (second_holder_globals, mut second_holder_events) =
+                registry_queue_init::<PointerProtocolClient>(&second_holder_connection)
+                    .expect("second global-surface holder registry");
+            let second_holder_queue = second_holder_events.handle();
+            let second_holder_compositor = second_holder_globals
+                .bind::<client_wl_compositor::WlCompositor, _, _>(
+                    &second_holder_queue,
+                    1..=6,
+                    (),
+                )
+                .expect("second global-surface holder compositor");
+            let _second_holder_surfaces = (0..MAX_SURFACES_PER_CLIENT)
+                .map(|_| second_holder_compositor.create_surface(&second_holder_queue, ()))
+                .collect::<Vec<_>>();
+            second_holder_connection
+                .flush()
+                .expect("flush second global-surface holder");
+            second_holder_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("second global-surface holder roundtrip");
+
+            let global_surface_connection = connect();
+            let (global_surface_globals, mut global_surface_events) =
+                registry_queue_init::<PointerProtocolClient>(&global_surface_connection)
+                    .expect("global-surface overflow registry");
+            let global_surface_queue = global_surface_events.handle();
+            let global_surface_compositor = global_surface_globals
+                .bind::<client_wl_compositor::WlCompositor, _, _>(
+                    &global_surface_queue,
+                    1..=6,
+                    (),
+                )
+                .expect("global-surface overflow compositor");
+            let _global_surface =
+                global_surface_compositor.create_surface(&global_surface_queue, ());
+            global_surface_connection
+                .flush()
+                .expect("flush global surface overflow");
+            assert!(
+                global_surface_events
+                    .roundtrip(&mut PointerProtocolClient::default())
+                    .is_err(),
+                "global surface overflow must disconnect its client"
+            );
+        }
+        stage.store(3, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 4 {
+            std::thread::yield_now();
+        }
+
+        {
+            let create_callback_holder = |connection: &Connection, label: &str| {
+                let (globals, mut events) =
+                    registry_queue_init::<PointerProtocolClient>(connection).expect(label);
+                let queue = events.handle();
+                let compositor = globals
+                    .bind::<client_wl_compositor::WlCompositor, _, _>(&queue, 1..=6, ())
+                    .expect("global-callback holder compositor");
+                let surfaces = (0..2)
+                    .map(|_| compositor.create_surface(&queue, ()))
+                    .collect::<Vec<_>>();
+                let callbacks = surfaces
+                    .iter()
+                    .flat_map(|surface| {
+                        (0..MAX_FRAME_CALLBACKS_PER_SURFACE)
+                            .map(|_| surface.frame(&queue, ()))
+                    })
+                    .collect::<Vec<_>>();
+                connection
+                    .flush()
+                    .expect("flush global-callback holder");
+                events
+                    .roundtrip(&mut PointerProtocolClient::default())
+                    .expect("global-callback holder roundtrip");
+                (events, surfaces, callbacks)
+            };
+            let first_holder_connection = connect();
+            let _first_holder = create_callback_holder(
+                &first_holder_connection,
+                "first global-callback holder registry",
+            );
+            let second_holder_connection = connect();
+            let _second_holder = create_callback_holder(
+                &second_holder_connection,
+                "second global-callback holder registry",
+            );
+
+            let global_callback_connection = connect();
+            let (global_callback_globals, mut global_callback_events) =
+                registry_queue_init::<PointerProtocolClient>(&global_callback_connection)
+                    .expect("global-callback overflow registry");
+            let global_callback_queue = global_callback_events.handle();
+            let global_callback_compositor = global_callback_globals
+                .bind::<client_wl_compositor::WlCompositor, _, _>(
+                    &global_callback_queue,
+                    1..=6,
+                    (),
+                )
+                .expect("global-callback overflow compositor");
+            let global_callback_surface =
+                global_callback_compositor.create_surface(&global_callback_queue, ());
+            let _global_callback = global_callback_surface.frame(&global_callback_queue, ());
+            global_callback_connection
+                .flush()
+                .expect("flush global callback overflow");
+            assert!(
+                global_callback_events
+                    .roundtrip(&mut PointerProtocolClient::default())
+                    .is_err(),
+                "global callback overflow must disconnect its client"
+            );
+        }
+        stage.store(5, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 6 {
+            std::thread::yield_now();
+        }
+
+        let second_connection = connect();
+        let (second_globals, second_events) = registry_queue_init::<PointerProtocolClient>(
+            &second_connection,
+        )
+        .expect("second registry");
+        let second_queue = second_events.handle();
+        let second_compositor = second_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&second_queue, 1..=6, ())
+            .expect("second wl_compositor");
+        let second_surface = second_compositor.create_surface(&second_queue, ());
+        let _callback = second_surface.frame(&second_queue, ());
+        second_surface.commit();
+        second_connection.flush().expect("flush recovered callback");
+        stage.store(7, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 8 {
+            std::thread::yield_now();
+        }
+        stage.store(9, Ordering::Release);
+
+        server.join().expect("callback-limit server");
         assert!(!socket.exists());
     }
 
@@ -18531,6 +19022,42 @@ mod tests {
             slot.copy_damage(PresentationCopyDamage::Region(current)),
             PresentationCopyDamage::Full
         );
+    }
+
+    #[test]
+    fn frame_callback_limits_accept_exact_capacity_and_reject_growth() {
+        assert!(!frame_callback_limit_exceeded(
+            MAX_FRAME_CALLBACKS_PER_SURFACE - 1,
+            MAX_FRAME_CALLBACKS_PER_CLIENT - 1,
+            MAX_FRAME_CALLBACKS_TOTAL - 1,
+        ));
+        assert!(frame_callback_limit_exceeded(
+            MAX_FRAME_CALLBACKS_PER_SURFACE,
+            MAX_FRAME_CALLBACKS_PER_CLIENT - 1,
+            MAX_FRAME_CALLBACKS_TOTAL - 1,
+        ));
+        assert!(frame_callback_limit_exceeded(
+            MAX_FRAME_CALLBACKS_PER_SURFACE - 1,
+            MAX_FRAME_CALLBACKS_PER_CLIENT,
+            MAX_FRAME_CALLBACKS_TOTAL - 1,
+        ));
+        assert!(frame_callback_limit_exceeded(
+            MAX_FRAME_CALLBACKS_PER_SURFACE - 1,
+            MAX_FRAME_CALLBACKS_PER_CLIENT - 1,
+            MAX_FRAME_CALLBACKS_TOTAL,
+        ));
+        assert!(!surface_limit_exceeded(
+            MAX_SURFACES_PER_CLIENT - 1,
+            MAX_SURFACES - 1,
+        ));
+        assert!(surface_limit_exceeded(
+            MAX_SURFACES_PER_CLIENT,
+            MAX_SURFACES - 1,
+        ));
+        assert!(surface_limit_exceeded(
+            MAX_SURFACES_PER_CLIENT - 1,
+            MAX_SURFACES,
+        ));
     }
 
     #[test]
