@@ -2938,7 +2938,10 @@ fn copy_last_frame_to_native_window(
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn launcher_presentation_frame(state: &CompositorState) -> Option<Arc<CommittedFrame>> {
-    let fallback = state.last_frame.as_ref()?.clone();
+    direct_launcher_presentation_frame(state).or_else(|| state.last_frame.clone())
+}
+
+fn direct_launcher_presentation_frame(state: &CompositorState) -> Option<Arc<CommittedFrame>> {
     if !state.tile_toplevels
         || state.cursor_frame.is_some()
         || state.popups.iter().any(|popup| {
@@ -2948,7 +2951,7 @@ fn launcher_presentation_frame(state: &CompositorState) -> Option<Arc<CommittedF
                     .is_some_and(|data| !data.dismissed.load(Ordering::Acquire))
         })
     {
-        return Some(fallback);
+        return None;
     }
     let root_surface = state.root_surface.as_ref()?;
     let layout = toplevel_layout(state)?;
@@ -2958,18 +2961,11 @@ fn launcher_presentation_frame(state: &CompositorState) -> Option<Arc<CommittedF
         || layout.root_width != state.output_width
         || layout.root_height != state.output_height
     {
-        return Some(fallback);
+        return None;
     }
     let data = root_surface.data::<SurfaceData>()?;
     let surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
-    let frame = surface.committed_frame.as_ref()?.clone();
-    if surface.committed_buffer_transform != BufferTransform::Normal
-        || surface.committed_viewport_source.is_some()
-        || !surface.children_below.is_empty()
-        || !surface.children_above.is_empty()
-    {
-        return Some(fallback);
-    }
+    let frame = direct_surface_frame(&surface)?;
     drop(surface);
     let geometry = window_geometry_for_surface(root_surface).unwrap_or(WindowGeometry {
         x: 0,
@@ -2982,9 +2978,48 @@ fn launcher_presentation_frame(state: &CompositorState) -> Option<Arc<CommittedF
         || geometry.width != frame.width as i32
         || geometry.height != frame.height as i32
     {
-        return Some(fallback);
+        return None;
     }
     Some(original_buffer_frame(&frame))
+}
+
+fn direct_surface_frame(surface: &SurfaceState) -> Option<Arc<CommittedFrame>> {
+    let frame = surface.committed_frame.as_ref()?;
+    if surface.committed_buffer_transform != BufferTransform::Normal
+        || surface.committed_viewport_source.is_some()
+        || !surface.children_below.is_empty()
+        || !surface.children_above.is_empty()
+        || (frame.format == wl_shm::Format::Argb8888 && surface.committed_opaque_region.is_some())
+    {
+        None
+    } else {
+        Some(Arc::clone(frame))
+    }
+}
+
+fn frame_matches_output(frame: &CommittedFrame, width: u32, height: u32) -> bool {
+    frame.width == width && frame.height == height
+}
+
+fn stable_popup_base_frame(state: &CompositorState) -> Option<Arc<CommittedFrame>> {
+    let frame = state
+        .popup_base_frame
+        .as_ref()
+        .or(state.last_frame.as_ref())?;
+    let aliases_root = state
+        .root_frame
+        .as_ref()
+        .is_some_and(|root| Arc::ptr_eq(frame, &original_buffer_frame(root)));
+    if !aliases_root {
+        return Some(Arc::clone(frame));
+    }
+    Some(Arc::new(CommittedFrame::new(
+        frame.width,
+        frame.height,
+        frame.format,
+        frame.pixels().clone(),
+        None,
+    )))
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -4008,6 +4043,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                     if state.popup_base_frame.is_none() {
                         state.popup_base_frame = state.last_frame.clone();
                     }
+                    state.popup_base_frame = stable_popup_base_frame(state);
                     state.popup_base_armed = false;
                 }
                 state.popups.push(popup.clone());
@@ -9980,6 +10016,20 @@ fn update_composited_frame(state: &mut CompositorState) {
     } else {
         layout.output_height
     };
+    if let Some(frame) = direct_launcher_presentation_frame(state)
+        .filter(|frame| frame_matches_output(frame, output_width, output_height))
+    {
+        state.last_frame_width = frame.width;
+        state.last_frame_height = frame.height;
+        state.last_frame_checksum = frame.pixels().iter().fold(0u32, |checksum, value| {
+            checksum.wrapping_add(u32::from(*value))
+        });
+        state.last_frame = Some(frame);
+        if !state.popup_base_armed {
+            state.popup_base_frame = None;
+        }
+        return;
+    }
     let prefer_original_buffers =
         output_width != layout.output_width || output_height != layout.output_height;
     let scale_x = |value: i32| {
@@ -17810,6 +17860,70 @@ mod tests {
             &presentation_buffer_frame(&logical, true, BufferTransform::Rotate90, None,),
             &logical,
         ));
+    }
+
+    #[test]
+    fn direct_frame_alias_requires_copy_equivalent_surface_state() {
+        let frame = test_frame(2, 2, &[1, 2, 3, 4]);
+        let mut surface = SurfaceState {
+            committed_frame: Some(Arc::clone(&frame)),
+            ..SurfaceState::default()
+        };
+        assert!(Arc::ptr_eq(
+            &direct_surface_frame(&surface).expect("direct frame"),
+            &frame
+        ));
+        assert!(frame_matches_output(&frame, 2, 2));
+        assert!(!frame_matches_output(&frame, 1, 2));
+
+        surface.committed_buffer_transform = BufferTransform::Rotate90;
+        assert!(direct_surface_frame(&surface).is_none());
+        surface.committed_buffer_transform = BufferTransform::Normal;
+        surface.committed_viewport_source = Some(ViewportSource {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        });
+        assert!(direct_surface_frame(&surface).is_none());
+
+        let argb = Arc::new(CommittedFrame::new(
+            1,
+            1,
+            wl_shm::Format::Argb8888,
+            vec![1, 2, 3, 4],
+            None,
+        ));
+        surface.committed_frame = Some(argb);
+        surface.committed_viewport_source = None;
+        surface.committed_opaque_region = Some(RegionState {
+            operations: vec![RegionOperation::Add(
+                RegionRectangle::new(0, 0, 1, 1).expect("opaque region"),
+            )],
+        });
+        assert!(direct_surface_frame(&surface).is_none());
+    }
+
+    #[test]
+    fn popup_base_detaches_an_aliased_direct_root() {
+        let root = test_frame(2, 1, &[1, 2]);
+        let mut state = CompositorState {
+            root_frame: Some(Arc::clone(&root)),
+            last_frame: Some(Arc::clone(&root)),
+            ..CompositorState::default()
+        };
+        for _ in 0..100 {
+            state.popup_base_frame = state.last_frame.clone();
+            assert!(Arc::ptr_eq(
+                state.popup_base_frame.as_ref().expect("armed popup base"),
+                &root
+            ));
+        }
+        let base = stable_popup_base_frame(&state).expect("popup base");
+        assert!(!Arc::ptr_eq(&base, &root));
+        root.pixels().fill(9);
+        assert_eq!(frame_values(&base), [1, 2]);
+        assert_eq!(frame_values(&root), [9, 9]);
     }
 
     #[test]

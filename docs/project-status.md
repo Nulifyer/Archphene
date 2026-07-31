@@ -3149,6 +3149,20 @@ compositor probes pass. The probe now accounts explicitly for the
 mapped toplevel's retained activation configure before proving that two later
 resize configures remain ordered and independently acknowledged.
 
+The common direct-root launcher path no longer constructs a redundant composed
+output raster before copying into Android's retained `AHardwareBuffer`. When the
+tiled root exactly covers the physical output and needs no cursor, popup,
+secondary overlay, transform, viewport, subsurface, geometry adjustment, or
+ARGB opaque-region processing, `last_frame` aliases the original retained client
+raster and computes diagnostics directly from it. All non-equivalent scenes
+still use the compositor canvas. Popup capture deep-copies an aliased root once
+to preserve its stable base across later in-place client damage. Unit tests cover
+direct eligibility, physical-size mismatch, transform and viewport fallback,
+low-alpha opaque-region fallback, and popup-base isolation; the full workspace
+and strict Clippy gates plus rebuilt x86_64 and AArch64 Android compositor probes
+pass. Retained-raster conversion/copy into `AHardwareBuffer` and direct client
+dmabuf import remain open.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
