@@ -3314,6 +3314,22 @@ device 17 without disconnecting either holder, verifies complete cleanup, and
 creates a final healthy device. The full workspace and strict Clippy gates plus
 rebuilt exact x86_64 and AArch64 Android probes pass.
 
+Bindings to advertised Wayland globals now share one ownership quota. A client
+may retain 16 bindings across the compositor's 14 interfaces, leaving two slots
+for compatible repeated binding. The 32-client admission ceiling makes 512 the
+exact aggregate maximum. Every accepted bind records its client-local object
+identity. Explicit protocol destruction and client disconnect remove that
+identity; binding 17 disconnects before interface-specific state or events are
+published. A real protocol fixture binds all 14 interfaces, consumes both spare
+slots, destroys and replaces a manager binding, rejects binding 17, fills all
+512 slots with 24 filesystem and eight descriptor-adopted clients, verifies
+single-holder and complete cleanup, and reconnects at exact capacity. The
+lifecycle design was checked against libwayland's resource destruction order,
+KWin's descriptor-created client path and connection-buffer controls, and
+Hyprland's protocol ownership and retained bound-output handling. The full
+workspace and strict Clippy gates plus rebuilt exact x86_64 and AArch64 Android
+probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

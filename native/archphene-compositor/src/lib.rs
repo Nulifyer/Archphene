@@ -91,7 +91,7 @@ use wayland_server::protocol::wl_touch::{self, WlTouch};
 use wayland_server::{
     Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
     backend::protocol::ProtocolError,
-    backend::{ClientData, ClientId, DisconnectReason},
+    backend::{ClientData, ClientId, DisconnectReason, ObjectId},
 };
 
 const MAX_WAYLAND_CLIENTS: usize = 32;
@@ -148,6 +148,8 @@ const MAX_OUTPUTS_PER_CLIENT: usize = 1;
 const MAX_OUTPUTS_TOTAL: usize = MAX_WAYLAND_CLIENTS;
 const MAX_CURSOR_SHAPE_DEVICES_PER_CLIENT: usize = 8;
 const MAX_CURSOR_SHAPE_DEVICES_TOTAL: usize = 16;
+const MAX_GLOBAL_BINDINGS_PER_CLIENT: usize = 16;
+const MAX_GLOBAL_BINDINGS_TOTAL: usize = MAX_WAYLAND_CLIENTS * MAX_GLOBAL_BINDINGS_PER_CLIENT;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -484,6 +486,7 @@ fn release_wayland_client_reservation(active_client_count: &AtomicUsize) {
 
 #[derive(Default)]
 pub struct CompositorState {
+    global_bindings: Vec<ObjectId>,
     compositor_binds: u32,
     shm_binds: u32,
     shm_pool_count: u32,
@@ -4253,13 +4256,16 @@ impl ShmBufferInner {
 impl GlobalDispatch<XdgWmBase, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<XdgWmBase>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, XdgWmBaseData::default());
+        let wm_base = data_init.init(resource, XdgWmBaseData::default());
+        if !admit_global_binding(state, client, handle, &wm_base) {
+            return;
+        }
         state.xdg_wm_base_binds = state.xdg_wm_base_binds.saturating_add(1);
     }
 }
@@ -4343,6 +4349,10 @@ impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
             xdg_wm_base::Request::Pong { .. } => {}
             _ => unreachable!("xdg_wm_base request added without an implementation"),
         }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &XdgWmBase, _data: &XdgWmBaseData) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -5615,14 +5625,15 @@ fn queue_linux_drag(state: &mut CompositorState, source: &WlDataSource) -> bool 
 
 impl GlobalDispatch<ZwpRelativePointerManagerV1, ()> for CompositorState {
     fn bind(
-        _state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<ZwpRelativePointerManagerV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let manager = data_init.init(resource, ());
+        admit_global_binding(state, client, handle, &manager);
     }
 }
 
@@ -5660,6 +5671,15 @@ impl Dispatch<ZwpRelativePointerManagerV1, ()> for CompositorState {
             }
             _ => unreachable!("relative-pointer manager request added without an implementation"),
         }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpRelativePointerManagerV1,
+        _data: &(),
+    ) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -6217,14 +6237,15 @@ fn apply_pointer_constraint_regions(state: &mut CompositorState, surface: &WlSur
 
 impl GlobalDispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
     fn bind(
-        _state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<ZwpPointerConstraintsV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let manager = data_init.init(resource, ());
+        admit_global_binding(state, client, handle, &manager);
     }
 }
 
@@ -6294,6 +6315,15 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
             }
             _ => unreachable!("pointer-constraints request added without an implementation"),
         }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpPointerConstraintsV1,
+        _data: &(),
+    ) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -6392,14 +6422,15 @@ impl Dispatch<ZwpConfinedPointerV1, PointerConstraintData> for CompositorState {
 
 impl GlobalDispatch<ZwpPointerGesturesV1, ()> for CompositorState {
     fn bind(
-        _state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<ZwpPointerGesturesV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let manager = data_init.init(resource, ());
+        admit_global_binding(state, client, handle, &manager);
     }
 }
 
@@ -6474,6 +6505,10 @@ impl Dispatch<ZwpPointerGesturesV1, ()> for CompositorState {
             zwp_pointer_gestures_v1::Request::Release => {}
             _ => unreachable!("pointer-gestures request added without an implementation"),
         }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwpPointerGesturesV1, _data: &()) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -6562,14 +6597,15 @@ impl Dispatch<ZwpPointerGestureHoldV1, PointerGestureData> for CompositorState {
 }
 impl GlobalDispatch<WpViewporter, ()> for CompositorState {
     fn bind(
-        _state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WpViewporter>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let viewporter = data_init.init(resource, ());
+        admit_global_binding(state, client, handle, &viewporter);
     }
 }
 
@@ -6610,6 +6646,10 @@ impl Dispatch<WpViewporter, ()> for CompositorState {
             }
             _ => unreachable!("wp_viewporter request added without an implementation"),
         }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WpViewporter, _data: &()) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -6703,14 +6743,15 @@ impl Dispatch<WpViewport, ViewportData> for CompositorState {
 
 impl GlobalDispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
     fn bind(
-        _state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WpFractionalScaleManagerV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let manager = data_init.init(resource, ());
+        admit_global_binding(state, client, handle, &manager);
     }
 }
 
@@ -6758,6 +6799,15 @@ impl Dispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
             _ => unreachable!("fractional-scale manager request added without an implementation"),
         }
     }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WpFractionalScaleManagerV1,
+        _data: &(),
+    ) {
+        release_global_binding(state, &resource.id());
+    }
 }
 
 impl Dispatch<WpFractionalScaleV1, FractionalScaleData> for CompositorState {
@@ -6803,13 +6853,16 @@ impl Dispatch<WpFractionalScaleV1, FractionalScaleData> for CompositorState {
 impl GlobalDispatch<ZwpTextInputManagerV3, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<ZwpTextInputManagerV3>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let manager = data_init.init(resource, ());
+        if !admit_global_binding(state, client, handle, &manager) {
+            return;
+        }
         state.text_input_manager_binds = state.text_input_manager_binds.saturating_add(1);
     }
 }
@@ -6866,6 +6919,15 @@ impl Dispatch<ZwpTextInputManagerV3, ()> for CompositorState {
             zwp_text_input_manager_v3::Request::Destroy => {}
             _ => unreachable!("text-input manager request added without an implementation"),
         }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpTextInputManagerV3,
+        _data: &(),
+    ) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -7015,13 +7077,16 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for CompositorState {
 impl GlobalDispatch<WlDataDeviceManager, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WlDataDeviceManager>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let manager = data_init.init(resource, ());
+        if !admit_global_binding(state, client, handle, &manager) {
+            return;
+        }
         state.data_device_manager_binds = state.data_device_manager_binds.saturating_add(1);
     }
 }
@@ -7096,6 +7161,10 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
             wl_data_device_manager::Request::Release => {}
             _ => unreachable!("wl_data_device_manager request added without an implementation"),
         }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlDataDeviceManager, _data: &()) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -7412,6 +7481,9 @@ impl GlobalDispatch<WlOutput, ()> for CompositorState {
             );
             return;
         }
+        if !admit_global_binding(state, client, handle, &output) {
+            return;
+        }
         output.geometry(
             0,
             0,
@@ -7462,6 +7534,7 @@ impl Dispatch<WlOutput, ()> for CompositorState {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlOutput, _data: &()) {
+        release_global_binding(state, &resource.id());
         state.outputs.retain(|output| output.id() != resource.id());
         let protocol_id = resource.id().protocol_id();
         for surface in state
@@ -7483,13 +7556,16 @@ impl Dispatch<WlOutput, ()> for CompositorState {
 impl GlobalDispatch<WlSeat, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WlSeat>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
         let seat = data_init.init(resource, ());
+        if !admit_global_binding(state, client, handle, &seat) {
+            return;
+        }
         state.seat_binds = state.seat_binds.saturating_add(1);
         if seat.version() >= 2 {
             seat.name("Archphene".into());
@@ -7612,6 +7688,10 @@ impl Dispatch<WlSeat, ()> for CompositorState {
             _ => unreachable!("wl_seat request added without an implementation"),
         }
     }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSeat, _data: &()) {
+        release_global_binding(state, &resource.id());
+    }
 }
 
 impl Dispatch<WlTouch, ()> for CompositorState {
@@ -7700,14 +7780,15 @@ fn cursor_changed(state: &mut CompositorState) {
 
 impl GlobalDispatch<WpCursorShapeManagerV1, ()> for CompositorState {
     fn bind(
-        _state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WpCursorShapeManagerV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let manager = data_init.init(resource, ());
+        admit_global_binding(state, client, handle, &manager);
     }
 }
 
@@ -7781,6 +7862,15 @@ impl Dispatch<WpCursorShapeManagerV1, ()> for CompositorState {
             }
             _ => unreachable!("cursor-shape manager request added without an implementation"),
         }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WpCursorShapeManagerV1,
+        _data: &(),
+    ) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -8078,6 +8168,41 @@ fn live_resource_counts<R: Resource>(
     (client, total)
 }
 
+fn admit_global_binding<R: Resource>(
+    state: &mut CompositorState,
+    client: &Client,
+    handle: &DisplayHandle,
+    resource: &R,
+) -> bool {
+    let client_count = state
+        .global_bindings
+        .iter()
+        .filter(|binding| binding.same_client_as(&resource.id()))
+        .count();
+    if resource_limit_exceeded(
+        client_count,
+        state.global_bindings.len(),
+        MAX_GLOBAL_BINDINGS_PER_CLIENT,
+        MAX_GLOBAL_BINDINGS_TOTAL,
+    ) {
+        disconnect_for_resource_limit(
+            client,
+            handle,
+            resource,
+            "retained global binding limit exceeded",
+        );
+        return false;
+    }
+    state.global_bindings.push(resource.id());
+    true
+}
+
+fn release_global_binding(state: &mut CompositorState, resource_id: &ObjectId) {
+    state
+        .global_bindings
+        .retain(|binding| binding != resource_id);
+}
+
 fn live_pointer_gesture_counts(
     state: &mut CompositorState,
     client_id: &ClientId,
@@ -8131,13 +8256,16 @@ fn source_mime_limit_exceeded(mime_types: &[String], candidate: &str) -> bool {
 impl GlobalDispatch<WlCompositor, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WlCompositor>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let compositor = data_init.init(resource, ());
+        if !admit_global_binding(state, client, handle, &compositor) {
+            return;
+        }
         state.compositor_binds = state.compositor_binds.saturating_add(1);
     }
 }
@@ -8145,13 +8273,16 @@ impl GlobalDispatch<WlCompositor, ()> for CompositorState {
 impl GlobalDispatch<WlSubcompositor, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WlSubcompositor>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let subcompositor = data_init.init(resource, ());
+        if !admit_global_binding(state, client, handle, &subcompositor) {
+            return;
+        }
         state.subcompositor_binds = state.subcompositor_binds.saturating_add(1);
     }
 }
@@ -8159,13 +8290,16 @@ impl GlobalDispatch<WlSubcompositor, ()> for CompositorState {
 impl GlobalDispatch<WlShm, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WlShm>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
         let shm = data_init.init(resource, ());
+        if !admit_global_binding(state, client, handle, &shm) {
+            return;
+        }
         shm.format(wl_shm::Format::Argb8888);
         shm.format(wl_shm::Format::Xrgb8888);
         state.shm_binds = state.shm_binds.saturating_add(1);
@@ -8240,6 +8374,10 @@ impl Dispatch<WlShm, ()> for CompositorState {
             }
             _ => unreachable!("wl_shm request added without an implementation"),
         }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlShm, _data: &()) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -8805,6 +8943,10 @@ impl Dispatch<WlSubcompositor, ()> for CompositorState {
             _ => unreachable!("wl_subcompositor request added without an implementation"),
         }
     }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSubcompositor, _data: &()) {
+        release_global_binding(state, &resource.id());
+    }
 }
 
 fn subsurface_sibling_is_valid(data: &SubsurfaceData, sibling: &WlSurface) -> bool {
@@ -9033,6 +9175,10 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
             }
             _ => unreachable!("wl_compositor request added without an implementation"),
         }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlCompositor, _data: &()) {
+        release_global_binding(state, &resource.id());
     }
 }
 
@@ -18342,8 +18488,10 @@ mod tests {
     use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1 as client_relative_pointer;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1 as client_cursor_shape_device;
     use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1 as client_cursor_shape_manager;
+    use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1 as client_fractional_scale_manager;
     use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3 as client_text_input_manager;
     use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3 as client_text_input;
+    use wayland_protocols::wp::viewporter::client::wp_viewporter as client_viewporter;
     use wayland_protocols::xdg::shell::client::{
         xdg_positioner as client_xdg_positioner, xdg_surface as client_xdg_surface,
         xdg_toplevel as client_xdg_toplevel, xdg_wm_base as client_xdg_wm_base,
@@ -18416,6 +18564,10 @@ mod tests {
     wayland_client::delegate_noop!(
         PointerProtocolClient: client_cursor_shape_manager::WpCursorShapeManagerV1
     );
+    wayland_client::delegate_noop!(
+        PointerProtocolClient: client_fractional_scale_manager::WpFractionalScaleManagerV1
+    );
+    wayland_client::delegate_noop!(PointerProtocolClient: client_viewporter::WpViewporter);
     wayland_client::delegate_noop!(
         PointerProtocolClient: ignore client_cursor_shape_device::WpCursorShapeDeviceV1
     );
@@ -22058,6 +22210,353 @@ mod tests {
         stage.store(13, Ordering::Release);
 
         server.join().expect("cursor-device server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn global_binding_limits_cover_every_advertised_interface() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-global-binding-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let (adopt_sender, adopt_receiver) = std::sync::mpsc::channel::<OwnedFd>();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while server_stage.load(Ordering::Acquire) != 19 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "global-binding server timed out"
+                );
+                while let Ok(fd) = adopt_receiver.try_recv() {
+                    core.adopt_client(fd)
+                        .expect("adopt global-binding holder");
+                }
+                core.dispatch_once().expect("dispatch global-binding clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.global_bindings.len() == 14 => {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.global_bindings.len() == MAX_GLOBAL_BINDINGS_PER_CLIENT => {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.global_bindings.len()
+                        == MAX_GLOBAL_BINDINGS_PER_CLIENT - 1 =>
+                    {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.global_bindings.len() == MAX_GLOBAL_BINDINGS_PER_CLIENT => {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.global_bindings.is_empty() => {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.global_bindings.len() == MAX_GLOBAL_BINDINGS_TOTAL => {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    13 if core.state.global_bindings.len()
+                        == MAX_GLOBAL_BINDINGS_TOTAL - MAX_GLOBAL_BINDINGS_PER_CLIENT =>
+                    {
+                        server_stage.store(14, Ordering::Release);
+                    }
+                    15 if core.state.global_bindings.is_empty()
+                        && core.active_client_count() == 0 =>
+                    {
+                        server_stage.store(16, Ordering::Release);
+                    }
+                    17 if core.state.global_bindings.len()
+                        == MAX_GLOBAL_BINDINGS_PER_CLIENT =>
+                    {
+                        server_stage.store(18, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting global-binding client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("global-binding connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect global-binding client: {error}"),
+                }
+            }
+        };
+        let connect_adopted = || {
+            let (server, client) = UnixStream::pair().expect("global-binding adopted pair");
+            adopt_sender
+                .send(server.into())
+                .expect("send global-binding adopted client");
+            Connection::from_socket(client).expect("global-binding adopted connection")
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for global-binding stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let mixed_connection = connect();
+        let (mixed_globals, mut mixed_events) =
+            registry_queue_init::<PointerProtocolClient>(&mixed_connection)
+                .expect("mixed global-binding registry");
+        let mixed_queue = mixed_events.handle();
+        let compositor = mixed_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&mixed_queue, 1..=6, ())
+            .expect("bind compositor global");
+        let subcompositor = mixed_globals
+            .bind::<client_wl_subcompositor::WlSubcompositor, _, _>(&mixed_queue, 1..=1, ())
+            .expect("bind subcompositor global");
+        let shm = mixed_globals
+            .bind::<client_wl_shm::WlShm, _, _>(&mixed_queue, 1..=1, ())
+            .expect("bind SHM global");
+        let wm_base = mixed_globals
+            .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&mixed_queue, 1..=6, ())
+            .expect("bind XDG shell global");
+        let seat = mixed_globals
+            .bind::<client_wl_seat::WlSeat, _, _>(&mixed_queue, 1..=9, ())
+            .expect("bind seat global");
+        let data_manager = mixed_globals
+            .bind::<client_wl_data_device_manager::WlDataDeviceManager, _, _>(
+                &mixed_queue,
+                1..=3,
+                (),
+            )
+            .expect("bind data-device global");
+        let text_manager = mixed_globals
+            .bind::<client_text_input_manager::ZwpTextInputManagerV3, _, _>(
+                &mixed_queue,
+                1..=1,
+                (),
+            )
+            .expect("bind text-input global");
+        let gesture_manager = mixed_globals
+            .bind::<client_pointer_gestures::ZwpPointerGesturesV1, _, _>(
+                &mixed_queue,
+                1..=3,
+                (),
+            )
+            .expect("bind pointer-gestures global");
+        let relative_manager = mixed_globals
+            .bind::<client_relative_pointer_manager::ZwpRelativePointerManagerV1, _, _>(
+                &mixed_queue,
+                1..=1,
+                (),
+            )
+            .expect("bind relative-pointer global");
+        let constraints = mixed_globals
+            .bind::<client_pointer_constraints::ZwpPointerConstraintsV1, _, _>(
+                &mixed_queue,
+                1..=1,
+                (),
+            )
+            .expect("bind pointer-constraints global");
+        let cursor_manager = mixed_globals
+            .bind::<client_cursor_shape_manager::WpCursorShapeManagerV1, _, _>(
+                &mixed_queue,
+                1..=2,
+                (),
+            )
+            .expect("bind cursor-shape global");
+        let viewporter = mixed_globals
+            .bind::<client_viewporter::WpViewporter, _, _>(&mixed_queue, 1..=1, ())
+            .expect("bind viewporter global");
+        let fractional_manager = mixed_globals
+            .bind::<client_fractional_scale_manager::WpFractionalScaleManagerV1, _, _>(
+                &mixed_queue,
+                1..=1,
+                (),
+            )
+            .expect("bind fractional-scale global");
+        let output = mixed_globals
+            .bind::<client_wl_output::WlOutput, _, _>(&mixed_queue, 1..=4, ())
+            .expect("bind output global");
+        mixed_connection
+            .flush()
+            .expect("flush every advertised global");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        mixed_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("all advertised globals remain connected");
+
+        let mut extra_compositors = (0..2)
+            .map(|_| {
+                mixed_globals
+                    .bind::<client_wl_compositor::WlCompositor, _, _>(
+                        &mixed_queue,
+                        1..=6,
+                        (),
+                    )
+                    .expect("bind global within aggregate limit")
+            })
+            .collect::<Vec<_>>();
+        mixed_connection
+            .flush()
+            .expect("flush exact aggregate binding limit");
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+        mixed_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact aggregate binding limit remains connected");
+
+        cursor_manager.destroy();
+        mixed_connection
+            .flush()
+            .expect("flush global-binding destroy");
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        mixed_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("global-binding destroy frees capacity");
+        extra_compositors.push(
+            mixed_globals
+                .bind::<client_wl_compositor::WlCompositor, _, _>(
+                    &mixed_queue,
+                    1..=6,
+                    (),
+                )
+                .expect("bind replacement global"),
+        );
+        mixed_connection
+            .flush()
+            .expect("flush replacement global binding");
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        mixed_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("aggregate global-binding capacity is reusable");
+
+        let _overflow_binding = mixed_globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&mixed_queue, 1..=6, ())
+            .expect("create aggregate overflow proxy");
+        mixed_connection
+            .flush()
+            .expect("flush aggregate global-binding overflow");
+        assert!(
+            mixed_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "global binding 17 must disconnect its client"
+        );
+        drop((
+            compositor,
+            subcompositor,
+            shm,
+            wm_base,
+            seat,
+            data_manager,
+            text_manager,
+            gesture_manager,
+            relative_manager,
+            constraints,
+            viewporter,
+            fractional_manager,
+            output,
+            extra_compositors,
+            mixed_globals,
+            mixed_events,
+            mixed_connection,
+        ));
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+
+        let mut holders = Vec::new();
+        for index in 0..MAX_WAYLAND_CLIENTS {
+            let connection = if index < MAX_FILESYSTEM_WAYLAND_CLIENTS {
+                connect()
+            } else {
+                connect_adopted()
+            };
+            let (globals, events) = registry_queue_init::<PointerProtocolClient>(&connection)
+                .expect("global-binding holder registry");
+            let queue = events.handle();
+            let bindings = (0..MAX_GLOBAL_BINDINGS_PER_CLIENT)
+                .map(|_| {
+                    globals
+                        .bind::<client_wl_compositor::WlCompositor, _, _>(
+                            &queue,
+                            1..=6,
+                            (),
+                        )
+                        .expect("bind global-binding holder resource")
+                })
+                .collect::<Vec<_>>();
+            connection.flush().expect("flush global-binding holder");
+            holders.push((connection, globals, events, bindings));
+        }
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        for (_, _, events, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("global-binding holder remains connected");
+        }
+
+        drop(holders.pop().expect("global-binding holder to release"));
+        stage.store(13, Ordering::Release);
+        wait_for_stage(14);
+        for (_, _, events, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("remaining global-binding holder survives cleanup");
+        }
+        drop(holders);
+        stage.store(15, Ordering::Release);
+        wait_for_stage(16);
+
+        let healthy_connection = connect();
+        let (healthy_globals, mut healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy global-binding registry");
+        let healthy_queue = healthy_events.handle();
+        let healthy_bindings = (0..MAX_GLOBAL_BINDINGS_PER_CLIENT)
+            .map(|_| {
+                healthy_globals
+                    .bind::<client_wl_compositor::WlCompositor, _, _>(
+                        &healthy_queue,
+                        1..=6,
+                        (),
+                    )
+                    .expect("bind healthy global resource")
+            })
+            .collect::<Vec<_>>();
+        healthy_connection
+            .flush()
+            .expect("flush healthy global bindings");
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("healthy exact global-binding client remains connected");
+        stage.store(17, Ordering::Release);
+        wait_for_stage(18);
+        stage.store(19, Ordering::Release);
+
+        drop(healthy_bindings);
+        server.join().expect("global-binding server");
         assert!(!socket.exists());
     }
 
