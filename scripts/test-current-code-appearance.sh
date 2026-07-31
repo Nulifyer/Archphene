@@ -303,7 +303,7 @@ code_configs="$(
 code_config="$(sed -n '1p' <<<"$code_configs")"
 [[ "$code_config" =~ ^files/arch-root/home/archphene/\.config/(Code|Code\ -\ OSS)$ ]] ||
   archphene_die "Code configuration path is unsafe: $code_config"
-archphene_adb_run shell run-as "$manager" test ! -L "$code_config" ||
+archphene_adb_run shell "run-as $manager test ! -L '$code_config'" ||
   archphene_die "Code configuration directory is a symlink"
 archphene_adb_run shell run-as "$manager" test ! -e "$backup" ||
   archphene_die "Code appearance backup already exists"
@@ -312,17 +312,17 @@ archphene_adb_run shell \
   "run-as $manager sh -c 'cp -a -- \"$code_config\" \"$backup\"'"
 config_backed_up=true
 
-archphene_adb_run shell run-as "$manager" mkdir -p "$code_config/User"
+archphene_adb_run shell "run-as $manager mkdir -p '$code_config/User'"
 archphene_adb_run push "$fixture" "$remote_fixture" >/dev/null
 archphene_adb_run shell chmod 0644 "$remote_fixture"
-archphene_adb_run shell run-as "$manager" cp \
-  "$remote_fixture" "$code_config/User/settings.json"
-archphene_adb_run shell run-as "$manager" chmod 0600 \
-  "$code_config/User/settings.json"
+archphene_adb_run shell \
+  "run-as $manager cp '$remote_fixture' '$code_config/User/settings.json'"
+archphene_adb_run shell \
+  "run-as $manager chmod 0600 '$code_config/User/settings.json'"
 local_fixture_hash="$(sha256sum "$fixture" | awk '{print $1}')"
 remote_fixture_hash="$(
-  archphene_adb_run shell run-as "$manager" sha256sum \
-    "$code_config/User/settings.json" |
+  archphene_adb_run shell \
+    "run-as $manager sha256sum '$code_config/User/settings.json'" |
     awk '{print $1}' |
     tr -d '\r'
 )"

@@ -663,7 +663,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Validate broad GTK 4/libadwaita appearance with current unmodified Seahorse on both exact ABIs. The state-preserving gate drives the production Auto/Light/Dark and Material You controls, verifies the resolved GTK settings/helper diagnostic and stable palette, and requires unchanged manager, wrapper, and Linux PIDs. Android UI-tree evidence, fatal-log checks, measured pixel differences, and manually inspected full-device light/dark/stable-accent frames pass on the emulator and Samsung. The physical AArch64 run exposed and fixed a generic Android loader-namespace regression by resolving symbols only from already-loaded GTK 3/4 and libadwaita libraries; the bridge remains event-driven and does not introduce a toolkit.
   - [x] native Wayland/Foot — Samsung proves both the 150% explicit geometry workspace (288×587 logical output) and the restored automatic phone workspace (432×881), with full-device visual inspection and real shell input. The generic supervised-process bridge now recognizes Foot's `ptsname` → close-master → `setsid` → reopen-slave controlling-terminal sequence without releasing ordinary GUI descendants from manager supervision; exact host PTY regressions and the sealed AArch64 runtime pass.
   - [ ] SDL
-  - [ ] Electron/Chromium
+  - [x] Electron/Chromium
     - [x] Prove current unmodified Visual Studio Code follows live explicit
       Light→Dark→Light changes through Archphene's standard appearance portal
       on the physical AArch64 Samsung. A state-preserving gate enables Code's
@@ -672,9 +672,13 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       across 99.9% of the sampled Linux surface, restores exact Code
       configuration and Auto preference, rejects scoped fatal logs, and keeps
       inspected full-device evidence.
-    - [ ] Repeat the current Code appearance gate on x86_64. The emulator's
-      existing Code - OSS session is deliberately left intact instead of
-      force-stopping a potentially unsaved user workspace.
+    - [x] Repeat the current Code appearance gate on x86_64. Once no Code
+      session was active, the state-preserving gate passed live
+      Light→Dark→Light updates with unchanged manager, wrapper, and Electron
+      leader PIDs; exact configuration and Auto preference restoration; scoped
+      fatal-log rejection; measured full-surface transitions; and inspected
+      full-device light/dark/returned-light frames under
+      `tooling/artifacts/visual-audit/emulator-5554/code-appearance-current`.
   - [ ] XWayland
 - [x] Keep geometry scale, text scale, visible control size, and touch target size distinct, documented, persisted, and predictable after relaunch.
 - [x] Evaluate safe live appearance updates per toolkit; keep relaunch semantics when a toolkit cannot update geometry, fonts, and controls consistently.

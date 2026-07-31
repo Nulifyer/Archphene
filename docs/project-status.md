@@ -2477,16 +2477,17 @@ Accelerated rendering now explicitly requires both a safe render-node/GBM
 strategy and compositor presentation/readback; the C# debugger and sustained
 lifecycle also remain open.
 
-Current unmodified Visual Studio Code on the physical AArch64 Samsung follows
-live explicit Light→Dark→Light changes through Archphene's standard appearance
-portal when Code's standard automatic color-scheme preference is enabled. The
-state-preserving gate retains the same manager, wrapper, and Electron leader;
-measures the Linux surface moving from 249.9 to 29.7 mean luma across 99.9% of
-sampled pixels; restores the exact Code configuration and Archphene Auto
-preference; rejects scoped fatal logs; and retains inspected full-device
-light/dark/returned-light frames. The x86_64 repeat remains pending because the
-emulator currently has an existing Code - OSS session that the gate correctly
-refuses to force-stop.
+Current unmodified Visual Studio Code on the physical AArch64 Samsung and
+Code - OSS on the x86_64 emulator follow live explicit Light→Dark→Light changes
+through Archphene's standard appearance portal when Code's standard automatic
+color-scheme preference is enabled. Both state-preserving runs retain the same
+manager, wrapper, and Electron leader; restore the exact Code configuration and
+Archphene Auto preference; reject scoped fatal logs; and retain inspected
+full-device light/dark/returned-light frames. Samsung measures 249.9 to 29.7
+mean luma across 99.9% of sampled pixels. The emulator independently measures
+254.2 to 30.6 and back to 254.2 across the complete sampled surface. Current
+x86_64 evidence is under
+`tooling/artifacts/visual-audit/emulator-5554/code-appearance-current`.
 
 Current x86_64 Code-OSS now also reaches its full Ozone/Wayland workbench with
 the shared process, Node workers, extension host, file watcher, and integrated
