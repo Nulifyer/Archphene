@@ -686,6 +686,12 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_keyboard key lifecycle was incomplete");
                 }
 
+                int pendingConfigureBaseline = nativePendingConfigureCount(core);
+                if (pendingConfigureBaseline != 1) {
+                    throw new IllegalStateException(
+                            "mapped toplevel activation configure count was not exact: "
+                                    + pendingConfigureBaseline);
+                }
                 int firstResizeSerial = nativeConfigureFocusedToplevel(core, 8, 4);
                 int secondResizeSerial = nativeConfigureFocusedToplevel(core, 12, 6);
                 if (firstResizeSerial <= 0 || secondResizeSerial <= firstResizeSerial) {
@@ -705,8 +711,11 @@ public final class MainActivity extends Activity {
                         secondResizeSerial,
                         12,
                         6);
-                if (nativePendingConfigureCount(core) != 2) {
-                    throw new IllegalStateException("xdg configure queue did not retain both entries");
+                int pendingConfigureCount = nativePendingConfigureCount(core);
+                if (pendingConfigureCount != pendingConfigureBaseline + 2) {
+                    throw new IllegalStateException(
+                            "xdg configure queue did not retain both entries: "
+                                    + pendingConfigureCount);
                 }
 
                 output.write(ackXdgConfigureAndSyncRequest(firstResizeSerial, 39));

@@ -11,7 +11,8 @@ use wayland_server::protocol::wl_shm;
 
 use super::{
     BufferTransform, CommittedFrame, RegionRectangle, ShmBufferInner, ShmPoolInner,
-    ShmSnapshotState,
+    ShmSnapshotState, SurfaceState, damage_for_commit_into, push_bounded_damage,
+    restore_commit_damage_scratch, restore_pending_damage_buffers, take_pending_damage,
 };
 
 struct ThreadCountingAllocator;
@@ -76,6 +77,49 @@ fn count_allocations(operation: impl FnOnce()) -> usize {
     ALLOCATION_COUNT.with(Cell::get)
 }
 
+fn collect_commit_damage(
+    surface: &mut SurfaceState,
+    frame: &Arc<CommittedFrame>,
+    surface_rectangle: RegionRectangle,
+    buffer_rectangle: RegionRectangle,
+) -> usize {
+    let SurfaceState {
+        pending_surface_damage,
+        pending_surface_damage_full,
+        ..
+    } = surface;
+    push_bounded_damage(
+        pending_surface_damage,
+        pending_surface_damage_full,
+        surface_rectangle,
+    );
+    let SurfaceState {
+        pending_buffer_damage,
+        pending_buffer_damage_full,
+        ..
+    } = surface;
+    push_bounded_damage(
+        pending_buffer_damage,
+        pending_buffer_damage_full,
+        buffer_rectangle,
+    );
+    let (surface_damage, buffer_damage, overflow) = take_pending_damage(surface);
+    let mut damage = std::mem::take(&mut surface.commit_damage_scratch);
+    damage_for_commit_into(
+        &mut damage,
+        &surface_damage,
+        &buffer_damage,
+        Some(frame),
+        BufferTransform::Normal,
+        1,
+        overflow,
+    );
+    let count = damage.len();
+    restore_pending_damage_buffers(surface, surface_damage, buffer_damage);
+    restore_commit_damage_scratch(surface, damage);
+    count
+}
+
 #[test]
 fn warmed_retained_shm_damage_does_not_allocate() {
     let (_fixture, file) = create_fixture();
@@ -98,6 +142,9 @@ fn warmed_retained_shm_damage_does_not_allocate() {
         None,
     ));
     let damage = [RegionRectangle::new(1, 0, 1, 1).expect("damage")];
+    let surface_damage = RegionRectangle::new(0, 0, 1, 1).expect("surface damage");
+    let buffer_damage = RegionRectangle::new(1, 0, 1, 1).expect("buffer damage");
+    let mut surface = SurfaceState::default();
     let snapshot_state = || ShmSnapshotState {
         surface_damage: &[],
         buffer_damage: &damage,
@@ -105,11 +152,16 @@ fn warmed_retained_shm_damage_does_not_allocate() {
         scale: 1,
         viewport_active: false,
         allow_in_place: true,
+        force_full_damage: false,
     };
 
     buffer
         .snapshot(Some(&previous), snapshot_state())
         .expect("warm retained SHM patch");
+    assert_eq!(
+        collect_commit_damage(&mut surface, &previous, surface_damage, buffer_damage),
+        2,
+    );
     buffer
         .pool
         .lock()
@@ -135,6 +187,11 @@ fn warmed_retained_shm_damage_does_not_allocate() {
             let pixels = frame.pixels();
             assert_eq!(pixels[0], 1);
             assert_eq!(pixels[4], value);
+            drop(pixels);
+            assert_eq!(
+                collect_commit_damage(&mut surface, &previous, surface_damage, buffer_damage),
+                2,
+            );
         }
     });
 

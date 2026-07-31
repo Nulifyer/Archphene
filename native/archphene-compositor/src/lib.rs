@@ -523,7 +523,10 @@ struct SurfaceState {
     pending_buffer: Option<Option<SurfaceBuffer>>,
     pending_offset: (i32, i32),
     pending_surface_damage: Vec<RegionRectangle>,
+    pending_surface_damage_full: bool,
     pending_buffer_damage: Vec<RegionRectangle>,
+    pending_buffer_damage_full: bool,
+    commit_damage_scratch: Vec<RegionRectangle>,
     pending_callbacks: Vec<WlCallback>,
     pending_input_region: Option<Option<RegionState>>,
     committed_input_region: Option<RegionState>,
@@ -560,6 +563,36 @@ struct SurfaceState {
     pending_subsurface_stack: Vec<(WlSurface, WlSurface, bool)>,
     xdg_configured: bool,
     entered_outputs: Vec<u32>,
+}
+
+fn take_pending_damage(
+    surface: &mut SurfaceState,
+) -> (Vec<RegionRectangle>, Vec<RegionRectangle>, bool) {
+    let surface_damage = std::mem::take(&mut surface.pending_surface_damage);
+    let surface_damage_full = std::mem::take(&mut surface.pending_surface_damage_full);
+    let buffer_damage = std::mem::take(&mut surface.pending_buffer_damage);
+    let buffer_damage_full = std::mem::take(&mut surface.pending_buffer_damage_full);
+    (
+        surface_damage,
+        buffer_damage,
+        surface_damage_full || buffer_damage_full,
+    )
+}
+
+fn restore_pending_damage_buffers(
+    surface: &mut SurfaceState,
+    mut surface_damage: Vec<RegionRectangle>,
+    mut buffer_damage: Vec<RegionRectangle>,
+) {
+    surface_damage.clear();
+    buffer_damage.clear();
+    surface.pending_surface_damage = surface_damage;
+    surface.pending_buffer_damage = buffer_damage;
+}
+
+fn restore_commit_damage_scratch(surface: &mut SurfaceState, mut damage: Vec<RegionRectangle>) {
+    damage.clear();
+    surface.commit_damage_scratch = damage;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1340,25 +1373,28 @@ impl BufferTransform {
     }
 }
 
-fn damage_for_commit(
-    surface_damage: Vec<RegionRectangle>,
-    buffer_damage: Vec<RegionRectangle>,
+fn damage_for_commit_into(
+    damage: &mut Vec<RegionRectangle>,
+    surface_damage: &[RegionRectangle],
+    buffer_damage: &[RegionRectangle],
     frame: Option<&Arc<CommittedFrame>>,
     transform: BufferTransform,
     scale: i32,
     force_full: bool,
-) -> Vec<RegionRectangle> {
+) {
+    damage.clear();
     let Some(frame) = frame else {
-        return Vec::new();
+        return;
     };
     let scale = u32::try_from(scale).unwrap_or(1).max(1);
-    let mut damage = surface_damage
-        .into_iter()
-        .filter_map(|rectangle| rectangle.clip(frame.width, frame.height))
-        .collect::<Vec<_>>();
+    damage.extend(
+        surface_damage
+            .iter()
+            .filter_map(|rectangle| rectangle.clip(frame.width, frame.height)),
+    );
     let source = original_buffer_frame(frame);
-    damage.extend(buffer_damage.into_iter().filter_map(|rectangle| {
-        transform.buffer_damage_to_surface(rectangle, source.width, source.height, scale)
+    damage.extend(buffer_damage.iter().filter_map(|rectangle| {
+        transform.buffer_damage_to_surface(*rectangle, source.width, source.height, scale)
     }));
     if force_full {
         damage.clear();
@@ -1366,7 +1402,6 @@ fn damage_for_commit(
             damage.push(full);
         }
     }
-    damage
 }
 
 fn original_buffer_frame(frame: &Arc<CommittedFrame>) -> Arc<CommittedFrame> {
@@ -3182,6 +3217,40 @@ struct RegionRectangle {
     height: i32,
 }
 
+const MAX_PENDING_DAMAGE_RECTANGLES: usize = 64;
+
+fn push_bounded_damage(
+    damage: &mut Vec<RegionRectangle>,
+    full_damage: &mut bool,
+    rectangle: RegionRectangle,
+) {
+    if *full_damage {
+        return;
+    }
+    if damage.len() < MAX_PENDING_DAMAGE_RECTANGLES {
+        damage.push(rectangle);
+    } else {
+        damage.clear();
+        *full_damage = true;
+    }
+}
+
+fn push_accumulated_damage(damage: &mut Vec<RegionRectangle>, rectangle: RegionRectangle) {
+    if damage.len() < MAX_PENDING_DAMAGE_RECTANGLES {
+        damage.push(rectangle);
+        return;
+    }
+    let bounds = damage
+        .iter()
+        .copied()
+        .chain(std::iter::once(rectangle))
+        .reduce(RegionRectangle::union);
+    damage.clear();
+    if let Some(bounds) = bounds {
+        damage.push(bounds);
+    }
+}
+
 impl RegionRectangle {
     fn new(x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
         (width > 0 && height > 0).then_some(Self {
@@ -3307,6 +3376,7 @@ struct ShmSnapshotState<'a> {
     scale: i32,
     viewport_active: bool,
     allow_in_place: bool,
+    force_full_damage: bool,
 }
 
 impl ShmBufferInner {
@@ -3334,14 +3404,18 @@ impl ShmBufferInner {
                 && frame.format == self.format
                 && frame.pixels().len() == frame_bytes
         });
-        let damage = self.read_damage(
-            compatible_previous.is_some(),
-            state.surface_damage,
-            state.buffer_damage,
-            state.transform,
-            state.scale,
-            state.viewport_active,
-        );
+        let damage = if state.force_full_damage {
+            ShmReadDamage::Full
+        } else {
+            self.read_damage(
+                compatible_previous.is_some(),
+                state.surface_damage,
+                state.buffer_damage,
+                state.transform,
+                state.scale,
+                state.viewport_active,
+            )
+        };
         if state.allow_in_place {
             if let Some(previous) = compatible_previous.as_ref() {
                 match damage {
@@ -7373,13 +7447,13 @@ fn append_damage_batches(
         let Some((origin_x, origin_y)) = surface_origin_in_root(state, &surface, 0) else {
             continue;
         };
-        state
-            .presentation_damage
-            .extend(damage.into_iter().filter_map(|rectangle| {
-                rectangle
-                    .translated(origin_x, origin_y)
-                    .clip(output_width, output_height)
-            }));
+        for rectangle in damage.into_iter().filter_map(|rectangle| {
+            rectangle
+                .translated(origin_x, origin_y)
+                .clip(output_width, output_height)
+        }) {
+            push_accumulated_damage(&mut state.presentation_damage, rectangle);
+        }
     }
 }
 impl Dispatch<WlSubcompositor, ()> for CompositorState {
@@ -7695,11 +7769,17 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 height,
             } => {
                 if let Some(damage) = RegionRectangle::new(x, y, width, height) {
-                    data.inner
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .pending_surface_damage
-                        .push(damage);
+                    let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                    let SurfaceState {
+                        pending_surface_damage,
+                        pending_surface_damage_full,
+                        ..
+                    } = &mut *surface;
+                    push_bounded_damage(
+                        pending_surface_damage,
+                        pending_surface_damage_full,
+                        damage,
+                    );
                 }
             }
             wl_surface::Request::DamageBuffer {
@@ -7709,11 +7789,13 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 height,
             } => {
                 if let Some(damage) = RegionRectangle::new(x, y, width, height) {
-                    data.inner
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .pending_buffer_damage
-                        .push(damage);
+                    let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                    let SurfaceState {
+                        pending_buffer_damage,
+                        pending_buffer_damage_full,
+                        ..
+                    } = &mut *surface;
+                    push_bounded_damage(pending_buffer_damage, pending_buffer_damage_full, damage);
                 }
             }
             wl_surface::Request::Frame { callback } => {
@@ -7930,9 +8012,10 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let input_region_update = surface.pending_input_region.take();
                 let opaque_region_update = surface.pending_opaque_region.take();
                 let pending_offset = std::mem::take(&mut surface.pending_offset);
-                let surface_damage = std::mem::take(&mut surface.pending_surface_damage);
-                let buffer_damage = std::mem::take(&mut surface.pending_buffer_damage);
-                let damage_declared = !surface_damage.is_empty() || !buffer_damage.is_empty();
+                let (surface_damage, buffer_damage, damage_overflow) =
+                    take_pending_damage(&mut surface);
+                let damage_declared =
+                    damage_overflow || !surface_damage.is_empty() || !buffer_damage.is_empty();
                 let buffer_scale_update = surface.pending_buffer_scale.take();
                 let buffer_transform_update = surface.pending_buffer_transform.take();
                 let viewport_source_update = surface.pending_viewport_source.take();
@@ -8006,6 +8089,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 scale: next_scale,
                                 viewport_active,
                                 allow_in_place: !synchronized,
+                                force_full_damage: damage_overflow,
                             },
                         ) {
                             Ok(frame) => {
@@ -8085,15 +8169,19 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     || buffer_transform_update.is_some()
                     || viewport_state_changed
                     || (viewport_active && !buffer_damage.is_empty())
-                    || (frame_update.is_some() && !damage_declared);
-                let local_damage = damage_for_commit(
-                    surface_damage,
-                    buffer_damage,
+                    || (frame_update.is_some() && !damage_declared)
+                    || damage_overflow;
+                let mut local_damage = std::mem::take(&mut surface.commit_damage_scratch);
+                damage_for_commit_into(
+                    &mut local_damage,
+                    &surface_damage,
+                    &buffer_damage,
                     next_frame.as_ref(),
                     next_transform,
                     next_scale,
                     force_full_damage,
                 );
+                restore_pending_damage_buffers(&mut surface, surface_damage, buffer_damage);
 
                 if synchronized {
                     if let Some(input_region) = input_region_update {
@@ -8109,7 +8197,10 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     if buffer_state_changed {
                         surface.cached_frame = Some(next_frame);
                     }
-                    surface.cached_damage.extend(local_damage);
+                    for damage in local_damage.iter().copied() {
+                        push_accumulated_damage(&mut surface.cached_damage, damage);
+                    }
+                    restore_commit_damage_scratch(&mut surface, local_damage);
                     surface.cached_callbacks.append(&mut callbacks);
                     cache_pointer_constraint_regions(state, resource);
                     state.surface_commit_count = state.surface_commit_count.saturating_add(1);
@@ -8159,14 +8250,18 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 if let Some((origin_x, origin_y)) = damage_origin {
                     let output_width = state.output_width.max(0) as u32;
                     let output_height = state.output_height.max(0) as u32;
-                    state
-                        .presentation_damage
-                        .extend(local_damage.into_iter().filter_map(|damage| {
-                            damage
-                                .translated(origin_x, origin_y)
-                                .clip(output_width, output_height)
-                        }));
+                    for damage in local_damage.iter().filter_map(|damage| {
+                        damage
+                            .translated(origin_x, origin_y)
+                            .clip(output_width, output_height)
+                    }) {
+                        push_accumulated_damage(&mut state.presentation_damage, damage);
+                    }
                 }
+                restore_commit_damage_scratch(
+                    &mut data.inner.lock().unwrap_or_else(|error| error.into_inner()),
+                    local_damage,
+                );
                 if publishes_root_frame && has_frame {
                     if is_xdg_toplevel && state.primary_toplevel.is_none() {
                         state.primary_toplevel = xdg_toplevel.clone();
@@ -17776,6 +17871,65 @@ mod tests {
     }
 
     #[test]
+    fn bounds_pending_damage_and_promotes_overflow_to_full() {
+        let rectangle = RegionRectangle::new(0, 0, 1, 1).expect("damage");
+        let mut damage = Vec::new();
+        let mut full = false;
+        for _ in 0..MAX_PENDING_DAMAGE_RECTANGLES {
+            push_bounded_damage(&mut damage, &mut full, rectangle);
+        }
+        assert_eq!(damage.len(), MAX_PENDING_DAMAGE_RECTANGLES);
+        assert!(!full);
+
+        push_bounded_damage(&mut damage, &mut full, rectangle);
+        assert!(damage.is_empty());
+        assert!(full);
+        push_bounded_damage(&mut damage, &mut full, rectangle);
+        assert!(damage.is_empty());
+
+        let mut surface = SurfaceState::default();
+        for _ in 0..=MAX_PENDING_DAMAGE_RECTANGLES {
+            let SurfaceState {
+                pending_buffer_damage,
+                pending_buffer_damage_full,
+                ..
+            } = &mut surface;
+            push_bounded_damage(
+                pending_buffer_damage,
+                pending_buffer_damage_full,
+                rectangle,
+            );
+        }
+        let (surface_damage, buffer_damage, overflow) = take_pending_damage(&mut surface);
+        assert!(surface_damage.is_empty());
+        assert!(buffer_damage.is_empty());
+        assert!(overflow);
+        restore_pending_damage_buffers(&mut surface, surface_damage, buffer_damage);
+        let SurfaceState {
+            pending_buffer_damage,
+            pending_buffer_damage_full,
+            ..
+        } = &mut surface;
+        push_bounded_damage(
+            pending_buffer_damage,
+            pending_buffer_damage_full,
+            rectangle,
+        );
+        let (_, buffer_damage, overflow) = take_pending_damage(&mut surface);
+        assert_eq!(buffer_damage, [rectangle]);
+        assert!(!overflow);
+
+        let mut accumulated = Vec::new();
+        for x in 0..=MAX_PENDING_DAMAGE_RECTANGLES {
+            push_accumulated_damage(
+                &mut accumulated,
+                RegionRectangle::new(x as i32, 0, 1, 1).expect("accumulated damage"),
+            );
+        }
+        assert_eq!(accumulated, [RegionRectangle::new(0, 0, 65, 1).expect("union")]);
+    }
+
+    #[test]
     fn retains_undamaged_shm_pixels_and_reads_only_the_damage_bounds() {
         let path = std::env::temp_dir().join(format!(
             "archphene-shm-damage-{}.bin",
@@ -17812,6 +17966,7 @@ mod tests {
                     scale: 1,
                     viewport_active: false,
                     allow_in_place: true,
+                    force_full_damage: false,
                 },
             )
             .expect("partial SHM snapshot");
@@ -17837,12 +17992,30 @@ mod tests {
                     scale: 1,
                     viewport_active: false,
                     allow_in_place: false,
+                    force_full_damage: false,
                 },
             )
             .expect("detached synchronized snapshot");
         assert!(!Arc::ptr_eq(&synchronized, &previous));
         assert_eq!(frame_values(&synchronized), [50, 20, 3, 4]);
         assert_eq!(frame_values(&previous), [1, 20, 3, 4]);
+
+        let forced = buffer
+            .snapshot(
+                Some(&previous),
+                ShmSnapshotState {
+                    surface_damage: &[],
+                    buffer_damage: &[RegionRectangle::new(0, 0, 1, 1).expect("damage")],
+                    transform: BufferTransform::Normal,
+                    scale: 1,
+                    viewport_active: false,
+                    allow_in_place: true,
+                    force_full_damage: true,
+                },
+            )
+            .expect("forced full SHM snapshot");
+        assert!(!Arc::ptr_eq(&forced, &previous));
+        assert_eq!(frame_values(&forced), [50, 60, 70, 80]);
 
         buffer
             .pool
@@ -17862,6 +18035,7 @@ mod tests {
                         scale: 1,
                         viewport_active: false,
                         allow_in_place: true,
+                        force_full_damage: false,
                     },
                 )
                 .is_err()
