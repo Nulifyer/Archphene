@@ -13278,12 +13278,7 @@ class ArchpheneRuntimeService : Service() {
                 Log.e(TAG, "Pending package mutation response is malformed", error)
                 return
             }
-        val mutationOperation =
-            if (pending.install) {
-                NativeRuntime.JOB_OPERATION_INSTALL
-            } else {
-                NativeRuntime.JOB_OPERATION_REMOVE
-            }
+        val mutationOperation = PackageMutationRecoveryPolicy.defaultOperation(pending.install)
         if (jobPackage != pending.packageName) {
             Log.w(
                 TAG,
@@ -13294,7 +13289,7 @@ class ArchpheneRuntimeService : Service() {
             jobRepository = "recovery"
             jobOperation = mutationOperation
             jobState = NativeRuntime.JOB_FAILED
-        } else if (jobOperation != mutationOperation) {
+        } else if (!PackageMutationRecoveryPolicy.matches(pending.install, jobOperation)) {
             packageMutationStatus = ""
             Log.e(TAG, "Pending package mutation operation disagrees with the durable job")
             return

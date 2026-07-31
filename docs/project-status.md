@@ -83,8 +83,14 @@ lifecycle-script authorization, disabled arbitrary libalpm hooks with fixed
 maintenance adapters, contained executable and desktop ownership, APK-bound
 native runtime content, AndroidKeyStore launcher signing, authenticated Binder
 identity, and explicit key-loss recovery. A source contract keeps these claims
-linked to their Rust/Kotlin enforcement. Signed-scriptlet reverse rollback
-remains a device-coverage task.
+linked to their Rust/Kotlin enforcement. Signed-scriptlet reverse rollback now
+passes on x86_64 with verified `zsh` 5.9.1-1 and 5.9.2-1. The gate interrupts
+the normal update after commit, exposes Repair and Roll back, restores the older
+archive, and proves its `post_upgrade` script restores `/usr/bin/zsh` exactly
+once without changing unrelated `/etc/shells` content. It preserves the install
+reason, clears transaction residue, restores current `zsh` 5.9.2-1, and retains
+full-device evidence under
+`tooling/build/signed-scriptlet-rollback/emulator-5554`.
 
 Graphical Linux sessions now retain the same Android foreground-service
 protection as the shared shell and long package/file work. The manager records
