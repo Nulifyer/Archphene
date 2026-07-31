@@ -3279,6 +3279,19 @@ replacement, fill all 32 descriptor-adopted slots, reject slot 33, and reuse a
 released slot. The full workspace and strict Clippy gates plus rebuilt exact
 x86_64 and AArch64 Android probes pass.
 
+Wayland output bindings now follow the compositor's single-physical-output
+model. Each of the at most 32 active clients may retain one `wl_output`, making
+32 the exact compositor-wide ceiling without denying a first binding to any
+admitted client. A repeated binding disconnects only that client. Explicit
+release and client disconnect restore capacity. Destruction removes an entered
+output only from same-client surfaces because Wayland protocol IDs are local to
+one connection and can collide across clients. A real protocol fixture proves
+the exact per-client boundary, release and replacement, repeated-bind
+rejection, saturation by all 32 filesystem and descriptor-adopted clients,
+same-numbered output cleanup isolation across their surfaces, complete cleanup,
+and a successful final binding and round trip. The full workspace and strict
+Clippy gates plus rebuilt exact x86_64 and AArch64 Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

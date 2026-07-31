@@ -142,6 +142,8 @@ const MAX_POINTER_GESTURES_PER_CLIENT: usize = 8;
 const MAX_POINTER_GESTURES_TOTAL: usize = 16;
 const MAX_REGIONS_PER_CLIENT: usize = 64;
 const MAX_REGIONS_TOTAL: usize = 128;
+const MAX_OUTPUTS_PER_CLIENT: usize = 1;
+const MAX_OUTPUTS_TOTAL: usize = MAX_WAYLAND_CLIENTS;
 const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 const MAX_REGION_OPERATIONS: usize = 64;
@@ -7362,13 +7364,28 @@ fn enter_surface_outputs(state: &mut CompositorState, surface: &WlSurface) {
 impl GlobalDispatch<WlOutput, ()> for CompositorState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<WlOutput>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
         let output = data_init.init(resource, ());
+        let (client_count, total_count) = live_resource_counts(&mut state.outputs, &client.id());
+        if resource_limit_exceeded(
+            client_count,
+            total_count,
+            MAX_OUTPUTS_PER_CLIENT,
+            MAX_OUTPUTS_TOTAL,
+        ) {
+            disconnect_for_resource_limit(
+                client,
+                handle,
+                &output,
+                "retained output binding limit exceeded",
+            );
+            return;
+        }
         output.geometry(
             0,
             0,
@@ -7421,7 +7438,11 @@ impl Dispatch<WlOutput, ()> for CompositorState {
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlOutput, _data: &()) {
         state.outputs.retain(|output| output.id() != resource.id());
         let protocol_id = resource.id().protocol_id();
-        for surface in &state.surfaces {
+        for surface in state
+            .surfaces
+            .iter()
+            .filter(|surface| resource.id().same_client_as(&surface.id()))
+        {
             if let Some(data) = surface.data::<SurfaceData>() {
                 data.inner
                     .lock()
@@ -18231,7 +18252,7 @@ mod tests {
         wl_data_device_manager as client_wl_data_device_manager,
         wl_data_offer as client_wl_data_offer, wl_data_source as client_wl_data_source,
         wl_keyboard as client_wl_keyboard, wl_pointer as client_wl_pointer,
-        wl_region as client_wl_region,
+        wl_output as client_wl_output, wl_region as client_wl_region,
         wl_registry as client_wl_registry, wl_seat as client_wl_seat,
         wl_shm as client_wl_shm,
         wl_shm_pool as client_wl_shm_pool, wl_subcompositor as client_wl_subcompositor,
@@ -18292,6 +18313,7 @@ mod tests {
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_callback::WlCallback);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_buffer::WlBuffer);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_keyboard::WlKeyboard);
+    wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_output::WlOutput);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_touch::WlTouch);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_shm::WlShm);
     wayland_client::delegate_noop!(PointerProtocolClient: client_wl_shm_pool::WlShmPool);
@@ -21215,6 +21237,263 @@ mod tests {
         stage.store(7, Ordering::Release);
 
         server.join().expect("pointer-global server");
+        assert!(!socket.exists());
+    }
+
+    #[test]
+    fn output_binding_limits_release_and_preserve_independent_clients() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-output-resource-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let (adopt_sender, adopt_receiver) = std::sync::mpsc::channel::<OwnedFd>();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while server_stage.load(Ordering::Acquire) != 13 {
+                if std::time::Instant::now() >= deadline {
+                    let current_stage = server_stage.load(Ordering::Acquire);
+                    assert_eq!(
+                        current_stage,
+                        13,
+                        "output-resource server timed out at stage {current_stage} with {} active clients",
+                        core.active_client_count(),
+                    );
+                    break;
+                }
+                while let Ok(fd) = adopt_receiver.try_recv() {
+                    if let Err(error) = core.adopt_client(fd) {
+                        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+                    }
+                }
+                core.dispatch_once().expect("dispatch output-resource clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.outputs.len() == MAX_OUTPUTS_PER_CLIENT => {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.outputs.is_empty() => {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.outputs.len() == MAX_OUTPUTS_TOTAL
+                        && core.state.surfaces.len() == MAX_OUTPUTS_TOTAL =>
+                    {
+                        for surface in &core.state.surfaces {
+                            let output = core
+                                .state
+                                .outputs
+                                .iter()
+                                .find(|output| output.id().same_client_as(&surface.id()))
+                                .expect("surface owner has an output binding");
+                            let data = surface.data::<SurfaceData>().expect("surface data");
+                            let mut surface_state = data
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            surface_state.entered_outputs.clear();
+                            surface_state.entered_outputs.push(output.id().protocol_id());
+                        }
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.outputs.len() == MAX_OUTPUTS_TOTAL - 1
+                        && core.state.surfaces.len() == MAX_OUTPUTS_TOTAL - 1 =>
+                    {
+                        assert!(core.state.surfaces.iter().all(|surface| {
+                            surface
+                                .data::<SurfaceData>()
+                                .is_some_and(|data| {
+                                    data.inner
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .entered_outputs
+                                        .len()
+                                        == 1
+                                })
+                        }));
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.outputs.is_empty()
+                        && core.state.surfaces.is_empty()
+                        && core.active_client_count() == 0 =>
+                    {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    11 if core.state.outputs.len() == 1 => {
+                        server_stage.store(12, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting output-resource client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("output-resource connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect output-resource client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for output-resource stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+        let connect_adopted = || {
+            let (server, client) = UnixStream::pair().expect("adopted output-resource pair");
+            adopt_sender
+                .send(server.into())
+                .expect("send adopted output-resource client");
+            Connection::from_socket(client).expect("adopted output-resource connection")
+        };
+
+        let limit_connection = connect();
+        let (limit_globals, mut limit_events) =
+            registry_queue_init::<PointerProtocolClient>(&limit_connection)
+                .expect("output per-client registry");
+        let limit_queue = limit_events.handle();
+        let mut outputs = (0..MAX_OUTPUTS_PER_CLIENT)
+            .map(|_| {
+                limit_globals
+                    .bind::<client_wl_output::WlOutput, _, _>(&limit_queue, 1..=4, ())
+                    .expect("bind output within per-client limit")
+            })
+            .collect::<Vec<_>>();
+        limit_connection
+            .flush()
+            .expect("flush exact output limit");
+        stage.store(1, Ordering::Release);
+        wait_for_stage(2);
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact output limit remains connected");
+        outputs.pop().expect("output to recycle").release();
+        limit_connection.flush().expect("flush output release");
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("output release frees capacity");
+        outputs.push(
+            limit_globals
+                .bind::<client_wl_output::WlOutput, _, _>(&limit_queue, 1..=4, ())
+                .expect("bind replacement output"),
+        );
+        limit_connection
+            .flush()
+            .expect("flush replacement output");
+        limit_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("output capacity is reusable");
+        let _overflow_output = limit_globals
+            .bind::<client_wl_output::WlOutput, _, _>(&limit_queue, 1..=4, ())
+            .expect("create overflow output proxy");
+        limit_connection
+            .flush()
+            .expect("flush per-client output overflow");
+        assert!(
+            limit_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "output binding 2 must disconnect its client"
+        );
+        drop((outputs, limit_globals, limit_events, limit_connection));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let mut holders = Vec::new();
+        for index in 0..MAX_OUTPUTS_TOTAL {
+            let connection = if index < MAX_FILESYSTEM_WAYLAND_CLIENTS {
+                connect()
+            } else {
+                connect_adopted()
+            };
+            let (globals, events) = registry_queue_init::<PointerProtocolClient>(&connection)
+                .expect("global output holder registry");
+            let queue = events.handle();
+            let compositor = globals
+                .bind::<client_wl_compositor::WlCompositor, _, _>(&queue, 1..=6, ())
+                .expect("bind output-holder compositor");
+            let surface = compositor.create_surface(&queue, ());
+            let holder_outputs = (0..MAX_OUTPUTS_PER_CLIENT)
+                .map(|_| {
+                    globals
+                        .bind::<client_wl_output::WlOutput, _, _>(&queue, 1..=4, ())
+                        .expect("bind global output holder")
+                })
+                .collect::<Vec<_>>();
+            connection.flush().expect("flush global output holder");
+            holders.push((
+                connection,
+                globals,
+                events,
+                holder_outputs,
+                compositor,
+                surface,
+            ));
+        }
+        stage.store(5, Ordering::Release);
+        wait_for_stage(6);
+        for (_, _, events, _, _, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("global output holder remains connected");
+        }
+
+        drop(holders.pop().expect("output holder to disconnect"));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+        for (_, _, events, _, _, _) in &mut holders {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("remaining output holder keeps entered-output state");
+        }
+        drop(holders);
+        stage.store(9, Ordering::Release);
+        wait_for_stage(10);
+
+        let healthy_connection = connect();
+        let (healthy_globals, _healthy_events) =
+            registry_queue_init::<PointerProtocolClient>(&healthy_connection)
+                .expect("healthy output registry");
+        let healthy_queue = _healthy_events.handle();
+        let _healthy_output = healthy_globals
+            .bind::<client_wl_output::WlOutput, _, _>(&healthy_queue, 1..=4, ())
+            .expect("healthy output binding");
+        healthy_connection
+            .flush()
+            .expect("flush healthy output binding");
+        let mut healthy_events = _healthy_events;
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("healthy output client remains connected");
+        stage.store(11, Ordering::Release);
+        wait_for_stage(12);
+        stage.store(13, Ordering::Release);
+
+        server.join().expect("output-resource server");
         assert!(!socket.exists());
     }
 
