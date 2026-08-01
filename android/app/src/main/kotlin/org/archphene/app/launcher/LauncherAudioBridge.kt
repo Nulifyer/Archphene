@@ -10,13 +10,11 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
-import java.io.BufferedReader
 import java.io.Closeable
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
 import java.nio.charset.CodingErrorAction
 import java.nio.ByteBuffer
@@ -1141,25 +1139,20 @@ internal class LauncherAudioBridge(
         Thread(
                 {
                     try {
-                        BufferedReader(
-                                InputStreamReader(
-                                    process.inputStream,
-                                    StandardCharsets.UTF_8,
-                                ),
-                            )
-                            .useLines { lines ->
-                                lines.forEach { line ->
-                                    if (observePlayback) {
-                                        if (isPulseServerReadyLine(line)) {
-                                            synchronized(serverStateLock) {
-                                                if (server === process) readyServer = process
-                                            }
-                                        }
-                                        recordPlaybackInputEvent(process, line)
+                        drainBoundedUtf8Lines(
+                            process.inputStream,
+                            MAX_SERVER_LOG_LINE_BYTES,
+                        ) { line ->
+                            if (observePlayback && !line.truncated) {
+                                if (isPulseServerReadyLine(line.text)) {
+                                    synchronized(serverStateLock) {
+                                        if (server === process) readyServer = process
                                     }
-                                    Log.i(TAG, "$label: $line")
                                 }
+                                recordPlaybackInputEvent(process, line.text)
                             }
+                            Log.i(TAG, "$label: ${line.text}")
+                        }
                     } catch (error: IOException) {
                         Log.d(TAG, "$label log stream closed: ${error.message}")
                     } finally {
@@ -1227,15 +1220,10 @@ internal class LauncherAudioBridge(
         Thread(
                 {
                     try {
-                        BufferedReader(
-                                InputStreamReader(
-                                    process.errorStream,
-                                    StandardCharsets.UTF_8,
-                                ),
-                            )
-                            .useLines { lines ->
-                                lines.forEach { line -> Log.i(TAG, "$label: $line") }
-                            }
+                        drainBoundedUtf8Lines(
+                            process.errorStream,
+                            MAX_SERVER_LOG_LINE_BYTES,
+                        ) { line -> Log.i(TAG, "$label: ${line.text}") }
                     } catch (error: IOException) {
                         Log.d(TAG, "$label error stream closed: ${error.message}")
                     }
@@ -1290,6 +1278,7 @@ internal class LauncherAudioBridge(
         private const val CONTROL_TIMEOUT_SECONDS = 2L
         private const val CONTROL_TASK_WAIT_SECONDS = 7L
         private const val MAX_CONTROL_DIAGNOSTIC_BYTES = 512
+        private const val MAX_SERVER_LOG_LINE_BYTES = 512
         private const val CONTROL_DIAGNOSTIC_JOIN_MILLIS = 2_000L
         private const val MAX_FOCUS_RETRY_EXPONENT = 5
         private const val MAX_CONTROL_RETRY_EXPONENT = 5
