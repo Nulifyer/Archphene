@@ -560,7 +560,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         val delay =
             runCatching {
                 File(context.cacheDir, PORTAL_FOLDER_PROVIDER_DELAY_FILE)
-                    .readText()
+                    .let(::readBoundedDebugControl)
                     .trim()
                     .toLong()
             }.getOrNull()
@@ -582,7 +582,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         val configuredOperation =
             runCatching {
                 File(context.cacheDir, PORTAL_FOLDER_PROVIDER_FAILURE_FILE)
-                    .readText()
+                    .let(::readBoundedDebugControl)
                     .trim()
             }.getOrNull()
                 ?: return
@@ -608,7 +608,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         val delay =
             runCatching {
                 File(context.cacheDir, PORTAL_FOLDER_PROVIDER_READ_DELAY_FILE)
-                    .readText()
+                    .let(::readBoundedDebugControl)
                     .trim()
                     .toLong()
             }.getOrNull()

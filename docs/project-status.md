@@ -3239,6 +3239,14 @@ maximum. JVM tests cover empty, exact-limit, overflow traversal, and bounded
 collection rejection. JDK 26 app unit/lint and exact x86_64/AArch64 manager
 builds pass.
 
+The debuggable DocumentsProvider now reads its delay and failure-injection
+controls through a 256-byte bounded stream before UTF-8 parsing instead of
+calling unbounded `readText()` on cache files. Exact-limit controls remain
+accepted, limit-plus-one fails before string allocation, and release behavior
+remains excluded by the existing debuggable gate. JVM tests cover exact,
+oversized, and multibyte content. JDK 26 app unit/lint and exact
+x86_64/AArch64 manager builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
