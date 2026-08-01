@@ -3414,6 +3414,15 @@ pass the current Snapshot camera gate on the x86_64 emulator and AArch64
 Samsung, including the private PipeWire stream, GTK4 Cairo environment, Linux
 frame presentation, and full-device pixel inspection.
 
+Private D-Bus and XDG portal diagnostics now use fixed 1 KiB read and 512-byte
+line buffers instead of unbounded `BufferedReader.readLine()` allocation.
+Overlong tails are discarded while helper output remains fully drained. LF,
+CR, CRLF, and final unterminated lines preserve prior line semantics. A
+deterministic JVM test drains a 64 KiB hostile line, publishes only its bounded
+prefix, and preserves following mixed-delimiter lines. The JDK 26 app unit/lint
+gate and current exact-APK private portal startup within the Snapshot camera
+gate pass on the x86_64 emulator and AArch64 Samsung.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

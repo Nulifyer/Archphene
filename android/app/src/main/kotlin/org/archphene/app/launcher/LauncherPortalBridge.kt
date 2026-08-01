@@ -13,13 +13,12 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Base64
 import android.util.Log
-import java.io.BufferedReader
 import java.io.Closeable
 import java.io.File
 import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.InputStreamReader
+import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
@@ -1648,10 +1647,8 @@ internal class LauncherPortalBridge(
     ) {
         thread(start = true, isDaemon = true, name = "ArchphenePortal-$label-$sessionId") {
             runCatching {
-                BufferedReader(
-                    InputStreamReader(process.inputStream, StandardCharsets.UTF_8),
-                ).useLines { lines ->
-                    lines.forEach { line -> Log.i(TAG, "$label session=$sessionId: $line") }
+                drainBoundedUtf8Lines(process.inputStream, MAX_LOG_LINE_BYTES) { line ->
+                    Log.i(TAG, "$label session=$sessionId: $line")
                 }
             }
         }
@@ -1711,6 +1708,7 @@ internal class LauncherPortalBridge(
         private const val PORTAL_READY_DELAY_MILLIS = 100L
         private const val PROCESS_STOP_TIMEOUT_SECONDS = 2L
         private const val WORKER_STOP_TIMEOUT_MILLIS = 2_000L
+        private const val MAX_LOG_LINE_BYTES = 512
         private const val BROKER_IO_TIMEOUT_MILLIS = 1_000
         private const val MAX_BROKER_CLIENTS = 4
         private const val MAX_REQUEST_BYTES = 16_384
@@ -1810,6 +1808,53 @@ internal class LauncherPortalBridge(
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")
         private val STALE_RUNTIME_DIRECTORY_NAME =
             Regex("p[1-9][0-9]*-[0-9a-f]{16}")
+
+        internal fun drainBoundedUtf8Lines(
+            input: InputStream,
+            maximumLineBytes: Int,
+            consume: (String) -> Unit,
+        ) {
+            require(maximumLineBytes > 0)
+            val retained = ByteArray(maximumLineBytes)
+            val chunk = ByteArray(1024)
+            var retainedBytes = 0
+            var sawBytes = false
+            var carriageReturn = false
+
+            fun publish() {
+                consume(String(retained, 0, retainedBytes, StandardCharsets.UTF_8))
+                retainedBytes = 0
+                sawBytes = false
+            }
+
+            input.use { stream ->
+                while (true) {
+                    val count = stream.read(chunk)
+                    if (count < 0) break
+                    for (index in 0 until count) {
+                        val value = chunk[index]
+                        when (value) {
+                            '\r'.code.toByte() -> {
+                                publish()
+                                carriageReturn = true
+                            }
+                            '\n'.code.toByte() -> {
+                                if (!carriageReturn) publish()
+                                carriageReturn = false
+                            }
+                            else -> {
+                                carriageReturn = false
+                                sawBytes = true
+                                if (retainedBytes < retained.size) {
+                                    retained[retainedBytes++] = value
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (sawBytes) publish()
+        }
 
         fun recoverStaleRuntime(cacheRoot: File) {
             check(
