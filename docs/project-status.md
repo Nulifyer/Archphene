@@ -3524,6 +3524,16 @@ behavior, stale-drain invalidation, pause/resume, cleanup, and repeated overflow
 recovery. Launcher-template debug unit/lint and exact x86_64/AArch64 release
 R8/template assembly pass.
 
+Manager preference, configuration, wallpaper, and runtime-connection appearance
+notifications now coalesce to one pending generation-tagged Surface-thread
+update. Replacement cancels and repositions the queued update, so appearance is
+resolved from the latest preference snapshot and Android configuration at its
+final queue position without retaining one closure per change. Service teardown
+closes the slot before Surface-thread shutdown. Ordered-dispatch JVM tests cover
+100-update retention, replacement ordering, scheduling failure preservation,
+close rejection, and payload disposal. JDK 26 app unit/lint and exact
+x86_64/AArch64 manager builds pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

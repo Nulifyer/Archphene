@@ -59,7 +59,7 @@ import org.archphene.app.runtime.LauncherAuthorization
 class LauncherSessionService : Service() {
     private val preferenceAppearanceListener =
         ArchphenePreferences.AppearanceListener {
-            surfaceHandler.post { publishPortalAppearance() }
+            requestAppearanceUpdate()
         }
     private data class PendingDocumentRequest(
         val id: Int,
@@ -229,6 +229,7 @@ class LauncherSessionService : Service() {
     private val sessionBinder = SessionBinder()
     private lateinit var surfaceThread: HandlerThread
     private lateinit var surfaceHandler: Handler
+    private lateinit var appearanceUpdates: LatestDispatchSlot<Unit>
     private lateinit var clipboardThread: HandlerThread
     private lateinit var clipboardHandler: Handler
     private var wallpaperManager: WallpaperManager? = null
@@ -237,7 +238,7 @@ class LauncherSessionService : Service() {
     private var runtimeBound = false
     private val wallpaperColorsChanged =
         WallpaperManager.OnColorsChangedListener { _, _ ->
-            publishPortalAppearance()
+            requestAppearanceUpdate()
         }
 
     private val runtimeConnection =
@@ -248,7 +249,7 @@ class LauncherSessionService : Service() {
             ) {
                 runtimeBinder = service as? ArchpheneRuntimeService.LocalBinder
                 Log.i(TAG, "Shared runtime connected")
-                surfaceHandler.post { publishPortalAppearance() }
+                requestAppearanceUpdate()
             }
 
             override fun onServiceDisconnected(name: ComponentName) {
@@ -262,6 +263,12 @@ class LauncherSessionService : Service() {
         super.onCreate()
         surfaceThread = HandlerThread("ArchpheneLauncherSurface").apply { start() }
         surfaceHandler = Handler(surfaceThread.looper)
+        appearanceUpdates =
+            LatestDispatchSlot(
+                schedule = surfaceHandler::post,
+                cancel = surfaceHandler::removeCallbacks,
+                consume = { publishPortalAppearance() },
+            )
         ArchphenePreferences.setAppearanceListener(preferenceAppearanceListener)
         clipboardThread = HandlerThread("ArchpheneLauncherClipboard").apply { start() }
         clipboardHandler = Handler(clipboardThread.looper)
@@ -328,11 +335,12 @@ class LauncherSessionService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        surfaceHandler.post { publishPortalAppearance() }
+        requestAppearanceUpdate()
     }
 
     override fun onDestroy() {
         ArchphenePreferences.clearAppearanceListener(preferenceAppearanceListener)
+        appearanceUpdates.close()
         LauncherSessionDebugBridge.detach(this)
         wallpaperManager?.removeOnColorsChangedListener(wallpaperColorsChanged)
         wallpaperManager = null
@@ -2752,6 +2760,10 @@ class LauncherSessionService : Service() {
         ) {
             Log.w(TAG, "Shared runtime did not accept live Linux appearance")
         }
+    }
+
+    private fun requestAppearanceUpdate() {
+        if (::appearanceUpdates.isInitialized) appearanceUpdates.offer(Unit)
     }
 
     private inner class CompositorPump(
