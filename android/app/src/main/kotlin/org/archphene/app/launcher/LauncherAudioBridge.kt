@@ -15,22 +15,56 @@ import java.io.Closeable
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
+import java.nio.charset.CodingErrorAction
+import java.nio.ByteBuffer
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Future
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 internal data class DebugMicrophoneCapture(
     val bytes: Int,
     val nonzeroBytes: Int,
 )
+
+internal class BoundedProcessDiagnostic(
+    input: InputStream,
+    maximumBytes: Int,
+) {
+    @Volatile private var text = ""
+    private val thread =
+        Thread(
+            {
+                text =
+                    runCatching {
+                        LauncherAudioBridge.readBoundedUtf8Diagnostic(input, maximumBytes)
+                    }.getOrDefault("")
+            },
+            "ArchpheneAudioControlLog",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+
+    fun awaitText(timeoutMillis: Long): String {
+        try {
+            thread.join(timeoutMillis)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        return text
+    }
+}
 
 /**
  * Session-scoped PulseAudio server backed by Android AAudio, with an OpenSL ES fallback.
@@ -50,10 +84,7 @@ internal class LauncherAudioBridge(
             "Android audio service is unavailable"
         }
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var playbackControlExecutor =
-        Executors.newSingleThreadExecutor { command ->
-            Thread(command, "ArchpheneAudioControl").apply { isDaemon = true }
-        }
+    private var playbackControlExecutor = newPlaybackControlExecutor()
     private val focusListener =
         AudioManager.OnAudioFocusChangeListener { change ->
             synchronized(this) {
@@ -96,8 +127,15 @@ internal class LauncherAudioBridge(
     private val stateDirectory = File(runtimeDirectory, "state")
     private val socket = File(runtimeDirectory, "pulse")
     private val inputFifo = File(runtimeDirectory, "input")
+    private val serverStateLock = Any()
     @Volatile private var server: Process? = null
+    @Volatile private var readyServer: Process? = null
+    @Volatile private var unreapedServer: Process? = null
     private var input: Process? = null
+    @Volatile private var closing = false
+    private val debugToneLock = Any()
+    private var debugToneStarting = false
+    @Volatile private var debugToneProcess: Process? = null
     private var hostActive = false
     private var runtimeForeground = false
     private var focusRequested = false
@@ -106,10 +144,19 @@ internal class LauncherAudioBridge(
     @Volatile private var playbackSuspensionRequested: Boolean? = null
     @Volatile private var playbackControlFuture: Future<*>? = null
     @Volatile private var playbackControlGeneration = 0L
+    private val playbackControlLock = Any()
+    private var playbackControlStarting = false
+    @Volatile private var playbackControlProcess: Process? = null
     private var focusRetryCount = 0
     @Volatile private var playbackControlRetryCount = 0
     private val retryAudioFocus = Runnable { retryAudioFocus() }
     private val retryPlaybackSuspension = Runnable { retryPlaybackSuspension() }
+    private val reconcileAudioFocusOnMain =
+        Runnable {
+            synchronized(this) {
+                reconcileAudioFocus()
+            }
+        }
     private val playbackInputIds = LongArray(MAX_CONCURRENT_PLAYBACK_INPUTS) { UNUSED_INPUT_ID }
     private var activePlaybackInputCount = 0
     private var untrackedPlaybackInputCount = 0
@@ -121,10 +168,24 @@ internal class LauncherAudioBridge(
     @Throws(IOException::class)
     fun start() {
         close()
-        playbackControlExecutor =
-            Executors.newSingleThreadExecutor { command ->
-                Thread(command, "ArchpheneAudioControl").apply { isDaemon = true }
+        val debugToneBusy =
+            synchronized(debugToneLock) {
+                debugToneStarting || debugToneProcess?.isAlive == true
             }
+        val playbackControlBusy =
+            synchronized(playbackControlLock) {
+                playbackControlStarting || playbackControlProcess?.isAlive == true
+            }
+        if (
+            debugToneBusy ||
+            playbackControlBusy ||
+            input?.isAlive == true ||
+            unreapedServer?.isAlive == true
+        ) {
+            throw IOException("Could not reap prior audio helper")
+        }
+        closing = false
+        playbackControlExecutor = newPlaybackControlExecutor()
         if (
             (!moduleDirectory.mkdirs() && !moduleDirectory.isDirectory) ||
                 (!stateDirectory.mkdirs() && !stateDirectory.isDirectory)
@@ -158,9 +219,16 @@ internal class LauncherAudioBridge(
         if (firstFailure == null) {
             return
         }
-
         Log.w(TAG, "AAudio startup failed; trying OpenSL ES session=$sessionId", firstFailure)
         stopServer()
+        val controlBusy =
+            synchronized(playbackControlLock) {
+                playbackControlStarting || playbackControlProcess?.isAlive == true
+            }
+        if (unreapedServer?.isAlive == true || input?.isAlive == true || controlBusy) {
+            close()
+            throw IOException("Could not reap failed AAudio server", firstFailure)
+        }
         unlinkIfPresent(socket, "PulseAudio socket")
         runCatching {
             launch(socketPath, "module-sles-sink")
@@ -175,15 +243,36 @@ internal class LauncherAudioBridge(
     @Synchronized
     fun isReady(): Boolean =
         server?.isAlive == true &&
+            readyServer === server &&
             socket.exists() &&
             (!inputEnabled || input?.isAlive == true)
 
     @Synchronized
-    fun setHostActive(active: Boolean) {
+    fun setHostActive(
+        active: Boolean,
+        closing: Boolean = false,
+    ) {
+        if (closing) this.closing = true
         if (active && !hostActive) focusInterrupted = false
         hostActive = active
         Log.i(TAG, "Android audio host active session=$sessionId active=$active")
-        reconcileAudioFocus()
+        if (closing) {
+            mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+            mainHandler.removeCallbacks(retryPlaybackSuspension)
+            synchronized(playbackControlLock) {
+                playbackControlGeneration++
+                playbackSuspensionRequested = null
+                playbackControlFuture = null
+            }
+            abandonAudioFocus()
+            return
+        }
+        if (active) {
+            reconcileAudioFocus()
+        } else {
+            mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+            mainHandler.postDelayed(reconcileAudioFocusOnMain, INACTIVE_RECONCILE_DELAY_MILLIS)
+        }
     }
 
     /**
@@ -194,15 +283,35 @@ internal class LauncherAudioBridge(
     @Synchronized
     fun setRuntimeForeground(active: Boolean) {
         runtimeForeground = active
-        reconcileAudioFocus()
+        if (active) {
+            reconcileAudioFocus()
+        } else {
+            mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+            mainHandler.postDelayed(reconcileAudioFocusOnMain, INACTIVE_RECONCILE_DELAY_MILLIS)
+        }
     }
 
-    @Synchronized
     fun playDebugTone(): Boolean {
-        if (!isReady()) return false
-        val probe = requireHelper(PROBE)
+        val (audioServer, probe) =
+            synchronized(this) {
+                if (!isReady()) return false
+                if (closing) return false
+                val requiredProbe = requireHelper(PROBE)
+                val reserved =
+                    synchronized(debugToneLock) {
+                        if (debugToneStarting || debugToneProcess?.isAlive == true) {
+                            false
+                        } else {
+                            debugToneStarting = true
+                            true
+                        }
+                    }
+                if (!reserved) return false
+                Pair(server, requiredProbe)
+            }
         val process =
-            ProcessBuilder(
+            try {
+                ProcessBuilder(
                     probe.absolutePath,
                     "--playback",
                     "--raw",
@@ -218,31 +327,69 @@ internal class LauncherAudioBridge(
                     environment()["PULSE_SERVER"] = serverAddress
                     environment()["PULSE_RUNTIME_PATH"] = runtimeDirectory.absolutePath
                 }.start()
-        drain(process, "output-probe")
-        val samples = ByteArray(DEBUG_TONE_FRAMES_PER_CHUNK * DEBUG_TONE_FRAME_BYTES)
-        var phase = 0
-        process.outputStream.use { output ->
-            repeat(DEBUG_TONE_CHUNKS) {
-                var index = 0
-                repeat(DEBUG_TONE_FRAMES_PER_CHUNK) {
-                    phase += DEBUG_TONE_HZ
-                    if (phase >= DEBUG_TONE_SAMPLE_RATE) phase -= DEBUG_TONE_SAMPLE_RATE
-                    val sample =
-                        if (phase < DEBUG_TONE_SAMPLE_RATE / 2) {
-                            DEBUG_TONE_AMPLITUDE
-                        } else {
-                            -DEBUG_TONE_AMPLITUDE
-                        }
-                    repeat(2) {
-                        samples[index++] = sample.toByte()
-                        samples[index++] = (sample shr 8).toByte()
-                    }
+            } catch (error: IOException) {
+                synchronized(debugToneLock) { debugToneStarting = false }
+                throw error
+            }
+        val accepted =
+            synchronized(debugToneLock) {
+                if (
+                    server !== audioServer ||
+                    closing ||
+                    readyServer !== audioServer ||
+                    audioServer?.isAlive != true ||
+                    !socket.exists() ||
+                    debugToneProcess?.isAlive == true
+                ) {
+                    false
+                } else {
+                    debugToneProcess = process
+                    debugToneStarting = false
+                    true
                 }
-                output.write(samples)
+            }
+        if (!accepted) {
+            val terminated = stopProcess(process, "output probe")
+            synchronized(debugToneLock) {
+                if (!terminated && debugToneProcess?.isAlive != true) {
+                    debugToneProcess = process
+                }
+                debugToneStarting = false
+            }
+            return false
+        }
+        drain(process, "output-probe")
+        return try {
+            val samples = ByteArray(DEBUG_TONE_FRAMES_PER_CHUNK * DEBUG_TONE_FRAME_BYTES)
+            var phase = 0
+            process.outputStream.use { output ->
+                repeat(DEBUG_TONE_CHUNKS) {
+                    var index = 0
+                    repeat(DEBUG_TONE_FRAMES_PER_CHUNK) {
+                        phase += DEBUG_TONE_HZ
+                        if (phase >= DEBUG_TONE_SAMPLE_RATE) phase -= DEBUG_TONE_SAMPLE_RATE
+                        val sample =
+                            if (phase < DEBUG_TONE_SAMPLE_RATE / 2) {
+                                DEBUG_TONE_AMPLITUDE
+                            } else {
+                                -DEBUG_TONE_AMPLITUDE
+                            }
+                        repeat(2) {
+                            samples[index++] = sample.toByte()
+                            samples[index++] = (sample shr 8).toByte()
+                        }
+                    }
+                    output.write(samples)
+                }
+            }
+            process.waitFor(DEBUG_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS) &&
+                process.exitValue() == 0
+        } finally {
+            val terminated = stopProcess(process, "output probe")
+            synchronized(debugToneLock) {
+                if (debugToneProcess === process && terminated) debugToneProcess = null
             }
         }
-        return process.waitFor(DEBUG_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS) &&
-            process.exitValue() == 0
     }
 
     @Synchronized
@@ -306,6 +453,7 @@ internal class LauncherAudioBridge(
 
     @Synchronized
     override fun close() {
+        closing = true
         hostActive = false
         runtimeForeground = false
         focusInterrupted = false
@@ -313,14 +461,35 @@ internal class LauncherAudioBridge(
         playbackControlRetryCount = 0
         mainHandler.removeCallbacks(retryAudioFocus)
         mainHandler.removeCallbacks(retryPlaybackSuspension)
-        setPlaybackSuspended(true, wait = true)
+        mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
         abandonAudioFocus()
+        awaitDebugToneStart()
+        val toneProcess = synchronized(debugToneLock) { debugToneProcess }
+        if (stopProcess(toneProcess, "output probe")) {
+            synchronized(debugToneLock) {
+                if (debugToneProcess === toneProcess) debugToneProcess = null
+            }
+        }
         stopServer()
         playbackControlExecutor.shutdownNow()
         mainHandler.removeCallbacks(retryAudioFocus)
         mainHandler.removeCallbacks(retryPlaybackSuspension)
-        unlinkIfPresentQuietly(socket)
-        deleteTree(runtimeDirectory)
+        mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+        val helperAlive =
+            synchronized(debugToneLock) {
+                debugToneStarting || debugToneProcess?.isAlive == true
+            } ||
+                synchronized(playbackControlLock) {
+                    playbackControlStarting || playbackControlProcess?.isAlive == true
+                } ||
+                input?.isAlive == true ||
+                unreapedServer?.isAlive == true
+        if (helperAlive) {
+            Log.w(TAG, "Could not remove audio runtime while a helper remains alive")
+        } else {
+            unlinkIfPresentQuietly(socket)
+            deleteTree(runtimeDirectory)
+        }
     }
 
     private fun requestAudioFocus() {
@@ -346,20 +515,37 @@ internal class LauncherAudioBridge(
     }
 
     private fun reconcileAudioFocus() {
+        val audioServer = server
+        val serverAvailable =
+            isAudioServerAvailable(
+                processAlive = audioServer?.isAlive == true,
+                readinessMatches = readyServer === audioServer,
+                socketExists = socket.exists(),
+            )
         if (
             shouldRequestAudioFocus(
                 hostActive,
                 runtimeForeground,
                 activePlaybackInputCount,
                 focusInterrupted,
-            ) && server?.isAlive == true && socket.exists()
+            ) && serverAvailable
         ) {
             requestAudioFocus()
-        } else if (!hostActive || !runtimeForeground || activePlaybackInputCount == 0) {
-            setPlaybackSuspended(true, wait = true)
-            abandonAudioFocus()
+        } else if (
+            shouldAbandonAudioFocus(
+                hostActive,
+                runtimeForeground,
+                activePlaybackInputCount,
+                serverAvailable,
+            )
+        ) {
             focusRetryCount = 0
             mainHandler.removeCallbacks(retryAudioFocus)
+            if (serverAvailable) {
+                setPlaybackSuspended(true)
+                if (playbackSuspended != true) return
+            }
+            abandonAudioFocus()
             return
         }
         reconcilePlaybackSuspension()
@@ -367,17 +553,7 @@ internal class LauncherAudioBridge(
 
     @Synchronized
     private fun retryAudioFocus() {
-        if (
-            shouldRequestAudioFocus(
-                hostActive,
-                runtimeForeground,
-                activePlaybackInputCount,
-                focusInterrupted,
-            ) && !focusRequested
-        ) {
-            requestAudioFocus()
-            reconcilePlaybackSuspension()
-        }
+        if (!closing) reconcileAudioFocus()
     }
 
     @Synchronized
@@ -385,7 +561,8 @@ internal class LauncherAudioBridge(
         reconcilePlaybackSuspension()
     }
 
-    private fun schedulePlaybackControlRetry() {
+    private fun schedulePlaybackControlRetry(): Boolean {
+        if (playbackControlRetryCount >= MAX_CONTROL_RETRY_ATTEMPTS) return false
         playbackControlRetryCount =
             (playbackControlRetryCount + 1).coerceAtMost(MAX_CONTROL_RETRY_EXPONENT)
         mainHandler.removeCallbacks(retryPlaybackSuspension)
@@ -393,9 +570,50 @@ internal class LauncherAudioBridge(
             retryPlaybackSuspension,
             controlRetryDelayMillis(playbackControlRetryCount),
         )
+        return true
+    }
+
+    private fun retryPlaybackControlOrStopServer(audioServer: Process) {
+        if (schedulePlaybackControlRetry()) return
+        Log.w(TAG, "Pulse playback control retries exhausted session=$sessionId")
+        synchronized(serverStateLock) {
+            if (server === audioServer) readyServer = null
+        }
+        val terminated = stopProcessForcibly(audioServer, "audio server")
+        synchronized(serverStateLock) {
+            if (server === audioServer) {
+                server = null
+                readyServer = null
+            }
+            if (terminated) {
+                if (unreapedServer === audioServer) unreapedServer = null
+            } else {
+                unreapedServer = audioServer
+            }
+        }
+        synchronized(playbackControlLock) {
+            playbackControlGeneration++
+            playbackSuspensionRequested = null
+            playbackControlFuture = null
+            playbackSuspended = null
+        }
+        mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+        mainHandler.post(reconcileAudioFocusOnMain)
     }
 
     private fun reconcilePlaybackSuspension() {
+        if (closing) return
+        val audioServer = server
+        if (
+            !isAudioServerAvailable(
+                processAlive = audioServer?.isAlive == true,
+                readinessMatches = readyServer === audioServer,
+                socketExists = socket.exists(),
+            )
+        ) {
+            abandonAudioFocus()
+            return
+        }
         setPlaybackSuspended(
             shouldSuspendPlayback(
                 hostActive,
@@ -411,31 +629,74 @@ internal class LauncherAudioBridge(
         suspended: Boolean,
         wait: Boolean = false,
     ) {
+        if (closing) return
         val audioServer = server
-        if (audioServer?.isAlive != true || !socket.exists()) {
-            playbackSuspended = null
-            playbackSuspensionRequested = null
-            playbackControlFuture = null
+        if (
+            !isAudioServerAvailable(
+                processAlive = audioServer?.isAlive == true,
+                readinessMatches = readyServer === audioServer,
+                socketExists = socket.exists(),
+            )
+        ) {
+            synchronized(playbackControlLock) {
+                playbackControlGeneration++
+                playbackSuspended = null
+                playbackSuspensionRequested = null
+                playbackControlFuture = null
+            }
             return
         }
-        if (playbackSuspensionRequested == suspended) {
-            if (wait) awaitPlaybackControl(playbackControlFuture)
+        val readyAudioServer = audioServer ?: return
+        var existingFuture: Future<*>? = null
+        var generation = 0L
+        var reused = false
+        synchronized(playbackControlLock) {
+            if (playbackSuspensionRequested == suspended) {
+                reused = true
+                existingFuture = playbackControlFuture
+            } else {
+                playbackSuspensionRequested = suspended
+                playbackControlGeneration++
+                generation = playbackControlGeneration
+            }
+        }
+        if (reused) {
+            if (wait) awaitPlaybackControl(existingFuture)
             return
         }
-        playbackSuspensionRequested = suspended
-        playbackControlGeneration++
-        val generation = playbackControlGeneration
         val command = {
-            applyPlaybackSuspension(audioServer, suspended, generation)
+            applyPlaybackSuspension(readyAudioServer, suspended, generation)
         }
         val future =
             runCatching { playbackControlExecutor.submit(command) }.getOrElse { error ->
                 Log.w(TAG, "Could not schedule Pulse playback control session=$sessionId", error)
-                playbackSuspensionRequested = null
-                playbackControlFuture = null
+                synchronized(playbackControlLock) {
+                    if (
+                        playbackControlGeneration == generation &&
+                        playbackSuspensionRequested == suspended
+                    ) {
+                        playbackSuspensionRequested = null
+                        playbackControlFuture = null
+                    }
+                }
                 return
             }
-        playbackControlFuture = future
+        val retained =
+            synchronized(playbackControlLock) {
+                if (
+                    playbackControlGeneration == generation &&
+                    playbackSuspensionRequested == suspended
+                ) {
+                    playbackControlFuture = future
+                    true
+                } else {
+                    false
+                }
+            }
+        if (!retained) {
+            future.cancel(false)
+            return
+        }
         if (wait) {
             awaitPlaybackControl(future)
         }
@@ -444,9 +705,11 @@ internal class LauncherAudioBridge(
     private fun awaitPlaybackControl(future: Future<*>?) {
         if (future == null) return
         try {
-            future.get()
+            future.get(CONTROL_TASK_WAIT_SECONDS, TimeUnit.SECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
+        } catch (_: TimeoutException) {
+            Log.w(TAG, "Timed out waiting for Pulse playback control session=$sessionId")
         } catch (error: java.util.concurrent.ExecutionException) {
             Log.w(TAG, "Pulse playback control failed session=$sessionId", error.cause)
         }
@@ -457,11 +720,28 @@ internal class LauncherAudioBridge(
         suspended: Boolean,
         generation: Long,
     ) {
-        val stale =
-            server !== audioServer ||
-                playbackControlGeneration != generation ||
-                playbackSuspensionRequested != suspended
-        if (stale) return
+        val reserved =
+            synchronized(playbackControlLock) {
+                if (
+                    server !== audioServer ||
+                    playbackControlGeneration != generation ||
+                    playbackSuspensionRequested != suspended
+                ) {
+                    false
+                } else if (
+                    playbackControlStarting ||
+                    playbackControlProcess?.isAlive == true
+                ) {
+                    Log.w(TAG, "Previous Pulse playback control is still alive session=$sessionId")
+                    playbackSuspensionRequested = null
+                    playbackSuspended = null
+                    false
+                } else {
+                    playbackControlStarting = true
+                    true
+                }
+            }
+        if (!reserved) return
         val process =
             runCatching {
                 val control = requireHelper(CONTROL)
@@ -479,17 +759,52 @@ internal class LauncherAudioBridge(
                     }.start()
             }.getOrElse { error ->
                 Log.w(TAG, "Could not start Pulse playback control session=$sessionId", error)
-                if (
-                    server === audioServer &&
-                    playbackControlGeneration == generation &&
-                    playbackSuspensionRequested == suspended
-                ) {
-                    playbackSuspensionRequested = null
-                    playbackSuspended = null
-                    schedulePlaybackControlRetry()
+                var retry = false
+                synchronized(playbackControlLock) {
+                    playbackControlStarting = false
+                    if (
+                        server === audioServer &&
+                        playbackControlGeneration == generation &&
+                        playbackSuspensionRequested == suspended
+                    ) {
+                        playbackSuspensionRequested = null
+                        playbackSuspended = null
+                        retry = true
+                    }
                 }
+                if (retry) retryPlaybackControlOrStopServer(audioServer)
                 return
             }
+        val published =
+            synchronized(playbackControlLock) {
+                if (
+                    server !== audioServer ||
+                    playbackControlGeneration != generation ||
+                    playbackSuspensionRequested != suspended ||
+                    playbackControlProcess?.isAlive == true
+                ) {
+                    false
+                } else {
+                    playbackControlProcess = process
+                    playbackControlStarting = false
+                    true
+                }
+            }
+        if (!published) {
+            val terminated = stopProcess(process, "Pulse playback control")
+            synchronized(playbackControlLock) {
+                if (!terminated && playbackControlProcess?.isAlive != true) {
+                    playbackControlProcess = process
+                }
+                playbackControlStarting = false
+            }
+            return
+        }
+        val diagnostic =
+            BoundedProcessDiagnostic(
+                process.inputStream,
+                MAX_CONTROL_DIAGNOSTIC_BYTES,
+            )
         val completed =
             try {
                 process.waitFor(CONTROL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -497,43 +812,79 @@ internal class LauncherAudioBridge(
                 Thread.currentThread().interrupt()
                 false
             }
-        if (!completed) process.destroyForcibly()
-        val result = if (completed) process.exitValue() else -1
+        val terminated =
+            if (completed) {
+                true
+            } else {
+                process.destroyForcibly()
+                try {
+                    process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    false
+                }
+            }
+        if (!completed) {
+            runCatching { process.inputStream.close() }
+        }
+        if (terminated) {
+            synchronized(playbackControlLock) {
+                if (playbackControlProcess === process) playbackControlProcess = null
+            }
+        }
+        val result = if (completed && terminated) process.exitValue() else -1
+        val diagnosticText = diagnostic.awaitText(CONTROL_DIAGNOSTIC_JOIN_MILLIS)
         if (result == 0) {
-            if (
-                server === audioServer &&
-                playbackControlGeneration == generation &&
-                playbackSuspensionRequested == suspended
-            ) {
-                playbackSuspended = suspended
-                playbackControlRetryCount = 0
-                mainHandler.removeCallbacks(retryPlaybackSuspension)
+            val applied =
+                synchronized(playbackControlLock) {
+                    if (
+                        server === audioServer &&
+                        playbackControlGeneration == generation &&
+                        playbackSuspensionRequested == suspended
+                    ) {
+                        playbackSuspended = suspended
+                        playbackControlRetryCount = 0
+                        true
+                    } else {
+                        false
+                    }
+                }
+            if (applied) mainHandler.removeCallbacks(retryPlaybackSuspension)
+            if (suspended && applied) {
+                mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+                mainHandler.post(reconcileAudioFocusOnMain)
             }
             Log.i(TAG, "Pulse playback suspended session=$sessionId suspended=$suspended")
         } else {
-            val diagnostic =
+            val renderedDiagnostic =
                 if (completed) {
-                    runCatching {
-                        process.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
-                            reader.readText().trim().take(MAX_CONTROL_DIAGNOSTIC_CHARS)
-                        }
-                    }.getOrDefault("")
+                    diagnosticText
                 } else {
                     "timeout"
                 }
             Log.w(
                 TAG,
                 "Could not change Pulse playback suspension session=$sessionId " +
-                    "suspended=$suspended result=$result diagnostic=$diagnostic",
+                    "suspended=$suspended result=$result diagnostic=$renderedDiagnostic",
             )
-            if (
-                server === audioServer &&
-                playbackControlGeneration == generation &&
-                playbackSuspensionRequested == suspended
-            ) {
-                playbackSuspensionRequested = null
-                playbackSuspended = null
-                schedulePlaybackControlRetry()
+            var retry = false
+            val unreaped = shouldStopServerForControlFailure(terminated)
+            synchronized(playbackControlLock) {
+                if (
+                    server === audioServer &&
+                    playbackControlGeneration == generation &&
+                    playbackSuspensionRequested == suspended
+                ) {
+                    playbackSuspensionRequested = null
+                    playbackSuspended = null
+                    retry = terminated
+                }
+            }
+            if (retry) retryPlaybackControlOrStopServer(audioServer)
+            if (unreaped) {
+                Log.w(TAG, "Pulse playback control did not terminate session=$sessionId")
+                playbackControlRetryCount = MAX_CONTROL_RETRY_ATTEMPTS
+                retryPlaybackControlOrStopServer(audioServer)
             }
         }
     }
@@ -591,23 +942,39 @@ internal class LauncherAudioBridge(
                     environment()["PULSE_STATE_PATH"] = stateDirectory.absolutePath
                     environment()["TMPDIR"] = runtimeDirectory.absolutePath
                 }.start()
-        server = process
-        playbackSuspended = null
-        playbackSuspensionRequested = null
-        playbackControlFuture = null
+        synchronized(serverStateLock) {
+            server = process
+            readyServer = null
+        }
+        synchronized(playbackControlLock) {
+            playbackSuspended = null
+            playbackSuspensionRequested = null
+            playbackControlFuture = null
+        }
         drain(process, sinkModule, observePlayback = true)
         val deadline = android.os.SystemClock.uptimeMillis() + START_TIMEOUT_MILLIS
         while (
-            !socket.exists() &&
+            (!socket.exists() || readyServer !== process) &&
                 process.isAlive &&
                 android.os.SystemClock.uptimeMillis() < deadline
         ) {
             android.os.SystemClock.sleep(START_POLL_MILLIS)
         }
-        if (!socket.exists() || !process.isAlive) {
+        if (!socket.exists() || readyServer !== process || !process.isAlive) {
             throw IOException("Private PulseAudio server did not become ready")
         }
-        setPlaybackSuspended(true, wait = true)
+        android.os.SystemClock.sleep(CONTROL_START_DELAY_MILLIS)
+        val controlDeadline = android.os.SystemClock.uptimeMillis() + START_TIMEOUT_MILLIS
+        while (
+            playbackSuspended != true &&
+                process.isAlive &&
+                android.os.SystemClock.uptimeMillis() < controlDeadline
+        ) {
+            setPlaybackSuspended(true, wait = true)
+            if (playbackSuspended != true) {
+                android.os.SystemClock.sleep(CONTROL_START_RETRY_MILLIS)
+            }
+        }
         if (playbackSuspended != true) {
             throw IOException("Could not suspend private PulseAudio output before launch")
         }
@@ -658,37 +1025,111 @@ internal class LauncherAudioBridge(
 
     @Synchronized
     private fun stopServer() {
-        stopProcess(input, "microphone bridge")
-        input = null
-        val process = server
-        server = null
-        playbackSuspended = null
-        playbackSuspensionRequested = null
-        playbackControlFuture = null
-        playbackControlGeneration++
+        val inputProcess = input
+        if (stopProcess(inputProcess, "microphone bridge")) {
+            if (input === inputProcess) input = null
+        }
+        val process = server ?: unreapedServer
+        synchronized(serverStateLock) {
+            if (server === process) {
+                readyServer = null
+            }
+        }
+        synchronized(playbackControlLock) {
+            playbackControlGeneration++
+            playbackSuspended = null
+            playbackSuspensionRequested = null
+            playbackControlFuture = null
+        }
+        awaitPlaybackControlStart()
+        val controlProcess = synchronized(playbackControlLock) { playbackControlProcess }
+        if (stopProcess(controlProcess, "Pulse playback control")) {
+            synchronized(playbackControlLock) {
+                if (playbackControlProcess === controlProcess) playbackControlProcess = null
+            }
+        }
         playbackInputIds.fill(UNUSED_INPUT_ID)
         activePlaybackInputCount = 0
         untrackedPlaybackInputCount = 0
         abandonAudioFocus()
-        stopProcess(process, "audio server")
+        val serverTerminated = stopProcessForcibly(process, "audio server")
+        synchronized(serverStateLock) {
+            if (server === process) server = null
+            if (serverTerminated) {
+                if (unreapedServer === process) unreapedServer = null
+            } else {
+                unreapedServer = process
+            }
+        }
+    }
+
+    private fun awaitDebugToneStart() {
+        val deadline = android.os.SystemClock.uptimeMillis() + STOP_TIMEOUT_SECONDS * 1_000L
+        while (
+            synchronized(debugToneLock) { debugToneStarting } &&
+                android.os.SystemClock.uptimeMillis() < deadline
+        ) {
+            android.os.SystemClock.sleep(START_POLL_MILLIS)
+        }
+        if (synchronized(debugToneLock) { debugToneStarting }) {
+            Log.w(TAG, "Audio helper start did not finish label=output-probe")
+        }
+    }
+
+    private fun awaitPlaybackControlStart() {
+        val deadline = android.os.SystemClock.uptimeMillis() + STOP_TIMEOUT_SECONDS * 1_000L
+        while (
+            synchronized(playbackControlLock) { playbackControlStarting } &&
+                android.os.SystemClock.uptimeMillis() < deadline
+        ) {
+            android.os.SystemClock.sleep(START_POLL_MILLIS)
+        }
+        if (synchronized(playbackControlLock) { playbackControlStarting }) {
+            Log.w(TAG, "Audio helper start did not finish label=Pulse-playback-control")
+        }
     }
 
     private fun stopProcess(
         process: Process?,
         label: String,
-    ) {
-        if (process == null) return
+    ): Boolean {
+        if (process == null) return true
         process.destroy()
-        try {
+        return try {
             if (!process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 process.destroyForcibly()
                 if (!process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                     Log.w(TAG, "$label did not report exit after forced termination")
+                    false
+                } else {
+                    true
                 }
+            } else {
+                true
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             process.destroyForcibly()
+            !process.isAlive
+        }
+    }
+
+    private fun stopProcessForcibly(
+        process: Process?,
+        label: String,
+    ): Boolean {
+        if (process == null) return true
+        process.destroyForcibly()
+        return try {
+            if (process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                true
+            } else {
+                Log.w(TAG, "$label did not report exit after forced termination")
+                false
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            !process.isAlive
         }
     }
 
@@ -709,6 +1150,11 @@ internal class LauncherAudioBridge(
                             .useLines { lines ->
                                 lines.forEach { line ->
                                     if (observePlayback) {
+                                        if (isPulseServerReadyLine(line)) {
+                                            synchronized(serverStateLock) {
+                                                if (server === process) readyServer = process
+                                            }
+                                        }
                                         recordPlaybackInputEvent(process, line)
                                     }
                                     Log.i(TAG, "$label: $line")
@@ -716,6 +1162,22 @@ internal class LauncherAudioBridge(
                             }
                     } catch (error: IOException) {
                         Log.d(TAG, "$label log stream closed: ${error.message}")
+                    } finally {
+                        if (observePlayback) {
+                            val currentServer =
+                                synchronized(serverStateLock) {
+                                    if (server === process) {
+                                        readyServer = null
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                            if (currentServer) {
+                                mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+                                mainHandler.post(reconcileAudioFocusOnMain)
+                            }
+                        }
                     }
                 },
                 "ArchpheneAudioLog",
@@ -724,36 +1186,38 @@ internal class LauncherAudioBridge(
             .start()
     }
 
-    @Synchronized
     private fun recordPlaybackInputEvent(
         process: Process,
         line: String,
     ) {
-        if (server !== process) return
         val event = pulsePlaybackInputEvent(line)
         if (event == 0L) return
-        val input = kotlin.math.abs(event) - 1L
-        val existing = playbackInputIds.indexOf(input)
-        if (event > 0L && existing < 0) {
-            val slot = playbackInputIds.indexOf(UNUSED_INPUT_ID)
-            if (slot < 0) {
-                untrackedPlaybackInputCount++
-                activePlaybackInputCount++
-                Log.w(TAG, "Playback input registry full session=$sessionId")
-            } else {
-                val wasIdle = activePlaybackInputCount == 0
-                playbackInputIds[slot] = input
-                activePlaybackInputCount++
-                if (wasIdle) focusInterrupted = false
+        synchronized(this) {
+            if (server !== process) return
+            val input = kotlin.math.abs(event) - 1L
+            val existing = playbackInputIds.indexOf(input)
+            if (event > 0L && existing < 0) {
+                val slot = playbackInputIds.indexOf(UNUSED_INPUT_ID)
+                if (slot < 0) {
+                    untrackedPlaybackInputCount++
+                    activePlaybackInputCount++
+                    Log.w(TAG, "Playback input registry full session=$sessionId")
+                } else {
+                    val wasIdle = activePlaybackInputCount == 0
+                    playbackInputIds[slot] = input
+                    activePlaybackInputCount++
+                    if (wasIdle) focusInterrupted = false
+                }
+            } else if (event < 0L && existing >= 0) {
+                playbackInputIds[existing] = UNUSED_INPUT_ID
+                activePlaybackInputCount = (activePlaybackInputCount - 1).coerceAtLeast(0)
+            } else if (event < 0L && untrackedPlaybackInputCount > 0) {
+                untrackedPlaybackInputCount--
+                activePlaybackInputCount = (activePlaybackInputCount - 1).coerceAtLeast(0)
             }
-        } else if (event < 0L && existing >= 0) {
-            playbackInputIds[existing] = UNUSED_INPUT_ID
-            activePlaybackInputCount = (activePlaybackInputCount - 1).coerceAtLeast(0)
-        } else if (event < 0L && untrackedPlaybackInputCount > 0) {
-            untrackedPlaybackInputCount--
-            activePlaybackInputCount = (activePlaybackInputCount - 1).coerceAtLeast(0)
+            mainHandler.removeCallbacks(reconcileAudioFocusOnMain)
+            mainHandler.post(reconcileAudioFocusOnMain)
         }
-        reconcileAudioFocus()
     }
 
     private fun drainError(
@@ -815,15 +1279,21 @@ internal class LauncherAudioBridge(
         private const val CONTROL = "libarchphene_pulse_control.so"
         private const val UNIX_SOCKET_PATH_LIMIT = 100
         private const val MAX_BROKER_BYTES = 128
-        private const val START_TIMEOUT_MILLIS = 5_000L
+        private const val START_TIMEOUT_MILLIS = 20_000L
         private const val START_POLL_MILLIS = 25L
+        private const val CONTROL_START_DELAY_MILLIS = 500L
+        private const val CONTROL_START_RETRY_MILLIS = 250L
+        private const val INACTIVE_RECONCILE_DELAY_MILLIS = 50L
         private const val INPUT_START_DELAY_MILLIS = 100L
         private const val STOP_TIMEOUT_SECONDS = 2L
         private const val DEBUG_PROBE_TIMEOUT_SECONDS = 5L
         private const val CONTROL_TIMEOUT_SECONDS = 2L
-        private const val MAX_CONTROL_DIAGNOSTIC_CHARS = 512
+        private const val CONTROL_TASK_WAIT_SECONDS = 7L
+        private const val MAX_CONTROL_DIAGNOSTIC_BYTES = 512
+        private const val CONTROL_DIAGNOSTIC_JOIN_MILLIS = 2_000L
         private const val MAX_FOCUS_RETRY_EXPONENT = 5
         private const val MAX_CONTROL_RETRY_EXPONENT = 5
+        private const val MAX_CONTROL_RETRY_ATTEMPTS = 5
         private const val RETRY_BASE_DELAY_MILLIS = 250L
         private const val DEBUG_TONE_SAMPLE_RATE = 48_000
         private const val DEBUG_TONE_HZ = 440
@@ -840,6 +1310,54 @@ internal class LauncherAudioBridge(
         private const val UNUSED_INPUT_ID = -1L
         private const val CREATED_INPUT_MARKER = "sink-input.c: Created input "
         private const val FREED_INPUT_MARKER = "sink-input.c: Freeing input "
+        private const val SERVER_READY_MARKER = "main.c: Daemon startup complete."
+
+        internal fun newPlaybackControlExecutor(): ThreadPoolExecutor =
+            ThreadPoolExecutor(
+                1,
+                1,
+                0L,
+                TimeUnit.MILLISECONDS,
+                ArrayBlockingQueue(1),
+                { command ->
+                    Thread(command, "ArchpheneAudioControl").apply { isDaemon = true }
+                },
+                ThreadPoolExecutor.DiscardOldestPolicy(),
+            )
+
+        internal fun readBoundedUtf8Diagnostic(
+            input: InputStream,
+            maximumBytes: Int,
+        ): String {
+            require(maximumBytes > 0)
+            val retained = ByteArray(maximumBytes)
+            val chunk = ByteArray(1024)
+            var retainedBytes = 0
+            input.use { stream ->
+                while (true) {
+                    val read = stream.read(chunk)
+                    if (read < 0) break
+                    val copied = minOf(read, maximumBytes - retainedBytes)
+                    if (copied > 0) {
+                        System.arraycopy(chunk, 0, retained, retainedBytes, copied)
+                        retainedBytes += copied
+                    }
+                }
+            }
+            val decoder =
+                StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+            for (length in retainedBytes downTo 0) {
+                val decoded =
+                    runCatching {
+                        decoder.reset().decode(ByteBuffer.wrap(retained, 0, length)).toString()
+                    }.getOrNull()
+                if (decoded != null) return decoded.trim()
+            }
+            return ""
+        }
 
         internal fun shouldRequestAudioFocus(
             hostActive: Boolean,
@@ -851,6 +1369,25 @@ internal class LauncherAudioBridge(
                 runtimeForeground &&
                 activePlaybackInputCount > 0 &&
                 !focusInterrupted
+
+        internal fun shouldAbandonAudioFocus(
+            hostActive: Boolean,
+            runtimeForeground: Boolean,
+            activePlaybackInputCount: Int,
+            serverAvailable: Boolean,
+        ): Boolean =
+            !hostActive ||
+                !runtimeForeground ||
+                activePlaybackInputCount <= 0 ||
+                !serverAvailable
+
+        internal fun isAudioServerAvailable(
+            processAlive: Boolean,
+            readinessMatches: Boolean,
+            socketExists: Boolean,
+        ): Boolean = processAlive && readinessMatches && socketExists
+
+        internal fun shouldStopServerForControlFailure(terminated: Boolean): Boolean = !terminated
 
         internal fun focusRetryDelayMillis(attempt: Int): Long =
             retryDelayMillis(attempt, MAX_FOCUS_RETRY_EXPONENT)
@@ -906,6 +1443,9 @@ internal class LauncherAudioBridge(
             if (index == start) return 0L
             return direction.toLong() * (value + 1L)
         }
+
+        internal fun isPulseServerReadyLine(line: String): Boolean =
+            line.contains(SERVER_READY_MARKER)
 
         internal fun audioFocusChangeName(change: Int): String =
             when (change) {

@@ -392,7 +392,7 @@ class LauncherSessionService : Service() {
                 "Releasing launcher resources session=${session.id} close=$closeCompositor",
             )
             session.hostActive = false
-            session.audioBridge?.setHostActive(false)
+            session.audioBridge?.setHostActive(false, closing = closeCompositor)
             if (closeCompositor) {
                 val linuxHandle = session.linuxHandle
                 session.linuxHandle = 0L

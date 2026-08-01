@@ -63,7 +63,7 @@ archphene_regex_contains \
   archphene_die "audio launcher is not owned by the current manager"
 archphene_regex_contains \
   "$manifest" \
-  'android:name="org\.archphene\.launcher\.CAPABILITIES"[^>]*android:value="c:wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output(?:,printing)?"' ||
+  'android:name="org\.archphene\.launcher\.CAPABILITIES"[^>]*android:value="c:wayland,input,ime,clipboard,documents,open-uri,notifications,audio-output(?:,audio-input)?(?:,printing)?(?:,accessibility)?"' ||
   archphene_die "audio launcher does not carry the exact audio-output contract"
 if [[ -n "$non_audio_package" ]]; then
   non_audio_installed_path="$(
@@ -87,15 +87,15 @@ if [[ -n "$non_audio_package" ]]; then
 fi
 
 manager_dump="$(archphene_adb_run shell dumpsys package "$manager")"
-[[ "$manager_dump" != *"android.permission.RECORD_AUDIO"* ]] ||
-  archphene_die "playback-only manager unexpectedly requests microphone permission"
+[[ "$manager_dump" == *"android.permission.RECORD_AUDIO"* ]] ||
+  archphene_die "manager does not declare its implemented microphone broker permission"
 
 activity="$(archphene_launcher "$package")"
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package"
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log \
-  'Private (?:AAudio|OpenSL ES) server ready session=[0-9]+' 20 \
+  'Private (?:AAudio|OpenSL ES) server ready session=[0-9]+' 30 \
   'ArchpheneAudio:I ArchpheneLauncherSession:V AndroidRuntime:E libc:F *:S' >/dev/null
 archphene_wait_log \
   'Linux Wayland client connected session=[0-9]+' 30 \
@@ -121,6 +121,39 @@ archphene_wait_log \
 sleep 4
 archphene_adb_run exec-out screencap -p >"$artifact_dir/full-device.png"
 
+archphene_adb_run shell am force-stop "$package"
+archphene_wait_log \
+  'Releasing launcher resources session=[0-9]+ close=true' 20 \
+  'ArchpheneLauncherSession:V AndroidRuntime:E libc:F *:S' >/dev/null
+audio_runtime_removed=false
+audio_cleanup_deadline=$((SECONDS + 15))
+while ((SECONDS < audio_cleanup_deadline)); do
+  audio_cleanup_remaining=$((audio_cleanup_deadline - SECONDS))
+  if ! audio_cache="$(
+    timeout "${audio_cleanup_remaining}s" \
+      "$ARCHPHENE_ADB" "${ARCHPHENE_ADB_ARGS[@]}" \
+      shell run-as "$manager" ls -1 cache
+  )"; then
+    continue
+  fi
+  if ! printf '%s\n' "$audio_cache" | rg -q '^audio-'; then
+    audio_runtime_removed=true
+    break
+  fi
+  sleep 0.25
+done
+if [[ "$audio_runtime_removed" != true ]]; then
+  archphene_die "manager retained a private audio runtime after launcher teardown"
+fi
+manager_user="$(archphene_adb_run shell run-as "$manager" id -un | tr -d '\r')"
+audio_helpers="$(
+  archphene_adb_run shell ps -A -o USER,PID,NAME |
+    awk -v user="$manager_user" \
+      '$1 == user && ($3 ~ /^libarchphene_pu/ || $3 ~ /^libarchphene_au/)'
+)"
+[[ -z "$audio_helpers" ]] ||
+  archphene_die "manager retained an audio helper after launcher teardown: $audio_helpers"
+
 if [[ -n "$non_audio_package" ]]; then
   non_audio_activity="$(archphene_launcher "$non_audio_package")"
   archphene_adb_run shell am force-stop "$non_audio_package"
@@ -141,23 +174,6 @@ if [[ -n "$non_audio_package" ]]; then
     'ArchpheneLauncherSessionProbe:V *:S' >/dev/null
 fi
 
-archphene_adb_run shell am force-stop "$package"
-archphene_wait_log \
-  'Releasing launcher resources session=[0-9]+ close=true' 20 \
-  'ArchpheneLauncherSession:V AndroidRuntime:E libc:F *:S' >/dev/null
-audio_runtime_removed=false
-for _ in $(seq 1 60); do
-  audio_cache="$(archphene_adb_run shell run-as "$manager" ls -1 cache)"
-  if ! printf '%s\n' "$audio_cache" | rg -q '^audio-'; then
-    audio_runtime_removed=true
-    break
-  fi
-  sleep 0.25
-done
-if [[ "$audio_runtime_removed" != true ]]; then
-  archphene_die "manager retained a private audio runtime after launcher teardown"
-fi
-
 log="$(
   archphene_adb_run logcat -d -v brief \
     -s ArchpheneAudio:V ArchpheneLauncherSession:V \
@@ -167,6 +183,13 @@ log="$(
   archphene_die "Android audio payload contaminated the glibc application path"
 [[ "$log" != *"FATAL EXCEPTION"* && "$log" != *"Fatal signal"* ]] ||
   archphene_die "audio bridge emitted a fatal runtime error: $log"
+[[ "$log" != *"did not report exit after forced termination"* &&
+  "$log" != *"Pulse playback control did not terminate"* &&
+  "$log" != *"Audio helper start did not finish"* &&
+  "$log" != *"Timed out waiting for Pulse playback control"* &&
+  "$log" != *"Could not remove audio runtime while a helper remains alive"* &&
+  "$log" != *"Pulse playback control retries exhausted"* ]] ||
+  archphene_die "audio bridge failed to reap a helper: $log"
 printf '%s\n' "$log" >"$artifact_dir/log.txt"
 
 trap - EXIT

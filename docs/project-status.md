@@ -3375,6 +3375,32 @@ boundary-plus-one requests independently, verifies cleanup after each offender,
 and leaves a final healthy client connected. The full workspace and strict
 Clippy gates plus rebuilt exact x86_64 and AArch64 Android probes pass.
 
+Android audio playback control now applies bounded latest-state backpressure.
+The single worker may retain one running Pulse suspension command and one
+replaceable latest request; obsolete queued transitions cannot accumulate in an
+unbounded executor. Every control subprocess starts draining its merged output
+before the bounded wait, retains at most a valid 512-byte UTF-8 prefix, and
+discards the remaining bytes. Timeout cleanup force-kills and reaps the process
+before retry, closes its stream, and boundedly joins the daemon drainer. A
+helper that cannot be reaped blocks further helper creation instead of allowing
+process accumulation. Startup waits for Pulse's completed-daemon diagnostic
+rather than treating an early socket path as control readiness. The server-log
+drainer now rejects irrelevant lines before taking the startup monitor, which
+removes the lock inversion that stalled its process pipe on Samsung, and
+playback-input churn coalesces one main-thread focus reconciliation instead of
+blocking that drainer on a control subprocess. A known final session close
+cancels the deferred suspension and force-reaps the server instead of asking
+Samsung's AAudio sink to suspend while its process tree is already closing.
+Deterministic JVM tests prove
+that a 100-task burst
+retains only the latest pending task, 64 KiB output drains fully while retaining
+512 bytes, pipe drainage starts before the consumer waits, and an incomplete
+multibyte tail is removed. The JDK 26 app unit/lint gate passes. Current direct
+Gradle APKs also pass the manager-owned 48 kHz stereo output gate with
+`pavucontrol` on the x86_64 emulator and SuperTux on the physical AArch64
+Samsung, including private-runtime teardown within the 15-second gate. The
+emulator then passes a separate non-audio launcher denial probe.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
