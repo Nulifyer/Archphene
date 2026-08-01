@@ -14112,23 +14112,22 @@ impl CompositorCore {
         let Some(surface) = self.gesture_focus_surface() else {
             return 0;
         };
-        let gestures = self
-            .state
-            .swipe_gestures
-            .iter()
-            .filter(|gesture| {
-                gesture.is_alive()
-                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if gestures.is_empty() || fingers == 0 {
+        let has_gesture = self.state.swipe_gestures.iter().any(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        });
+        if !has_gesture || fingers == 0 {
             return 0;
         }
         let serial = self.next_input_serial();
-        for gesture in gestures {
+        for gesture in self.state.swipe_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
             gesture.begin(serial, time, &surface, fingers);
         }
         self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
@@ -14159,23 +14158,22 @@ impl CompositorCore {
         let Some(surface) = self.gesture_focus_surface() else {
             return 0;
         };
-        let gestures = self
-            .state
-            .swipe_gestures
-            .iter()
-            .filter(|gesture| {
-                gesture.is_alive()
-                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if gestures.is_empty() {
+        let has_gesture = self.state.swipe_gestures.iter().any(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        });
+        if !has_gesture {
             return 0;
         }
         let serial = self.next_input_serial();
-        for gesture in gestures {
+        for gesture in self.state.swipe_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
             gesture.end(serial, time, i32::from(cancelled));
         }
         self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
@@ -14186,23 +14184,22 @@ impl CompositorCore {
         let Some(surface) = self.gesture_focus_surface() else {
             return 0;
         };
-        let gestures = self
-            .state
-            .pinch_gestures
-            .iter()
-            .filter(|gesture| {
-                gesture.is_alive()
-                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if gestures.is_empty() || fingers == 0 {
+        let has_gesture = self.state.pinch_gestures.iter().any(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        });
+        if !has_gesture || fingers == 0 {
             return 0;
         }
         let serial = self.next_input_serial();
-        for gesture in gestures {
+        for gesture in self.state.pinch_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
             gesture.begin(serial, time, &surface, fingers);
         }
         self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
@@ -14236,23 +14233,22 @@ impl CompositorCore {
         let Some(surface) = self.gesture_focus_surface() else {
             return 0;
         };
-        let gestures = self
-            .state
-            .pinch_gestures
-            .iter()
-            .filter(|gesture| {
-                gesture.is_alive()
-                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if gestures.is_empty() {
+        let has_gesture = self.state.pinch_gestures.iter().any(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        });
+        if !has_gesture {
             return 0;
         }
         let serial = self.next_input_serial();
-        for gesture in gestures {
+        for gesture in self.state.pinch_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
             gesture.end(serial, time, i32::from(cancelled));
         }
         self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
@@ -14263,23 +14259,22 @@ impl CompositorCore {
         let Some(surface) = self.gesture_focus_surface() else {
             return 0;
         };
-        let gestures = self
-            .state
-            .hold_gestures
-            .iter()
-            .filter(|gesture| {
-                gesture.is_alive()
-                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if gestures.is_empty() || fingers == 0 {
+        let has_gesture = self.state.hold_gestures.iter().any(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        });
+        if !has_gesture || fingers == 0 {
             return 0;
         }
         let serial = self.next_input_serial();
-        for gesture in gestures {
+        for gesture in self.state.hold_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
             gesture.begin(serial, time, &surface, fingers);
         }
         self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
@@ -14290,23 +14285,22 @@ impl CompositorCore {
         let Some(surface) = self.gesture_focus_surface() else {
             return 0;
         };
-        let gestures = self
-            .state
-            .hold_gestures
-            .iter()
-            .filter(|gesture| {
-                gesture.is_alive()
-                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if gestures.is_empty() {
+        let has_gesture = self.state.hold_gestures.iter().any(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        });
+        if !has_gesture {
             return 0;
         }
         let serial = self.next_input_serial();
-        for gesture in gestures {
+        for gesture in self.state.hold_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
             gesture.end(serial, time, i32::from(cancelled));
         }
         self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);

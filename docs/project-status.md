@@ -3560,6 +3560,14 @@ preserving one cancel/frame pair per live touch without heap collection or
 deduplication. Pinned Rust 1.88 full workspace tests and all-target
 warning-denied Clippy pass; exact x86_64/AArch64 compositor builds pass.
 
+Swipe, pinch, and hold begin/end delivery no longer clones matching protocol
+resources into temporary vectors. Each transition first confirms a live
+same-client gesture, allocates its serial only for an accepted event, then
+streams in retained-resource order over the already bounded gesture lists;
+update delivery already streamed directly. Pinned Rust 1.88 compositor tests and
+all-target warning-denied Clippy pass; exact x86_64/AArch64 compositor builds
+pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
