@@ -3423,6 +3423,19 @@ prefix, and preserves following mixed-delimiter lines. The JDK 26 app unit/lint
 gate and current exact-APK private portal startup within the Snapshot camera
 gate pass on the x86_64 emulator and AArch64 Samsung.
 
+Preference persistence now uses one keyed coalescing worker bounded by ten task
+domains—startup loading and nine persistent preference keys—instead of an
+unbounded executor queue. Repeated
+slider and toggle writes retain only the latest pending value for each key and
+move it behind older distinct work. Snapshot mutation and enqueue use one lock,
+so concurrent setters cannot enqueue writes out of snapshot order.
+Deterministic JVM tests cover a 100-update burst, distinct-key
+capacity rejection, cross-key ordering, task and failure-reporter exceptions,
+and blocked-task close. The JDK 26 app unit/lint gate passes. Current exact APKs
+also pass the Auto/Light/Dark and Material You appearance-policy gate on the
+x86_64 emulator and AArch64 Samsung without restarting manager, wrapper, or
+Linux processes.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

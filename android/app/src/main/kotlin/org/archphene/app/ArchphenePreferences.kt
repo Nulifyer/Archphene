@@ -3,10 +3,91 @@ package org.archphene.app
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import org.archphene.app.appearance.LinuxAppearanceOverrides
 import org.archphene.app.appearance.LinuxAppearancePreferences
+
+internal class LatestTaskExecutor<K>(
+    maximumPendingKeys: Int,
+    threadName: String,
+    private val onFailure: (Throwable) -> Unit,
+) : AutoCloseable {
+    private val maximumPendingKeys = maximumPendingKeys.also { require(it > 0) }
+    private val lock = ReentrantLock()
+    private val available = lock.newCondition()
+    private val pending = LinkedHashMap<K, Runnable>(maximumPendingKeys)
+    private var running = true
+    private val worker =
+        Thread(::runTasks, threadName).apply {
+            isDaemon = true
+            start()
+        }
+
+    fun execute(
+        key: K,
+        task: Runnable,
+    ) {
+        lock.withLock {
+            if (!running) throw RejectedExecutionException("Executor is closed")
+            if (!pending.containsKey(key) && pending.size >= maximumPendingKeys) {
+                throw RejectedExecutionException("Pending task key limit reached")
+            }
+            pending.remove(key)
+            pending[key] = task
+            available.signal()
+        }
+    }
+
+    internal fun pendingTaskCount(): Int = lock.withLock { pending.size }
+
+    internal fun isWorkerAlive(): Boolean = worker.isAlive
+
+    private fun runTasks() {
+        while (true) {
+            val task =
+                try {
+                    lock.withLock {
+                        while (running && pending.isEmpty()) available.await()
+                        if (!running) return
+                        val entry = pending.entries.iterator().next()
+                        pending.remove(entry.key)
+                        entry.value
+                    }
+                } catch (_: InterruptedException) {
+                    if (lock.withLock { !running }) return
+                    continue
+                }
+            try {
+                task.run()
+            } catch (error: Throwable) {
+                try {
+                    onFailure(error)
+                } catch (_: Throwable) {
+                    // Keep the bounded worker available even if failure reporting fails.
+                }
+            }
+        }
+    }
+
+    override fun close() {
+        lock.withLock {
+            running = false
+            pending.clear()
+            available.signalAll()
+        }
+        if (worker !== Thread.currentThread()) {
+            worker.interrupt()
+            worker.join(WORKER_STOP_MILLIS)
+            check(!worker.isAlive) { "Executor worker did not terminate" }
+        }
+    }
+
+    private companion object {
+        const val WORKER_STOP_MILLIS = 2_000L
+    }
+}
 
 internal data class ArchphenePreferenceSnapshot(
     val managerSection: Int = 0,
@@ -46,11 +127,24 @@ internal object ArchphenePreferences {
     private const val DIRTY_MATERIAL_YOU = 1 shl 6
     private const val DIRTY_ELECTRON = 1 shl 7
 
+    private enum class TaskKey {
+        STARTUP,
+        MANAGER_SECTION,
+        TERMINAL_TEXT,
+        APPEARANCE_GEOMETRY,
+        APPEARANCE_FONT,
+        APPEARANCE_CONTROLS,
+        APPEARANCE_THEME,
+        MATERIAL_YOU,
+        ELECTRON,
+        STORAGE_ONBOARDING,
+    }
+
     private val lock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val io: ExecutorService =
-        Executors.newSingleThreadExecutor { task ->
-            Thread(task, "ArchphenePreferences").apply { isDaemon = true }
+    private val io =
+        LatestTaskExecutor<TaskKey>(TaskKey.entries.size, "ArchphenePreferences") { error ->
+            android.util.Log.e(TAG, "Preference I/O task failed", error)
         }
     private val readyCallbacks = ArrayList<(ArchphenePreferenceSnapshot) -> Unit>(2)
 
@@ -70,7 +164,7 @@ internal object ArchphenePreferences {
             started = true
             applicationContext = appContext
         }
-        io.execute {
+        io.execute(TaskKey.STARTUP) {
             val manager = readInt(appContext, MANAGER_PREFERENCES, MANAGER_SECTION)
             val terminal = readInt(appContext, TERMINAL_PREFERENCES, TERMINAL_TEXT_SP)
             shellId(appContext)
@@ -161,16 +255,16 @@ internal object ArchphenePreferences {
         synchronized(lock) {
             current = current.copy(managerSection = section)
             dirty = dirty or DIRTY_MANAGER
+            writePreference(TaskKey.MANAGER_SECTION, MANAGER_PREFERENCES, MANAGER_SECTION, section)
         }
-        writePreference(MANAGER_PREFERENCES, MANAGER_SECTION, section)
     }
 
     fun setTerminalTextSp(textSp: Int) {
         synchronized(lock) {
             current = current.copy(terminalTextSp = textSp)
             dirty = dirty or DIRTY_TERMINAL
+            writePreference(TaskKey.TERMINAL_TEXT, TERMINAL_PREFERENCES, TERMINAL_TEXT_SP, textSp)
         }
-        writePreference(TERMINAL_PREFERENCES, TERMINAL_TEXT_SP, textSp)
     }
 
     fun setAppearance(
@@ -202,8 +296,15 @@ internal object ArchphenePreferences {
                     LinuxAppearancePreferences.CONTROL_VISUAL_DP -> DIRTY_CONTROLS
                     else -> DIRTY_THEME
                 }
+            val taskKey =
+                when (key) {
+                    LinuxAppearancePreferences.GEOMETRY_PERCENT -> TaskKey.APPEARANCE_GEOMETRY
+                    LinuxAppearancePreferences.FONT_PERCENT -> TaskKey.APPEARANCE_FONT
+                    LinuxAppearancePreferences.CONTROL_VISUAL_DP -> TaskKey.APPEARANCE_CONTROLS
+                    else -> TaskKey.APPEARANCE_THEME
+                }
+            writePreference(taskKey, LinuxAppearancePreferences.PREFERENCES, key, value)
         }
-        writePreference(LinuxAppearancePreferences.PREFERENCES, key, value)
         if (key == LinuxAppearancePreferences.THEME_MODE) {
             notifyAppearanceChanged()
         }
@@ -216,12 +317,13 @@ internal object ArchphenePreferences {
                     appearance = current.appearance.copy(materialYou = enabled),
                 )
             dirty = dirty or DIRTY_MATERIAL_YOU
+            writeDefaultTrueBooleanPreference(
+                TaskKey.MATERIAL_YOU,
+                LinuxAppearancePreferences.PREFERENCES,
+                LinuxAppearancePreferences.MATERIAL_YOU,
+                enabled,
+            )
         }
-        writeDefaultTrueBooleanPreference(
-            LinuxAppearancePreferences.PREFERENCES,
-            LinuxAppearancePreferences.MATERIAL_YOU,
-            enabled,
-        )
         notifyAppearanceChanged()
     }
 
@@ -270,7 +372,7 @@ internal object ArchphenePreferences {
 
     fun setStorageOnboardingSeen() {
         val context = initializedContext()
-        io.execute {
+        io.execute(TaskKey.STORAGE_ONBOARDING) {
             val saved =
                 context
                     .getSharedPreferences(STORAGE_PREFERENCES, Context.MODE_PRIVATE)
@@ -290,21 +392,23 @@ internal object ArchphenePreferences {
         synchronized(lock) {
             current = current.copy(reducedIsolationElectron = enabled)
             dirty = dirty or DIRTY_ELECTRON
+            writeBooleanPreference(
+                TaskKey.ELECTRON,
+                COMPATIBILITY_PREFERENCES,
+                REDUCED_ISOLATION_ELECTRON,
+                enabled,
+            )
         }
-        writeBooleanPreference(
-            COMPATIBILITY_PREFERENCES,
-            REDUCED_ISOLATION_ELECTRON,
-            enabled,
-        )
     }
 
     private fun writePreference(
+        taskKey: TaskKey,
         preferences: String,
         key: String,
         value: Int,
     ) {
         val context = initializedContext()
-        io.execute {
+        io.execute(taskKey) {
             val editor =
                 context
                     .getSharedPreferences(preferences, Context.MODE_PRIVATE)
@@ -321,12 +425,13 @@ internal object ArchphenePreferences {
     }
 
     private fun writeBooleanPreference(
+        taskKey: TaskKey,
         preferences: String,
         key: String,
         value: Boolean,
     ) {
         val context = initializedContext()
-        io.execute {
+        io.execute(taskKey) {
             if (
                 !context
                     .getSharedPreferences(preferences, Context.MODE_PRIVATE)
@@ -340,12 +445,13 @@ internal object ArchphenePreferences {
     }
 
     private fun writeDefaultTrueBooleanPreference(
+        taskKey: TaskKey,
         preferences: String,
         key: String,
         value: Boolean,
     ) {
         val context = initializedContext()
-        io.execute {
+        io.execute(taskKey) {
             val editor =
                 context
                     .getSharedPreferences(preferences, Context.MODE_PRIVATE)
