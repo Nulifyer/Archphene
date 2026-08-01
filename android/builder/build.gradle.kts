@@ -2,6 +2,10 @@ plugins {
     id("com.android.application")
 }
 
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}
+
 val archpheneAbi = providers.gradleProperty("archpheneAbi").orNull
 val sourceValidation =
     providers.gradleProperty("archpheneSourceValidation")

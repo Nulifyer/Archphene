@@ -12,8 +12,14 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.system.Os
 import java.io.File
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+
+internal fun canReadSentinel(file: File): Boolean =
+    runCatching {
+        FileInputStream(file).use { stream -> stream.read() }
+    }.isSuccess
 
 class AurBuilderService : Service() {
     private val nativeOutputBuffer =
@@ -943,9 +949,7 @@ class AurBuilderService : Service() {
                 PackageManager.PERMISSION_GRANTED
         val directManagerDataReadable =
             managerSentinel.isNotEmpty() &&
-                runCatching {
-                    File(managerSentinel).readBytes()
-                }.isSuccess
+                canReadSentinel(File(managerSentinel))
         val outputWriteSucceeded =
             runCatching {
                 val bytes = "builder-output:$uid\n".toByteArray(Charsets.US_ASCII)

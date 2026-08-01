@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-31
+Updated: 2026-08-01
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -3186,6 +3186,14 @@ Exact-limit assets remain accepted; limit-plus-one and empty assets fail before
 native parsing. Shared JVM tests cover exact, oversized, chunked, and
 zero-progress streams. JDK 26 app/Builder unit compilation and lint plus exact
 x86_64/AArch64 manager and Builder builds pass.
+
+The isolated Builder's manager-data boundary probe now opens the supplied
+sentinel and reads one byte instead of allocating the complete manager-selected
+file. This preserves readable-empty-file handling and the result of open or
+first-byte failures while preventing a hostile same-signer caller from driving
+an unbounded diagnostic allocation.
+JVM tests cover empty, missing, and sparse files larger than the JVM array
+limit. JDK 26 Builder unit/lint and exact x86_64/AArch64 Builder builds pass.
 
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
