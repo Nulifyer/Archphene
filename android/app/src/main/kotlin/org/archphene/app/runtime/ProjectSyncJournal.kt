@@ -10,7 +10,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
 import java.util.zip.CRC32
 
 internal const val SYNC_JOURNAL_PUSH = 1
@@ -162,16 +161,15 @@ internal class ProjectSyncJournalStore(private val file: File) {
     }
 
     fun load(): ProjectSyncJournal? {
-        if (!file.exists()) {
-            return null
-        }
-        check(file.isFile && !Files.isSymbolicLink(file.toPath())) {
-            "Project synchronization journal is not a regular file"
-        }
-        check(file.length() in 1..MAX_JOURNAL_BYTES.toLong()) {
-            "Project synchronization journal is oversized"
-        }
-        return ProjectSyncJournalCodec.decode(AtomicFile(file).openRead().use { it.readBytes() })
+        val bytes =
+            readRecoveredAtomicBytes(
+                file,
+                MAX_JOURNAL_BYTES,
+                "Project synchronization journal is oversized",
+            ) ?: return null
+        return ProjectSyncJournalCodec.decode(
+            bytes,
+        )
     }
 
     fun updatePhase(phase: Int) {

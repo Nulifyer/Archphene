@@ -3170,6 +3170,15 @@ delivery needs a second pass. Debug resource counting uses the same iterator.
 Pinned Rust 1.88 compositor tests and all-target warning-denied Clippy pass;
 exact x86_64/AArch64 compositor builds pass.
 
+Project-synchronization journal and history loading now uses a fixed 8 KiB
+scratch buffer with exact 64/128 KiB stream ceilings instead of calling
+unbounded `readBytes()` after a path-length check. Legacy `.bak` state is
+validated as a no-follow regular file, restored with atomic replacement,
+reopened with `NOFOLLOW_LINKS`, and decoded from at most limit-plus-one bytes.
+JVM tests cover empty, exact, oversized, chunked, and zero-progress streams;
+backup-only and backup-over-base recovery; missing state; and symlink rejection.
+JDK 26 app unit/lint and exact x86_64/AArch64 manager builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

@@ -10,7 +10,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
 import java.util.zip.CRC32
 
 internal const val SYNC_HISTORY_FILE = "project-sync-history-v1"
@@ -257,16 +256,15 @@ internal object ProjectSyncHistoryCodec {
 
 internal class ProjectSyncHistoryStore(private val file: File) {
     fun load(): List<ProjectSyncHistoryEntry> {
-        if (!file.exists()) {
-            return emptyList()
-        }
-        check(file.isFile && !Files.isSymbolicLink(file.toPath())) {
-            "Project synchronization history is not a regular file"
-        }
-        check(file.length() in 1..MAX_HISTORY_ENCODED_BYTES.toLong()) {
-            "Project synchronization history is oversized"
-        }
-        return ProjectSyncHistoryCodec.decode(AtomicFile(file).openRead().use { it.readBytes() })
+        val bytes =
+            readRecoveredAtomicBytes(
+                file,
+                MAX_HISTORY_ENCODED_BYTES,
+                "Project synchronization history is oversized",
+            ) ?: return emptyList()
+        return ProjectSyncHistoryCodec.decode(
+            bytes,
+        )
     }
 
     fun append(entry: ProjectSyncHistoryEntry): List<ProjectSyncHistoryEntry> {
