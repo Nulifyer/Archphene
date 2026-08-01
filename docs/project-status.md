@@ -3282,6 +3282,15 @@ state rejection, and opened/path metadata policies; shared bounded-reader tests
 cover atomic replacement, growth, and shrink. Pinned Rust 1.88 package tests and
 warning-denied Clippy pass.
 
+Interrupted-install reason recovery now uses the same bounded no-follow reader
+instead of `fs::read()`. The opened stable descriptor must retain owner-only
+permissions before parsing, and links, replacement, growth, shrink, or
+limit-plus-one state fail closed without allocating beyond the 64 KiB intent
+ceiling. Recovery tests cover valid explicit reasons, oversized state, and
+symbolic links; shared bounded-reader tests cover descriptor and path
+replacement policies. Pinned Rust 1.88 package tests and warning-denied Clippy
+pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

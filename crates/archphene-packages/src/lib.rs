@@ -5763,9 +5763,11 @@ impl PackageRuntime {
         {
             return Err(PackageRuntimeError::UnsafeEntry(path));
         }
-        let content = fs::read(&path)?;
-        if content.len() as u64 != metadata.len() {
-            return Err(PackageRuntimeError::SizeMismatch);
+        let (content, final_metadata) =
+            read_bounded_regular_file_with_metadata(&path, INSTALL_REASON_INTENT_LIMIT)?
+                .ok_or(PackageRuntimeError::SizeMismatch)?;
+        if final_metadata.permissions().mode() & 0o077 != 0 {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
         }
         let content =
             std::str::from_utf8(&content).map_err(|_| PackageRuntimeError::InvalidResolution)?;
@@ -8219,10 +8221,14 @@ fn read_bounded_exact(
         Err(_) => return Ok(None),
     };
     let mut content = Vec::with_capacity(capacity);
-    reader
-        .take(limit.saturating_add(1))
+    Read::by_ref(reader)
+        .take(expected)
         .read_to_end(&mut content)?;
-    if content.len() as u64 != expected || content.len() as u64 > limit {
+    if content.len() as u64 != expected {
+        return Ok(None);
+    }
+    let mut overflow = [0_u8; 1];
+    if reader.read(&mut overflow)? != 0 {
         return Ok(None);
     }
     Ok(Some(content))
@@ -15068,6 +15074,28 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
             .preserve_pending_install_reasons(&mut archives)
             .expect("preserve retained reason");
         assert!(archives[0].explicitly_installed);
+
+        fs::write(
+            &intent,
+            vec![b'x'; INSTALL_REASON_INTENT_LIMIT as usize + 1],
+        )
+        .expect("oversized reason intent");
+        fs::set_permissions(&intent, fs::Permissions::from_mode(0o600))
+            .expect("oversized reason intent mode");
+        assert!(matches!(
+            runtime.read_pending_install_reasons(),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == intent
+        ));
+
+        fs::remove_file(&intent).expect("remove oversized reason intent");
+        let target = tree.root.join("reason-intent-target");
+        fs::write(&target, format!("{INSTALL_REASON_INTENT_HEADER}\nfoot\n"))
+            .expect("reason target");
+        std::os::unix::fs::symlink(&target, &intent).expect("reason intent link");
+        assert!(matches!(
+            runtime.read_pending_install_reasons(),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == intent
+        ));
     }
 
     #[test]
