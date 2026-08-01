@@ -135,6 +135,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var frameCallbackActive = false
     private var statusFrameCountdown = 0
     private var keepServiceAfterFinish = false
+    private var preferenceReadyRegistration:
+        LatestReadyCallback.Registration<ArchphenePreferenceSnapshot>? = null
     private var shellCatalogRevision = Int.MIN_VALUE
     private var installedPackageRevision = Int.MIN_VALUE
     private var availablePackageRevision = Int.MIN_VALUE
@@ -1862,7 +1864,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         applySystemBarInsets(layout)
         setContentView(layout)
         updateShellPresentation(false)
-        ArchphenePreferences.whenReady { preferences ->
+        preferenceReadyRegistration = ArchphenePreferences.whenReady { preferences ->
             if (isDestroyed) {
                 return@whenReady
             }
@@ -1984,6 +1986,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     override fun onDestroy() {
+        preferenceReadyRegistration?.cancel()
+        preferenceReadyRegistration = null
         storageOnboardingDialog?.setOnDismissListener(null)
         storageOnboardingDialog?.dismiss()
         storageOnboardingDialog = null

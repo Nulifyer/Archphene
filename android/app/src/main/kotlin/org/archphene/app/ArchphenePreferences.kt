@@ -146,7 +146,7 @@ internal object ArchphenePreferences {
         LatestTaskExecutor<TaskKey>(TaskKey.entries.size, "ArchphenePreferences") { error ->
             android.util.Log.e(TAG, "Preference I/O task failed", error)
         }
-    private val readyCallbacks = ArrayList<(ArchphenePreferenceSnapshot) -> Unit>(2)
+    private val readyCallback = LatestReadyCallback<ArchphenePreferenceSnapshot>()
 
     @Volatile private var current = ArchphenePreferenceSnapshot()
     @Volatile private var appearanceListener: AppearanceListener? = null
@@ -181,7 +181,7 @@ internal object ArchphenePreferences {
                     android.util.Log.e(TAG, "Could not read Linux appearance preferences", error)
                     LinuxAppearanceOverrides(0, 0, 0, 0, true)
                 }
-            val callbacks: Array<(ArchphenePreferenceSnapshot) -> Unit>
+            val callback: LatestReadyCallback.Registration<ArchphenePreferenceSnapshot>?
             val loaded: ArchphenePreferenceSnapshot
             synchronized(lock) {
                 val prior = current
@@ -224,13 +224,10 @@ internal object ArchphenePreferences {
                     )
                 current = loaded
                 ready = true
-                callbacks = readyCallbacks.toTypedArray()
-                readyCallbacks.clear()
+                callback = readyCallback.take()
             }
-            if (callbacks.isNotEmpty()) {
-                mainHandler.post {
-                    callbacks.forEach { callback -> callback(loaded) }
-                }
+            if (callback != null && !mainHandler.post { callback.deliver(loaded) }) {
+                callback.cancel()
             }
         }
     }
@@ -239,16 +236,25 @@ internal object ArchphenePreferences {
 
     fun isReady(): Boolean = synchronized(lock) { ready }
 
-    fun whenReady(callback: (ArchphenePreferenceSnapshot) -> Unit) {
-        val snapshot =
-            synchronized(lock) {
+    fun whenReady(
+        callback: (ArchphenePreferenceSnapshot) -> Unit,
+    ): LatestReadyCallback.Registration<ArchphenePreferenceSnapshot> {
+        val registration: LatestReadyCallback.Registration<ArchphenePreferenceSnapshot>
+        val snapshot: ArchphenePreferenceSnapshot?
+        synchronized(lock) {
+            registration = readyCallback.register(callback)
+            snapshot =
                 if (!ready) {
-                    readyCallbacks.add(callback)
-                    return
+                    null
+                } else {
+                    readyCallback.take()
+                    current
                 }
-                current
-            }
-        mainHandler.post { callback(snapshot) }
+        }
+        if (snapshot != null && !mainHandler.post { registration.deliver(snapshot) }) {
+            registration.cancel()
+        }
+        return registration
     }
 
     fun setManagerSection(section: Int) {

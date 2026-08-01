@@ -3543,6 +3543,15 @@ queued update. Ordered-dispatch JVM tests cover 100-update retention,
 replacement ordering, scheduling failure, and close rejection. JDK 26 app
 unit/lint and exact x86_64/AArch64 manager builds pass.
 
+Preference startup now retains at most one current MainActivity readiness
+observer while I/O is pending or main-thread delivery is queued. Activity
+recreation replaces and deactivates the previous callback; `onDestroy()` and
+failed Handler posting cancel and unlink registration. One-shot delivery remains
+registry-validated, so replacement after worker drain cannot mutate a stale
+Activity. JVM tests cover 100-generation replacement, cancellation, one-shot
+delivery, post-drain replacement, and unlinking. JDK 26 app unit/lint and exact
+x86_64/AArch64 manager builds pass.
+
 Wayland touch down, motion, up, and cancel delivery no longer clones matching
 `WlTouch` resources into temporary vectors. Delivery streams over the already
 bounded retained touch-resource list with live and same-client filtering. Cancel
