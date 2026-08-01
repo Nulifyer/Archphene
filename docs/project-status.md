@@ -3319,6 +3319,13 @@ shrunk, oversized, and linked sources without writing growth bytes past the
 expected destination size. Pinned Rust 1.88 package tests and warning-denied
 Clippy pass.
 
+Retained local-package database repair files now use the stable exact-copy path
+instead of a second `io::copy()`-to-EOF implementation. Valid empty pacman
+metadata files remain supported while every source keeps the 1 MiB per-file
+ceiling, no-follow opening, final identity checks, and mode-0600 destination.
+Removal-repair round trips plus exact-copy empty, growth, shrink, replacement,
+overflow, and link tests pass with pinned Rust 1.88 and warning-denied Clippy.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

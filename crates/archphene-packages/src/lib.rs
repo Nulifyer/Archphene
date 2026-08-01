@@ -10595,19 +10595,28 @@ fn copy_bounded_regular_file(
     destination: &Path,
     maximum_size: u64,
 ) -> Result<(), PackageRuntimeError> {
-    copy_bounded_regular_file_after_open(source, destination, maximum_size, || Ok(()))
+    copy_bounded_regular_file_after_open(source, destination, maximum_size, false, || Ok(()))
+}
+
+fn copy_bounded_regular_file_allow_empty(
+    source: &Path,
+    destination: &Path,
+    maximum_size: u64,
+) -> Result<(), PackageRuntimeError> {
+    copy_bounded_regular_file_after_open(source, destination, maximum_size, true, || Ok(()))
 }
 
 fn copy_bounded_regular_file_after_open(
     source: &Path,
     destination: &Path,
     maximum_size: u64,
+    allow_empty: bool,
     after_open: impl FnOnce() -> Result<(), PackageRuntimeError>,
 ) -> Result<(), PackageRuntimeError> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
-        || metadata.len() == 0
+        || (!allow_empty && metadata.len() == 0)
         || metadata.len() > maximum_size
     {
         return Err(PackageRuntimeError::UnsafeEntry(source.to_path_buf()));
@@ -10692,25 +10701,12 @@ fn copy_database_repair_entry(
             {
                 return Err(PackageRuntimeError::UnsafeEntry(source_file));
             }
-            let mut input = OpenOptions::new()
-                .read(true)
-                .custom_flags(O_NOFOLLOW | O_CLOEXEC)
-                .open(&source_file)?;
-            if input.metadata()?.len() != metadata.len() {
-                return Err(PackageRuntimeError::SizeMismatch);
-            }
             let destination_file = destination.join(name);
-            let mut output = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .custom_flags(O_NOFOLLOW | O_CLOEXEC)
-                .open(&destination_file)?;
-            let copied = io::copy(&mut input, &mut output)?;
-            if copied != metadata.len() {
-                return Err(PackageRuntimeError::SizeMismatch);
-            }
-            output.sync_all()?;
+            copy_bounded_regular_file_allow_empty(
+                &source_file,
+                &destination_file,
+                LOCAL_DATABASE_PACKAGE_FILE_LIMIT,
+            )?;
         }
         File::open(destination)?.sync_all()?;
         validate_database_repair_entry(destination)
@@ -12334,6 +12330,16 @@ mod tests {
         copy_bounded_regular_file(&source, &destination, 5).expect("bounded copy");
         assert_eq!(fs::read(&destination).expect("copied bytes"), b"state");
 
+        let empty = tree.native.join("empty-source");
+        let empty_destination = tree.native.join("empty-destination");
+        fs::write(&empty, b"").expect("empty source");
+        copy_bounded_regular_file_allow_empty(&empty, &empty_destination, 5)
+            .expect("empty bounded copy");
+        assert_eq!(
+            fs::metadata(&empty_destination).expect("empty copy").len(),
+            0
+        );
+
         let oversized_destination = tree.native.join("oversized-destination");
         assert!(matches!(
             copy_bounded_regular_file(&source, &oversized_destination, 4),
@@ -12352,7 +12358,7 @@ mod tests {
 
         let growth_destination = tree.native.join("growth-destination");
         assert!(matches!(
-            copy_bounded_regular_file_after_open(&source, &growth_destination, 5, || {
+            copy_bounded_regular_file_after_open(&source, &growth_destination, 5, false, || {
                 OpenOptions::new()
                     .append(true)
                     .open(&source)?
@@ -12366,7 +12372,7 @@ mod tests {
         fs::write(&source, b"state").expect("restore source");
         let shrink_destination = tree.native.join("shrink-destination");
         assert!(matches!(
-            copy_bounded_regular_file_after_open(&source, &shrink_destination, 5, || {
+            copy_bounded_regular_file_after_open(&source, &shrink_destination, 5, false, || {
                 OpenOptions::new().write(true).open(&source)?.set_len(4)?;
                 Ok(())
             }),
@@ -12378,11 +12384,17 @@ mod tests {
         let replacement = tree.native.join("copy-replacement");
         let replacement_destination = tree.native.join("replacement-destination");
         assert!(matches!(
-            copy_bounded_regular_file_after_open(&source, &replacement_destination, 5, || {
-                fs::write(&replacement, b"other")?;
-                fs::rename(&replacement, &source)?;
-                Ok(())
-            }),
+            copy_bounded_regular_file_after_open(
+                &source,
+                &replacement_destination,
+                5,
+                false,
+                || {
+                    fs::write(&replacement, b"other")?;
+                    fs::rename(&replacement, &source)?;
+                    Ok(())
+                },
+            ),
             Err(PackageRuntimeError::SizeMismatch)
         ));
     }
