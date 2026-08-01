@@ -3213,6 +3213,15 @@ symbolic links, unknown names, overflow progress, and mixed-entry recovery.
 Launcher-template unit/lint and exact release plus x86_64/AArch64 manager builds
 pass.
 
+Generated-launcher private print cleanup now uses the same bounded no-follow
+directory walker instead of allocating the complete staging directory before
+checking its 32-file ceiling. Unknown names and unsafe file types fail closed.
+Inactive PDF files are deleted as each accepted entry is visited, so overflow
+is reported only after bounded cleanup progress rather than retaining the whole
+stale set forever. JVM tests prove active-file preservation and stale-file
+recovery across overflow. Launcher-template unit/lint, exact release, and
+x86_64/AArch64 manager builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

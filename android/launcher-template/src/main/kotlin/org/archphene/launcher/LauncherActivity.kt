@@ -4875,23 +4875,16 @@ class LauncherActivity :
                 !Files.isSymbolicLink(directory.toPath()) &&
                 canonicalDirectory.isDirectory,
         )
-        val entries = canonicalDirectory.listFiles() ?: error("Could not inspect print staging")
-        check(entries.size <= MAX_STALE_PRINT_FILES)
         synchronized(ACTIVE_PRINT_FILES) {
-            for (entry in entries) {
-                val canonical = entry.canonicalFile
-                check(
-                    canonical.parentFile == canonicalDirectory &&
-                        !Files.isSymbolicLink(entry.toPath()) &&
-                        canonical.isFile &&
-                        canonical.name.endsWith(".pdf"),
-                ) {
-                    "Unsafe private print staging entry"
-                }
-                if (ACTIVE_PRINT_FILES.contains(canonical)) continue
-                if (!canonical.delete()) {
-                    Log.w(TAG, "Could not delete stale private print document")
-                }
+            cleanupBoundedRegularFiles(
+                canonicalDirectory,
+                PRINT_FILE_NAME,
+                MAX_STALE_PRINT_FILES,
+                ACTIVE_PRINT_FILES,
+                "Unsafe private print staging entry",
+                "Private print staging limit exceeded",
+            ) { _ ->
+                Log.w(TAG, "Could not delete stale private print document")
             }
         }
     }
@@ -5138,6 +5131,7 @@ class LauncherActivity :
         private const val MAX_PRINT_TITLE_UTF16 = 256
         private const val MAX_PRINT_TITLE_BYTES = 512
         private const val PRINT_DIRECTORY = "print"
+        private val PRINT_FILE_NAME = Regex(".*\\.pdf", RegexOption.DOT_MATCHES_ALL)
         private const val MIN_PRINT_BYTES = 5L
         private const val MAX_PRINT_BYTES = 256L * 1024 * 1024
         private const val MAX_PENDING_PRINTS = 4

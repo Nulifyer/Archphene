@@ -64,3 +64,29 @@ internal fun visitBoundedRegularFiles(
     }
     return matched
 }
+
+internal fun cleanupBoundedRegularFiles(
+    directory: File,
+    namePattern: Regex,
+    maximumFiles: Int,
+    activeFiles: Set<File>,
+    unsafeMessage: String,
+    overflowMessage: String,
+    deleteFailure: (File) -> Unit,
+) {
+    visitBoundedRegularFiles(
+        directory,
+        namePattern,
+        namePattern,
+        maximumFiles,
+        maximumFiles + 1,
+        unsafeMessage,
+        overflowMessage,
+    ) { entry ->
+        val canonical = entry.canonicalFile
+        check(canonical.parentFile == directory) { unsafeMessage }
+        if (!activeFiles.contains(canonical) && !canonical.delete()) {
+            deleteFailure(canonical)
+        }
+    }
+}

@@ -3,6 +3,7 @@ package org.archphene.launcher
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -131,6 +132,40 @@ class BoundedDirectoryTest {
                 "overflow",
             )
         }
+    }
+
+    @Test
+    fun cleanupPreservesActiveFileAndRecoversAfterOverflow() {
+        val active = temporaryFolder.newFile("active.pdf").canonicalFile
+        repeat(2) { index -> temporaryFolder.newFile("stale-$index.pdf") }
+        val pdf = Regex(".+\\.pdf")
+
+        assertThrows(IllegalStateException::class.java) {
+            cleanupBoundedRegularFiles(
+                temporaryFolder.root.canonicalFile,
+                pdf,
+                2,
+                setOf(active),
+                "unsafe",
+                "overflow",
+            ) { error("delete failed") }
+        }
+        assertTrue(active.exists())
+        assertTrue(temporaryFolder.root.listFiles { file -> file.name.startsWith("stale-") }.orEmpty().size < 2)
+
+        cleanupBoundedRegularFiles(
+            temporaryFolder.root.canonicalFile,
+            pdf,
+            2,
+            setOf(active),
+            "unsafe",
+            "overflow",
+        ) { error("delete failed") }
+        assertTrue(active.exists())
+        assertEquals(
+            0,
+            temporaryFolder.root.listFiles { file -> file.name.startsWith("stale-") }.orEmpty().size,
+        )
     }
 
     private fun collect(
