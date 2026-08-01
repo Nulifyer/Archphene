@@ -115,6 +115,11 @@ class LauncherActivity :
         val releaseBeforeApply: Boolean,
     )
 
+    private data class PendingStatus(
+        val state: Int,
+        val message: String,
+    )
+
     private sealed interface CursorUpdate {
         data class System(val icon: Int) : CursorUpdate
 
@@ -314,6 +319,13 @@ class LauncherActivity :
                 )
             }
         }
+    private val pendingStatus = LatestCallbackSlot<PendingStatus>()
+    private val applyPendingStatus =
+        Runnable {
+            pendingStatus.take()?.let { pending ->
+                applyRemoteStatus(pending.state, pending.message)
+            }
+        }
     private val applyPendingCursor =
         Runnable {
             when (val update = pendingCursor.take()) {
@@ -430,7 +442,13 @@ class LauncherActivity :
                             ) {
                                 return@runCatching false
                             }
-                            handler.post { applyRemoteStatus(state, message) }
+                            if (
+                                !pendingStatus.offer(PendingStatus(state, message)) {
+                                    handler.post(applyPendingStatus)
+                                }
+                            ) {
+                                return@runCatching false
+                            }
                             true
                         }
                         CALLBACK_CLIPBOARD -> {
@@ -1407,6 +1425,7 @@ class LauncherActivity :
         pendingClipboardCallback.clear()
         pendingPointerCapture.clear()
         pendingAppearance.clear()
+        pendingStatus.clear()
         if (
             cameraPermissionRequestInFlight &&
             !getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
@@ -1438,6 +1457,7 @@ class LauncherActivity :
         pendingClipboardCallback.close()
         pendingPointerCapture.close()
         pendingAppearance.close()
+        pendingStatus.close()
         pendingNotifications.fill(null)
         stopClipboardListening()
         cancelPendingDocumentRequest()

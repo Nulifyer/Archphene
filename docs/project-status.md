@@ -3460,10 +3460,11 @@ also pass the Auto/Light/Dark and Material You appearance-policy gate on the
 x86_64 emulator and AArch64 Samsung without restarting manager, wrapper, or
 Linux processes.
 
-Generated-launcher IME-state, cursor, Linux-clipboard, pointer-capture, and
-appearance Binder bursts now coalesce into one scheduled main-thread callback
-and one replaceable latest payload per type. Clipboard selection, capture intent,
-and appearance stay latest-wins; pointer-capture merging preserves an
+Generated-launcher status, IME-state, cursor, Linux-clipboard, pointer-capture,
+and appearance Binder bursts now coalesce into one scheduled main-thread
+callback and one replaceable latest payload per type. Status, clipboard
+selection, capture intent, and appearance stay latest-wins; pointer-capture
+merging preserves an
 intermediate release and waits for Android's loss callback before recapture.
 Replaced custom cursor bitmaps are recycled before Android takes ownership.
 Activity destruction atomically closes all slots, rejects late Binder work, and
