@@ -959,7 +959,14 @@ class AurBuilderService : Service() {
             }.isSuccess
         val selinuxContext =
             runCatching {
-                File("/proc/self/attr/current").readText().trimEnd('\u0000', '\n')
+                File("/proc/self/attr/current").inputStream().use { input ->
+                    input
+                        .readBoundedBytes(
+                            MAX_SELINUX_CONTEXT_FILE_BYTES,
+                            "Builder SELinux context is too large",
+                        ).toString(Charsets.UTF_8)
+                        .trimEnd('\u0000', '\n')
+                }
             }.getOrDefault("unavailable")
         val staged = stageReviewedInputs(packageBase, version, inputs)
         val privateWorkspaceWritable = staged.first > 0 && staged.second.length == 64
@@ -1155,6 +1162,7 @@ class AurBuilderService : Service() {
         private const val MAX_AUR_REQUIREMENT_BYTES = 4 * 1024
         private const val BUILD_ROOT_STORAGE_RESERVE_BYTES = 512L * 1024 * 1024
         private const val MAX_RUNTIME_MANIFEST_BYTES = 32 * 1024
+        private const val MAX_SELINUX_CONTEXT_FILE_BYTES = 258
         private const val HEX_DIGITS = "0123456789abcdef"
         private val SHA256 = Regex("[0-9a-f]{64}")
         private val PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")

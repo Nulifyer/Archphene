@@ -3195,6 +3195,13 @@ an unbounded diagnostic allocation.
 JVM tests cover empty, missing, and sparse files larger than the JVM array
 limit. JDK 26 Builder unit/lint and exact x86_64/AArch64 Builder builds pass.
 
+The isolated Builder now reads `/proc/self/attr/current` through a 258-byte
+bounded stream instead of unbounded `readText()`. This preserves the existing
+256-character SELinux-context validation plus trailing newline/NUL allowance;
+oversized or unreadable proc state falls back to `unavailable` before Binder
+validation. Builder JVM tests cover exact and limit-plus-one reads. JDK 26
+Builder unit/lint and exact x86_64/AArch64 Builder builds pass.
+
 The manager now reads at most 64 bytes from the isolated Builder's writable
 boundary-probe descriptor before ASCII decoding. The exact UID-bearing marker
 remains accepted, while a compromised Builder cannot trigger an unbounded
