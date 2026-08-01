@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
@@ -8141,9 +8141,38 @@ fn read_bounded_regular_file(
     if metadata.len() == 0 || metadata.len() > limit {
         return Ok(None);
     }
-    let mut content = Vec::with_capacity(metadata.len() as usize);
-    File::open(path)?.read_to_end(&mut content)?;
-    if content.len() as u64 != metadata.len() {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file()
+        || opened_metadata.dev() != metadata.dev()
+        || opened_metadata.ino() != metadata.ino()
+        || opened_metadata.len() != metadata.len()
+    {
+        return Ok(None);
+    }
+    read_bounded_exact(&mut file, opened_metadata.len(), limit).map_err(PackageRuntimeError::Io)
+}
+
+fn read_bounded_exact(
+    reader: &mut impl Read,
+    expected: u64,
+    limit: u64,
+) -> io::Result<Option<Vec<u8>>> {
+    if expected == 0 || expected > limit {
+        return Ok(None);
+    }
+    let capacity = match usize::try_from(expected) {
+        Ok(capacity) => capacity,
+        Err(_) => return Ok(None),
+    };
+    let mut content = Vec::with_capacity(capacity);
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut content)?;
+    if content.len() as u64 != expected || content.len() as u64 > limit {
         return Ok(None);
     }
     Ok(Some(content))
@@ -12163,6 +12192,54 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn bounded_exact_read_rejects_growth_after_metadata() {
+        assert_eq!(
+            read_bounded_exact(&mut Cursor::new(b"state"), 5, 5).expect("exact"),
+            Some(b"state".to_vec()),
+        );
+        assert_eq!(
+            read_bounded_exact(&mut Cursor::new(b"state!"), 5, 5).expect("growth"),
+            None,
+        );
+        assert_eq!(
+            read_bounded_exact(&mut Cursor::new(b"stat"), 5, 5).expect("shrink"),
+            None,
+        );
+        assert_eq!(
+            read_bounded_exact(&mut std::io::repeat(0), 5, 5).expect("unbounded source"),
+            None,
+        );
+    }
+
+    #[test]
+    fn bounded_regular_file_read_rejects_links_missing_and_oversized_state() {
+        let tree = TestTree::new();
+        let state = tree.native.join("state");
+        fs::write(&state, b"valid").expect("state");
+        assert_eq!(
+            read_bounded_regular_file(&state, 5).expect("regular"),
+            Some(b"valid".to_vec()),
+        );
+
+        let link = tree.native.join("state-link");
+        symlink(&state, &link).expect("link");
+        assert!(matches!(
+            read_bounded_regular_file(&link, 5),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == link
+        ));
+        assert_eq!(
+            read_bounded_regular_file(&tree.native.join("missing"), 5).expect("missing"),
+            None,
+        );
+
+        fs::write(&state, b"oversized").expect("oversized");
+        assert_eq!(
+            read_bounded_regular_file(&state, 5).expect("oversized result"),
+            None,
+        );
+    }
 
     #[test]
     fn pacman_assumed_dependency_expressions_are_strictly_bounded() {

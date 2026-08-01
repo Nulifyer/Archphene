@@ -3254,6 +3254,15 @@ remains excluded by the existing debuggable gate. JVM tests cover exact,
 oversized, and multibyte content. JDK 26 app unit/lint and exact
 x86_64/AArch64 manager builds pass.
 
+Package trust-source state now reopens with `O_NOFOLLOW|O_CLOEXEC`, requires the
+opened device, inode, and length to match the validated regular file, and reads
+through a limit-plus-one adapter instead of allowing `read_to_end()` to follow
+concurrent growth. Missing, linked, oversized, substituted, shrunk, and grown
+state fails closed without allocating beyond the declared ceiling. Package
+tests cover exact, symlink, missing, static overflow, post-metadata growth, and
+unbounded-reader behavior. Pinned Rust 1.88 package tests and warning-denied
+Clippy pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
