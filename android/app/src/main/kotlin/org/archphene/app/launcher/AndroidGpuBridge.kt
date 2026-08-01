@@ -19,10 +19,19 @@ internal class AndroidGpuBridge(
         File(context.cacheDir, "gpu-$sessionId-${randomToken()}")
     private var process: Process? = null
     private var socket: File? = null
+    private var reaper: Thread? = null
 
     @Synchronized
     fun start(): File? {
+        if (reaper != null) {
+            Log.w(TAG, "Previous GPU helper is still stopping; session=$sessionId uses llvmpipe")
+            return null
+        }
         close()
+        if (process != null) {
+            Log.w(TAG, "Previous GPU helper is still stopping; session=$sessionId uses llvmpipe")
+            return null
+        }
         if (!helper.isFile || !helper.canExecute()) {
             Log.w(TAG, "GPU helper is unavailable; session=$sessionId uses llvmpipe")
             return null
@@ -88,20 +97,42 @@ internal class AndroidGpuBridge(
     @Synchronized
     override fun close() {
         val child = process
-        process = null
-        if (child != null) {
-            child.destroy()
-            try {
-                if (!child.waitFor(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-                    child.destroyForcibly()
-                }
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                child.destroyForcibly()
-            }
+        if (child != null && !stopProcess(child, STOP_TIMEOUT_MILLIS)) {
+            Log.w(TAG, "GPU helper did not stop; retaining cleanup session=$sessionId")
+            scheduleReap(child, socket)
+            return
         }
+        process = null
         cleanupFiles(socket)
         socket = null
+    }
+
+    private fun scheduleReap(child: Process, candidate: File?) {
+        if (reaper != null) return
+        reaper =
+            Thread({
+                var interrupted = false
+                while (child.isAlive) {
+                    try {
+                        child.waitFor()
+                    } catch (_: InterruptedException) {
+                        interrupted = true
+                        child.destroyForcibly()
+                    }
+                }
+                synchronized(this@AndroidGpuBridge) {
+                    if (process === child) process = null
+                    if (socket === candidate) {
+                        cleanupFiles(candidate)
+                        socket = null
+                    }
+                    reaper = null
+                }
+                if (interrupted) Thread.currentThread().interrupt()
+            }, "archphene-gpu-reaper-$sessionId").apply {
+                isDaemon = true
+                start()
+            }
     }
 
     private fun cleanupFiles(candidate: File?) {
@@ -125,6 +156,28 @@ internal class AndroidGpuBridge(
         private const val STOP_TIMEOUT_MILLIS = 1_000L
         private const val HEX = "0123456789abcdef"
         private val random = SecureRandom()
+
+        internal fun stopProcess(child: Process, timeoutMillis: Long): Boolean {
+            var interrupted = false
+            child.destroy()
+            val stoppedGracefully =
+                try {
+                    child.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    false
+                }
+            if (!stoppedGracefully && child.isAlive) {
+                child.destroyForcibly()
+                try {
+                    child.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt()
+            return !child.isAlive
+        }
 
         fun cleanupStaleRuntimeDirectories(context: Context) {
             val cachePath = context.cacheDir.toPath()

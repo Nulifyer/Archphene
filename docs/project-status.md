@@ -3361,6 +3361,15 @@ interrupted, malformed, stale-component, detached-session, and live pidfd paths.
 Pinned Rust 1.88 process tests, warning-denied Clippy, and exact
 x86_64/AArch64 manager builds pass.
 
+Android GPU helper ownership now survives graceful and forced shutdown. The
+manager waits one bounded interval after `destroy()` and another after
+`destroyForcibly()`. If the helper still lives, its process and socket state
+remain tracked, replacement startup is rejected, and one daemon reaper performs
+final process and filesystem cleanup. Caller interruption is restored only
+after the forced wait. JVM tests use readiness handshakes for forced and
+interrupted paths and a stubborn process for the timeout result. JDK 26 app
+unit/lint and exact x86_64/AArch64 manager builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
