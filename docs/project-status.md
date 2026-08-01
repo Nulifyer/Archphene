@@ -3302,6 +3302,14 @@ substitution fails closed without blocking bootstrap. Root tests cover content
 and mode repair, concurrent publication and cleanup, link-target preservation,
 and FIFO rejection. Pinned Rust 1.88 root tests and warning-denied Clippy pass.
 
+Launcher-registry loading now uses `O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`, a fixed
+metadata-sized buffer, and a separate one-byte overflow probe. Device, inode,
+mode, size, and timestamps must remain stable across initial path metadata, the
+opened descriptor, the completed read, and the final path before decoding.
+Exact, grown, shrunk, interrupted, replaced, corrupt, and linked registry tests
+pass without allocating beyond the 4 MiB ceiling. Pinned Rust 1.88 launcher
+tests and warning-denied Clippy pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

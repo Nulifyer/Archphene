@@ -3,7 +3,7 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use archphene_packages::desktop::{
@@ -146,6 +146,7 @@ const MAX_LAUNCHER_ICON_PIXELS: u64 = 4 * 1024 * 1024;
 const PACKAGE_PREFIX: &str = "org.archphene.linux.p";
 const O_NOFOLLOW: i32 = 0o400000;
 const O_CLOEXEC: i32 = 0o2000000;
+const O_NONBLOCK: i32 = 0o4000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -295,6 +296,37 @@ impl From<io::Error> for LauncherRegistryError {
     }
 }
 
+fn stable_registry_metadata(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    after.is_file()
+        && after.dev() == before.dev()
+        && after.ino() == before.ino()
+        && after.mode() == before.mode()
+        && after.len() == before.len()
+        && after.mtime() == before.mtime()
+        && after.mtime_nsec() == before.mtime_nsec()
+        && after.ctime() == before.ctime()
+        && after.ctime_nsec() == before.ctime_nsec()
+}
+
+fn read_registry_bytes(reader: &mut impl Read, expected: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut bytes = vec![0_u8; expected];
+    if let Err(error) = reader.read_exact(&mut bytes) {
+        return match error.kind() {
+            io::ErrorKind::UnexpectedEof => Ok(None),
+            _ => Err(error),
+        };
+    }
+    let mut overflow = [0_u8; 1];
+    loop {
+        match reader.read(&mut overflow) {
+            Ok(0) => return Ok(Some(bytes)),
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 impl LauncherRegistry {
     pub fn empty() -> Self {
         Self {
@@ -321,23 +353,22 @@ impl LauncherRegistry {
         {
             return Err(LauncherRegistryError::UnsafePath(path));
         }
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
-            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
             .open(&path)?;
         let opened = file.metadata()?;
-        if !opened.is_file() || opened.len() != metadata.len() {
+        if !stable_registry_metadata(&metadata, &opened) {
             return Err(LauncherRegistryError::Corrupt);
         }
-        let mut bytes = Vec::with_capacity(
-            usize::try_from(metadata.len()).map_err(|_| LauncherRegistryError::LimitExceeded)?,
-        );
-        file.take(
-            u64::try_from(MAX_LAUNCHER_REGISTRY_BYTES + 1).expect("launcher registry read limit"),
-        )
-        .read_to_end(&mut bytes)?;
-        if u64::try_from(bytes.len()).map_err(|_| LauncherRegistryError::LimitExceeded)?
-            != metadata.len()
+        let expected =
+            usize::try_from(metadata.len()).map_err(|_| LauncherRegistryError::LimitExceeded)?;
+        let bytes =
+            read_registry_bytes(&mut file, expected)?.ok_or(LauncherRegistryError::Corrupt)?;
+        let final_descriptor = file.metadata()?;
+        let final_path = fs::symlink_metadata(&path).map_err(|_| LauncherRegistryError::Corrupt)?;
+        if !stable_registry_metadata(&opened, &final_descriptor)
+            || !stable_registry_metadata(&final_descriptor, &final_path)
         {
             return Err(LauncherRegistryError::Corrupt);
         }
@@ -2385,6 +2416,47 @@ mod tests {
     }
 
     #[test]
+    fn registry_reads_are_exact_bounded_and_interrupt_tolerant() {
+        assert_eq!(
+            read_registry_bytes(&mut io::Cursor::new(b"state"), 5).expect("exact"),
+            Some(b"state".to_vec()),
+        );
+        assert_eq!(
+            read_registry_bytes(&mut io::Cursor::new(b"state!"), 5).expect("growth"),
+            None,
+        );
+        assert_eq!(
+            read_registry_bytes(&mut io::Cursor::new(b"stat"), 5).expect("shrink"),
+            None,
+        );
+
+        struct InterruptedEof {
+            cursor: io::Cursor<&'static [u8]>,
+            interrupted: bool,
+        }
+        impl Read for InterruptedEof {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                if self.cursor.position() == 5 && !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.cursor.read(output)
+            }
+        }
+        assert_eq!(
+            read_registry_bytes(
+                &mut InterruptedEof {
+                    cursor: io::Cursor::new(b"state"),
+                    interrupted: false,
+                },
+                5,
+            )
+            .expect("interrupted EOF"),
+            Some(b"state".to_vec()),
+        );
+    }
+
+    #[test]
     fn streaming_sha256_matches_one_shot_across_icon_sized_chunks() {
         let bytes: Vec<u8> = (0..100_000).map(|index| (index % 251) as u8).collect();
         let mut streaming = Sha256::new();
@@ -3282,6 +3354,16 @@ mod tests {
         )
         .expect("initial reconcile");
         let path = root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE);
+        let opened = File::open(&path).expect("opened registry");
+        let opened_metadata = opened.metadata().expect("opened registry metadata");
+        let replacement = path.with_extension("replacement");
+        fs::copy(&path, &replacement).expect("replacement registry");
+        fs::rename(&replacement, &path).expect("replace registry");
+        assert!(!stable_registry_metadata(
+            &opened_metadata,
+            &fs::symlink_metadata(&path).expect("replacement registry metadata"),
+        ));
+        LauncherRegistry::load(&root.path).expect("load exact replacement");
         let mut bytes = fs::read(&path).expect("registry");
         let last = bytes.len() - 1;
         bytes[last] ^= 0x40;
