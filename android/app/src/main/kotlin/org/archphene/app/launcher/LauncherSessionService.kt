@@ -115,6 +115,8 @@ class LauncherSessionService : Service() {
                 }
     }
 
+    private data class AndroidClipboardUpdate(val payload: ClipboardPayload?)
+
     private class Session(
         val id: Int,
         val uid: Int,
@@ -172,6 +174,7 @@ class LauncherSessionService : Service() {
         var inputPosted = false
         var inputDrain: Runnable? = null
         var androidClipboard: ClipboardPayload? = null
+        var androidClipboardUpdates: LatestDispatchSlot<AndroidClipboardUpdate>? = null
         var offeredAndroidClipboard: ClipboardPayload? = null
         val clipboardReadBuffer = ByteBuffer.allocateDirect(MAX_CLIPBOARD_BYTES)
         val clipboardWriteBuffer = ByteBuffer.allocateDirect(MAX_CLIPBOARD_BYTES)
@@ -373,6 +376,7 @@ class LauncherSessionService : Service() {
             session.imeSize = 0
             session.imePosted = false
             if (closeCompositor) {
+                session.androidClipboardUpdates?.close()
                 session.accessibilityActions.clear()
                 session.pendingDocumentRequest?.portalCompletion?.complete(
                     DOCUMENT_RESULT_FAILED,
@@ -1076,6 +1080,12 @@ class LauncherSessionService : Service() {
             )
         session.inputDrain = Runnable { drainInput(session) }
         session.imeDrain = Runnable { drainIme(session) }
+        session.androidClipboardUpdates =
+            LatestDispatchSlot(
+                schedule = surfaceHandler::post,
+                cancel = surfaceHandler::removeCallbacks,
+                consume = { update -> drainAndroidClipboard(session, update) },
+            )
         try {
             clientToken.linkToDeath(sessionBinder, 0)
         } catch (_: RemoteException) {
@@ -1306,20 +1316,32 @@ class LauncherSessionService : Service() {
                     "htmlBytes=${htmlBytes?.size ?: 0}",
             )
         }
-        surfaceHandler.post {
-            if (!session.active || session.surface == null) {
-                return@post
-            }
-            val compositor = session.compositor ?: return@post
-            session.clipboardRevision = session.clipboardRevision.inc().coerceAtLeast(1)
-            session.offeredAndroidClipboard = payload
-            if (bytes == null) {
-                compositor.clearAndroidClipboard()
-            } else {
-                compositor.offerAndroidClipboardText(htmlBytes != null)
-            }
+        if (
+            !checkNotNull(session.androidClipboardUpdates).offer(AndroidClipboardUpdate(payload))
+        ) {
+            session.androidClipboard = previous
+            return RESULT_NOT_READY
         }
         return RESULT_OK
+    }
+
+    private fun drainAndroidClipboard(
+        session: Session,
+        update: AndroidClipboardUpdate,
+    ) {
+        val compositor =
+            synchronized(this) {
+                if (!session.active || session.surface == null) return
+                session.androidClipboard = update.payload
+                session.compositor ?: return
+            }
+        session.clipboardRevision = session.clipboardRevision.inc().coerceAtLeast(1)
+        session.offeredAndroidClipboard = update.payload
+        if (update.payload == null) {
+            compositor.clearAndroidClipboard()
+        } else {
+            compositor.offerAndroidClipboardText(update.payload.html != null)
+        }
     }
 
     @Synchronized

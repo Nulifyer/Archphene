@@ -3490,6 +3490,17 @@ capacity, rejection and cleanup, scheduler failure, stale-drain invalidation,
 pause/resume, and close. Launcher-template debug unit/lint and exact
 x86_64/AArch64 release R8/template assembly pass.
 
+Manager Android-clipboard submissions now retain one pending payload and one
+Surface-thread drain. Replacements cancel the earlier queued drain and repost a
+generation-tagged drain at the replacement's queue position, preserving order
+against Linux clipboard completion and Surface lifecycle work. Consumption
+restores canonical clipboard state before compositor publication, preventing an
+intervening Linux completion from resurfacing after reattachment. Session close
+cancels pending work, and failed posting rolls state back. JVM tests cover a
+100-update burst, one-runnable retention, queue-barrier ordering, canonical
+latest-state restoration, scheduling failure/retry, and close rejection. JDK 26
+app unit/lint and exact x86_64/AArch64 manager builds pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
