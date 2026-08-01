@@ -6,8 +6,11 @@ use std::io::{self, Read, Write};
 use std::net::IpAddr;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustix::fd::OwnedFd;
+#[cfg(test)]
+use rustix::fs::mkfifoat;
 use rustix::fs::{
     AtFlags, CWD, FileType, Mode, OFlags, fchmod, fstat, fsync, openat, renameat, statat, unlinkat,
 };
@@ -24,6 +27,7 @@ const RESOLV_CONF_FILE: &str = "resolv.conf";
 const RESOLV_CONF_TEMP_FILE: &str = ".resolv.conf.tmp";
 const DNS_REQUEST_HEADER: &str = "D1";
 const MAX_ROOT_PATH_BYTES: usize = 1024;
+static MANAGED_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_BASHRC: &[u8] = b"# Created once by Archphene; this file belongs to the user.\n\
 case $- in\n\
   *i*) ;;\n\
@@ -501,53 +505,101 @@ fn ensure_user_file(path: &Path, content: &[u8]) -> Result<(), RootError> {
 }
 
 fn ensure_managed_file(path: &Path, content: &[u8]) -> Result<(), RootError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
+    match openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => {
+            let metadata = fstat(&descriptor)?;
+            if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
                 return Err(RootError::InvalidEntry(path.to_path_buf()));
             }
-            if metadata.len() == content.len() as u64 {
-                let mut current = Vec::with_capacity(content.len());
-                File::open(path)?.read_to_end(&mut current)?;
-                if current == content {
-                    if metadata.permissions().mode() & 0o7777 != 0o600 {
-                        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            if metadata.st_size == content.len() as i64 && metadata.st_mode & 0o7777 == 0o600 {
+                let mut file = File::from(descriptor);
+                let mut current = vec![0_u8; content.len()];
+                let mut read = 0_usize;
+                while read < current.len() {
+                    let count = file.read(&mut current[read..])?;
+                    if count == 0 {
+                        break;
                     }
-                    return Ok(());
+                    read += count;
+                }
+                let mut overflow = [0_u8; 1];
+                if read == current.len() && file.read(&mut overflow)? == 0 && current == content {
+                    let final_descriptor = fstat(&file)?;
+                    let final_path = statat(CWD, path, AtFlags::SYMLINK_NOFOLLOW)
+                        .map_err(|_| RootError::InvalidEntry(path.to_path_buf()))?;
+                    if FileType::from_raw_mode(final_path.st_mode) == FileType::RegularFile
+                        && final_descriptor.st_dev == metadata.st_dev
+                        && final_descriptor.st_ino == metadata.st_ino
+                        && final_descriptor.st_size == metadata.st_size
+                        && final_descriptor.st_mode & 0o7777 == 0o600
+                        && final_descriptor.st_mtime == metadata.st_mtime
+                        && final_descriptor.st_mtime_nsec == metadata.st_mtime_nsec
+                        && final_descriptor.st_ctime == metadata.st_ctime
+                        && final_descriptor.st_ctime_nsec == metadata.st_ctime_nsec
+                        && final_path.st_dev == final_descriptor.st_dev
+                        && final_path.st_ino == final_descriptor.st_ino
+                        && final_path.st_size == final_descriptor.st_size
+                        && final_path.st_mode == final_descriptor.st_mode
+                        && final_path.st_mtime == final_descriptor.st_mtime
+                        && final_path.st_mtime_nsec == final_descriptor.st_mtime_nsec
+                        && final_path.st_ctime == final_descriptor.st_ctime
+                        && final_path.st_ctime_nsec == final_descriptor.st_ctime_nsec
+                    {
+                        return Ok(());
+                    }
+                    return Err(RootError::InvalidEntry(path.to_path_buf()));
                 }
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(RootError::Io(error)),
+        Err(Errno::NOENT) => {}
+        Err(Errno::LOOP) => return Err(RootError::InvalidEntry(path.to_path_buf())),
+        Err(error) => return Err(error.into()),
     }
-    let temporary = path.with_extension("conf.tmp");
-    match fs::symlink_metadata(&temporary) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(RootError::InvalidEntry(temporary));
-            }
-            fs::remove_file(&temporary)?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(RootError::Io(error)),
+    let (temporary, mut file) = create_managed_temporary(path)?;
+    if let Err(error) = (|| -> io::Result<()> {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(content)?;
+        file.sync_all()
+    })() {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(RootError::Io(error));
     }
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(content)?;
-    file.sync_all()?;
     drop(file);
-    fs::rename(temporary, path)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(RootError::Io(error));
+    }
     Ok(())
+}
+
+fn create_managed_temporary(path: &Path) -> Result<(PathBuf, File), RootError> {
+    let parent = path.parent().ok_or(RootError::InvalidPath)?;
+    for _ in 0..16 {
+        let id = MANAGED_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(".archphene-{}-{id}.tmp", std::process::id()));
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(RootError::Io(error)),
+        }
+    }
+    Err(RootError::Io(io::Error::from(io::ErrorKind::AlreadyExists)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -675,6 +727,68 @@ mod tests {
             fs::read(temporary.0.join("var/lib/archphene/fontconfig/fonts.conf"))
                 .expect("repaired fontconfig"),
             ANDROID_FONTCONFIG,
+        );
+        let fontconfig = temporary.0.join("var/lib/archphene/fontconfig/fonts.conf");
+        fs::set_permissions(&fontconfig, fs::Permissions::from_mode(0o644))
+            .expect("weaken fontconfig mode");
+        ArchRoot::bootstrap(&temporary.0).expect("repair fontconfig mode");
+        assert_eq!(
+            fs::metadata(&fontconfig)
+                .expect("fontconfig metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600,
+        );
+        fs::remove_file(&fontconfig).expect("remove fontconfig");
+        let outside = temporary.0.join("outside-fontconfig");
+        fs::write(&outside, b"outside\n").expect("outside fontconfig");
+        symlink(&outside, &fontconfig).expect("fontconfig link");
+        assert!(matches!(
+            ArchRoot::bootstrap(&temporary.0),
+            Err(RootError::InvalidEntry(path)) if path == fontconfig
+        ));
+        assert_eq!(
+            fs::read(&outside).expect("outside fontconfig"),
+            b"outside\n"
+        );
+        fs::remove_file(&fontconfig).expect("remove fontconfig link");
+        mkfifoat(CWD, &fontconfig, Mode::from_raw_mode(0o600)).expect("fontconfig fifo");
+        assert!(matches!(
+            ArchRoot::bootstrap(&temporary.0),
+            Err(RootError::InvalidEntry(path)) if path == fontconfig
+        ));
+    }
+
+    #[test]
+    fn managed_file_publication_owns_unique_temporary_files() {
+        let temporary = TestDirectory::new();
+        fs::create_dir(&temporary.0).expect("test directory");
+        let managed = temporary.0.join("managed");
+        let workers = (0..8)
+            .map(|_| {
+                let managed = managed.clone();
+                std::thread::spawn(move || {
+                    ensure_managed_file(&managed, b"managed\n").expect("managed publication");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("managed worker");
+        }
+        assert_eq!(fs::read(&managed).expect("managed content"), b"managed\n");
+        assert_eq!(
+            fs::metadata(&managed)
+                .expect("managed metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600,
+        );
+        assert!(
+            fs::read_dir(&temporary.0)
+                .expect("temporary directory")
+                .all(|entry| entry.expect("temporary entry").file_name() == "managed")
         );
     }
 

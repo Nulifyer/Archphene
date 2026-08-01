@@ -3291,6 +3291,17 @@ symbolic links; shared bounded-reader tests cover descriptor and path
 replacement policies. Pinned Rust 1.88 package tests and warning-denied Clippy
 pass.
 
+Managed root fontconfig reuse now reopens the file with
+`O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`, compares it through a fixed expected-size
+buffer plus a one-byte overflow probe, and requires stable identity, mode, size,
+and timestamps before accepting reuse. Content or mode repair publishes the
+exact private replacement atomically through a caller-owned unique temporary
+file; concurrent bootstraps cannot remove or rename another writer's partial
+file. Symbolic-link substitution cannot redirect permission changes, and FIFO
+substitution fails closed without blocking bootstrap. Root tests cover content
+and mode repair, concurrent publication and cleanup, link-target preservation,
+and FIFO rejection. Pinned Rust 1.88 root tests and warning-denied Clippy pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
