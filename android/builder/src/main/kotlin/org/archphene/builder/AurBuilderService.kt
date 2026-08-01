@@ -819,7 +819,10 @@ class AurBuilderService : Service() {
                 else -> throw IllegalStateException("Unsupported Builder ABI")
             }
         return assets.open("builder-runtime-$architecture.tsv").use { input ->
-            input.readBytes()
+            input.readBoundedBytes(
+                MAX_RUNTIME_MANIFEST_BYTES,
+                "Invalid Builder runtime manifest size",
+            )
         }.also { manifest ->
             require(manifest.isNotEmpty() && manifest.size <= MAX_RUNTIME_MANIFEST_BYTES)
         }

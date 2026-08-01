@@ -5542,9 +5542,12 @@ class ArchpheneRuntimeService : Service() {
                 .toByteArray(StandardCharsets.UTF_8)
         val manifestBytes =
             assets.open("package-runtime-$architecture.tsv").use { input ->
-                input.readBytes()
+                input.readBoundedBytes(
+                    NativeRuntime.PACKAGE_MANIFEST_LIMIT,
+                    "Invalid package-runtime manifest size",
+                )
             }
-        if (manifestBytes.isEmpty() || manifestBytes.size > NativeRuntime.PACKAGE_MANIFEST_LIMIT) {
+        if (manifestBytes.isEmpty()) {
             throw IllegalStateException("Invalid package-runtime manifest size")
         }
         val nativePathBuffer = ByteBuffer.allocateDirect(nativePathBytes.size)

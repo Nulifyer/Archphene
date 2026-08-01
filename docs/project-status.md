@@ -3179,6 +3179,14 @@ JVM tests cover empty, exact, oversized, chunked, and zero-progress streams;
 backup-only and backup-over-base recovery; missing state; and symlink rejection.
 JDK 26 app unit/lint and exact x86_64/AArch64 manager builds pass.
 
+Packaged manager and isolated-Builder runtime manifests now read through
+API-29-compatible fixed 8 KiB scratch buffers with their declared stream
+ceilings instead of allocating complete assets before size validation.
+Exact-limit assets remain accepted; limit-plus-one and empty assets fail before
+native parsing. Shared JVM tests cover exact, oversized, chunked, and
+zero-progress streams. JDK 26 app/Builder unit compilation and lint plus exact
+x86_64/AArch64 manager and Builder builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
