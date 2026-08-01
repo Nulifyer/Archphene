@@ -20,6 +20,7 @@ import java.nio.ByteOrder
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 /**
@@ -55,6 +56,15 @@ internal class LauncherAccessibilityProvider(
         val ordered: Array<Node>,
     )
 
+    private data class PendingEvent(
+        val host: View,
+        val nodeId: Int,
+        val type: Int,
+        val role: String,
+        val text: String,
+        val overflowRecovery: Boolean = false,
+    )
+
     @Volatile private var host: View? = null
     @Volatile private var tree = emptyTree()
     @Volatile private var accessibilityFocus = 0
@@ -63,9 +73,18 @@ internal class LauncherAccessibilityProvider(
     private val parseLock = Any()
     private var wireBuffer = ByteArray(INITIAL_TREE_BUFFER_BYTES)
     private var boundsRefreshGeneration = 0
+    private val eventOverflow = AtomicBoolean(false)
+    private val eventOverflowRecoveryQueued = AtomicBoolean(false)
+    private val pendingEvents =
+        BoundedCallbackQueue<PendingEvent>(
+            capacity = MAX_PENDING_EVENTS,
+            schedule = { command -> host?.post(command) == true },
+            consume = ::sendPendingEvent,
+        )
 
     fun attach(view: View) {
         host = view
+        pendingEvents.resume()
         view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         view.post {
             if (host === view) {
@@ -77,6 +96,9 @@ internal class LauncherAccessibilityProvider(
     fun detach(view: View) {
         if (host === view) {
             host = null
+            eventOverflow.set(false)
+            eventOverflowRecoveryQueued.set(false)
+            pendingEvents.pause()
         }
     }
 
@@ -371,37 +393,91 @@ internal class LauncherAccessibilityProvider(
     ) {
         val currentHost = host ?: return
         val node = tree.nodes[nodeId]
-        currentHost.post {
-            val manager =
-                currentHost.context.getSystemService(
-                    Context.ACCESSIBILITY_SERVICE,
-                ) as? AccessibilityManager
-            if (
-                host !== currentHost ||
-                manager?.isEnabled != true ||
-                currentHost.parent == null
-            ) {
-                return@post
-            }
+        if (
+            !pendingEvents.offer(
+                PendingEvent(
+                    currentHost,
+                    nodeId,
+                    type,
+                    node?.role.orEmpty(),
+                    node?.text.orEmpty(),
+                ),
+            )
+        ) {
+            eventOverflow.set(true)
+        }
+    }
+
+    private fun sendPendingEvent(pending: PendingEvent) {
+        val currentHost = pending.host
+        val manager =
+            currentHost.context.getSystemService(
+                Context.ACCESSIBILITY_SERVICE,
+            ) as? AccessibilityManager
+        if (
+            host === currentHost &&
+            manager?.isEnabled == true &&
+            currentHost.parent != null
+        ) {
             runCatching {
-                val event =
-                    AccessibilityEvent.obtain(type).apply {
+                val event = AccessibilityEvent.obtain(pending.type)
+                var transferred = false
+                try {
+                    event.apply {
                         packageName = currentHost.context.packageName
-                        if (nodeId == 0) {
+                        if (pending.nodeId == 0) {
                             className = currentHost.javaClass.name
                             setSource(currentHost)
-                            if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                            if (pending.type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
                                 contentChangeTypes =
                                     AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE
                             }
                         } else {
-                            className = androidClass(node?.role.orEmpty())
-                            setSource(currentHost, nodeId)
-                            if (node?.text?.isNotEmpty() == true) text.add(node.text)
+                            className = androidClass(pending.role)
+                            setSource(currentHost, pending.nodeId)
+                            if (pending.text.isNotEmpty()) text.add(pending.text)
                         }
                     }
-                currentHost.parent.requestSendAccessibilityEvent(currentHost, event)
+                    transferred =
+                        currentHost.parent.requestSendAccessibilityEvent(currentHost, event)
+                } finally {
+                    if (!transferred) event.recycle()
+                }
             }
+        }
+        if (pending.overflowRecovery) {
+            eventOverflowRecoveryQueued.set(false)
+        }
+        scheduleOverflowRecovery()
+    }
+
+    private fun scheduleOverflowRecovery() {
+        if (
+            !eventOverflow.get() ||
+            !eventOverflowRecoveryQueued.compareAndSet(false, true)
+        ) {
+            return
+        }
+        if (!eventOverflow.compareAndSet(true, false)) {
+            eventOverflowRecoveryQueued.set(false)
+            return
+        }
+        val currentHost = host
+        if (
+            currentHost == null ||
+            !pendingEvents.offer(
+                PendingEvent(
+                    currentHost,
+                    0,
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+                    "",
+                    "",
+                    overflowRecovery = true,
+                ),
+            )
+        ) {
+            eventOverflow.set(true)
+            eventOverflowRecoveryQueued.set(false)
         }
     }
 
@@ -598,6 +674,7 @@ internal class LauncherAccessibilityProvider(
         private const val TREE_HEADER_BYTES = 24
         private const val MAX_TREE_BYTES = 1024 * 1024
         private const val POST_TRANSITION_BOUNDS_FRAMES = 12
+        private const val MAX_PENDING_EVENTS = 64
         private const val INITIAL_TREE_BUFFER_BYTES = 16 * 1024
         private const val MAX_NODES = 1024
         private const val MAX_NODE_ID = 1_000_000

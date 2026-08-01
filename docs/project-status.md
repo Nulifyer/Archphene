@@ -3513,6 +3513,17 @@ merging, distinct replacement/lifecycle disposal, a 100-attachment exact-once
 release model, ordering, replacement failure, and close. JDK 26 app unit/lint and
 exact x86_64/AArch64 manager builds pass.
 
+Generated-launcher Android accessibility delivery now uses a 64-event FIFO with
+one scheduled main-thread drain. Events retain only bounded node identity, role,
+text, and host state. Detach pauses and clears the queue so stale SurfaceView
+events cannot enter a replacement host. Overflow latches one conservative root
+subtree-change notification after capacity returns, with at most one recovery
+queued during sustained bursts. Framework events are recycled unless successful
+parent delivery transfers ownership. JVM tests cover exact capacity and FIFO
+behavior, stale-drain invalidation, pause/resume, cleanup, and repeated overflow
+recovery. Launcher-template debug unit/lint and exact x86_64/AArch64 release
+R8/template assembly pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

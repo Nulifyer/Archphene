@@ -137,4 +137,42 @@ class BoundedCallbackQueueTest {
         currentDrain.run()
         assertEquals(listOf(3), consumed)
     }
+
+    @Test
+    fun overflowCanAppendOneConservativeRecoveryAfterCapacityReturns() {
+        val scheduled = ArrayDeque<Runnable>()
+        val consumed = mutableListOf<Int>()
+        var overflow = false
+        var recoveryQueued = false
+        lateinit var queue: BoundedCallbackQueue<Int>
+        queue =
+            BoundedCallbackQueue(
+                capacity = 2,
+                schedule = { scheduled.addLast(it); true },
+                consume = { value ->
+                    consumed.add(value)
+                    if (value == -1) recoveryQueued = false
+                    if (value == 1 || value == 4) {
+                        assertTrue(queue.offer(value + 3))
+                        assertFalse(queue.offer(value + 4))
+                        overflow = true
+                    }
+                    if (overflow && !recoveryQueued) {
+                        overflow = false
+                        recoveryQueued = true
+                        if (!queue.offer(-1)) {
+                            overflow = true
+                            recoveryQueued = false
+                        }
+                    }
+                },
+            )
+        assertTrue(queue.offer(1))
+        assertTrue(queue.offer(2))
+        assertFalse(queue.offer(3))
+        overflow = true
+        while (scheduled.isNotEmpty()) scheduled.removeFirst().run()
+        assertEquals(listOf(1, 2, 4, -1, 7, -1), consumed)
+        assertEquals(0, queue.pendingCount())
+    }
 }
