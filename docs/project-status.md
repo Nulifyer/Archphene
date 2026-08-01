@@ -3335,6 +3335,14 @@ UTF-8 while still propagating open and metadata failures. Package tests cover
 valid restored records, invalid text, links, overflow, growth, shrink, and
 replacement with pinned Rust 1.88 and warning-denied Clippy.
 
+The isolated AUR resolution database now copies signed repository catalogs
+through the stable exact-copy path instead of `io::copy()` to EOF. Each catalog
+remains within its repository ceiling and must retain stable device, inode,
+mode, size, and timestamps through the final path check. Any failure removes
+the partial database generation. Fresh-database, exact-copy, growth, shrink,
+replacement, overflow, and link tests pass with pinned Rust 1.88 and
+warning-denied Clippy.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

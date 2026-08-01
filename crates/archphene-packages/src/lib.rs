@@ -2211,25 +2211,15 @@ impl PackageRuntime {
                 {
                     return Err(PackageRuntimeError::InvalidCatalog);
                 }
-                let mut input = OpenOptions::new()
-                    .read(true)
-                    .custom_flags(O_NOFOLLOW | O_CLOEXEC)
-                    .open(&source)?;
-                let opened = input.metadata()?;
-                if !opened.is_file() || opened.len() != source_metadata.len() {
-                    return Err(PackageRuntimeError::InvalidCatalog);
-                }
                 let destination = sync.join(repository.file_name());
-                let mut output = OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&destination)?;
-                let copied = io::copy(&mut input, &mut output)?;
-                if copied != opened.len() {
-                    return Err(PackageRuntimeError::InvalidCatalog);
-                }
-                output.sync_all()?;
+                copy_bounded_regular_file(&source, &destination, repository.size_limit()).map_err(
+                    |error| match error {
+                        PackageRuntimeError::UnsafeEntry(_) | PackageRuntimeError::SizeMismatch => {
+                            PackageRuntimeError::InvalidCatalog
+                        }
+                        error => error,
+                    },
+                )?;
             }
             File::open(&sync)?.sync_all()?;
             File::open(&database)?.sync_all()?;
