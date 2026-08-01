@@ -98,6 +98,56 @@ class LatestDispatchSlotTest {
         assertTrue(consumed.isEmpty())
     }
 
+    @Test
+    fun mergeTransfersRetainedStateAndUsesDistinctDisposalPaths() {
+        data class Value(val current: Int, val retained: Int)
+
+        val scheduled = ArrayDeque<Runnable>()
+        val replaced = mutableListOf<Value>()
+        val cleared = mutableListOf<Value>()
+        val slot =
+            LatestDispatchSlot<Value>(
+                schedule = { scheduled.addLast(it); true },
+                cancel = scheduled::remove,
+                consume = {},
+                merge = { previous, next -> next.copy(retained = previous.retained) },
+                discardReplaced = replaced::add,
+                discardCleared = cleared::add,
+            )
+        assertTrue(slot.offer(Value(1, 10)))
+        assertTrue(slot.offer(Value(2, 20)))
+        assertEquals(listOf(Value(1, 10)), replaced)
+        slot.clear()
+        assertEquals(listOf(Value(2, 10)), cleared)
+        assertTrue(scheduled.isEmpty())
+    }
+
+    @Test
+    fun replacementBurstReleasesEverySupersededAndLifecycleSurfaceOnce() {
+        data class Attachment(val current: Int, val releaseBefore: Int)
+
+        val scheduled = ArrayDeque<Runnable>()
+        val released = mutableListOf<Int>()
+        val slot =
+            LatestDispatchSlot<Attachment>(
+                schedule = { scheduled.addLast(it); true },
+                cancel = scheduled::remove,
+                consume = {},
+                merge = { previous, next ->
+                    next.copy(releaseBefore = previous.releaseBefore)
+                },
+                discardReplaced = { released.add(it.current) },
+                discardCleared = { released.add(it.releaseBefore) },
+            )
+        for (surface in 1..100) {
+            assertTrue(slot.offer(Attachment(surface, surface - 1)))
+        }
+        slot.clear()
+        released.add(100)
+        assertEquals((0..100).toList(), released.sorted())
+        assertEquals(101, released.toSet().size)
+    }
+
     private fun <T : Any> slot(
         scheduled: ArrayDeque<Runnable>,
         consumed: MutableList<T>,

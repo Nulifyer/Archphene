@@ -3501,6 +3501,18 @@ cancels pending work, and failed posting rolls state back. JVM tests cover a
 latest-state restoration, scheduling failure/retry, and close rejection. JDK 26
 app unit/lint and exact x86_64/AArch64 manager builds pass.
 
+Manager Surface attachment churn now retains one pending generation-tagged
+attachment drain. Replacements move that drain to the latest request's
+Surface-thread queue position, release never-consumed intermediate `Surface`
+objects immediately, and carry only the original attached `Surface` into final
+application. Detach and session close cancel queued work, serialize an in-flight
+predecessor's release behind its Surface-thread use, and leave lifecycle cleanup
+owning the final requested `Surface`. Failed posting releases the rejected
+Surface without replacing accepted geometry. JVM tests cover retained-state
+merging, distinct replacement/lifecycle disposal, a 100-attachment exact-once
+release model, ordering, replacement failure, and close. JDK 26 app unit/lint and
+exact x86_64/AArch64 manager builds pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

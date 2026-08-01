@@ -117,6 +117,15 @@ class LauncherSessionService : Service() {
 
     private data class AndroidClipboardUpdate(val payload: ClipboardPayload?)
 
+    private data class SurfaceAttachment(
+        val surface: Surface,
+        val releaseBefore: Surface?,
+        val width: Int,
+        val height: Int,
+        val densityDpi: Int,
+        val fontScaleMillis: Int,
+    )
+
     private class Session(
         val id: Int,
         val uid: Int,
@@ -129,6 +138,7 @@ class LauncherSessionService : Service() {
         val compositorSocketName: String,
     ) {
         var surface: Surface? = null
+        var surfaceAttachments: LatestDispatchSlot<SurfaceAttachment>? = null
         @Volatile var active = true
         var compositor: NativeLauncherCompositor? = null
         var compositorSocket: File? = null
@@ -370,6 +380,11 @@ class LauncherSessionService : Service() {
         surface: Surface?,
         closeCompositor: Boolean,
     ) {
+        if (closeCompositor) {
+            session.surfaceAttachments?.close()
+        } else {
+            session.surfaceAttachments?.clear()
+        }
         synchronized(session) {
             session.imeTexts.fill(null)
             session.imeHead = 0
@@ -390,7 +405,7 @@ class LauncherSessionService : Service() {
             }
         }
         val runtime = runtimeBinder
-        surfaceHandler.post {
+        val cleanup = Runnable {
             Log.i(
                 TAG,
                 "Releasing launcher resources session=${session.id} close=$closeCompositor",
@@ -428,6 +443,10 @@ class LauncherSessionService : Service() {
                 session.compositor?.setClipboardActive(false)
                 session.compositor?.detach()
             }
+            surface?.release()
+        }
+        if (!surfaceHandler.post(cleanup)) {
+            Log.e(TAG, "Could not schedule launcher resource cleanup session=${session.id}")
             surface?.release()
         }
     }
@@ -1086,6 +1105,19 @@ class LauncherSessionService : Service() {
                 cancel = surfaceHandler::removeCallbacks,
                 consume = { update -> drainAndroidClipboard(session, update) },
             )
+        session.surfaceAttachments =
+            LatestDispatchSlot(
+                schedule = surfaceHandler::post,
+                cancel = surfaceHandler::removeCallbacks,
+                consume = { attachment -> applySurfaceAttachment(session, attachment) },
+                merge = { previous, next ->
+                    next.copy(releaseBefore = previous.releaseBefore)
+                },
+                discardReplaced = { attachment -> attachment.surface.release() },
+                discardCleared = { attachment ->
+                    attachment.releaseBefore?.let(::releaseSurfaceOnHandler)
+                },
+            )
         try {
             clientToken.linkToDeath(sessionBinder, 0)
         } catch (_: RemoteException) {
@@ -1121,7 +1153,19 @@ class LauncherSessionService : Service() {
                 densityDpi,
                 session.appearanceOverrides.geometryPercent,
             )
-        val previous = session.surface
+        val attachment =
+            SurfaceAttachment(
+                surface,
+                session.surface,
+                width,
+                height,
+                densityDpi,
+                fontScaleMillis,
+            )
+        if (!checkNotNull(session.surfaceAttachments).offer(attachment)) {
+            surface.release()
+            return SurfaceAttachResult(RESULT_NOT_READY)
+        }
         session.surface = surface
         session.surfaceWidth = width
         session.surfaceHeight = height
@@ -1129,30 +1173,48 @@ class LauncherSessionService : Service() {
         session.logicalHeight = logicalSize.height
         session.densityDpi = densityDpi
         session.fontScaleMillis = fontScaleMillis
-        surfaceHandler.post {
-            val current =
-                synchronized(this) {
-                    session.active && sessions[sessionId] === session && session.surface === surface
-                }
-            if (current) {
-                session.portalBridge?.let { bridge ->
-                    val appearance = resolvedAppearance(session)
-                    notifyAppearance(session, appearance)
-                    bridge.updateAppearance(appearance.dark, appearance.accent)
-                }
-                session.compositor?.detach()
-                previous?.release()
-                attachCompositor(session, surface, width, height, densityDpi)
-            } else {
-                previous?.release()
-            }
-        }
         Log.i(TAG, "Attached launcher Surface session=$sessionId size=${width}x$height")
         return SurfaceAttachResult(
             RESULT_OK,
             logicalSize.width,
             logicalSize.height,
         )
+    }
+
+    private fun applySurfaceAttachment(
+        session: Session,
+        attachment: SurfaceAttachment,
+    ) {
+        val current =
+            synchronized(this) {
+                session.active &&
+                    sessions[session.id] === session &&
+                    session.surface === attachment.surface
+            }
+        if (!current) {
+            attachment.releaseBefore?.release()
+            return
+        }
+        session.portalBridge?.let { bridge ->
+            val appearance = resolvedAppearance(session)
+            notifyAppearance(session, appearance)
+            bridge.updateAppearance(appearance.dark, appearance.accent)
+        }
+        session.compositor?.detach()
+        attachment.releaseBefore?.release()
+        attachCompositor(
+            session,
+            attachment.surface,
+            attachment.width,
+            attachment.height,
+            attachment.densityDpi,
+        )
+    }
+
+    private fun releaseSurfaceOnHandler(surface: Surface) {
+        if (!surfaceHandler.post { surface.release() }) {
+            surface.release()
+        }
     }
 
     @Synchronized
