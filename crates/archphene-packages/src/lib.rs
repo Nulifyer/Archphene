@@ -10388,17 +10388,25 @@ fn local_database_entry_matches(
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(&description)?;
     let opened = file.metadata()?;
-    if !opened.is_file() || opened.len() != metadata.len() {
-        return Err(PackageRuntimeError::SizeMismatch);
-    }
-    let mut content = String::with_capacity(
-        usize::try_from(opened.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
-    );
-    if file.read_to_string(&mut content).is_err() {
+    if !stable_opened_metadata(&metadata, &opened) {
         return Ok(false);
     }
-    let name = local_description_field(&content, "%NAME%");
-    let version = local_description_field(&content, "%VERSION%");
+    let content = match read_bounded_exact(&mut file, opened.len(), LOCAL_DESCRIPTION_LIMIT) {
+        Ok(Some(content)) => content,
+        Ok(None) | Err(_) => return Ok(false),
+    };
+    let final_descriptor = file.metadata()?;
+    let final_path = fs::symlink_metadata(&description)?;
+    if !stable_opened_metadata(&opened, &final_descriptor)
+        || !stable_opened_metadata(&final_descriptor, &final_path)
+    {
+        return Ok(false);
+    }
+    let Ok(content) = std::str::from_utf8(&content) else {
+        return Ok(false);
+    };
+    let name = local_description_field(content, "%NAME%");
+    let version = local_description_field(content, "%VERSION%");
     Ok(matches!(
         (name, version),
         (Ok(Some(name)), Ok(Some(version)))
@@ -10419,23 +10427,15 @@ fn read_local_package_identity(
     {
         return Err(PackageRuntimeError::UnsafeEntry(description));
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
-        .open(&description)?;
-    if file.metadata()?.len() != metadata.len() {
-        return Err(PackageRuntimeError::SizeMismatch);
-    }
-    let mut content = String::with_capacity(
-        usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
-    );
-    file.read_to_string(&mut content)?;
-    if content.len() as u64 != metadata.len() {
-        return Err(PackageRuntimeError::SizeMismatch);
-    }
-    let name = local_description_field(&content, "%NAME%")?
+    let (content, _final_metadata) =
+        read_bounded_regular_file_with_metadata(&description, LOCAL_DESCRIPTION_LIMIT)?
+            .ok_or(PackageRuntimeError::SizeMismatch)?;
+    let content = std::str::from_utf8(&content).map_err(|error| {
+        PackageRuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+    })?;
+    let name = local_description_field(content, "%NAME%")?
         .ok_or(PackageRuntimeError::InvalidResolution)?;
-    let version = local_description_field(&content, "%VERSION%")?
+    let version = local_description_field(content, "%VERSION%")?
         .ok_or(PackageRuntimeError::InvalidResolution)?;
     if !safe_logical_name(name)
         || version.is_empty()
@@ -12439,6 +12439,23 @@ mod tests {
         assert_eq!(
             read_bounded_regular_file(&state, 5).expect("oversized result"),
             None,
+        );
+    }
+
+    #[test]
+    fn local_database_match_treats_invalid_description_text_as_non_match() {
+        let tree = TestTree::new();
+        tree.local_package("foot-1.0-1", "foot", b"%FILES%\nusr/bin/foot\n");
+        let entry = tree.root.join("var/lib/pacman/local/foot-1.0-1");
+        assert!(local_database_entry_matches(&entry, "foot", "1.0-1").expect("valid match"));
+        fs::write(
+            entry.join("desc"),
+            b"%NAME%\nfoot\xff\n\n%VERSION%\n1.0-1\n",
+        )
+        .expect("invalid description");
+        assert!(
+            !local_database_entry_matches(&entry, "foot", "1.0-1")
+                .expect("invalid description is not a match")
         );
     }
 

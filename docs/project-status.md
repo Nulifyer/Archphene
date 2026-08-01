@@ -3326,6 +3326,15 @@ ceiling, no-follow opening, final identity checks, and mode-0600 destination.
 Removal-repair round trips plus exact-copy empty, growth, shrink, replacement,
 overflow, and link tests pass with pinned Rust 1.88 and warning-denied Clippy.
 
+Local pacman package identity and repair-match descriptions now parse through
+stable bounded reads instead of `read_to_string()`. Device, inode, mode, size,
+and timestamps remain tied to the no-follow descriptor and final path, so
+concurrent growth, shrink, or replacement fails before parsing. Repair matching
+preserves its previous non-match behavior for content-read failures or invalid
+UTF-8 while still propagating open and metadata failures. Package tests cover
+valid restored records, invalid text, links, overflow, growth, shrink, and
+replacement with pinned Rust 1.88 and warning-denied Clippy.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
