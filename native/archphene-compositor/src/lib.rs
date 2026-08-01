@@ -2089,6 +2089,7 @@ mod android_graphics_ffi {
     enum AndroidSurfaceTransactionStats {}
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
     struct AndroidRect {
         left: i32,
         top: i32,
