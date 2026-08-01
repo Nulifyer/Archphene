@@ -2636,10 +2636,10 @@ mod system {
     use super::PtyWaitEvent;
     use std::ffi::CStr;
     use std::fs::{self, File, OpenOptions};
-    use std::io;
-    use std::os::fd::AsRawFd;
-    use std::os::raw::{c_char, c_int, c_ulong};
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::io::{self, Read};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::raw::{c_char, c_int, c_long, c_ulong};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::os::unix::process::CommandExt;
     use std::process::Command;
     use std::time::Duration;
@@ -2647,6 +2647,7 @@ mod system {
     const O_NOCTTY: c_int = 0x100;
     const O_NONBLOCK: c_int = 0x800;
     const O_CLOEXEC: c_int = 0x80000;
+    const O_NOFOLLOW: c_int = 0x20000;
     const TIOCSCTTY: c_ulong = 0x540e;
     const TIOCSWINSZ: c_ulong = 0x5414;
     const POLLIN: i16 = 0x0001;
@@ -2656,12 +2657,22 @@ mod system {
     const POLLNVAL: i16 = 0x0020;
     const MAX_PROCESSES_SCANNED: usize = 8192;
     const MAX_DESCENDANT_PROCESSES: usize = 512;
-    const MAX_PROCESS_STAT_BYTES: u64 = 4096;
+    const MAX_PROCESS_STAT_BYTES: usize = 4096;
+    const SYS_PIDFD_SEND_SIGNAL: c_long = 424;
+    const SYS_PIDFD_OPEN: c_long = 434;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct ProcessIdentity {
         pub(super) process: u32,
         pub(super) start_time: u64,
+        pub(super) device: u64,
+        pub(super) inode: u64,
+    }
+
+    struct ProcessStat {
+        content: String,
+        device: u64,
+        inode: u64,
     }
 
     #[repr(C)]
@@ -2687,12 +2698,14 @@ mod system {
         fn setsid() -> c_int;
         fn ioctl(descriptor: c_int, request: c_ulong, ...) -> c_int;
         fn poll(descriptors: *mut PollDescriptor, count: c_ulong, timeout: c_int) -> c_int;
+        fn syscall(number: c_long, ...) -> c_long;
     }
 
     pub fn kill_process_group(group: u32) -> io::Result<()> {
         signal_process_group(group, 9)
     }
 
+    #[cfg(test)]
     pub fn signal_process(process: u32, signal: i32) -> io::Result<()> {
         let process = i32::try_from(process)
             .ok()
@@ -2711,6 +2724,27 @@ mod system {
     }
 
     pub fn signal_process_if_same(process: ProcessIdentity, signal: i32) -> io::Result<()> {
+        if !(1..=64).contains(&signal) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let process_id = i32::try_from(process.process)
+            .ok()
+            .filter(|process| *process > 0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: pidfd_open takes one positive PID and flags zero. A successful
+        // return is a new owned descriptor and does not borrow Rust memory.
+        let descriptor = unsafe { syscall(SYS_PIDFD_OPEN, process_id, 0_u32) };
+        if descriptor < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(3) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        let descriptor =
+            i32::try_from(descriptor).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        // SAFETY: pidfd_open returned this nonnegative descriptor exactly once.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
         let stat = match read_process_stat(process.process) {
             Ok(stat) => stat,
             Err(error)
@@ -2723,10 +2757,34 @@ mod system {
             }
             Err(error) => return Err(error),
         };
-        if process_fields(&stat).map(|(_, start_time)| start_time) != Some(process.start_time) {
+        if process_fields(&stat.content).map(|(_, start_time)| start_time)
+            != Some(process.start_time)
+            || stat.device != process.device
+            || stat.inode != process.inode
+        {
             return Ok(());
         }
-        signal_process(process.process, signal)
+        // SAFETY: pidfd_send_signal receives an owned pidfd, valid signal,
+        // null siginfo pointer, and flags zero. The pidfd pins process identity.
+        if unsafe {
+            syscall(
+                SYS_PIDFD_SEND_SIGNAL,
+                descriptor.as_raw_fd(),
+                signal,
+                std::ptr::null::<std::ffi::c_void>(),
+                0_u32,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(3) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
     }
 
     pub fn signal_process_group(group: u32, signal: i32) -> io::Result<()> {
@@ -2788,6 +2846,16 @@ mod system {
         if root == 0 {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
+        let root_stat = read_process_stat(root)?;
+        let Some((_, root_start_time)) = process_fields(&root_stat.content) else {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        };
+        let root_identity = ProcessIdentity {
+            process: root,
+            start_time: root_start_time,
+            device: root_stat.device,
+            inode: root_stat.inode,
+        };
         let mut relationships = Vec::with_capacity(256);
         let mut scanned = 0_usize;
         for entry in fs::read_dir("/proc")? {
@@ -2818,43 +2886,78 @@ mod system {
                 }
                 Err(error) => return Err(error),
             };
-            let Some((parent, start_time)) = process_fields(&stat) else {
+            let Some((parent, start_time)) = process_fields(&stat.content) else {
                 continue;
             };
+            if parent == 0 {
+                continue;
+            }
+            let parent_stat = match read_process_stat(parent) {
+                Ok(stat) => stat,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some((_, parent_start_time)) = process_fields(&parent_stat.content) else {
+                continue;
+            };
+            let confirmed_stat = match read_process_stat(process) {
+                Ok(stat) => stat,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if process_fields(&confirmed_stat.content) != Some((parent, start_time))
+                || confirmed_stat.device != stat.device
+                || confirmed_stat.inode != stat.inode
+            {
+                continue;
+            }
             relationships.push((
                 ProcessIdentity {
                     process,
                     start_time,
+                    device: stat.device,
+                    inode: stat.inode,
                 },
-                parent,
+                ProcessIdentity {
+                    process: parent,
+                    start_time: parent_start_time,
+                    device: parent_stat.device,
+                    inode: parent_stat.inode,
+                },
             ));
         }
 
         let mut tree = Vec::with_capacity(32);
-        tree.push(root);
+        tree.push(root_identity);
         let mut cursor = 0_usize;
         while cursor < tree.len() {
             let parent = tree[cursor];
             for (process, candidate_parent) in &relationships {
-                if *candidate_parent == parent && !tree.contains(&process.process) {
+                if *candidate_parent == parent && !tree.contains(process) {
                     if tree.len() > MAX_DESCENDANT_PROCESSES {
                         return Err(io::Error::from(io::ErrorKind::InvalidData));
                     }
-                    tree.push(process.process);
+                    tree.push(*process);
                 }
             }
             cursor += 1;
         }
         tree.remove(0);
-        let descendants = tree
-            .into_iter()
-            .filter_map(|process| {
-                relationships
-                    .iter()
-                    .find_map(|(identity, _)| (identity.process == process).then_some(*identity))
-            })
-            .collect();
-        Ok(descendants)
+        Ok(tree)
     }
 
     #[cfg(test)]
@@ -2874,17 +2977,98 @@ mod system {
         Some((parent, start_time))
     }
 
-    fn read_process_stat(process: u32) -> io::Result<String> {
+    fn read_bounded_process_stat(reader: &mut impl Read, output: &mut [u8]) -> io::Result<usize> {
+        let mut length = 0_usize;
+        while length < output.len() {
+            match reader.read(&mut output[length..]) {
+                Ok(0) => return Ok(length),
+                Ok(count) => length += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let mut overflow = [0_u8; 1];
+        loop {
+            match reader.read(&mut overflow) {
+                Ok(0) => return Ok(length),
+                Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidData)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn normalize_process_stat_error(error: io::Error) -> io::Error {
+        if error.raw_os_error() == Some(3) {
+            io::Error::from(io::ErrorKind::NotFound)
+        } else {
+            error
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_bounded_process_stat_for_test(
+        reader: &mut impl Read,
+        output: &mut [u8],
+    ) -> io::Result<usize> {
+        read_bounded_process_stat(reader, output)
+    }
+
+    #[cfg(test)]
+    pub(super) fn normalize_process_stat_error_for_test(error: io::Error) -> io::Error {
+        normalize_process_stat_error(error)
+    }
+
+    #[cfg(test)]
+    pub(super) fn process_identity_for_test(process: u32) -> io::Result<ProcessIdentity> {
+        let stat = read_process_stat(process)?;
+        let start_time = process_fields(&stat.content)
+            .map(|(_, start_time)| start_time)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        Ok(ProcessIdentity {
+            process,
+            start_time,
+            device: stat.device,
+            inode: stat.inode,
+        })
+    }
+
+    fn read_process_stat(process: u32) -> io::Result<ProcessStat> {
         let stat_path = format!("/proc/{process}/stat");
-        let metadata = fs::symlink_metadata(&stat_path)?;
-        if !metadata.is_file() || metadata.len() > MAX_PROCESS_STAT_BYTES {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(&stat_path)
+            .map_err(normalize_process_stat_error)?;
+        let opened = file.metadata().map_err(normalize_process_stat_error)?;
+        if !opened.is_file() || opened.len() > MAX_PROCESS_STAT_BYTES as u64 {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
-        let stat = fs::read_to_string(stat_path)?;
-        if stat.is_empty() || stat.len() as u64 > MAX_PROCESS_STAT_BYTES {
+        let mut bytes = [0_u8; MAX_PROCESS_STAT_BYTES];
+        let length = read_bounded_process_stat(&mut file, &mut bytes)
+            .map_err(normalize_process_stat_error)?;
+        if length == 0 {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
-        Ok(stat)
+        let final_descriptor = file.metadata().map_err(normalize_process_stat_error)?;
+        let final_path = fs::symlink_metadata(&stat_path).map_err(normalize_process_stat_error)?;
+        if final_descriptor.dev() != opened.dev()
+            || final_descriptor.ino() != opened.ino()
+            || final_descriptor.mode() != opened.mode()
+            || final_path.dev() != final_descriptor.dev()
+            || final_path.ino() != final_descriptor.ino()
+            || final_path.mode() != final_descriptor.mode()
+        {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        let content = std::str::from_utf8(&bytes[..length])
+            .map(str::to_owned)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        Ok(ProcessStat {
+            content,
+            device: final_descriptor.dev(),
+            inode: final_descriptor.ino(),
+        })
     }
 
     #[cfg(test)]
@@ -3978,6 +4162,34 @@ mod tests {
     }
 
     #[test]
+    fn pidfd_signaling_rejects_every_stale_identity_component() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("identity child");
+        let identity = system::process_identity_for_test(child.id()).expect("process identity");
+        for stale in [
+            system::ProcessIdentity {
+                start_time: identity.start_time.wrapping_add(1),
+                ..identity
+            },
+            system::ProcessIdentity {
+                device: identity.device.wrapping_add(1),
+                ..identity
+            },
+            system::ProcessIdentity {
+                inode: identity.inode.wrapping_add(1),
+                ..identity
+            },
+        ] {
+            system::signal_process_if_same(stale, 9).expect("reject stale identity");
+            assert!(child.try_wait().expect("stale identity status").is_none());
+        }
+        system::signal_process_if_same(identity, 9).expect("signal exact identity");
+        child.wait().expect("reap exact identity");
+    }
+
+    #[test]
     fn process_tree_shutdown_reaps_a_descendant_in_another_session() {
         let process_file = std::env::temp_dir().join(format!(
             "archphene-detached-descendant-{}-{}",
@@ -4039,6 +4251,63 @@ mod tests {
             Some(42),
         );
         assert_eq!(system::process_parent("malformed"), None);
+
+        let mut output = [0_u8; 5];
+        assert_eq!(
+            system::read_bounded_process_stat_for_test(
+                &mut std::io::Cursor::new(b"state"),
+                &mut output,
+            )
+            .expect("exact stat"),
+            5,
+        );
+        assert_eq!(&output, b"state");
+
+        struct InterruptedOnce {
+            cursor: std::io::Cursor<&'static [u8]>,
+            interrupted: bool,
+        }
+        impl io::Read for InterruptedOnce {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                io::Read::read(&mut self.cursor, output)
+            }
+        }
+        assert_eq!(
+            system::read_bounded_process_stat_for_test(
+                &mut InterruptedOnce {
+                    cursor: std::io::Cursor::new(b"state"),
+                    interrupted: false,
+                },
+                &mut output,
+            )
+            .expect("interrupted stat"),
+            5,
+        );
+        assert_eq!(
+            system::read_bounded_process_stat_for_test(
+                &mut std::io::Cursor::new(b"stat"),
+                &mut output,
+            )
+            .expect("short stat"),
+            4,
+        );
+        assert_eq!(
+            system::read_bounded_process_stat_for_test(
+                &mut std::io::Cursor::new(b"state!"),
+                &mut output,
+            )
+            .expect_err("grown stat")
+            .kind(),
+            io::ErrorKind::InvalidData,
+        );
+        assert_eq!(
+            system::normalize_process_stat_error_for_test(io::Error::from_raw_os_error(3)).kind(),
+            io::ErrorKind::NotFound,
+        );
     }
 
     #[test]

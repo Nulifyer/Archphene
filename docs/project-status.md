@@ -3351,6 +3351,16 @@ admission limits and prove a late validation failure sends zero signals. Pinned
 Rust 1.88 compositor tests, warning-denied Clippy, and exact x86_64/AArch64
 manager builds pass.
 
+Process-tree `/proc/<pid>/stat` reads now use a fixed 4 KiB no-follow descriptor.
+Every child-parent edge is bound to confirmed start-time plus descriptor
+device/inode identities. Vanished-process `ESRCH` is normal scan churn, captured
+descendants remain usable after leader exit, and exact identities are signaled
+through `pidfd_send_signal`, preventing PID reuse from redirecting `SIGKILL`.
+Unsupported pidfd policy fails closed. Tests cover exact, short, oversized,
+interrupted, malformed, stale-component, detached-session, and live pidfd paths.
+Pinned Rust 1.88 process tests, warning-denied Clippy, and exact
+x86_64/AArch64 manager builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
