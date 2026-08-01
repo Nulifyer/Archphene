@@ -3460,6 +3460,20 @@ also pass the Auto/Light/Dark and Material You appearance-policy gate on the
 x86_64 emulator and AArch64 Samsung without restarting manager, wrapper, or
 Linux processes.
 
+Generated-launcher IME-state and cursor Binder bursts now coalesce into one
+scheduled main-thread callback and one replaceable latest payload per type.
+Replaced custom cursor bitmaps are recycled before Android takes ownership.
+Activity destruction atomically closes both slots, rejects late Binder work,
+and recycles its retained payload. IME merging preserves inactive-to-active
+restart and intermediate-deactivation cleanup markers, preventing a collapsed
+transition from reusing the prior editor buffer or carrying its soft-keyboard
+state into the next editor. Scheduling happens while the slot is locked, so a
+failed first post cannot erase a concurrent replacement. Deterministic JVM
+tests cover a 100-update burst, one-payload retention,
+replacement/clear/close disposal, scheduling failure, and both transition
+markers. Launcher-template debug unit tests and lint pass; exact release
+R8/template assembly passes in both x86_64 and AArch64 manager builds.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

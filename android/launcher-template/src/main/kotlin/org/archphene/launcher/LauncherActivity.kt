@@ -93,6 +93,22 @@ class LauncherActivity :
         val editorEvidence: Int = LauncherImeTouchPolicy.EDITOR_EVIDENCE_NONE,
     )
 
+    private data class PendingImeState(
+        val state: ImeState,
+        val restartOnApply: Boolean,
+        val deactivateBeforeApply: Boolean,
+    )
+
+    private sealed interface CursorUpdate {
+        data class System(val icon: Int) : CursorUpdate
+
+        data class BitmapCursor(
+            val bitmap: Bitmap,
+            val hotspotX: Int,
+            val hotspotY: Int,
+        ) : CursorUpdate
+    }
+
     private data class OpenDocument(
         val displayName: String,
         val descriptor: ParcelFileDescriptor,
@@ -191,6 +207,53 @@ class LauncherActivity :
     private var cursorSystemIcon = PointerIcon.TYPE_ARROW
     private var customCursorPointerIcon: PointerIcon? = null
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
+    @Volatile private var callbackImeActive = false
+    private val pendingImeState =
+        LatestCallbackSlot<PendingImeState>(
+            merge = { previous, next ->
+                PendingImeState(
+                    state = next.state,
+                    restartOnApply =
+                        previous.restartOnApply ||
+                            (!previous.state.active && next.state.active),
+                    deactivateBeforeApply =
+                        previous.deactivateBeforeApply ||
+                            (previous.state.active && !next.state.active),
+                )
+            },
+        )
+    private val applyPendingImeState =
+        Runnable {
+            pendingImeState.take()?.let { pending ->
+                if (pending.deactivateBeforeApply && pending.state.active) {
+                    applyImeState(
+                        imeState.copy(
+                            active = false,
+                            text = "",
+                            cursor = 0,
+                            anchor = 0,
+                            editorEvidence = LauncherImeTouchPolicy.EDITOR_EVIDENCE_NONE,
+                        ),
+                    )
+                }
+                applyImeState(pending.state, pending.restartOnApply)
+            }
+        }
+    private val pendingCursor =
+        LatestCallbackSlot<CursorUpdate>(
+            discard = { update ->
+                if (update is CursorUpdate.BitmapCursor) update.bitmap.recycle()
+            },
+        )
+    private val applyPendingCursor =
+        Runnable {
+            when (val update = pendingCursor.take()) {
+                is CursorUpdate.System -> applyCursorSystemIcon(update.icon)
+                is CursorUpdate.BitmapCursor ->
+                    applyCursorBitmap(update.bitmap, update.hotspotX, update.hotspotY)
+                null -> Unit
+            }
+        }
     private var softImeRequested = false
     private var softImeExplicitlyRequestedForAmbiguousInput = false
     private var imeActivationTouchPending = false
@@ -362,7 +425,15 @@ class LauncherActivity :
                                     purpose,
                                     editorEvidence,
                                 )
-                            handler.post { applyImeState(next) }
+                            val pending =
+                                PendingImeState(
+                                    state = next,
+                                    restartOnApply = next.active && !callbackImeActive,
+                                    deactivateBeforeApply = !next.active && callbackImeActive,
+                                )
+                            if (!pendingImeState.offer(pending) { handler.post(applyPendingImeState) }) {
+                                return@runCatching false
+                            }
                             true
                         }
                         CALLBACK_DOCUMENT_REQUEST -> {
@@ -432,7 +503,12 @@ class LauncherActivity :
                                     ) {
                                         return@runCatching false
                                     }
-                                    handler.post { applyCursorSystemIcon(systemIcon) }
+                                    if (!pendingCursor.offer(CursorUpdate.System(systemIcon)) {
+                                            handler.post(applyPendingCursor)
+                                        }
+                                    ) {
+                                        return@runCatching false
+                                    }
                                     true
                                 }
                                 CURSOR_KIND_BITMAP -> {
@@ -460,8 +536,13 @@ class LauncherActivity :
                                         bitmap.recycle()
                                         return@runCatching false
                                     }
-                                    handler.post {
-                                        applyCursorBitmap(bitmap, hotspotX, hotspotY)
+                                    if (!pendingCursor.offer(
+                                            CursorUpdate.BitmapCursor(bitmap, hotspotX, hotspotY),
+                                        ) {
+                                            handler.post(applyPendingCursor)
+                                        }
+                                    ) {
+                                        return@runCatching false
                                     }
                                     true
                                 }
@@ -1232,6 +1313,8 @@ class LauncherActivity :
         configurationSurfaceAttachFrames = 0
         surfaceView.removeCallbacks(attachSurfaceAfterConfigurationChange)
         handler.removeCallbacksAndMessages(null)
+        pendingImeState.clear()
+        pendingCursor.clear()
         if (
             cameraPermissionRequestInFlight &&
             !getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
@@ -1258,6 +1341,8 @@ class LauncherActivity :
             cameraLifecycleMonitor.notifyAll()
         }
         handler.removeCallbacksAndMessages(null)
+        pendingImeState.close()
+        pendingCursor.close()
         pendingNotifications.fill(null)
         stopClipboardListening()
         cancelPendingDocumentRequest()
@@ -3129,9 +3214,13 @@ class LauncherActivity :
         }
     }
 
-    private fun applyImeState(next: ImeState) {
+    private fun applyImeState(
+        next: ImeState,
+        restartOnApply: Boolean = false,
+    ) {
         val previous = imeState
         imeState = next
+        callbackImeActive = next.active
         val requestedAfterTouch =
             LauncherImeTouchPolicy.requestOnActivationAfterTouch(
                 imeActivationTouchPending,
@@ -3178,7 +3267,8 @@ class LauncherActivity :
             return
         }
         val restart =
-            !previous.active ||
+            restartOnApply ||
+                !previous.active ||
                 previous.hint != next.hint ||
                 previous.purpose != next.purpose
         if (restart) {
