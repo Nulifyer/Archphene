@@ -239,9 +239,14 @@ internal class LauncherCameraBridge(
             ) {
                 "Verified package runtime is unavailable"
             }
-            val runtimeEntries = packageRuntime.listFiles() ?: error("Could not list runtime")
-            check(runtimeEntries.size in 1..MAX_RUNTIME_LINKS) {
-                "Verified package runtime exceeds the camera link bound"
+            val runtimeEntries =
+                collectBoundedDirectoryEntries(
+                    packageRuntime,
+                    MAX_RUNTIME_LINKS,
+                    "Verified package runtime exceeds the camera link bound",
+                )
+            check(runtimeEntries.isNotEmpty()) {
+                "Verified package runtime is empty"
             }
             for (entry in runtimeEntries) {
                 check(

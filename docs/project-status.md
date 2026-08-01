@@ -3222,6 +3222,14 @@ stale set forever. JVM tests prove active-file preservation and stale-file
 recovery across overflow. Launcher-template unit/lint, exact release, and
 x86_64/AArch64 manager builds pass.
 
+Verified camera-runtime link discovery now collects through a bounded directory
+stream instead of allocating an uncapped `listFiles()` array before checking the
+128-link ceiling. Entry 129 fails before validation or link creation, empty
+runtimes still fail, and successful traversal retains only the declared
+maximum. JVM tests cover empty, exact-limit, overflow traversal, and bounded
+collection rejection. JDK 26 app unit/lint and exact x86_64/AArch64 manager
+builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
