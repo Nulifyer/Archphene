@@ -3222,6 +3222,15 @@ stale set forever. JVM tests prove active-file preservation and stale-file
 recovery across overflow. Launcher-template unit/lint, exact release, and
 x86_64/AArch64 manager builds pass.
 
+Each generated launcher's Android PDF adapter now admits one active writer
+instead of creating a thread for every overlapping `onWrite()` call.
+Cancellation closes the owned streams so pending I/O observes descriptor
+closure, completion reconciles late cancellation after cleanup, and the task
+gate releases before exactly one terminal callback. `onFinish()` rejects later
+writes. Concurrent JVM tests cover one-winner admission, close/release behavior,
+release-before-callback ordering, and exactly-once completion. Launcher-template
+unit/lint, exact release, and x86_64/AArch64 manager builds pass.
+
 Verified camera-runtime link discovery now collects through a bounded directory
 stream instead of allocating an uncapped `listFiles()` array before checking the
 128-link ceiling. Entry 129 fails before validation or link creation, empty
