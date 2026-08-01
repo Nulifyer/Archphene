@@ -1218,10 +1218,15 @@ impl PackageRuntime {
         {
             return Err(PackageRuntimeError::UnsafeEntry(path));
         }
-        let source = fs::read_to_string(&path)?;
-        if source.len() as u64 != metadata.len() {
-            return Err(PackageRuntimeError::InvalidManifest);
+        let (source, opened_metadata) =
+            read_bounded_regular_file_with_metadata(&path, SHELLS_FILE_LIMIT)?
+                .ok_or(PackageRuntimeError::InvalidManifest)?;
+        if !opened_shells_metadata_is_safe(&opened_metadata) {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
         }
+        let source = std::str::from_utf8(&source).map_err(|error| {
+            PackageRuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+        })?;
         let environment = self.command_environment()?;
         let mut output = ToolOutput {
             bytes: [0; MAX_TOOL_OUTPUT_BYTES],
@@ -7253,6 +7258,13 @@ impl PackageRuntime {
     }
 }
 
+fn opened_shells_metadata_is_safe(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && metadata.permissions().mode() & 0o022 == 0
+        && metadata.len() != 0
+        && metadata.len() <= SHELLS_FILE_LIMIT
+}
+
 fn collect_archive_file_paths(
     listing: &[u8],
     paths: &mut BTreeSet<Vec<u8>>,
@@ -8130,6 +8142,13 @@ fn read_bounded_regular_file(
     path: &Path,
     limit: u64,
 ) -> Result<Option<Vec<u8>>, PackageRuntimeError> {
+    Ok(read_bounded_regular_file_with_metadata(path, limit)?.map(|(content, _metadata)| content))
+}
+
+fn read_bounded_regular_file_with_metadata(
+    path: &Path,
+    limit: u64,
+) -> Result<Option<(Vec<u8>, fs::Metadata)>, PackageRuntimeError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -8149,11 +8168,16 @@ fn read_bounded_regular_file(
     if !opened_metadata.is_file()
         || opened_metadata.dev() != metadata.dev()
         || opened_metadata.ino() != metadata.ino()
+        || opened_metadata.mode() != metadata.mode()
         || opened_metadata.len() != metadata.len()
     {
         return Ok(None);
     }
-    read_bounded_exact(&mut file, opened_metadata.len(), limit).map_err(PackageRuntimeError::Io)
+    let content = match read_bounded_exact(&mut file, opened_metadata.len(), limit)? {
+        Some(content) => content,
+        None => return Ok(None),
+    };
+    Ok(Some((content, opened_metadata)))
 }
 
 fn read_bounded_exact(
@@ -13184,6 +13208,14 @@ fish\tFish\tfish\t--interactive\n"
             fs::Permissions::from_mode(0o666),
         )
         .expect("unsafe shells mode");
+        let opened_shells = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(tree.root.join(SHELLS_FILE))
+            .expect("open writable shells");
+        assert!(!opened_shells_metadata_is_safe(
+            &opened_shells.metadata().expect("opened metadata")
+        ));
         assert!(matches!(
             runtime.discover_shells(),
             Err(PackageRuntimeError::UnsafeEntry(_))

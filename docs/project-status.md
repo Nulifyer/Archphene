@@ -3263,6 +3263,15 @@ tests cover exact, symlink, missing, static overflow, post-metadata growth, and
 unbounded-reader behavior. Pinned Rust 1.88 package tests and warning-denied
 Clippy pass.
 
+Shell discovery now reads `/etc/shells` through the same bounded no-follow
+reader instead of `read_to_string()`. Validation binds the opened descriptor's
+device, inode, mode, and length before UTF-8 parsing, so a concurrent
+group/world-writable replacement cannot inherit permission approval from stale
+metadata and file growth cannot exceed the existing ceiling. Existing
+shell-adapter tests cover accepted declarations and writable rejection;
+bounded-reader tests cover links, overflow, growth, and shrink. Pinned Rust 1.88
+package tests and warning-denied Clippy pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
