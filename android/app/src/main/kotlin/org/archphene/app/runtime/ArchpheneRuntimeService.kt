@@ -2557,6 +2557,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_STALE_AUR_BUILD_OUTPUTS = 64
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
+        private const val AUR_BUILDER_PROBE_OUTPUT_MAX_BYTES = 64
         private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
         private const val AUR_GRAPH_TOTAL_SOURCE_MAX_BYTES =
             32L * AUR_TOTAL_SOURCE_MAX_BYTES
@@ -9738,7 +9739,14 @@ class ArchpheneRuntimeService : Service() {
                 val selinuxContext = reply.readString().orEmpty()
                 val stagedBytes = reply.readLong()
                 val inputManifestSha256 = reply.readString().orEmpty()
-                val output = outputFile.readText(StandardCharsets.US_ASCII)
+                val output =
+                    outputFile.inputStream().use { input ->
+                        input
+                            .readBoundedBytes(
+                                AUR_BUILDER_PROBE_OUTPUT_MAX_BYTES,
+                                "AUR builder probe output is too large",
+                            ).toString(StandardCharsets.US_ASCII)
+                    }
                 val expectedStagedBytes =
                     buildInputs.fold(0L) { total, input ->
                         Math.addExact(total, input.bytes)

@@ -3195,6 +3195,13 @@ an unbounded diagnostic allocation.
 JVM tests cover empty, missing, and sparse files larger than the JVM array
 limit. JDK 26 Builder unit/lint and exact x86_64/AArch64 Builder builds pass.
 
+The manager now reads at most 64 bytes from the isolated Builder's writable
+boundary-probe descriptor before ASCII decoding. The exact UID-bearing marker
+remains accepted, while a compromised Builder cannot trigger an unbounded
+whole-file string allocation. Existing bounded-stream JVM tests cover exact,
+oversized, chunked, and zero-progress reads. JDK 26 app unit/lint and exact
+x86_64/AArch64 manager builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
