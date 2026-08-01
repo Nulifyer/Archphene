@@ -104,6 +104,17 @@ class LauncherActivity :
         val html: String?,
     )
 
+    private data class PendingAppearance(
+        val dark: Boolean,
+        val background: Int,
+        val foreground: Int,
+    )
+
+    private data class PendingPointerCapture(
+        val active: Boolean,
+        val releaseBeforeApply: Boolean,
+    )
+
     private sealed interface CursorUpdate {
         data class System(val icon: Int) : CursorUpdate
 
@@ -208,6 +219,9 @@ class LauncherActivity :
     private var desktopTouchDownX = 0f
     private var desktopTouchDownY = 0f
     private var pointerCaptureRequested = false
+    private var pointerRecaptureAfterRelease = false
+    private var pointerCaptureReleaseInFlight = false
+    @Volatile private var callbackPointerCaptureActive = false
     private var launcherOrientationPolicy = LauncherOrientationPolicy.DEFAULT
     private var cursorSystemIcon = PointerIcon.TYPE_ARROW
     private var customCursorPointerIcon: PointerIcon? = null
@@ -255,6 +269,49 @@ class LauncherActivity :
         Runnable {
             pendingClipboardCallback.take()?.let { clipboard ->
                 applyLinuxClipboard(clipboard.text, clipboard.html)
+            }
+        }
+    private val pendingPointerCapture =
+        LatestCallbackSlot<PendingPointerCapture>(
+            merge = { previous, next ->
+                PendingPointerCapture(
+                    active = next.active,
+                    releaseBeforeApply =
+                        previous.releaseBeforeApply ||
+                            (previous.active && !next.active),
+                )
+            },
+        )
+    private val applyPendingPointerCapture =
+        Runnable {
+            pendingPointerCapture.take()?.let { pending ->
+                when {
+                    pending.releaseBeforeApply &&
+                        pending.active &&
+                        surfaceView.hasPointerCapture() -> {
+                        pointerRecaptureAfterRelease = true
+                        pointerCaptureReleaseInFlight = true
+                        callbackPointerCaptureActive = false
+                        pointerCaptureRequested = false
+                        surfaceView.releasePointerCapture()
+                    }
+                    !pending.active -> {
+                        pointerRecaptureAfterRelease = false
+                        applyPointerCapture(false)
+                    }
+                    !pointerRecaptureAfterRelease -> applyPointerCapture(true)
+                }
+            }
+        }
+    private val pendingAppearance = LatestCallbackSlot<PendingAppearance>()
+    private val applyPendingAppearance =
+        Runnable {
+            pendingAppearance.take()?.let { appearance ->
+                applyLinuxAppearance(
+                    appearance.dark,
+                    appearance.background,
+                    appearance.foreground,
+                )
             }
         }
     private val applyPendingCursor =
@@ -508,7 +565,19 @@ class LauncherActivity :
                             if (active !in 0..1 || data.dataAvail() != 0) {
                                 return@runCatching false
                             }
-                            handler.post { applyPointerCapture(active == 1) }
+                            if (
+                                !pendingPointerCapture.offer(
+                                    PendingPointerCapture(
+                                        active = active == 1,
+                                        releaseBeforeApply =
+                                            active == 0 && callbackPointerCaptureActive,
+                                    ),
+                                ) {
+                                    handler.post(applyPendingPointerCapture)
+                                }
+                            ) {
+                                return@runCatching false
+                            }
                             true
                         }
                         CALLBACK_CURSOR -> {
@@ -789,12 +858,14 @@ class LauncherActivity :
                             ) {
                                 return@runCatching false
                             }
-                            handler.post {
-                                applyLinuxAppearance(
-                                    dark == 1,
-                                    background,
-                                    foreground,
-                                )
+                            if (
+                                !pendingAppearance.offer(
+                                    PendingAppearance(dark == 1, background, foreground),
+                                ) {
+                                    handler.post(applyPendingAppearance)
+                                }
+                            ) {
+                                return@runCatching false
                             }
                             true
                         }
@@ -1334,6 +1405,8 @@ class LauncherActivity :
         pendingImeState.clear()
         pendingCursor.clear()
         pendingClipboardCallback.clear()
+        pendingPointerCapture.clear()
+        pendingAppearance.clear()
         if (
             cameraPermissionRequestInFlight &&
             !getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
@@ -1363,6 +1436,8 @@ class LauncherActivity :
         pendingImeState.close()
         pendingCursor.close()
         pendingClipboardCallback.close()
+        pendingPointerCapture.close()
+        pendingAppearance.close()
         pendingNotifications.fill(null)
         stopClipboardListening()
         cancelPendingDocumentRequest()
@@ -1537,13 +1612,21 @@ class LauncherActivity :
     }
 
     private fun applyPointerCapture(active: Boolean) {
+        if (!active) {
+            pointerRecaptureAfterRelease = false
+        }
+        callbackPointerCaptureActive = active
         pointerCaptureRequested = active
-        if (active && hasWindowFocus()) {
+        if (active && pointerCaptureReleaseInFlight) {
+            pointerRecaptureAfterRelease = true
+            pointerCaptureRequested = false
+        } else if (active && hasWindowFocus()) {
             surfaceView.requestFocus()
             if (!surfaceView.hasPointerCapture()) {
                 surfaceView.requestPointerCapture()
             }
         } else if (!active && surfaceView.hasPointerCapture()) {
+            pointerCaptureReleaseInFlight = true
             surfaceView.releasePointerCapture()
         }
     }
@@ -3020,6 +3103,14 @@ class LauncherActivity :
 
         override fun onPointerCaptureChange(hasCapture: Boolean) {
             super.onPointerCaptureChange(hasCapture)
+            if (!hasCapture) {
+                pointerCaptureReleaseInFlight = false
+            }
+            if (!hasCapture && pointerRecaptureAfterRelease) {
+                pointerRecaptureAfterRelease = false
+                applyPointerCapture(true)
+                return
+            }
             if (!hasCapture && pointerCaptureRequested && hasWindowFocus()) {
                 pointerCaptureRequested = false
                 submitPointerCaptureLost()
