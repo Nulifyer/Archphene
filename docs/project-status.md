@@ -3401,6 +3401,19 @@ Gradle APKs also pass the manager-owned 48 kHz stereo output gate with
 Samsung, including private-runtime teardown within the 15-second gate. The
 emulator then passes a separate non-audio launcher denial probe.
 
+Camera-runtime diagnostics now use fixed 1 KiB read and 512-byte line buffers.
+An overlong helper line is drained completely while only its bounded prefix is
+logged, and the next line remains independently visible. Teardown retains any
+helper or log drainer that cannot be reaped. A process-wide lifecycle registry
+blocks same-session replacement across service generations and excludes every
+live runtime directory from stale cleanup. Deterministic JVM tests cover
+registry retention and eventual release, same-session ownership, stale-cleanup
+exclusion, a 64 KiB hostile line, a following CRLF line, and a final
+unterminated line. The JDK 26 app unit/lint gate passes. Direct Gradle APKs also
+pass the current Snapshot camera gate on the x86_64 emulator and AArch64
+Samsung, including the private PipeWire stream, GTK4 Cairo environment, Linux
+frame presentation, and full-device pixel inspection.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK

@@ -5,15 +5,50 @@ import android.os.Build
 import android.os.SystemClock
 import android.system.Os
 import android.util.Log
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
+import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+
+internal class CameraRuntimeRegistry<T> {
+    private val owned = LinkedHashSet<T>()
+    private val unreaped = LinkedHashSet<T>()
+
+    @Synchronized
+    fun claim(value: T) {
+        owned.add(value)
+    }
+
+    @Synchronized
+    fun finish(
+        value: T,
+        terminated: Boolean,
+    ) {
+        if (terminated) {
+            unreaped.remove(value)
+            owned.remove(value)
+        } else {
+            owned.add(value)
+            unreaped.add(value)
+        }
+    }
+
+    @Synchronized
+    fun hasUnreaped(): Boolean = unreaped.isNotEmpty()
+
+    @Synchronized
+    fun unreapedSnapshot(): List<T> = unreaped.toList()
+
+    @Synchronized
+    fun ownedSnapshot(): List<T> = owned.toList()
+
+    @Synchronized
+    fun hasOwnedMatching(predicate: (T) -> Boolean): Boolean = owned.any(predicate)
+}
 
 /**
  * Session-scoped minimal PipeWire camera remote.
@@ -40,9 +75,33 @@ internal class LauncherCameraBridge(
     val socketPath: String
         get() = pipeWireSocket.absolutePath
 
-    @Synchronized
-    fun start(brokerAddress: String): Boolean {
-        close()
+    fun start(brokerAddress: String): Boolean =
+        synchronized(runtimeLifecycleLock) {
+            closeLocked()
+            runtimeRegistry.unreapedSnapshot().forEach { bridge ->
+                if (bridge !== this) bridge.closeLocked()
+            }
+            runtimeRegistry.ownedSnapshot().forEach { bridge ->
+                if (bridge !== this && bridge.sessionId == sessionId) bridge.closeLocked()
+            }
+            if (
+                runtimeRegistry.hasUnreaped() ||
+                runtimeRegistry.hasOwnedMatching { bridge ->
+                    bridge !== this && bridge.sessionId == sessionId
+                }
+            ) {
+                Log.e(TAG, "An earlier camera runtime still owns session=$sessionId")
+                return@synchronized false
+            }
+            startLocked(brokerAddress)
+        }
+
+    private fun startLocked(brokerAddress: String): Boolean {
+        if (process?.isAlive == true || logThread?.isAlive == true) {
+            Log.e(TAG, "Prior camera helper did not terminate session=$sessionId")
+            return false
+        }
+        runtimeRegistry.claim(this)
         if (
             !validBrokerAddress(brokerAddress) ||
             !prepareRuntimeDirectory() ||
@@ -86,12 +145,8 @@ internal class LauncherCameraBridge(
                     name = "ArchpheneCameraRuntime-$sessionId",
                 ) {
                     runCatching {
-                        BufferedReader(
-                            InputStreamReader(child.inputStream, StandardCharsets.UTF_8),
-                        ).useLines { lines ->
-                            lines.forEach { line ->
-                                Log.i(TAG, "runtime session=$sessionId: ${line.take(512)}")
-                            }
+                        drainBoundedUtf8Lines(child.inputStream, MAX_LOG_LINE_BYTES) { line ->
+                            Log.i(TAG, "runtime session=$sessionId: $line")
                         }
                     }
                 }
@@ -115,31 +170,55 @@ internal class LauncherCameraBridge(
         }
     }
 
-    @Synchronized
-    fun isReady(): Boolean = process?.isAlive == true && pipeWireSocket.exists()
+    fun isReady(): Boolean =
+        synchronized(runtimeLifecycleLock) {
+            process?.isAlive == true && pipeWireSocket.exists()
+        }
 
-    @Synchronized
     override fun close() {
+        synchronized(runtimeLifecycleLock) {
+            closeLocked()
+        }
+    }
+
+    private fun closeLocked() {
         val child = process
-        process = null
+        var childTerminated = child == null || !child.isAlive
         if (child != null) {
             child.destroy()
             try {
                 if (!child.waitFor(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                     child.destroyForcibly()
-                    child.waitFor(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                    childTerminated =
+                        child.waitFor(STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                } else {
+                    childTerminated = true
                 }
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 child.destroyForcibly()
+                childTerminated = !child.isAlive
             }
         }
+        if (childTerminated) {
+            if (process === child) process = null
+        } else {
+            Log.w(TAG, "Camera helper did not report exit after forced termination session=$sessionId")
+        }
         val worker = logThread
-        logThread = null
         if (worker != null && worker !== Thread.currentThread()) {
             runCatching { worker.join(STOP_TIMEOUT_MILLIS) }
         }
-        cleanupRuntimeDirectory(runtimeDirectory.toPath(), log = false)
+        val workerTerminated = worker == null || !worker.isAlive
+        if (workerTerminated) {
+            if (logThread === worker) logThread = null
+        } else {
+            Log.w(TAG, "Camera log drainer did not terminate session=$sessionId")
+        }
+        if (childTerminated && workerTerminated) {
+            cleanupRuntimeDirectory(runtimeDirectory.toPath(), log = false)
+        }
+        runtimeRegistry.finish(this, childTerminated && workerTerminated)
     }
 
     private fun prepareRuntimeDirectory(): Boolean =
@@ -264,8 +343,11 @@ internal class LauncherCameraBridge(
         private const val UNIX_SOCKET_PATH_LIMIT = 104
         private const val START_TIMEOUT_MILLIS = 5_000L
         private const val STOP_TIMEOUT_MILLIS = 2_000L
+        private const val MAX_LOG_LINE_BYTES = 512
         private const val HEX = "0123456789abcdef"
         private val random = SecureRandom()
+        private val runtimeLifecycleLock = Any()
+        private val runtimeRegistry = CameraRuntimeRegistry<LauncherCameraBridge>()
         private val PAYLOAD_LINKS =
             arrayOf(
                 "libpipewire-0.3.so.0" to "libarchphene_pipewire_client.so",
@@ -302,23 +384,32 @@ internal class LauncherCameraBridge(
             )
 
         fun cleanupStaleRuntimeDirectories(context: Context) {
-            val cache = context.cacheDir.toPath()
-            if (!Files.isDirectory(cache) || Files.isSymbolicLink(cache)) return
-            runCatching {
-                var visited = 0
-                Files.newDirectoryStream(cache, "$RUNTIME_PREFIX*").use { entries ->
-                    for (entry in entries) {
-                        if (visited++ >= MAX_STALE_DIRECTORIES) {
-                            Log.w(TAG, "Camera stale-runtime cleanup reached its bounded limit")
-                            break
-                        }
-                        if (isRuntimeDirectoryName(entry.fileName.toString())) {
-                            cleanupRuntimeDirectory(entry, log = true)
+            synchronized(runtimeLifecycleLock) {
+                runtimeRegistry.unreapedSnapshot().forEach { bridge -> bridge.closeLocked() }
+                val ownedPaths =
+                    runtimeRegistry
+                        .ownedSnapshot()
+                        .mapTo(HashSet()) { bridge -> bridge.runtimeDirectory.toPath() }
+                val cache = context.cacheDir.toPath()
+                if (!Files.isDirectory(cache) || Files.isSymbolicLink(cache)) return
+                runCatching {
+                    var visited = 0
+                    Files.newDirectoryStream(cache, "$RUNTIME_PREFIX*").use { entries ->
+                        for (entry in entries) {
+                            if (visited++ >= MAX_STALE_DIRECTORIES) {
+                                Log.w(TAG, "Camera stale-runtime cleanup reached its bounded limit")
+                                break
+                            }
+                            if (
+                                shouldCleanupRuntimeDirectory(entry, ownedPaths)
+                            ) {
+                                cleanupRuntimeDirectory(entry, log = true)
+                            }
                         }
                     }
+                }.onFailure { error ->
+                    Log.w(TAG, "Could not inspect stale camera runtime directories", error)
                 }
-            }.onFailure { error ->
-                Log.w(TAG, "Could not inspect stale camera runtime directories", error)
             }
         }
 
@@ -337,6 +428,51 @@ internal class LauncherCameraBridge(
             return name.substring(separator + 1).all { character ->
                 character in '0'..'9' || character in 'a'..'f'
             }
+        }
+
+        internal fun shouldCleanupRuntimeDirectory(
+            path: Path,
+            ownedPaths: Set<Path>,
+        ): Boolean =
+            path !in ownedPaths && isRuntimeDirectoryName(path.fileName.toString())
+
+        internal fun drainBoundedUtf8Lines(
+            input: InputStream,
+            maximumLineBytes: Int,
+            consume: (String) -> Unit,
+        ) {
+            require(maximumLineBytes > 0)
+            val retained = ByteArray(maximumLineBytes)
+            val chunk = ByteArray(1024)
+            var retainedBytes = 0
+            var sawBytes = false
+
+            fun publish() {
+                var length = retainedBytes
+                if (length > 0 && retained[length - 1] == '\r'.code.toByte()) length--
+                consume(String(retained, 0, length, StandardCharsets.UTF_8))
+                retainedBytes = 0
+                sawBytes = false
+            }
+
+            input.use { stream ->
+                while (true) {
+                    val count = stream.read(chunk)
+                    if (count < 0) break
+                    for (index in 0 until count) {
+                        val value = chunk[index]
+                        if (value == '\n'.code.toByte()) {
+                            publish()
+                        } else {
+                            sawBytes = true
+                            if (retainedBytes < retained.size) {
+                                retained[retainedBytes++] = value
+                            }
+                        }
+                    }
+                }
+            }
+            if (sawBytes) publish()
         }
 
         private fun cleanupRuntimeDirectory(
