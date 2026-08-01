@@ -13467,16 +13467,14 @@ impl CompositorCore {
         self.state.keyboard_event_count
     }
 
-    fn focused_keyboard_resources(&self) -> Vec<WlKeyboard> {
-        let Some(surface) = self.state.keyboard_focus_surface.as_ref() else {
-            return Vec::new();
-        };
-        self.state
-            .keyboards
-            .iter()
-            .filter(|keyboard| keyboard.is_alive() && keyboard.id().same_client_as(&surface.id()))
-            .cloned()
-            .collect()
+    fn focused_keyboard_resources(&self) -> impl Iterator<Item = &WlKeyboard> {
+        let focus_id = self.state.keyboard_focus_surface.as_ref().map(Resource::id);
+        self.state.keyboards.iter().filter(move |keyboard| {
+            keyboard.is_alive()
+                && focus_id
+                    .as_ref()
+                    .is_some_and(|focus_id| keyboard.id().same_client_as(focus_id))
+        })
     }
 
     fn keyboard_modifier_mask(pressed_keys: &[u32]) -> u32 {
@@ -13509,8 +13507,7 @@ impl CompositorCore {
         if !self.state.host_active {
             return 0;
         }
-        let keyboards = self.focused_keyboard_resources();
-        if keyboards.is_empty() {
+        if self.focused_keyboard_resources().next().is_none() {
             return 0;
         }
         let duplicate = self.state.pressed_keys.contains(&key) == pressed;
@@ -13524,7 +13521,7 @@ impl CompositorCore {
                 return 0;
             }
             let serial = self.next_input_serial();
-            for keyboard in keyboards {
+            for keyboard in self.focused_keyboard_resources() {
                 keyboard.modifiers(serial, modifiers, 0, 0, 0);
             }
             self.state.keyboard_event_count = self.state.keyboard_event_count.saturating_add(1);
@@ -13551,7 +13548,7 @@ impl CompositorCore {
         } else {
             wl_keyboard::KeyState::Released
         };
-        for keyboard in &keyboards {
+        for keyboard in self.focused_keyboard_resources() {
             keyboard.key(serial, time, key, key_state);
         }
         if pressed {
@@ -13564,7 +13561,7 @@ impl CompositorCore {
         let modifiers =
             Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
         if modifiers != previous_modifiers {
-            for keyboard in &keyboards {
+            for keyboard in self.focused_keyboard_resources() {
                 keyboard.modifiers(serial, modifiers, 0, 0, 0);
             }
         }
@@ -13588,8 +13585,7 @@ impl CompositorCore {
         if !self.state.host_active || !self.state.pressed_keys.contains(&key) {
             return 0;
         }
-        let keyboards = self.focused_keyboard_resources();
-        if keyboards.is_empty() {
+        if self.focused_keyboard_resources().next().is_none() {
             return 0;
         }
         let previous_modifiers =
@@ -13598,11 +13594,11 @@ impl CompositorCore {
         let modifiers =
             Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
         let serial = self.next_input_serial();
-        for keyboard in &keyboards {
+        for keyboard in self.focused_keyboard_resources() {
             keyboard.key(serial, time, key, wl_keyboard::KeyState::Pressed);
         }
         if modifiers != previous_modifiers {
-            for keyboard in &keyboards {
+            for keyboard in self.focused_keyboard_resources() {
                 keyboard.modifiers(serial, modifiers, 0, 0, 0);
             }
         }
@@ -17936,7 +17932,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeI
         64 => return i32::try_from(core.set_host_active(a != 0)).unwrap_or(i32::MAX),
         65 => return i32::try_from(core.keyboard_count()).unwrap_or(i32::MAX),
         66 => {
-            return i32::try_from(core.focused_keyboard_resources().len()).unwrap_or(i32::MAX);
+            return i32::try_from(core.focused_keyboard_resources().count()).unwrap_or(i32::MAX);
         }
         67 => return core.cursor_system_icon(),
         68 => return core.cursor_change_serial() as i32,

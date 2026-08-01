@@ -3162,6 +3162,14 @@ low-alpha opaque-region fallback, and popup-base isolation; the full workspace
 and strict Clippy gates plus rebuilt x86_64 and AArch64 Android compositor probes
 pass.
 
+Hardware key, repeat, and modifier delivery no longer clones focused
+`WlKeyboard` resources into a temporary vector. Focused resources stream in
+retained order through a reusable live/same-client iterator; accepted events
+repeat that allocation-free filter after key-state mutation when modifier
+delivery needs a second pass. Debug resource counting uses the same iterator.
+Pinned Rust 1.88 compositor tests and all-target warning-denied Clippy pass;
+exact x86_64/AArch64 compositor builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
