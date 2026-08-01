@@ -13948,13 +13948,11 @@ impl CompositorCore {
         1
     }
 
-    fn touch_resources_for_surface(&self, surface: &WlSurface) -> Vec<WlTouch> {
+    fn has_touch_resource_for_surface(&self, surface: &WlSurface) -> bool {
         self.state
             .touches
             .iter()
-            .filter(|touch| touch.is_alive() && touch.id().same_client_as(&surface.id()))
-            .cloned()
-            .collect()
+            .any(|touch| touch.is_alive() && touch.id().same_client_as(&surface.id()))
     }
 
     fn touch_target(&self, x: f64, y: f64) -> Option<(WlSurface, f64, f64)> {
@@ -13992,8 +13990,7 @@ impl CompositorCore {
         let Some((surface, local_x, local_y)) = self.touch_target(x, y) else {
             return 0;
         };
-        let touches = self.touch_resources_for_surface(&surface);
-        if touches.is_empty() {
+        if !self.has_touch_resource_for_surface(&surface) {
             return 0;
         }
         let serial = self.next_input_serial();
@@ -14012,7 +14009,12 @@ impl CompositorCore {
             surface: surface.clone(),
         });
         set_keyboard_focus(&mut self.state, Some(surface.clone()));
-        for touch in touches {
+        for touch in self
+            .state
+            .touches
+            .iter()
+            .filter(|touch| touch.is_alive() && touch.id().same_client_as(&surface.id()))
+        {
             touch.down(serial, time, &surface, id, local_x, local_y);
             touch.frame();
         }
@@ -14034,12 +14036,16 @@ impl CompositorCore {
         else {
             return 0;
         };
-        let touches = self.touch_resources_for_surface(&surface);
-        if touches.is_empty() {
+        if !self.has_touch_resource_for_surface(&surface) {
             return 0;
         }
         let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
-        for touch in touches {
+        for touch in self
+            .state
+            .touches
+            .iter()
+            .filter(|touch| touch.is_alive() && touch.id().same_client_as(&surface.id()))
+        {
             touch.motion(time, id, local_x, local_y);
             touch.frame();
         }
@@ -14057,12 +14063,16 @@ impl CompositorCore {
             return 0;
         };
         let surface = self.state.active_touches[index].surface.clone();
-        let touches = self.touch_resources_for_surface(&surface);
-        if touches.is_empty() {
+        if !self.has_touch_resource_for_surface(&surface) {
             return 0;
         }
         let serial = self.next_input_serial();
-        for touch in touches {
+        for touch in self
+            .state
+            .touches
+            .iter()
+            .filter(|touch| touch.is_alive() && touch.id().same_client_as(&surface.id()))
+        {
             touch.up(serial, time, id);
             touch.frame();
         }
@@ -14075,15 +14085,14 @@ impl CompositorCore {
         if self.state.active_touches.is_empty() {
             return 0;
         }
-        let mut touches = Vec::<WlTouch>::new();
-        for active in &self.state.active_touches {
-            for touch in self.touch_resources_for_surface(&active.surface) {
-                if !touches.iter().any(|candidate| candidate.id() == touch.id()) {
-                    touches.push(touch);
-                }
-            }
-        }
-        for touch in touches {
+        for touch in self.state.touches.iter().filter(|touch| {
+            touch.is_alive()
+                && self
+                    .state
+                    .active_touches
+                    .iter()
+                    .any(|active| touch.id().same_client_as(&active.surface.id()))
+        }) {
             touch.cancel();
             touch.frame();
         }

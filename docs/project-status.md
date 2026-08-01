@@ -3534,6 +3534,14 @@ closes the slot before Surface-thread shutdown. Ordered-dispatch JVM tests cover
 close rejection, and payload disposal. JDK 26 app unit/lint and exact
 x86_64/AArch64 manager builds pass.
 
+Wayland touch down, motion, up, and cancel delivery no longer clones matching
+`WlTouch` resources into temporary vectors. Delivery streams over the already
+bounded retained touch-resource list with live and same-client filtering. Cancel
+uses one retained-list pass and matches any active touch surface for that client,
+preserving one cancel/frame pair per live touch without heap collection or
+deduplication. Pinned Rust 1.88 full workspace tests and all-target
+warning-denied Clippy pass; exact x86_64/AArch64 compositor builds pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
