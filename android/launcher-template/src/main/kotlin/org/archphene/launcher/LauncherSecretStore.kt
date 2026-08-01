@@ -282,12 +282,15 @@ internal class LauncherSecretStore(filesDirectory: File) {
     }
 
     private fun recordFiles(): List<File> =
-        (directory.listFiles { entry -> entry.name.matches(RECORD_NAME) } ?: emptyArray())
-            .also { files ->
-                if (files.any { Files.isSymbolicLink(it.toPath()) || !it.isFile }) {
-                    throw SecurityException("Unsafe secret record")
-                }
-            }.sortedBy(File::getName)
+        collectBoundedRegularFiles(
+            directory,
+            RECORD_NAME,
+            STORE_ENTRY_NAME,
+            MAX_ITEMS,
+            MAX_DIRECTORY_ENTRIES,
+            "Unsafe secret record",
+            "Secret store item limit exceeded",
+        ).also { files -> files.sortBy(File::getName) }
 
     private fun ensureDirectory() {
         if (
@@ -300,11 +303,16 @@ internal class LauncherSecretStore(filesDirectory: File) {
             throw IOException("Could not create private secret store")
         }
         Os.chmod(directory.absolutePath, 0x1c0)
-        val stale =
-            directory.listFiles { entry -> entry.name.matches(TEMPORARY_NAME) }
-                ?: throw IOException("Could not inspect private secret store")
-        for (file in stale) {
-            if (Files.isSymbolicLink(file.toPath()) || !file.isFile || !file.delete()) {
+        visitBoundedRegularFiles(
+            directory,
+            TEMPORARY_NAME,
+            STORE_ENTRY_NAME,
+            MAX_STALE_TEMPORARY_FILES,
+            MAX_DIRECTORY_ENTRIES,
+            "Unsafe stale secret record",
+            "Stale secret record limit exceeded",
+        ) { file ->
+            if (!file.delete()) {
                 throw IOException("Could not remove stale secret record")
             }
         }
@@ -328,6 +336,8 @@ internal class LauncherSecretStore(filesDirectory: File) {
             MAX_SECRET_BYTES + MAX_ATTRIBUTES_BYTES + 4_096
         private const val MAX_INDEX_BYTES = 1024 * 1024
         private const val MAX_ITEMS = 256
+        private const val MAX_STALE_TEMPORARY_FILES = 256
+        private const val MAX_DIRECTORY_ENTRIES = 513
         private const val MAX_ID = 128
         private const val MAX_LABEL = 256
         private const val MAX_CONTENT_TYPE = 128
@@ -338,6 +348,8 @@ internal class LauncherSecretStore(filesDirectory: File) {
         private val RECORD_NAME = Regex("[0-9a-f]{64}\\.secret")
         private val TEMPORARY_NAME =
             Regex("[0-9a-f]{64}\\.secret\\.tmp-[0-9a-f]{1,16}")
+        private val STORE_ENTRY_NAME =
+            Regex("(?:${RECORD_NAME.pattern})|(?:${TEMPORARY_NAME.pattern})")
 
         private fun encodeRecord(record: Record): ByteArray {
             val id = record.id.toByteArray(StandardCharsets.UTF_8)

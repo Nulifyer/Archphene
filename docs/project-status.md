@@ -3202,6 +3202,17 @@ whole-file string allocation. Existing bounded-stream JVM tests cover exact,
 oversized, chunked, and zero-progress reads. JDK 26 app unit/lint and exact
 x86_64/AArch64 manager builds pass.
 
+Launcher secret-record and interrupted-write discovery now uses a bounded
+directory stream instead of an uncapped `listFiles()` array. Each pass admits
+at most 256 records, removes at most 256 stale temporary files, and scans at
+most 513 recognized entries. Unknown names, symbolic links, and non-regular
+matching entries fail closed. Stale cleanup deletes its bounded accepted batch
+before reporting overflow, allowing repeated calls to recover instead of
+locking the store permanently. JVM tests cover matching and total-entry limits,
+symbolic links, unknown names, overflow progress, and mixed-entry recovery.
+Launcher-template unit/lint and exact release plus x86_64/AArch64 manager builds
+pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
