@@ -106,6 +106,8 @@ const MAX_FRAME_CALLBACKS_PER_CLIENT: usize = 128;
 const MAX_PENDING_XDG_CONFIGURES: usize = 64;
 const MAX_XDG_POSITIONERS_PER_CLIENT: usize = 64;
 const MAX_XDG_POSITIONERS_TOTAL: usize = 128;
+const MAX_XDG_TOPLEVEL_TITLE_BYTES: usize = 2 * 1024;
+const MAX_XDG_TOPLEVEL_APP_ID_BYTES: usize = 1024;
 const MAX_XDG_SURFACES_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
 const MAX_XDG_SURFACES_TOTAL: usize = MAX_SURFACES;
 const MAX_XDG_POPUPS_PER_CLIENT: usize = MAX_SURFACES_PER_CLIENT;
@@ -5085,10 +5087,28 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
                 state.window_change_serial = state.window_change_serial.wrapping_add(1).max(1);
             }
             xdg_toplevel::Request::SetTitle { title } => {
+                if title.len() > MAX_XDG_TOPLEVEL_TITLE_BYTES {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "xdg_toplevel title limit exceeded",
+                    );
+                    return;
+                }
                 *data.title.lock().unwrap_or_else(|error| error.into_inner()) = title;
                 state.window_change_serial = state.window_change_serial.wrapping_add(1).max(1);
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
+                if app_id.len() > MAX_XDG_TOPLEVEL_APP_ID_BYTES {
+                    disconnect_for_resource_limit(
+                        client,
+                        handle,
+                        resource,
+                        "xdg_toplevel app ID limit exceeded",
+                    );
+                    return;
+                }
                 *data
                     .app_id
                     .lock()
@@ -23275,6 +23295,217 @@ mod tests {
         assert_eq!(MAX_XDG_POPUPS_TOTAL, MAX_SURFACES);
         assert_eq!(MAX_SUBSURFACES_PER_CLIENT, MAX_SURFACES_PER_CLIENT);
         assert_eq!(MAX_SUBSURFACES_TOTAL, MAX_SURFACES);
+    }
+
+    #[test]
+    fn xdg_toplevel_metadata_limits_preserve_independent_clients() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-xdg-metadata-limit-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.bind_socket(&server_socket).expect("bind socket");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while server_stage.load(Ordering::Acquire) != 11 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "XDG metadata-limit server timed out"
+                );
+                core.dispatch_once().expect("dispatch XDG metadata clients");
+                match server_stage.load(Ordering::Acquire) {
+                    1 if core.state.toplevels.len() == 1 => {
+                        server_stage.store(2, Ordering::Release);
+                    }
+                    3 if core.state.toplevels.is_empty() => {
+                        server_stage.store(4, Ordering::Release);
+                    }
+                    5 if core.state.toplevels.len() == 1 => {
+                        server_stage.store(6, Ordering::Release);
+                    }
+                    7 if core.state.toplevels.is_empty() => {
+                        server_stage.store(8, Ordering::Release);
+                    }
+                    9 if core.state.toplevels.len() == 1 => {
+                        server_stage.store(10, Ordering::Release);
+                    }
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+
+        let connect = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out connecting XDG metadata client"
+                );
+                match UnixStream::connect(&socket) {
+                    Ok(stream) => {
+                        break Connection::from_socket(stream).expect("XDG metadata connection");
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("connect XDG metadata client: {error}"),
+                }
+            }
+        };
+        let wait_for_stage = |expected| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while stage.load(Ordering::Acquire) != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for XDG metadata stage {expected}"
+                );
+                std::thread::yield_now();
+            }
+        };
+        let create_toplevel = |connection: &Connection| {
+            let (globals, events) = registry_queue_init::<PointerProtocolClient>(connection)
+                .expect("XDG metadata registry");
+            let queue = events.handle();
+            let compositor = globals
+                .bind::<client_wl_compositor::WlCompositor, _, _>(&queue, 1..=6, ())
+                .expect("XDG metadata compositor");
+            let wm_base = globals
+                .bind::<client_xdg_wm_base::XdgWmBase, _, _>(&queue, 1..=6, ())
+                .expect("XDG metadata wm base");
+            let surface = compositor.create_surface(&queue, ());
+            let xdg_surface = wm_base.get_xdg_surface(&surface, &queue, ());
+            let toplevel = xdg_surface.get_toplevel(&queue, ());
+            (
+                globals,
+                events,
+                compositor,
+                wm_base,
+                surface,
+                xdg_surface,
+                toplevel,
+            )
+        };
+
+        let title_connection = connect();
+        let (
+            title_globals,
+            mut title_events,
+            title_compositor,
+            title_wm_base,
+            title_surface,
+            title_xdg_surface,
+            title_toplevel,
+        ) = create_toplevel(&title_connection);
+        title_toplevel.set_title("t".repeat(MAX_XDG_TOPLEVEL_TITLE_BYTES));
+        title_toplevel.set_app_id("a".repeat(MAX_XDG_TOPLEVEL_APP_ID_BYTES));
+        stage.store(1, Ordering::Release);
+        title_connection.flush().expect("flush exact XDG metadata");
+        wait_for_stage(2);
+        title_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("exact XDG metadata remains connected");
+        title_toplevel.set_title("t".repeat(MAX_XDG_TOPLEVEL_TITLE_BYTES + 1));
+        title_connection
+            .flush()
+            .expect("flush XDG title overflow");
+        assert!(
+            title_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "oversized XDG title must disconnect only its client"
+        );
+        drop((
+            title_toplevel,
+            title_xdg_surface,
+            title_surface,
+            title_wm_base,
+            title_compositor,
+            title_globals,
+            title_events,
+            title_connection,
+        ));
+        stage.store(3, Ordering::Release);
+        wait_for_stage(4);
+
+        let app_connection = connect();
+        let (
+            app_globals,
+            mut app_events,
+            app_compositor,
+            app_wm_base,
+            app_surface,
+            app_xdg_surface,
+            app_toplevel,
+        ) = create_toplevel(&app_connection);
+        stage.store(5, Ordering::Release);
+        app_connection.flush().expect("flush app-ID baseline");
+        wait_for_stage(6);
+        app_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("app-ID baseline remains connected");
+        app_toplevel.set_app_id("a".repeat(MAX_XDG_TOPLEVEL_APP_ID_BYTES + 1));
+        app_connection.flush().expect("flush app-ID overflow");
+        assert!(
+            app_events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .is_err(),
+            "oversized XDG app ID must disconnect only its client"
+        );
+        drop((
+            app_toplevel,
+            app_xdg_surface,
+            app_surface,
+            app_wm_base,
+            app_compositor,
+            app_globals,
+            app_events,
+            app_connection,
+        ));
+        stage.store(7, Ordering::Release);
+        wait_for_stage(8);
+
+        let healthy_connection = connect();
+        let (
+            healthy_globals,
+            mut healthy_events,
+            healthy_compositor,
+            healthy_wm_base,
+            healthy_surface,
+            healthy_xdg_surface,
+            healthy_toplevel,
+        ) = create_toplevel(&healthy_connection);
+        healthy_toplevel.set_title("healthy".to_owned());
+        stage.store(9, Ordering::Release);
+        healthy_connection
+            .flush()
+            .expect("flush healthy XDG metadata");
+        wait_for_stage(10);
+        healthy_events
+            .roundtrip(&mut PointerProtocolClient::default())
+            .expect("healthy XDG metadata client remains connected");
+        drop((
+            healthy_toplevel,
+            healthy_xdg_surface,
+            healthy_surface,
+            healthy_wm_base,
+            healthy_compositor,
+            healthy_globals,
+            healthy_events,
+            healthy_connection,
+        ));
+        stage.store(11, Ordering::Release);
+
+        server.join().expect("XDG metadata-limit server");
+        assert!(!socket.exists());
     }
 
     #[test]

@@ -3365,6 +3365,16 @@ tests tie all six limits to the existing surface ceilings. The full workspace
 and strict Clippy gates plus rebuilt exact x86_64 and AArch64 Android probes
 pass.
 
+Retained XDG toplevel metadata now has explicit byte ceilings. A title accepts
+at most 2 KiB of UTF-8 and an app ID at most 1 KiB. Combined with the existing
+32-toplevel limit, client-supplied retained identity text cannot exceed 96 KiB.
+An oversized setter disconnects only its client through the resource-limit path
+before the stored value or window-change serial is mutated. A real protocol
+fixture accepts both exact boundaries, rejects title and app-ID
+boundary-plus-one requests independently, verifies cleanup after each offender,
+and leaves a final healthy client connected. The full workspace and strict
+Clippy gates plus rebuilt exact x86_64 and AArch64 Android probes pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
