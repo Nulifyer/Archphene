@@ -99,6 +99,11 @@ class LauncherActivity :
         val deactivateBeforeApply: Boolean,
     )
 
+    private data class PendingClipboard(
+        val text: String?,
+        val html: String?,
+    )
+
     private sealed interface CursorUpdate {
         data class System(val icon: Int) : CursorUpdate
 
@@ -245,6 +250,13 @@ class LauncherActivity :
                 if (update is CursorUpdate.BitmapCursor) update.bitmap.recycle()
             },
         )
+    private val pendingClipboardCallback = LatestCallbackSlot<PendingClipboard>()
+    private val applyPendingClipboardCallback =
+        Runnable {
+            pendingClipboardCallback.take()?.let { clipboard ->
+                applyLinuxClipboard(clipboard.text, clipboard.html)
+            }
+        }
     private val applyPendingCursor =
         Runnable {
             when (val update = pendingCursor.take()) {
@@ -381,7 +393,13 @@ class LauncherActivity :
                             ) {
                                 return@runCatching false
                             }
-                            handler.post { applyLinuxClipboard(text, html) }
+                            if (
+                                !pendingClipboardCallback.offer(PendingClipboard(text, html)) {
+                                    handler.post(applyPendingClipboardCallback)
+                                }
+                            ) {
+                                return@runCatching false
+                            }
                             true
                         }
                         CALLBACK_IME_STATE -> {
@@ -1315,6 +1333,7 @@ class LauncherActivity :
         handler.removeCallbacksAndMessages(null)
         pendingImeState.clear()
         pendingCursor.clear()
+        pendingClipboardCallback.clear()
         if (
             cameraPermissionRequestInFlight &&
             !getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
@@ -1343,6 +1362,7 @@ class LauncherActivity :
         handler.removeCallbacksAndMessages(null)
         pendingImeState.close()
         pendingCursor.close()
+        pendingClipboardCallback.close()
         pendingNotifications.fill(null)
         stopClipboardListening()
         cancelPendingDocumentRequest()

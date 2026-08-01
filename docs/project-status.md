@@ -3460,11 +3460,12 @@ also pass the Auto/Light/Dark and Material You appearance-policy gate on the
 x86_64 emulator and AArch64 Samsung without restarting manager, wrapper, or
 Linux processes.
 
-Generated-launcher IME-state and cursor Binder bursts now coalesce into one
-scheduled main-thread callback and one replaceable latest payload per type.
-Replaced custom cursor bitmaps are recycled before Android takes ownership.
-Activity destruction atomically closes both slots, rejects late Binder work,
-and recycles its retained payload. IME merging preserves inactive-to-active
+Generated-launcher IME-state, cursor, and Linux-clipboard Binder bursts now
+coalesce into one scheduled main-thread callback and one replaceable latest
+payload per type. Clipboard clear, text, and HTML selection stays latest-wins
+before the existing focus-deferred publication. Replaced custom cursor bitmaps
+are recycled before Android takes ownership. Activity destruction atomically
+closes all slots, rejects late Binder work, and recycles retained payloads. IME merging preserves inactive-to-active
 restart and intermediate-deactivation cleanup markers, preventing a collapsed
 transition from reusing the prior editor buffer or carrying its soft-keyboard
 state into the next editor. Scheduling happens while the slot is locked, so a
