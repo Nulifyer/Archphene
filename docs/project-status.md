@@ -3343,6 +3343,14 @@ the partial database generation. Fresh-database, exact-copy, growth, shrink,
 replacement, overflow, and link tests pass with pinned Rust 1.88 and
 warning-denied Clippy.
 
+Android same-UID process cleanup is now bounded before signaling. It scans at
+most 4,096 `/proc` entries and retains at most 1,024 matching process IDs.
+Quota, iterator, and non-transient metadata failures abort before any signal;
+every retained UID is revalidated before the first kill. Unit tests cover exact
+admission limits and prove a late validation failure sends zero signals. Pinned
+Rust 1.88 compositor tests, warning-denied Clippy, and exact x86_64/AArch64
+manager builds pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

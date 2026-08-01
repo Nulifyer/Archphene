@@ -16589,6 +16589,100 @@ fn establish_runtime_process_group(child: libc::pid_t) -> bool {
     unsafe { libc::getpgid(child) == child }
 }
 
+#[cfg(any(target_os = "android", test))]
+const MAX_UID_PROCESS_SCAN: usize = 4096;
+#[cfg(any(target_os = "android", test))]
+const MAX_UID_PROCESS_TARGETS: usize = 1024;
+
+#[cfg(any(target_os = "android", test))]
+fn count_uid_process_entry(scanned: &mut usize) -> Result<(), i32> {
+    *scanned = scanned.checked_add(1).ok_or(libc::EOVERFLOW)?;
+    if *scanned > MAX_UID_PROCESS_SCAN {
+        return Err(libc::E2BIG);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", test))]
+fn retain_uid_process_target(
+    targets: &mut Vec<libc::pid_t>,
+    process: libc::pid_t,
+) -> Result<(), i32> {
+    if targets.len() >= MAX_UID_PROCESS_TARGETS {
+        return Err(libc::E2BIG);
+    }
+    targets.push(process);
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", test))]
+fn signal_uid_process_targets(
+    targets: &[libc::pid_t],
+    own_uid: libc::uid_t,
+    mut process_uid: impl FnMut(libc::pid_t) -> Result<Option<libc::uid_t>, i32>,
+    mut signal_process: impl FnMut(libc::pid_t) -> bool,
+) -> Result<i32, i32> {
+    let mut validated = Vec::with_capacity(targets.len());
+    for &process in targets {
+        if process_uid(process)? == Some(own_uid) {
+            validated.push(process);
+        }
+    }
+    let mut signaled = 0_i32;
+    for process in validated {
+        if signal_process(process) {
+            signaled += 1;
+        }
+    }
+    Ok(signaled)
+}
+
+#[cfg(test)]
+mod uid_process_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_admission_is_bounded_before_signaling() {
+        let mut scanned = 0_usize;
+        for _ in 0..MAX_UID_PROCESS_SCAN {
+            count_uid_process_entry(&mut scanned).expect("scan within bound");
+        }
+        assert_eq!(count_uid_process_entry(&mut scanned), Err(libc::E2BIG));
+
+        let mut targets = Vec::new();
+        for process in 1..=MAX_UID_PROCESS_TARGETS {
+            retain_uid_process_target(&mut targets, process as libc::pid_t)
+                .expect("target within bound");
+        }
+        assert_eq!(
+            retain_uid_process_target(&mut targets, 2048),
+            Err(libc::E2BIG),
+        );
+        assert_eq!(targets.len(), MAX_UID_PROCESS_TARGETS);
+
+        let mut signals = 0_usize;
+        assert_eq!(
+            signal_uid_process_targets(
+                &[10, 11],
+                1000,
+                |process| {
+                    if process == 11 {
+                        Err(libc::EIO)
+                    } else {
+                        Ok(Some(1000))
+                    }
+                },
+                |_| {
+                    signals += 1;
+                    true
+                },
+            ),
+            Err(libc::EIO),
+        );
+        assert_eq!(signals, 0);
+    }
+}
+
 #[cfg(target_os = "android")]
 pub(super) fn terminate_uid_processes(signal: i32) -> i32 {
     use std::os::unix::fs::MetadataExt;
@@ -16598,8 +16692,16 @@ pub(super) fn terminate_uid_processes(signal: i32) -> i32 {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return -libc::EIO;
     };
-    let mut terminated = 0;
-    for entry in entries.flatten() {
+    let mut scanned = 0_usize;
+    let mut targets = Vec::with_capacity(64);
+    for entry in entries {
+        if let Err(error) = count_uid_process_entry(&mut scanned) {
+            return -error;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return -error.raw_os_error().unwrap_or(libc::EIO),
+        };
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -16609,17 +16711,31 @@ pub(super) fn terminate_uid_processes(signal: i32) -> i32 {
         if pid <= 1 || pid == own_pid {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return -error.raw_os_error().unwrap_or(libc::EIO),
         };
         if metadata.uid() != own_uid {
             continue;
         }
-        if unsafe { libc::kill(pid, signal) } == 0 {
-            terminated += 1;
+        if let Err(error) = retain_uid_process_target(&mut targets, pid) {
+            return -error;
         }
     }
-    terminated
+    match signal_uid_process_targets(
+        &targets,
+        own_uid,
+        |process| match std::fs::metadata(format!("/proc/{process}")) {
+            Ok(metadata) => Ok(Some(metadata.uid())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.raw_os_error().unwrap_or(libc::EIO)),
+        },
+        |process| unsafe { libc::kill(process, signal) == 0 },
+    ) {
+        Ok(terminated) => terminated,
+        Err(error) => -error,
+    }
 }
 
 #[cfg(target_os = "android")]
