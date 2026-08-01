@@ -60,6 +60,7 @@ import org.archphene.app.launcher.LauncherApkRequest
 import org.archphene.app.launcher.LauncherApkSigner
 import org.archphene.app.launcher.LauncherIntentMimePolicy
 import org.archphene.app.launcher.LauncherPackageInstaller
+import org.archphene.app.launcher.LatestDispatchSlot
 import org.archphene.app.performance.PerformanceMetrics
 
 internal class InstalledPackageSnapshot(
@@ -937,6 +938,17 @@ class ArchpheneRuntimeService : Service() {
 
     private val binder = LocalBinder()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val packageNotificationUpdates =
+        LatestDispatchSlot<Unit>(
+            schedule = mainHandler::post,
+            cancel = mainHandler::removeCallbacks,
+            consume = {
+                if (packageOperationActive) {
+                    getSystemService(NotificationManager::class.java)
+                        ?.notify(SESSION_NOTIFICATION_ID, activeForegroundNotification())
+                }
+            },
+        )
     private val shellClipboardLock = Any()
     private val pendingShellClipboardBytes = ByteArray(NativeRuntime.TERMINAL_CLIPBOARD_SIZE)
     private var pendingShellClipboardLength = -1
@@ -2222,6 +2234,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     override fun onDestroy() {
+        packageNotificationUpdates.close()
         dnsRootReady = false
         dnsRefreshPending.set(false)
         if (networkCallbackRegistered) {
@@ -15424,12 +15437,7 @@ class ArchpheneRuntimeService : Service() {
         jobStatus = "$packageName · ${jobStateName(state)} · $jobProgress%\n$message"
         jobRevision++
         if (packageThread != null) {
-            mainHandler.post {
-                if (packageOperationActive) {
-                    getSystemService(NotificationManager::class.java)
-                        ?.notify(SESSION_NOTIFICATION_ID, activeForegroundNotification())
-                }
-            }
+            packageNotificationUpdates.offer(Unit)
         }
     }
 

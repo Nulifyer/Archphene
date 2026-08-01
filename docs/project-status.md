@@ -3534,6 +3534,15 @@ closes the slot before Surface-thread shutdown. Ordered-dispatch JVM tests cover
 close rejection, and payload disposal. JDK 26 app unit/lint and exact
 x86_64/AArch64 manager builds pass.
 
+Runtime package-progress notification refreshes now coalesce to one pending
+generation-tagged main-thread update instead of posting one closure per durable
+job revision. The drain reads current bounded package state and active-operation
+state, so replacements render only latest progress and completion cannot revive
+a stale foreground notification. Runtime-service teardown closes and removes the
+queued update. Ordered-dispatch JVM tests cover 100-update retention,
+replacement ordering, scheduling failure, and close rejection. JDK 26 app
+unit/lint and exact x86_64/AArch64 manager builds pass.
+
 Wayland touch down, motion, up, and cancel delivery no longer clones matching
 `WlTouch` resources into temporary vectors. Delivery streams over the already
 bounded retained touch-resource list with live and same-client filtering. Cancel
