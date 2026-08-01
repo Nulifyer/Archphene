@@ -5619,9 +5619,11 @@ impl PackageRuntime {
         {
             return Err(PackageRuntimeError::UnsafeEntry(path));
         }
-        let content = fs::read(&path)?;
-        if content.len() as u64 != metadata.len() {
-            return Err(PackageRuntimeError::SizeMismatch);
+        let (content, opened_metadata) =
+            read_bounded_regular_file_with_metadata(&path, PACKAGE_MUTATION_INTENT_LIMIT)?
+                .ok_or(PackageRuntimeError::SizeMismatch)?;
+        if !opened_private_metadata_is_safe(&opened_metadata, PACKAGE_MUTATION_INTENT_LIMIT) {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
         }
         let content =
             std::str::from_utf8(&content).map_err(|_| PackageRuntimeError::InvalidResolution)?;
@@ -7265,6 +7267,13 @@ fn opened_shells_metadata_is_safe(metadata: &fs::Metadata) -> bool {
         && metadata.len() <= SHELLS_FILE_LIMIT
 }
 
+fn opened_private_metadata_is_safe(metadata: &fs::Metadata, limit: u64) -> bool {
+    metadata.is_file()
+        && metadata.permissions().mode() & 0o077 == 0
+        && metadata.len() != 0
+        && metadata.len() <= limit
+}
+
 fn collect_archive_file_paths(
     listing: &[u8],
     paths: &mut BTreeSet<Vec<u8>>,
@@ -8165,19 +8174,36 @@ fn read_bounded_regular_file_with_metadata(
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(path)?;
     let opened_metadata = file.metadata()?;
-    if !opened_metadata.is_file()
-        || opened_metadata.dev() != metadata.dev()
-        || opened_metadata.ino() != metadata.ino()
-        || opened_metadata.mode() != metadata.mode()
-        || opened_metadata.len() != metadata.len()
-    {
+    if !opened_metadata.is_file() || !stable_opened_metadata(&metadata, &opened_metadata) {
         return Ok(None);
     }
     let content = match read_bounded_exact(&mut file, opened_metadata.len(), limit)? {
         Some(content) => content,
         None => return Ok(None),
     };
-    Ok(Some((content, opened_metadata)))
+    let final_metadata = file.metadata()?;
+    if !stable_opened_metadata(&opened_metadata, &final_metadata) {
+        return Ok(None);
+    }
+    let final_path_metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if final_path_metadata.file_type().is_symlink()
+        || !stable_opened_metadata(&final_metadata, &final_path_metadata)
+    {
+        return Ok(None);
+    }
+    Ok(Some((content, final_metadata)))
+}
+
+fn stable_opened_metadata(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    after.is_file()
+        && after.dev() == before.dev()
+        && after.ino() == before.ino()
+        && after.mode() == before.mode()
+        && after.len() == before.len()
 }
 
 fn read_bounded_exact(
@@ -12258,6 +12284,21 @@ mod tests {
             None,
         );
 
+        let opened_state = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(&state)
+            .expect("open state");
+        let opened_metadata = opened_state.metadata().expect("opened state metadata");
+        let replacement = tree.native.join("state-replacement");
+        fs::write(&replacement, b"other").expect("replacement");
+        fs::rename(&replacement, &state).expect("replace state");
+        let replacement_metadata = fs::symlink_metadata(&state).expect("replacement metadata");
+        assert!(!stable_opened_metadata(
+            &opened_metadata,
+            &replacement_metadata,
+        ));
+
         fs::write(&state, b"oversized").expect("oversized");
         assert_eq!(
             read_bounded_regular_file(&state, 5).expect("oversized result"),
@@ -15277,6 +15318,32 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/libgcc-16.1.1-1-x86_64.pkg.tar.z
                 .as_bytes(),
             b"dotnet-sdk-bin\tinstall\t10.0.10.sdk302-1\trollback",
         );
+        let mutation = tree.root.join(PACKAGE_MUTATION_INTENT_FILE);
+        let opened_mutation = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(&mutation)
+            .expect("open mutation");
+        let private_metadata = opened_mutation
+            .metadata()
+            .expect("private mutation metadata");
+        fs::set_permissions(&mutation, fs::Permissions::from_mode(0o666))
+            .expect("unsafe mutation mode");
+        let writable_metadata = opened_mutation
+            .metadata()
+            .expect("writable mutation metadata");
+        assert!(!stable_opened_metadata(
+            &private_metadata,
+            &writable_metadata,
+        ));
+        assert!(!opened_private_metadata_is_safe(
+            &writable_metadata,
+            PACKAGE_MUTATION_INTENT_LIMIT,
+        ));
+        assert!(matches!(
+            runtime.pending_mutation_any(),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == mutation
+        ));
     }
 
     #[test]

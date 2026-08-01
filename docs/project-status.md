@@ -3272,6 +3272,16 @@ shell-adapter tests cover accepted declarations and writable rejection;
 bounded-reader tests cover links, overflow, growth, and shrink. Pinned Rust 1.88
 package tests and warning-denied Clippy pass.
 
+Durable package-mutation intent loading now uses the bounded no-follow reader
+instead of `fs::read()`. Owner-only mode and size are validated again on the
+opened descriptor before parsing, then the path is re-statted and required to
+identify the same inode. Concurrent replacement, permission widening, growth,
+shrink, links, and oversized state fail closed without exceeding the journal
+ceiling. Mutation recovery tests cover valid official/AUR intents, writable
+state rejection, and opened/path metadata policies; shared bounded-reader tests
+cover atomic replacement, growth, and shrink. Pinned Rust 1.88 package tests and
+warning-denied Clippy pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.
