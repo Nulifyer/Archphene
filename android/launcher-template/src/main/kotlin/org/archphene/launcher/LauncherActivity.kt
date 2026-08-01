@@ -120,6 +120,33 @@ class LauncherActivity :
         val message: String,
     )
 
+    private sealed interface PendingAction {
+        val session: Int
+
+        data class Document(
+            override val session: Int,
+            val requestId: Int,
+            val operation: Int,
+            val title: String,
+            val suggestedName: String,
+            val mimeType: String,
+        ) : PendingAction
+
+        data class OpenUri(
+            override val session: Int,
+            val uri: String,
+        ) : PendingAction
+
+        data class Notification(
+            override val session: Int,
+            val operation: Int,
+            val id: String,
+            val title: String,
+            val body: String,
+        ) : PendingAction
+
+    }
+
     private sealed interface CursorUpdate {
         data class System(val icon: Int) : CursorUpdate
 
@@ -326,6 +353,14 @@ class LauncherActivity :
                 applyRemoteStatus(pending.state, pending.message)
             }
         }
+    private val pendingActions =
+        BoundedCallbackQueue(
+            capacity = MAX_PENDING_ACTION_CALLBACKS,
+            schedule = handler::post,
+            consume = ::applyPendingAction,
+            discard = ::discardPendingAction,
+            reject = ::discardPendingAction,
+        )
     private val applyPendingCursor =
         Runnable {
             when (val update = pendingCursor.take()) {
@@ -556,27 +591,16 @@ class LauncherActivity :
                             ) {
                                 return@runCatching false
                             }
-                            handler.post {
-                                    when (operation) {
-                                        DOCUMENT_OPERATION_SAVE ->
-                                            beginDocumentSave(
-                                                requestId,
-                                                title,
-                                                suggestedName,
-                                                mimeType,
-                                            )
-                                        DOCUMENT_OPERATION_DIRECTORY ->
-                                            beginDirectoryOpen(requestId, title)
-                                        else ->
-                                            beginDocumentOpen(
-                                                requestId,
-                                                title,
-                                                mimeType,
-                                                operation == DOCUMENT_OPERATION_OPEN_MULTIPLE,
-                                            )
-                                    }
-                            }
-                            true
+                            pendingActions.offer(
+                                PendingAction.Document(
+                                    callbackSession,
+                                    requestId,
+                                    operation,
+                                    title,
+                                    suggestedName,
+                                    mimeType,
+                                ),
+                            )
                         }
                         CALLBACK_POINTER_CAPTURE -> {
                             val active = data.readInt()
@@ -663,8 +687,7 @@ class LauncherActivity :
                             ) {
                                 return@runCatching false
                             }
-                            handler.post { openAndroidUri(uri) }
-                            true
+                            pendingActions.offer(PendingAction.OpenUri(callbackSession, uri))
                         }
                         CALLBACK_NOTIFICATION -> {
                             val operation = data.readInt()
@@ -693,10 +716,15 @@ class LauncherActivity :
                             ) {
                                 return@runCatching false
                             }
-                            handler.post {
-                                handleLinuxNotification(operation, id, title, body)
-                            }
-                            true
+                            pendingActions.offer(
+                                PendingAction.Notification(
+                                    callbackSession,
+                                    operation,
+                                    id,
+                                    title,
+                                    body,
+                                ),
+                            )
                         }
                         CALLBACK_PRINT_PDF -> {
                             val title = data.readString()
@@ -993,6 +1021,7 @@ class LauncherActivity :
             override fun onServiceDisconnected(name: ComponentName) {
                 remote = null
                 sessionId = 0
+                pendingActions.clear()
                 remoteStatus = STATUS_STARTING
                 resetSurfaceAttachment()
                 recreateSurfaceView()
@@ -1175,6 +1204,7 @@ class LauncherActivity :
 
     override fun onStart() {
         super.onStart()
+        pendingActions.resume()
         if (remote != null) {
             if (sessionId > 0) {
                 attachSurface()
@@ -1343,6 +1373,7 @@ class LauncherActivity :
     private fun resetDeadBinding() {
         remote = null
         sessionId = 0
+        pendingActions.clear()
         remoteStatus = STATUS_STARTING
         accessibilityProvider.clear()
         resetSurfaceAttachment()
@@ -1426,6 +1457,7 @@ class LauncherActivity :
         pendingPointerCapture.clear()
         pendingAppearance.clear()
         pendingStatus.clear()
+        pendingActions.pause()
         if (
             cameraPermissionRequestInFlight &&
             !getSharedPreferences(CAMERA_PREFERENCES, MODE_PRIVATE)
@@ -1458,6 +1490,7 @@ class LauncherActivity :
         pendingPointerCapture.close()
         pendingAppearance.close()
         pendingStatus.close()
+        pendingActions.close()
         pendingNotifications.fill(null)
         stopClipboardListening()
         cancelPendingDocumentRequest()
@@ -3544,6 +3577,7 @@ class LauncherActivity :
     private fun closeSession() {
         val activeSession = sessionId
         detachSurface()
+        pendingActions.clear()
         sessionId = 0
         remoteStatus = STATUS_STARTING
         val service = remote
@@ -4396,6 +4430,61 @@ class LauncherActivity :
         status.visibility = View.VISIBLE
     }
 
+    private fun applyPendingAction(action: PendingAction) {
+        if (action.session != sessionId || remote == null) {
+            discardPendingAction(action)
+            return
+        }
+        when (action) {
+            is PendingAction.Document ->
+                when (action.operation) {
+                    DOCUMENT_OPERATION_SAVE ->
+                        beginDocumentSave(
+                            action.requestId,
+                            action.title,
+                            action.suggestedName,
+                            action.mimeType,
+                        )
+                    DOCUMENT_OPERATION_DIRECTORY ->
+                        beginDirectoryOpen(action.requestId, action.title)
+                    else ->
+                        beginDocumentOpen(
+                            action.requestId,
+                            action.title,
+                            action.mimeType,
+                            action.operation == DOCUMENT_OPERATION_OPEN_MULTIPLE,
+                        )
+                }
+            is PendingAction.OpenUri -> openAndroidUri(action.uri)
+            is PendingAction.Notification ->
+                handleLinuxNotification(
+                    action.operation,
+                    action.id,
+                    action.title,
+                    action.body,
+                )
+        }
+    }
+
+    private fun discardPendingAction(action: PendingAction) {
+        when (action) {
+            is PendingAction.Document ->
+                if (action.session == sessionId && remote != null) {
+                    sendDocumentResult(
+                        action.requestId,
+                        action.operation,
+                        DOCUMENT_RESULT_CANCELLED,
+                        null,
+                        "",
+                        false,
+                    )
+                }
+            is PendingAction.OpenUri,
+            is PendingAction.Notification,
+            -> Unit
+        }
+    }
+
     private fun applyRemoteStatus(
         state: Int,
         message: String,
@@ -5052,6 +5141,7 @@ class LauncherActivity :
         private const val MIN_PRINT_BYTES = 5L
         private const val MAX_PRINT_BYTES = 256L * 1024 * 1024
         private const val MAX_PENDING_PRINTS = 4
+        private const val MAX_PENDING_ACTION_CALLBACKS = 32
         private const val MAX_STALE_PRINT_FILES = 32
         private const val MAX_PRINT_PAGES = 10_000
         private const val MAX_PRINT_PAGE_DIMENSION = 100_000

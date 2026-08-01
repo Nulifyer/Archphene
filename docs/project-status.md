@@ -3478,6 +3478,18 @@ replacement/clear/close disposal, scheduling failure, and both transition
 markers. Launcher-template debug unit tests and lint pass; exact release
 R8/template assembly passes in both x86_64 and AArch64 manager builds.
 
+Non-coalescible generated-launcher document, browser-URI, and notification
+callbacks now enter a 32-item FIFO instead of posting unbounded main-thread
+closures. One drain remains scheduled at a time. Generation tokens invalidate
+removed lifecycle callbacks, stop-time pause rejects races, and session tags
+prevent old manager actions from entering a replacement session. Overflow,
+lifecycle clearing, and session close explicitly cancel one-way document
+requests; URI and notification overflow fails closed. Microphone consent remains
+on its manager-enforced single-pending-request path. JVM tests cover FIFO
+capacity, rejection and cleanup, scheduler failure, stale-drain invalidation,
+pause/resume, and close. Launcher-template debug unit/lint and exact
+x86_64/AArch64 release R8/template assembly pass.
+
 Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
