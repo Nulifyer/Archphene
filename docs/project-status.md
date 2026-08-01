@@ -3310,6 +3310,15 @@ Exact, grown, shrunk, interrupted, replaced, corrupt, and linked registry tests
 pass without allocating beyond the 4 MiB ceiling. Pinned Rust 1.88 launcher
 tests and warning-denied Clippy pass.
 
+Bounded package-file copies now stream exactly the validated metadata size and
+probe overflow separately instead of copying until EOF. Device, inode, mode,
+size, and timestamps must remain stable across initial validation, the opened
+source descriptor, copy completion, and the final path. Concurrent growth,
+shrink, or replacement therefore fails closed. Tests cover exact, grown,
+shrunk, oversized, and linked sources without writing growth bytes past the
+expected destination size. Pinned Rust 1.88 package tests and warning-denied
+Clippy pass.
+
 Android presentation now retains content validity and one conservative stale
 damage union independently for each of its three reusable `AHardwareBuffer`
 slots. Fresh, resized, invalidated, and evidence-free slots receive a full copy.

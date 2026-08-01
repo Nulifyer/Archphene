@@ -8206,6 +8206,29 @@ fn stable_opened_metadata(before: &fs::Metadata, after: &fs::Metadata) -> bool {
         && after.ino() == before.ino()
         && after.mode() == before.mode()
         && after.len() == before.len()
+        && after.mtime() == before.mtime()
+        && after.mtime_nsec() == before.mtime_nsec()
+        && after.ctime() == before.ctime()
+        && after.ctime_nsec() == before.ctime_nsec()
+}
+
+fn copy_exact_bytes(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    expected: u64,
+) -> io::Result<bool> {
+    if io::copy(&mut Read::by_ref(input).take(expected), output)? != expected {
+        return Ok(false);
+    }
+    let mut overflow = [0_u8; 1];
+    loop {
+        match input.read(&mut overflow) {
+            Ok(0) => return Ok(true),
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn read_bounded_exact(
@@ -10572,6 +10595,15 @@ fn copy_bounded_regular_file(
     destination: &Path,
     maximum_size: u64,
 ) -> Result<(), PackageRuntimeError> {
+    copy_bounded_regular_file_after_open(source, destination, maximum_size, || Ok(()))
+}
+
+fn copy_bounded_regular_file_after_open(
+    source: &Path,
+    destination: &Path,
+    maximum_size: u64,
+    after_open: impl FnOnce() -> Result<(), PackageRuntimeError>,
+) -> Result<(), PackageRuntimeError> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
@@ -10584,16 +10616,25 @@ fn copy_bounded_regular_file(
         .read(true)
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(source)?;
-    if input.metadata()?.len() != metadata.len() {
+    let opened_metadata = input.metadata()?;
+    if !stable_opened_metadata(&metadata, &opened_metadata) {
         return Err(PackageRuntimeError::SizeMismatch);
     }
+    after_open()?;
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(destination)?;
-    if io::copy(&mut input, &mut output)? != metadata.len() {
+    if !copy_exact_bytes(&mut input, &mut output, opened_metadata.len())? {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    let final_descriptor = input.metadata()?;
+    let final_path = fs::symlink_metadata(source)?;
+    if !stable_opened_metadata(&opened_metadata, &final_descriptor)
+        || !stable_opened_metadata(&final_descriptor, &final_path)
+    {
         return Err(PackageRuntimeError::SizeMismatch);
     }
     output.sync_all()?;
@@ -12267,6 +12308,83 @@ mod tests {
             read_bounded_exact(&mut std::io::repeat(0), 5, 5).expect("unbounded source"),
             None,
         );
+    }
+
+    #[test]
+    fn exact_copy_rejects_growth_without_writing_past_expected_size() {
+        let mut exact = Vec::new();
+        assert!(copy_exact_bytes(&mut Cursor::new(b"state"), &mut exact, 5).expect("exact copy"));
+        assert_eq!(exact, b"state");
+
+        let mut grown = Vec::new();
+        assert!(!copy_exact_bytes(&mut Cursor::new(b"state!"), &mut grown, 5).expect("grown copy"));
+        assert_eq!(grown, b"state");
+
+        let mut shrunk = Vec::new();
+        assert!(!copy_exact_bytes(&mut Cursor::new(b"stat"), &mut shrunk, 5).expect("shrunk copy"));
+        assert_eq!(shrunk, b"stat");
+    }
+
+    #[test]
+    fn bounded_regular_file_copy_rejects_links_and_static_overflow() {
+        let tree = TestTree::new();
+        let source = tree.native.join("copy-source");
+        let destination = tree.native.join("copy-destination");
+        fs::write(&source, b"state").expect("copy source");
+        copy_bounded_regular_file(&source, &destination, 5).expect("bounded copy");
+        assert_eq!(fs::read(&destination).expect("copied bytes"), b"state");
+
+        let oversized_destination = tree.native.join("oversized-destination");
+        assert!(matches!(
+            copy_bounded_regular_file(&source, &oversized_destination, 4),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == source
+        ));
+        assert!(!oversized_destination.exists());
+
+        let link = tree.native.join("copy-link");
+        symlink(&source, &link).expect("copy link");
+        let linked_destination = tree.native.join("linked-destination");
+        assert!(matches!(
+            copy_bounded_regular_file(&link, &linked_destination, 5),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == link
+        ));
+        assert!(!linked_destination.exists());
+
+        let growth_destination = tree.native.join("growth-destination");
+        assert!(matches!(
+            copy_bounded_regular_file_after_open(&source, &growth_destination, 5, || {
+                OpenOptions::new()
+                    .append(true)
+                    .open(&source)?
+                    .write_all(b"!")?;
+                Ok(())
+            }),
+            Err(PackageRuntimeError::SizeMismatch)
+        ));
+        fs::remove_file(&growth_destination).expect("growth destination");
+
+        fs::write(&source, b"state").expect("restore source");
+        let shrink_destination = tree.native.join("shrink-destination");
+        assert!(matches!(
+            copy_bounded_regular_file_after_open(&source, &shrink_destination, 5, || {
+                OpenOptions::new().write(true).open(&source)?.set_len(4)?;
+                Ok(())
+            }),
+            Err(PackageRuntimeError::SizeMismatch)
+        ));
+        fs::remove_file(&shrink_destination).expect("shrink destination");
+
+        fs::write(&source, b"state").expect("restore source");
+        let replacement = tree.native.join("copy-replacement");
+        let replacement_destination = tree.native.join("replacement-destination");
+        assert!(matches!(
+            copy_bounded_regular_file_after_open(&source, &replacement_destination, 5, || {
+                fs::write(&replacement, b"other")?;
+                fs::rename(&replacement, &source)?;
+                Ok(())
+            }),
+            Err(PackageRuntimeError::SizeMismatch)
+        ));
     }
 
     #[test]
