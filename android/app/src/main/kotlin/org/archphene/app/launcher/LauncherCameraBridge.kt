@@ -14,7 +14,7 @@ import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
-internal class CameraRuntimeRegistry<T> {
+internal class RuntimeLifecycleRegistry<T> {
     private val owned = LinkedHashSet<T>()
     private val unreaped = LinkedHashSet<T>()
 
@@ -347,7 +347,7 @@ internal class LauncherCameraBridge(
         private const val HEX = "0123456789abcdef"
         private val random = SecureRandom()
         private val runtimeLifecycleLock = Any()
-        private val runtimeRegistry = CameraRuntimeRegistry<LauncherCameraBridge>()
+        private val runtimeRegistry = RuntimeLifecycleRegistry<LauncherCameraBridge>()
         private val PAYLOAD_LINKS =
             arrayOf(
                 "libpipewire-0.3.so.0" to "libarchphene_pipewire_client.so",

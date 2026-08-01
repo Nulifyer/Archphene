@@ -11,7 +11,8 @@ import org.junit.Test
 class LauncherPortalSaveRecoveryTest {
     @Test
     fun recoversDisplayNameSlotsAndLegacyFlatStaging() {
-        val root = Files.createTempDirectory("archphene-save-recovery")
+        val container = Files.createTempDirectory("archphene-save-recovery")
+        val root = container.resolve("arch-root").createDirectories()
         try {
             val base =
                 root.resolve("home/archphene/.cache/archphene/portal-save")
@@ -25,14 +26,17 @@ class LauncherPortalSaveRecoveryTest {
 
             assertTrue(Files.isDirectory(base))
             assertFalse(Files.exists(current))
+            val recovered = container.resolve("portal-save-recovery").toFile().listFiles()
+            assertTrue(recovered != null && recovered.size == 2)
         } finally {
-            root.toFile().deleteRecursively()
+            container.toFile().deleteRecursively()
         }
     }
 
     @Test
     fun rejectsAStagingSlotWithMoreThanOneFile() {
-        val root = Files.createTempDirectory("archphene-save-recovery-hostile")
+        val container = Files.createTempDirectory("archphene-save-recovery-hostile")
+        val root = container.resolve("arch-root").createDirectories()
         try {
             val slot =
                 root.resolve(
@@ -48,7 +52,7 @@ class LauncherPortalSaveRecoveryTest {
             assertTrue(Files.exists(slot.resolve("first.txt")))
             assertTrue(Files.exists(slot.resolve("second.txt")))
         } finally {
-            root.toFile().deleteRecursively()
+            container.toFile().deleteRecursively()
         }
     }
 }

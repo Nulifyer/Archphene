@@ -2149,11 +2149,11 @@ class LauncherSessionService : Service() {
                         requestAccessibilityMenu = { nodeId, transition ->
                             notifyAccessibilityMenu(session, nodeId, transition)
                         },
-                        importDirectory = { displayName, descriptor ->
-                            runtime.importPortalFolder(displayName, descriptor)
+                        importDirectory = { displayName, descriptor, cancellationToken ->
+                            runtime.importPortalFolder(displayName, descriptor, cancellationToken)
                         },
-                        cancelDirectoryImport = {
-                            runtime.cancelPortalFolderImport()
+                        cancelDirectoryImport = { cancellationToken ->
+                            runtime.cancelPortalFolderImport(cancellationToken)
                         },
                     ).also { bridge ->
                         bridge.start()

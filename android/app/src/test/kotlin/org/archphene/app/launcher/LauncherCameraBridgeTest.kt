@@ -12,7 +12,7 @@ import org.junit.Test
 class LauncherCameraBridgeTest {
     @Test
     fun cameraRuntimeRegistryRetainsFailedCloseAndBlocksReplacement() {
-        val registry = CameraRuntimeRegistry<String>()
+        val registry = RuntimeLifecycleRegistry<String>()
         registry.claim("active")
         registry.finish("active", terminated = false)
         assertTrue(registry.hasUnreaped())
@@ -22,7 +22,7 @@ class LauncherCameraBridgeTest {
 
     @Test
     fun cameraRuntimeRegistryReleasesRuntimeAfterEventualReap() {
-        val registry = CameraRuntimeRegistry<String>()
+        val registry = RuntimeLifecycleRegistry<String>()
         registry.claim("retained")
         registry.finish("retained", terminated = false)
         registry.finish("retained", terminated = true)
@@ -35,7 +35,7 @@ class LauncherCameraBridgeTest {
     fun cameraRuntimeRegistryBlocksOwnedSameSessionUntilCloseFinishes() {
         data class Runtime(val sessionId: Int)
 
-        val registry = CameraRuntimeRegistry<Runtime>()
+        val registry = RuntimeLifecycleRegistry<Runtime>()
         val oldRuntime = Runtime(7)
         registry.claim(oldRuntime)
         assertTrue(registry.hasOwnedMatching { runtime -> runtime.sessionId == 7 })

@@ -3423,6 +3423,30 @@ prefix, and preserves following mixed-delimiter lines. The JDK 26 app unit/lint
 gate and current exact-APK private portal startup within the Snapshot camera
 gate pass on the x86_64 emulator and AArch64 Samsung.
 
+Private D-Bus and XDG portal teardown now has process-wide ownership and bounded
+waits. Graceful and forced helper waits each stop after two seconds. Helper
+processes, log drainers, broker/client/import/mirror workers, and save
+finalization remain strongly owned until they stop; an autonomous bounded retry
+completes transient cleanup after a session owner drops its bridge reference.
+Replacement startup cannot overlap an unreaped portal, and stale recovery
+excludes every live runtime and save path. Directory-import cancellation carries
+a random operation token through the runtime, preventing an old bridge from
+cancelling a newer import.
+
+Final Android provider writes run on one tracked finalizer. If its current write
+does not stop, teardown closes only that destination descriptor. The intact
+staging file is synced and atomically moved into a mode-0700 manager-private
+recovery directory before cleanup; startup also recovers interrupted staging
+instead of deleting it. Recovery is capped at 32 files and 1 GiB. Capacity
+exhaustion preserves staging, parks retries without CPU or log churn, and fails
+closed rather than discarding bytes.
+Deterministic JVM tests cover two-stage process deadlines, forced reap, cleanup
+readiness, live-path exclusion, failed-copy disposition, atomic recovery,
+capacity rejection, and stale slot recovery. The JDK 26 app unit/lint gate
+passes. Current direct Gradle APKs pass the Snapshot portal/camera gate on the
+x86_64 emulator and AArch64 Samsung. After wrapper force-stop, neither device
+retains a portal helper process or `cache/p*` runtime directory.
+
 Preference persistence now uses one keyed coalescing worker bounded by ten task
 domains—startup loading and nine persistent preference keys—instead of an
 unbounded executor queue. Repeated

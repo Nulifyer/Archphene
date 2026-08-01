@@ -19,10 +19,14 @@ import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.security.SecureRandom
 import java.util.Locale
 import java.util.concurrent.Semaphore
@@ -51,6 +55,38 @@ internal data class LauncherPortalDirectoryResult(
     val displayName: String,
     val cancelled: Boolean,
 )
+
+internal data class PortalCloseReadiness(
+    val brokerStopped: Boolean,
+    val clientsStopped: Boolean,
+    val importsStopped: Boolean,
+    val mirrorStopped: Boolean,
+    val processesStopped: Boolean,
+    val drainersStopped: Boolean,
+    val saveFinalizerStopped: Boolean,
+    val directoryCancelStopped: Boolean,
+    val savesFinalized: Boolean,
+) {
+    val canCleanup: Boolean
+        get() =
+            brokerStopped &&
+                clientsStopped &&
+                importsStopped &&
+                mirrorStopped &&
+                processesStopped &&
+                drainersStopped &&
+                saveFinalizerStopped &&
+                directoryCancelStopped &&
+                savesFinalized
+}
+
+internal fun canDiscardPortalStaging(
+    copyRequired: Boolean,
+    copySucceeded: Boolean,
+    recovered: Boolean,
+): Boolean = !copyRequired || copySucceeded || recovered
+
+internal class PortalRecoveryCapacityException(message: String) : IllegalStateException(message)
 
 /**
  * One private XDG portal frontend for one authenticated visible launcher.
@@ -86,8 +122,8 @@ internal class LauncherPortalBridge(
     private val publishAccessibilityEvent: (Int, String) -> Boolean,
     private val takeAccessibilityAction: (Int) -> String,
     private val requestAccessibilityMenu: (Int, Boolean) -> Boolean,
-    private val importDirectory: (String, ParcelFileDescriptor) -> String?,
-    private val cancelDirectoryImport: () -> Unit,
+    private val importDirectory: (String, ParcelFileDescriptor, Long) -> String?,
+    private val cancelDirectoryImport: (Long) -> Boolean,
 ) : Closeable {
     private class ActiveSave(
         val staging: File,
@@ -105,6 +141,7 @@ internal class LauncherPortalBridge(
         var copiedModified = -1L
         var writeObserved = false
         var truncateFallbackLogged = false
+        var recovered = false
     }
 
     private val random = SecureRandom()
@@ -117,11 +154,13 @@ internal class LauncherPortalBridge(
         File(savesBaseDirectory, "$sessionId-$instanceToken")
     private val importsDirectory =
         File(archRoot, "home/archphene/Documents/Android")
+    private val recoveryDirectory = File(context.filesDir, "portal-save-recovery")
     private val appearanceState = File(runtimeDirectory, APPEARANCE_STATE)
     private val appearanceStateTemporary = File(runtimeDirectory, APPEARANCE_STATE_TEMPORARY)
     private val activeSaves = ArrayList<ActiveSave>(MAX_ACTIVE_SAVES)
     @Volatile private var saveSnapshot = emptyArray<ActiveSave>()
     @Volatile private var running = false
+    @Volatile private var closing = false
     private var server: LocalServerSocket? = null
     private lateinit var brokerSocketName: String
     private var brokerThread: Thread? = null
@@ -129,9 +168,23 @@ internal class LauncherPortalBridge(
     private val brokerRequestLock = Any()
     private val brokerClients = HashSet<LocalSocket>(MAX_BROKER_CLIENTS)
     private val brokerClientThreads = HashSet<Thread>(MAX_BROKER_CLIENTS)
+    private val activeImportDescriptors = HashSet<ParcelFileDescriptor>(MAX_OPEN_DOCUMENTS)
+    private val activeImportThreads = HashSet<Thread>(MAX_BROKER_CLIENTS + 1)
     private var mirrorThread: Thread? = null
     private var daemon: java.lang.Process? = null
     private var portal: java.lang.Process? = null
+    private var daemonLogThread: Thread? = null
+    private var portalLogThread: Thread? = null
+    private var saveFinalizerThread: Thread? = null
+    private var finalizingSaves = emptyArray<ActiveSave>()
+    @Volatile private var mirrorCopyingSave: ActiveSave? = null
+    @Volatile private var finalizerCopyingSave: ActiveSave? = null
+    private var directoryCancelThread: Thread? = null
+    private var directoryImportActive = false
+    private var directoryImportToken = 0L
+    private var directoryCancelRequested = false
+    private var cleanupRetryScheduled = false
+    private var recoveryCapacityBlocked = false
     private var busSocket: File? = null
     private var nextSaveId = 1
     private var publishedDark = initialDark
@@ -147,40 +200,66 @@ internal class LauncherPortalBridge(
         return Uri.parse(uri).path ?: error("Imported document URI has no path")
     }
 
-    @Synchronized
-    fun start() {
-        check(!running) { "Portal bridge is already running" }
-        check(
-            !cameraEnabled ||
-                (
-                    cameraPipeWireSocket != null &&
-                        cameraPipeWireSocket.length in 1 until UNIX_SOCKET_PATH_LIMIT &&
-                        cameraPipeWireSocket.startsWith("/data/") &&
-                        cameraPipeWireSocket.none { character ->
-                            character == '\u0000' || character.isISOControl()
-                        }
-                ),
-        ) {
-            "Camera portal requires one private PipeWire socket"
+    fun start() =
+        synchronized(runtimeLifecycleLock) {
+            runtimeRegistry.unreapedSnapshot().forEach { bridge ->
+                bridge.closeLocked()
+            }
+            runtimeRegistry.ownedSnapshot().forEach { bridge ->
+                if (bridge !== this && bridge.sessionId == sessionId) bridge.closeLocked()
+            }
+            check(!runtimeRegistry.hasUnreaped()) {
+                "An earlier portal runtime did not terminate"
+            }
+            check(
+                !runtimeRegistry.hasOwnedMatching { bridge ->
+                    bridge !== this && bridge.sessionId == sessionId
+                },
+            ) {
+                "An earlier portal runtime still owns session=$sessionId"
+            }
+            startLocked()
         }
-        requireDirectory(runtimeDirectory)
-        writeAppearanceState(publishedDark, publishedAccent)
-        prepareSavesDirectory()
-        prepareImportsDirectory()
-        val socketName =
-            "archphene.portal.${Process.myPid()}.$sessionId.${randomHex(8)}"
-        brokerSocketName = socketName
-        val localServer = LocalServerSocket(socketName)
-        server = localServer
-        running = true
-        brokerThread = thread(
-            start = true,
-            isDaemon = true,
-            name = "ArchphenePortalBroker-$sessionId",
-        ) {
-            acceptLoop(localServer)
+
+    private fun startLocked() {
+        check(!running && !closing) { "Portal bridge is already active" }
+        runtimeRegistry.claim(this)
+        synchronized(this) {
+            directoryImportActive = false
+            directoryImportToken = 0L
+            directoryCancelRequested = false
         }
         try {
+            check(
+                !cameraEnabled ||
+                    (
+                        cameraPipeWireSocket != null &&
+                            cameraPipeWireSocket.length in 1 until UNIX_SOCKET_PATH_LIMIT &&
+                            cameraPipeWireSocket.startsWith("/data/") &&
+                            cameraPipeWireSocket.none { character ->
+                                character == '\u0000' || character.isISOControl()
+                            }
+                    ),
+            ) {
+                "Camera portal requires one private PipeWire socket"
+            }
+            requireDirectory(runtimeDirectory)
+            writeAppearanceState(publishedDark, publishedAccent)
+            prepareSavesDirectory()
+            prepareImportsDirectory()
+            val socketName =
+                "archphene.portal.${Process.myPid()}.$sessionId.${randomHex(8)}"
+            brokerSocketName = socketName
+            val localServer = LocalServerSocket(socketName)
+            server = localServer
+            running = true
+            brokerThread = thread(
+                start = true,
+                isDaemon = true,
+                name = "ArchphenePortalBroker-$sessionId",
+            ) {
+                acceptLoop(localServer)
+            }
             startDesktopPortal("@$socketName")
             mirrorThread = thread(
                 start = true,
@@ -189,8 +268,8 @@ internal class LauncherPortalBridge(
             ) {
                 mirrorLoop()
             }
-        } catch (error: Exception) {
-            close()
+        } catch (error: Throwable) {
+            closeLocked()
             throw error
         }
     }
@@ -212,7 +291,7 @@ internal class LauncherPortalBridge(
             output.write(busConfiguration(socketPath).toByteArray(StandardCharsets.UTF_8))
             output.fd.sync()
         }
-        daemon =
+        val daemonProcess =
             ProcessBuilder(
                 daemonFile.absolutePath,
                 "--config-file=${config.absolutePath}",
@@ -220,7 +299,8 @@ internal class LauncherPortalBridge(
                 "--nopidfile",
             ).redirectErrorStream(true)
                 .start()
-                .also { process -> drain(process, "dbus") }
+        daemon = daemonProcess
+        daemonLogThread = drain(daemonProcess, "dbus")
         val deadline = SystemClock.uptimeMillis() + START_TIMEOUT_MILLIS
         while (
             !socket.exists() &&
@@ -233,7 +313,7 @@ internal class LauncherPortalBridge(
             "Private D-Bus session did not become ready"
         }
         busAddress = "unix:path=$socketPath"
-        portal =
+        val portalProcess =
             ProcessBuilder(portalFile.absolutePath)
                 .redirectErrorStream(true)
                 .apply {
@@ -258,7 +338,8 @@ internal class LauncherPortalBridge(
                     environment()["ARCHPHENE_ENABLE_ACCESSIBILITY"] =
                         if (accessibilityEnabled) "1" else "0"
                 }.start()
-                .also { process -> drain(process, "portal") }
+        portal = portalProcess
+        portalLogThread = drain(portalProcess, "portal")
         SystemClock.sleep(PORTAL_READY_DELAY_MILLIS)
         check(portal?.isAlive == true) { "Private portal frontend exited during startup" }
         Log.i(TAG, "Private desktop portal ready session=$sessionId")
@@ -1166,9 +1247,24 @@ internal class LauncherPortalBridge(
         val uri =
             runCatching {
                 descriptor.use {
+                    val cancellationToken = random.nextLong().let { token -> if (token == 0L) 1L else token }
+                    synchronized(this) {
+                        check(running)
+                        directoryImportActive = true
+                        directoryImportToken = cancellationToken
+                    }
                     val logicalPath =
-                        importDirectory(result.displayName, it)
-                            ?: error("Could not import the selected Android folder")
+                        try {
+                            importDirectory(result.displayName, it, cancellationToken)
+                                ?: error("Could not import the selected Android folder")
+                        } finally {
+                            synchronized(this) {
+                                if (directoryImportToken == cancellationToken) {
+                                    directoryImportActive = false
+                                    directoryImportToken = 0L
+                                }
+                            }
+                        }
                     PortalFileUri.fromLogicalPath(logicalPath)
                 }
             }.getOrElse { error ->
@@ -1211,21 +1307,31 @@ internal class LauncherPortalBridge(
         return PortalFileUri.fromLogicalPath(logicalPath)
     }
 
-    @Synchronized
     private fun beginOpen(
         documents: List<LauncherPortalOpenDocument>,
         multiple: Boolean,
     ): List<String> {
-        check(running)
-        check(documents.size in 1..MAX_OPEN_DOCUMENTS)
-        check(multiple || documents.size == 1)
-        check(documents.all { document -> safeName(document.displayName) })
+        val importThread = Thread.currentThread()
+        synchronized(this) {
+            check(running)
+            check(documents.size in 1..MAX_OPEN_DOCUMENTS)
+            check(multiple || documents.size == 1)
+            check(documents.all { document -> safeName(document.displayName) })
+            check(activeImportDescriptors.size + documents.size <= MAX_OPEN_DOCUMENTS)
+            check(activeImportThreads.size < MAX_BROKER_CLIENTS + 1)
+            documents.forEach { document -> activeImportDescriptors.add(document.descriptor) }
+            activeImportThreads.add(importThread)
+        }
         val imported = ArrayList<File>(documents.size)
         var totalCopied = 0L
         val buffer = ByteArray(COPY_BUFFER_BYTES)
         try {
             for (document in documents) {
-                val target = reserveImport(document.displayName)
+                val target =
+                    synchronized(this) {
+                        check(running) { "Portal session closed during document import" }
+                        reserveImport(document.displayName)
+                    }
                 imported += target
                 ParcelFileDescriptor.AutoCloseInputStream(document.descriptor).use { input ->
                     FileOutputStream(target, false).use { output ->
@@ -1252,6 +1358,13 @@ internal class LauncherPortalBridge(
             }
             imported.forEach { file -> runCatching { file.delete() } }
             throw error
+        } finally {
+            synchronized(this) {
+                documents.forEach { document ->
+                    activeImportDescriptors.remove(document.descriptor)
+                }
+                activeImportThreads.remove(importThread)
+            }
         }
         return imported.map { file ->
             val logicalPath = "/home/archphene/Documents/Android/${file.name}"
@@ -1335,7 +1448,12 @@ internal class LauncherPortalBridge(
         ) {
             return
         }
-        copySave(save, length)
+        mirrorCopyingSave = save
+        try {
+            copySave(save, length)
+        } finally {
+            if (mirrorCopyingSave === save) mirrorCopyingSave = null
+        }
         save.copiedLength = length
         save.copiedModified = modified
         Log.i(TAG, "Mirrored Linux SaveFile session=$sessionId bytes=$length")
@@ -1380,65 +1498,359 @@ internal class LauncherPortalBridge(
     }
 
     override fun close() {
-        val saves: Array<ActiveSave>
-        val portalProcess: java.lang.Process?
-        val daemonProcess: java.lang.Process?
+        synchronized(runtimeLifecycleLock) {
+            closeLocked()
+        }
+    }
+
+    private fun closeLocked() {
         val localServer: LocalServerSocket?
-        val brokerWorker: Thread?
         val clientSockets: Array<LocalSocket>
-        val clientWorkers: Array<Thread>
-        val mirrorWorker: Thread?
+        val importDescriptors: Array<ParcelFileDescriptor>
         synchronized(this) {
-            if (!running && server == null && daemon == null && portal == null) return
+            val hasResources =
+                running ||
+                    closing ||
+                    server != null ||
+                    brokerThread != null ||
+                    brokerClients.isNotEmpty() ||
+                    brokerClientThreads.isNotEmpty() ||
+                    activeImportDescriptors.isNotEmpty() ||
+                    activeImportThreads.isNotEmpty() ||
+                    mirrorThread != null ||
+                    daemon != null ||
+                    portal != null ||
+                    daemonLogThread != null ||
+                    portalLogThread != null ||
+                    saveFinalizerThread != null ||
+                    directoryCancelThread != null ||
+                    directoryImportActive ||
+                    activeSaves.isNotEmpty() ||
+                    finalizingSaves.isNotEmpty() ||
+                    runtimeDirectory.exists() ||
+                    savesDirectory.exists()
+            if (!hasResources) {
+                runtimeRegistry.finish(this, terminated = true)
+                return
+            }
             running = false
-            saves = activeSaves.toTypedArray()
-            activeSaves.clear()
+            closing = true
             saveSnapshot = emptyArray()
-            portalProcess = portal
-            portal = null
-            daemonProcess = daemon
-            daemon = null
             localServer = server
             server = null
-            brokerWorker = brokerThread
-            brokerThread = null
             clientSockets = brokerClients.toTypedArray()
-            brokerClients.clear()
-            clientWorkers = brokerClientThreads.toTypedArray()
-            brokerClientThreads.clear()
-            mirrorWorker = mirrorThread
-            mirrorThread = null
+            importDescriptors = activeImportDescriptors.toTypedArray()
         }
         runCatching { localServer?.close() }
         clientSockets.forEach { socket -> runCatching { socket.close() } }
-        runCatching { cancelDirectoryImport() }
-        joinWorker(mirrorWorker)
-        joinWorker(brokerWorker)
-        clientWorkers.forEach(::joinWorker)
-        for (save in saves) {
-            runCatching {
+        importDescriptors.forEach { descriptor -> runCatching { descriptor.close() } }
+        val cancelWorkerToStart =
+            synchronized(this) {
+                if (
+                    directoryImportActive &&
+                    !directoryCancelRequested &&
+                    directoryCancelThread == null
+                ) {
+                    directoryCancelRequested = true
+                    val cancellationToken = directoryImportToken
+                    Thread(
+                        {
+                            val cancelled =
+                                runCatching { cancelDirectoryImport(cancellationToken) }
+                                    .getOrDefault(false)
+                            if (!cancelled) {
+                                synchronized(this) {
+                                    if (
+                                        directoryImportActive &&
+                                        directoryImportToken == cancellationToken
+                                    ) {
+                                        directoryCancelRequested = false
+                                    }
+                                }
+                            }
+                        },
+                        "ArchphenePortalImportCancel-$sessionId",
+                    ).apply {
+                        isDaemon = true
+                        directoryCancelThread = this
+                    }
+                } else {
+                    null
+                }
+            }
+        if (cancelWorkerToStart != null) {
+            runCatching { cancelWorkerToStart.start() }
+                .onFailure { error ->
+                    synchronized(this) {
+                        if (directoryCancelThread === cancelWorkerToStart) {
+                            directoryCancelThread = null
+                            directoryCancelRequested = false
+                        }
+                    }
+                    Log.e(TAG, "Could not start directory cancellation session=$sessionId", error)
+                }
+        }
+        val cancelWorker = synchronized(this) { directoryCancelThread }
+        if (joinWorker(cancelWorker, "document-import-cancel")) {
+            synchronized(this) {
+                if (directoryCancelThread === cancelWorker) directoryCancelThread = null
+            }
+        }
+
+        val mirrorWorker = synchronized(this) { mirrorThread }
+        var mirrorStopped = joinWorker(mirrorWorker, "mirror")
+        if (!mirrorStopped) {
+            mirrorCopyingSave?.let { save -> runCatching { save.output.close() } }
+            mirrorStopped = joinWorker(mirrorWorker, "mirror-cancelled")
+        }
+        if (mirrorStopped) {
+            synchronized(this) {
+                if (mirrorThread === mirrorWorker) mirrorThread = null
+            }
+        }
+        val brokerWorker = synchronized(this) { brokerThread }
+        if (joinWorker(brokerWorker, "broker")) {
+            synchronized(this) {
+                if (brokerThread === brokerWorker) brokerThread = null
+            }
+        }
+        val clientWorkers = synchronized(this) { brokerClientThreads.toTypedArray() }
+        clientWorkers.forEach { worker ->
+            if (joinWorker(worker, "client")) {
+                synchronized(this) { brokerClientThreads.remove(worker) }
+            }
+        }
+        val importWorkers = synchronized(this) { activeImportThreads.toTypedArray() }
+        importWorkers.forEach { worker -> joinWorker(worker, "document-import") }
+
+        stopTrackedProcess(portal, portalLogThread, "portal") { process, drainer ->
+            if (portal === process) portal = null
+            if (portalLogThread === drainer) portalLogThread = null
+        }
+        stopTrackedProcess(daemon, daemonLogThread, "dbus") { process, drainer ->
+            if (daemon === process) daemon = null
+            if (daemonLogThread === drainer) daemonLogThread = null
+        }
+
+        synchronized(this) {
+            if (
+                mirrorThread == null &&
+                saveFinalizerThread == null &&
+                (activeSaves.isNotEmpty() || finalizingSaves.isNotEmpty())
+            ) {
+                runCatching { startSaveFinalizerLocked() }
+                    .onFailure { error ->
+                        Log.e(TAG, "Could not start portal save finalizer session=$sessionId", error)
+                    }
+            }
+        }
+        val finalizer = synchronized(this) { saveFinalizerThread }
+        var finalizerStopped = joinWorker(finalizer, "save-finalizer")
+        if (!finalizerStopped) {
+            finalizerCopyingSave?.let { save -> runCatching { save.output.close() } }
+            finalizerStopped = joinWorker(finalizer, "save-finalizer-cancelled")
+        }
+        if (finalizerStopped) {
+            synchronized(this) {
+                if (saveFinalizerThread === finalizer) saveFinalizerThread = null
+            }
+        }
+
+        val resourcesStopped =
+            synchronized(this) {
+                brokerClients.removeAll { socket -> socket.isClosed }
+                PortalCloseReadiness(
+                    brokerStopped = brokerThread == null,
+                    clientsStopped =
+                        brokerClients.isEmpty() && brokerClientThreads.isEmpty(),
+                    importsStopped =
+                        activeImportDescriptors.isEmpty() && activeImportThreads.isEmpty(),
+                    mirrorStopped = mirrorThread == null,
+                    processesStopped = portal == null && daemon == null,
+                    drainersStopped = portalLogThread == null && daemonLogThread == null,
+                    saveFinalizerStopped = saveFinalizerThread == null,
+                    directoryCancelStopped =
+                        directoryCancelThread == null && !directoryImportActive,
+                    savesFinalized = activeSaves.isEmpty() && finalizingSaves.isEmpty(),
+                ).canCleanup
+            }
+        val cleaned = resourcesStopped && cleanupOwnedPaths()
+        synchronized(this) {
+            if (cleaned) closing = false
+        }
+        runtimeRegistry.finish(this, terminated = cleaned)
+        if (!cleaned) {
+            Log.w(TAG, "Portal runtime remained live after bounded teardown session=$sessionId")
+            scheduleCleanupRetryLocked()
+        }
+    }
+
+    private fun stopTrackedProcess(
+        process: java.lang.Process?,
+        drainer: Thread?,
+        label: String,
+        release: (java.lang.Process?, Thread?) -> Unit,
+    ) {
+        val processStopped = stopProcessBoundedly(process, PROCESS_STOP_TIMEOUT_MILLIS)
+        if (processStopped) runCatching { process?.inputStream?.close() }
+        val drainerStopped = processStopped && joinWorker(drainer, "$label-log")
+        if (processStopped && drainerStopped) {
+            synchronized(this) { release(process, drainer) }
+        }
+    }
+
+    private fun startSaveFinalizerLocked() {
+        val retainedSaves = finalizingSaves
+        val saves =
+            if (retainedSaves.isNotEmpty()) retainedSaves else activeSaves.toTypedArray()
+        val worker =
+            thread(
+                start = false,
+                isDaemon = true,
+                name = "ArchphenePortalSaveFinalizer-$sessionId",
+            ) {
+                finalizeSaves(saves)
+            }
+        saveFinalizerThread = worker
+        finalizingSaves = saves
+        activeSaves.clear()
+        saveSnapshot = emptyArray()
+        try {
+            worker.start()
+        } catch (error: Throwable) {
+            saveFinalizerThread = null
+            if (retainedSaves.isNotEmpty()) {
+                finalizingSaves = retainedSaves
+            } else {
+                finalizingSaves = emptyArray()
+                activeSaves.addAll(saves)
+            }
+            saveSnapshot = activeSaves.toTypedArray()
+            throw error
+        }
+    }
+
+    private fun finalizeSaves(saves: Array<ActiveSave>) {
+        val residual = ArrayList<ActiveSave>(saves.size)
+        try {
+            for (save in saves) {
                 val length = save.staging.length()
                 val modified = save.staging.lastModified()
-                if (
-                    save.staging.isFile &&
-                    length <= MAX_SAVE_BYTES &&
-                    (length != save.copiedLength || modified != save.copiedModified)
-                ) {
-                    copySave(save, length)
+                val copyRequired =
+                    !save.recovered &&
+                        save.staging.isFile &&
+                        length <= MAX_SAVE_BYTES &&
+                        (length != save.copiedLength || modified != save.copiedModified)
+                val copySucceeded =
+                    if (copyRequired && save.output.fd.valid()) {
+                        finalizerCopyingSave = save
+                        try {
+                            runCatching { copySave(save, length) }
+                                .onFailure { error ->
+                                    Log.e(
+                                        TAG,
+                                        "Final portal document mirror failed session=$sessionId",
+                                        error,
+                                    )
+                                }.isSuccess
+                        } finally {
+                            if (finalizerCopyingSave === save) finalizerCopyingSave = null
+                        }
+                    } else {
+                        false
+                    }
+                runCatching { save.output.close() }
+                val recovered =
+                    save.recovered ||
+                        (copyRequired && !copySucceeded && recoverFailedSave(save))
+                if (canDiscardPortalStaging(copyRequired, copySucceeded, recovered)) {
+                    val stagingRemoved = !save.staging.exists() || save.staging.delete()
+                    val slotRemoved =
+                        !save.stagingDirectory.exists() || save.stagingDirectory.delete()
+                    if (!stagingRemoved || !slotRemoved) residual += save
+                } else {
+                    Log.e(TAG, "Preserving uncommitted portal save session=$sessionId")
+                    residual += save
                 }
-            }.onFailure { error ->
-                Log.e(TAG, "Final portal document mirror failed session=$sessionId", error)
             }
-            runCatching { save.output.close() }
-            runCatching { save.staging.delete() }
-            runCatching { save.stagingDirectory.delete() }
+        } finally {
+            finalizerCopyingSave = null
+            synchronized(this) {
+                if (finalizingSaves === saves) finalizingSaves = residual.toTypedArray()
+            }
         }
-        stopProcess(portalProcess)
-        stopProcess(daemonProcess)
-        runCatching { busSocket?.delete() }
-        busSocket = null
-        runCatching { runtimeDirectory.deleteRecursively() }
-        runCatching { savesDirectory.delete() }
+    }
+
+    private fun recoverFailedSave(save: ActiveSave): Boolean {
+        return runCatching {
+            prepareRecoveryDirectory(recoveryDirectory)
+            val recoveredName = recoverPortalSaveFile(save.staging, recoveryDirectory)
+            save.recovered = true
+            Log.e(
+                TAG,
+                "Recovered uncommitted portal save session=$sessionId file=$recoveredName",
+            )
+            true
+        }.getOrElse { error ->
+            if (error is PortalRecoveryCapacityException) {
+                synchronized(this) { recoveryCapacityBlocked = true }
+            }
+            Log.e(TAG, "Could not recover uncommitted portal save session=$sessionId", error)
+            false
+        }
+    }
+
+    private fun scheduleCleanupRetryLocked() {
+        synchronized(this) {
+            if (cleanupRetryScheduled || recoveryCapacityBlocked) return
+            cleanupRetryScheduled = true
+        }
+        runCatching {
+            thread(
+                start = true,
+                isDaemon = true,
+                name = "ArchphenePortalCleanup-$sessionId",
+            ) {
+                try {
+                    while (true) {
+                        SystemClock.sleep(CLEANUP_RETRY_MILLIS)
+                        val complete =
+                            synchronized(runtimeLifecycleLock) {
+                                if (!closing) {
+                                    true
+                                } else {
+                                    runCatching { closeLocked() }
+                                        .onFailure { error ->
+                                            Log.e(
+                                                TAG,
+                                                "Portal cleanup retry failed session=$sessionId",
+                                                error,
+                                            )
+                                        }
+                                    !closing
+                                }
+                            }
+                        if (complete) return@thread
+                        if (synchronized(this) { recoveryCapacityBlocked }) return@thread
+                    }
+                } finally {
+                    synchronized(this) { cleanupRetryScheduled = false }
+                }
+            }
+        }.onFailure { error ->
+            synchronized(this) { cleanupRetryScheduled = false }
+            Log.e(TAG, "Could not schedule portal cleanup retry session=$sessionId", error)
+        }
+    }
+
+    private fun cleanupOwnedPaths(): Boolean {
+        var cleaned = true
+        val socket = busSocket
+        if (socket != null && socket.exists() && !socket.delete()) cleaned = false
+        if (cleaned) busSocket = null
+        if (runtimeDirectory.exists() && !runtimeDirectory.deleteRecursively()) cleaned = false
+        if (savesDirectory.exists() && !savesDirectory.delete()) cleaned = false
+        return cleaned
     }
 
     private fun requireHelper(name: String): File {
@@ -1644,7 +2056,7 @@ internal class LauncherPortalBridge(
     private fun drain(
         process: java.lang.Process,
         label: String,
-    ) {
+    ): Thread =
         thread(start = true, isDaemon = true, name = "ArchphenePortal-$label-$sessionId") {
             runCatching {
                 drainBoundedUtf8Lines(process.inputStream, MAX_LOG_LINE_BYTES) { line ->
@@ -1652,23 +2064,24 @@ internal class LauncherPortalBridge(
                 }
             }
         }
-    }
 
-    private fun stopProcess(process: java.lang.Process?) {
-        if (process == null) return
-        process.destroy()
-        if (!process.waitFor(PROCESS_STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            process.destroyForcibly()
-            process.waitFor()
+    private fun joinWorker(
+        worker: Thread?,
+        label: String,
+    ): Boolean {
+        if (worker == null) return true
+        if (worker === Thread.currentThread()) return false
+        try {
+            worker.join(WORKER_STOP_TIMEOUT_MILLIS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return !worker.isAlive
         }
-    }
-
-    private fun joinWorker(worker: Thread?) {
-        if (worker == null || worker === Thread.currentThread()) return
-        worker.join(WORKER_STOP_TIMEOUT_MILLIS)
         if (worker.isAlive) {
-            Log.w(TAG, "Portal worker did not stop promptly session=$sessionId")
+            Log.w(TAG, "Portal worker did not stop label=$label session=$sessionId")
+            return false
         }
+        return true
     }
 
     private fun busConfiguration(socketPath: String): String {
@@ -1706,8 +2119,9 @@ internal class LauncherPortalBridge(
         private const val APPEARANCE_STATE_BYTES = 11
         private const val START_TIMEOUT_MILLIS = 5_000L
         private const val PORTAL_READY_DELAY_MILLIS = 100L
-        private const val PROCESS_STOP_TIMEOUT_SECONDS = 2L
+        private const val PROCESS_STOP_TIMEOUT_MILLIS = 2_000L
         private const val WORKER_STOP_TIMEOUT_MILLIS = 2_000L
+        private const val CLEANUP_RETRY_MILLIS = 250L
         private const val MAX_LOG_LINE_BYTES = 512
         private const val BROKER_IO_TIMEOUT_MILLIS = 1_000
         private const val MAX_BROKER_CLIENTS = 4
@@ -1753,8 +2167,13 @@ internal class LauncherPortalBridge(
         private const val REQUIRED_STABLE_POLLS = 2
         private const val EMPTY_SAVE_GRACE_MILLIS = 5_000L
         private const val MAX_RECOVERED_SAVE_DIRECTORIES = 128
+        private const val MAX_RECOVERED_SAVES = 32
+        private const val MAX_RECOVERED_SAVE_BYTES = 1_024L * 1_024 * 1_024
         private const val MAX_RUNTIME_ENTRIES = 4
         private const val HEX = "0123456789abcdef"
+        private val runtimeLifecycleLock = Any()
+        private val runtimeRegistry = RuntimeLifecycleRegistry<LauncherPortalBridge>()
+        private val recoveryRandom = SecureRandom()
         private val AUDIO_INPUT_RESPONSES =
             setOf(
                 "OK",
@@ -1808,6 +2227,98 @@ internal class LauncherPortalBridge(
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")
         private val STALE_RUNTIME_DIRECTORY_NAME =
             Regex("p[1-9][0-9]*-[0-9a-f]{16}")
+        private val RECOVERED_SAVE_NAME = Regex("Recovered portal save [0-9a-f]{32}")
+
+        internal fun stopProcessBoundedly(
+            process: java.lang.Process?,
+            timeoutMillis: Long,
+        ): Boolean {
+            if (process == null || !process.isAlive) return true
+            require(timeoutMillis > 0)
+            process.destroy()
+            return try {
+                if (process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)) {
+                    true
+                } else {
+                    process.destroyForcibly()
+                    process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
+                }
+            } catch (_: InterruptedException) {
+                process.destroyForcibly()
+                Thread.currentThread().interrupt()
+                !process.isAlive
+            }
+        }
+
+        internal fun shouldRecoverPortalPath(
+            path: Path,
+            ownedPaths: Set<Path>,
+        ): Boolean = path.toAbsolutePath().normalize() !in ownedPaths
+
+        internal fun recoverPortalSaveFile(
+            source: File,
+            recoveryDirectory: File,
+        ): String {
+            check(
+                Files.isRegularFile(source.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+                    !Files.isSymbolicLink(source.toPath()) &&
+                    source.length() in 0..MAX_SAVE_BYTES &&
+                    Files.isDirectory(recoveryDirectory.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+                    !Files.isSymbolicLink(recoveryDirectory.toPath()),
+            ) {
+                "Invalid portal save recovery path"
+            }
+            var recoveredCount = 0
+            var recoveredBytes = 0L
+            Files.newDirectoryStream(recoveryDirectory.toPath()).use { entries ->
+                for (entry in entries) {
+                    check(recoveredCount++ < MAX_RECOVERED_SAVES) {
+                        "Too many recovered portal saves"
+                    }
+                    check(
+                        entry.fileName.toString().matches(RECOVERED_SAVE_NAME) &&
+                            Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS) &&
+                            !Files.isSymbolicLink(entry),
+                    ) {
+                        "Invalid recovered portal save"
+                    }
+                    recoveredBytes += Files.size(entry)
+                    check(recoveredBytes <= MAX_RECOVERED_SAVE_BYTES) {
+                        "Recovered portal saves exceed the byte limit"
+                    }
+                }
+            }
+            if (
+                recoveredCount >= MAX_RECOVERED_SAVES ||
+                recoveredBytes > MAX_RECOVERED_SAVE_BYTES - source.length()
+            ) {
+                throw PortalRecoveryCapacityException(
+                    "Recovered portal save capacity is exhausted",
+                )
+            }
+            repeat(MAX_IMPORT_COLLISIONS) {
+                val token = ByteArray(16).also(recoveryRandom::nextBytes)
+                val name =
+                    "Recovered portal save " +
+                        token.joinToString("") { value ->
+                            "%02x".format(value.toInt() and 0xff)
+                        }
+                val target = File(recoveryDirectory, name).canonicalFile
+                check(target.parentFile == recoveryDirectory.canonicalFile)
+                if (Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) return@repeat
+                FileInputStream(source).use { input -> input.fd.sync() }
+                Files.move(
+                    source.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                )
+                FileChannel.open(recoveryDirectory.toPath(), StandardOpenOption.READ).use { directory ->
+                    directory.force(true)
+                }
+                return name
+            }
+            error("Too many recovered portal save collisions")
+        }
 
         internal fun drainBoundedUtf8Lines(
             input: InputStream,
@@ -1857,6 +2368,12 @@ internal class LauncherPortalBridge(
         }
 
         fun recoverStaleRuntime(cacheRoot: File) {
+            synchronized(runtimeLifecycleLock) {
+                runtimeRegistry.unreapedSnapshot().forEach { bridge -> bridge.closeLocked() }
+                val ownedPaths =
+                    runtimeRegistry.ownedSnapshot().mapTo(HashSet()) { bridge ->
+                        bridge.runtimeDirectory.toPath().toAbsolutePath().normalize()
+                    }
             check(
                 cacheRoot.isDirectory &&
                     !Files.isSymbolicLink(cacheRoot.toPath()),
@@ -1871,6 +2388,7 @@ internal class LauncherPortalBridge(
                 "Too many stale portal runtime directories"
             }
             for (directory in directories) {
+                if (!shouldRecoverPortalPath(directory.toPath(), ownedPaths)) continue
                 check(
                     !Files.isSymbolicLink(directory.toPath()) &&
                         Files.isDirectory(directory.toPath(), LinkOption.NOFOLLOW_LINKS) &&
@@ -1894,19 +2412,29 @@ internal class LauncherPortalBridge(
                 }
                 check(directory.delete()) { "Could not remove stale portal runtime directory" }
             }
+            }
         }
 
         fun recoverStaleSaves(archRoot: File) {
+            synchronized(runtimeLifecycleLock) {
+                runtimeRegistry.unreapedSnapshot().forEach { bridge -> bridge.closeLocked() }
+                val ownedPaths =
+                    runtimeRegistry.ownedSnapshot().mapTo(HashSet()) { bridge ->
+                        bridge.savesDirectory.toPath().toAbsolutePath().normalize()
+                    }
             if (!archRoot.exists()) return
             val base = File(archRoot, "home/archphene/.cache/archphene/portal-save")
             if (!base.exists()) return
             requireTrustedDirectoryChain(archRoot, base)
+            val recoveryDirectory = File(checkNotNull(archRoot.parentFile), "portal-save-recovery")
+            prepareRecoveryDirectory(recoveryDirectory)
             val directories =
                 base.listFiles() ?: error("Could not inspect stale portal save directories")
             check(directories.size <= MAX_RECOVERED_SAVE_DIRECTORIES) {
                 "Too many stale portal save directories"
             }
             for (directory in directories) {
+                if (!shouldRecoverPortalPath(directory.toPath(), ownedPaths)) continue
                 val path = directory.toPath()
                 val compatibleName = directory.name.matches(STALE_SAVE_DIRECTORY_NAME)
                 check(
@@ -1933,10 +2461,10 @@ internal class LauncherPortalBridge(
                         }
                         val staged = entry.listFiles()
                             ?: error("Could not inspect stale portal save slot")
-                        check(staged.size == 1) {
+                        check(staged.size <= 1) {
                             "Invalid stale portal save slot"
                         }
-                        val file = staged.single()
+                        val file = staged.singleOrNull() ?: continue
                         check(
                             !Files.isSymbolicLink(file.toPath()) &&
                                 Files.isRegularFile(
@@ -1959,12 +2487,17 @@ internal class LauncherPortalBridge(
                 }
                 for (entry in entries) {
                     if (entry.isDirectory) {
-                        val staged = checkNotNull(entry.listFiles()).single()
-                        check(staged.delete()) { "Could not remove stale portal save" }
+                        val staged = checkNotNull(entry.listFiles()).singleOrNull()
+                        if (staged != null) recoverPortalSaveFile(staged, recoveryDirectory)
+                    } else {
+                        recoverPortalSaveFile(entry, recoveryDirectory)
                     }
-                    check(entry.delete()) { "Could not remove stale portal save entry" }
+                    check(!entry.exists() || entry.delete()) {
+                        "Could not remove stale portal save entry"
+                    }
                 }
                 check(directory.delete()) { "Could not remove stale portal save directory" }
+            }
             }
         }
 
@@ -1991,6 +2524,20 @@ internal class LauncherPortalBridge(
             check(target.canonicalFile.toPath().startsWith(archRoot.canonicalFile.toPath())) {
                 "Portal save path escaped the Arch root"
             }
+        }
+
+        private fun prepareRecoveryDirectory(directory: File) {
+            val parent = checkNotNull(directory.parentFile).canonicalFile
+            check(
+                parent.isDirectory &&
+                    !Files.isSymbolicLink(parent.toPath()) &&
+                    directory.canonicalFile.parentFile == parent &&
+                    !Files.isSymbolicLink(directory.toPath()) &&
+                    (directory.isDirectory || directory.mkdir()),
+            ) {
+                "Invalid portal save recovery directory"
+            }
+            runCatching { Os.chmod(directory.absolutePath, 0b111_000_000) }
         }
 
         private fun requireDirectoryStatic(directory: File) {

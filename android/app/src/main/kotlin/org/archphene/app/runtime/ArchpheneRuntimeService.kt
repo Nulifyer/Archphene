@@ -802,9 +802,11 @@ class ArchpheneRuntimeService : Service() {
         fun importPortalFolder(
             displayName: String,
             descriptor: ParcelFileDescriptor,
-        ): String? = requestPortalFolderImport(displayName, descriptor)
+            cancellationToken: Long,
+        ): String? = requestPortalFolderImport(displayName, descriptor, cancellationToken)
 
-        fun cancelPortalFolderImport(): Boolean = requestPortalFolderImportCancellation()
+        fun cancelPortalFolderImport(cancellationToken: Long): Boolean =
+            requestPortalFolderImportCancellation(cancellationToken)
 
         fun exportLinuxDocument(
             sourceUri: Uri,
@@ -1250,6 +1252,8 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var folderSyncRunning = false
     @Volatile private var folderMirrorCancellationRequested = false
     @Volatile private var portalFolderImportActive = false
+    @Volatile private var portalFolderImportCancellationToken = 0L
+    private val portalFolderImportLock = Any()
     @Volatile private var folderOnboardingNeeded = false
     @Volatile private var folderStatus = "Loading Android folder access…"
     @Volatile private var projectSyncHistoryAvailable = false
@@ -2957,17 +2961,22 @@ class ArchpheneRuntimeService : Service() {
     private fun requestPortalFolderImport(
         displayName: String,
         descriptor: ParcelFileDescriptor,
+        cancellationToken: Long,
     ): String? {
         requireRuntimeWorker("Portal folder import")
         val activeHandle = readyHandle
         if (
             activeHandle == 0L ||
+            cancellationToken == 0L ||
             !safeProjectName(displayName) ||
             !PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)
         ) {
             return null
         }
-        portalFolderImportActive = true
+        synchronized(portalFolderImportLock) {
+            portalFolderImportCancellationToken = cancellationToken
+            portalFolderImportActive = true
+        }
         return try {
             val request = ByteBuffer.allocateDirect(MAX_MIRROR_PATH_BYTES)
             val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
@@ -3009,16 +3018,22 @@ class ArchpheneRuntimeService : Service() {
             Log.e(TAG, "Portal folder import failed", error)
             null
         } finally {
-            portalFolderImportActive = false
-            PROCESS_STORAGE_ACTIVE.set(false)
+            synchronized(portalFolderImportLock) {
+                portalFolderImportActive = false
+                portalFolderImportCancellationToken = 0L
+                PROCESS_STORAGE_ACTIVE.set(false)
+            }
         }
     }
 
-    private fun requestPortalFolderImportCancellation(): Boolean {
-        val activeHandle = readyHandle
-        return portalFolderImportActive &&
-            activeHandle != 0L &&
-            NativeRuntime.nativeCancelProjectMirror(activeHandle)
+    private fun requestPortalFolderImportCancellation(cancellationToken: Long): Boolean {
+        synchronized(portalFolderImportLock) {
+            val activeHandle = readyHandle
+            return portalFolderImportActive &&
+                portalFolderImportCancellationToken == cancellationToken &&
+                activeHandle != 0L &&
+                NativeRuntime.nativeCancelProjectMirror(activeHandle)
+        }
     }
 
     @Synchronized
