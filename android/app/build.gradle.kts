@@ -3,12 +3,17 @@ plugins {
 }
 
 val archpheneAbi = providers.gradleProperty("archpheneAbi").orNull
+val debugApplicationIdSuffix =
+    providers.gradleProperty("archpheneDebugApplicationIdSuffix").orNull ?: ".debug"
 val sourceValidation =
     providers.gradleProperty("archpheneSourceValidation")
         .map(String::toBooleanStrict)
         .orElse(false)
 require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
     "archpheneAbi must be x86_64 or arm64-v8a"
+}
+require(Regex("""\.debug(?:\.[a-z][a-z0-9_]{0,31})?""").matches(debugApplicationIdSuffix)) {
+    "archpheneDebugApplicationIdSuffix must be .debug or .debug.<test-instance>"
 }
 
 dependencies {
@@ -73,7 +78,7 @@ android {
 
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = debugApplicationIdSuffix
             versionNameSuffix = "-debug"
         }
         getByName("release") {

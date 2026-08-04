@@ -8,14 +8,19 @@ archphene_require_command strings
 archphene_require_command unzip
 
 abi=
+debug_instance=
 while (($#)); do
   case "$1" in
     --abi)
       abi="${2:?missing value for --abi}"
       shift 2
       ;;
+    --debug-instance)
+      debug_instance="${2:?missing value for --debug-instance}"
+      shift 2
+      ;;
     -h|--help)
-      echo "usage: $0 [--abi x86_64|arm64-v8a]"
+      echo "usage: $0 [--abi x86_64|arm64-v8a] [--debug-instance NAME]"
       exit 0
       ;;
     *)
@@ -25,6 +30,9 @@ while (($#)); do
 done
 if [[ -n "$abi" && "$abi" != x86_64 && "$abi" != arm64-v8a ]]; then
   archphene_die "unsupported ABI: $abi"
+fi
+if [[ -n "$debug_instance" && ! "$debug_instance" =~ ^[a-z][a-z0-9_]{0,31}$ ]]; then
+  archphene_die "invalid debug instance: $debug_instance"
 fi
 
 export ANDROID_SDK_ROOT
@@ -43,6 +51,9 @@ flock "$build_lock_fd"
 gradle_arguments=(--no-daemon --no-build-cache --stacktrace)
 if [[ -n "$abi" ]]; then
   gradle_arguments+=("-ParchpheneAbi=$abi")
+fi
+if [[ -n "$debug_instance" ]]; then
+  gradle_arguments+=("-ParchpheneDebugApplicationIdSuffix=.debug.$debug_instance")
 fi
 gradle_arguments+=(:android:app:assembleDebug)
 
@@ -63,7 +74,11 @@ if [[ -n "$abi" ]]; then
     grep -F "lib/$abi/libarchphene_android.so" >/dev/null; then
     archphene_die "debug APK is missing the requested $abi runtime"
   fi
-  abi_apk="$ARCHPHENE_ROOT/tooling/build/apk/app-debug-$abi.apk"
+  artifact_suffix="$abi"
+  if [[ -n "$debug_instance" ]]; then
+    artifact_suffix="$artifact_suffix-$debug_instance"
+  fi
+  abi_apk="$ARCHPHENE_ROOT/tooling/build/apk/app-debug-$artifact_suffix.apk"
   mkdir -p "$(dirname "$abi_apk")"
   cp -- "$apk" "$abi_apk"
   apk="$abi_apk"

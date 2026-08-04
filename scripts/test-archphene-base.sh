@@ -4,27 +4,30 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+package=org.archphene.app.debug
 skip_install=true
 reset_data=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --package) package="${2:?missing value for --package}"; shift 2 ;;
     --install-apk) skip_install=false; shift ;;
     --skip-install) skip_install=true; shift ;;
     --reset-data) reset_data=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL [--apk PATH] [--install-apk] [--reset-data]"
+      echo "usage: $0 --serial SERIAL [--apk PATH] [--package PACKAGE] [--install-apk] [--reset-data]"
       exit 0 ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
+[[ "$package" =~ ^org\.archphene\.app\.debug(\.[a-z][a-z0-9_]{0,31})?$ ]] ||
+  archphene_die "invalid debug package: $package"
 
 archphene_test_init "$serial"
 archphene_require_command python3
 
-package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 if [[ -z "$apk" ]]; then
   apk="$ARCHPHENE_ROOT/android/app/build/outputs/apk/debug/app-debug.apk"
