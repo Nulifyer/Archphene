@@ -11,20 +11,27 @@ internal object PortalMimePolicy {
         if (spec.isEmpty() || spec.length > MAX_SPEC_UTF16) {
             return null
         }
-        val values = spec.split(';', limit = MAX_TYPES + 1)
-        if (values.size !in 1..MAX_TYPES) {
-            return null
-        }
-        val unique = HashSet<String>(values.size)
-        val normalized = ArrayList<String>(values.size)
-        for (rawValue in values) {
+        val unique = HashSet<String>(MAX_TYPES * 4 / 3 + 1)
+        val normalized = ArrayList<String>(MAX_TYPES)
+        var start = 0
+        while (normalized.size < MAX_TYPES) {
+            val delimiter = spec.indexOf(';', start)
+            val end = if (delimiter == -1) spec.length else delimiter
+            val rawValue = spec.substring(start, end)
+            if (!safeType(rawValue)) {
+                return null
+            }
             val value = rawValue.lowercase(Locale.ROOT)
-            if (!safeType(value) || !unique.add(value)) {
+            if (!unique.add(value)) {
                 return null
             }
             normalized.add(value)
+            if (delimiter == -1) {
+                return normalized
+            }
+            start = delimiter + 1
         }
-        return normalized
+        return null
     }
 
     fun valid(spec: String): Boolean = parse(spec) != null

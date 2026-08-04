@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,6 +61,47 @@ class LauncherPortalBridgeTest {
         }
 
         override fun isAlive(): Boolean = alive
+    }
+
+    @Test
+    fun portalRequestFieldsAreBoundedDuringSplitting() {
+        assertEquals(
+            listOf(
+                "ARCHPHENE/3",
+                "STORE_SECRET",
+                "id",
+                "label",
+                "attributes",
+                "content-type",
+            ),
+            LauncherPortalBridge.splitPortalRequest(
+                "ARCHPHENE/3\tSTORE_SECRET\tid\tlabel\tattributes\tcontent-type",
+            ),
+        )
+        assertNull(LauncherPortalBridge.splitPortalRequest("a\tb\tc\td\te\tf\tg"))
+
+        val hostile = List(8_192) { "x" }.joinToString("\t")
+        assertEquals(16_383, hostile.length)
+        assertNull(LauncherPortalBridge.splitPortalRequest(hostile))
+    }
+
+    @Test
+    fun portalResponseFieldsAreBoundedDuringSplitting() {
+        assertEquals(
+            listOf("OK", "label", "attributes", "65536"),
+            LauncherPortalBridge.splitPortalFields("OK\tlabel\tattributes\t65536", 4),
+        )
+        assertEquals(
+            listOf("OK", "0", "refresh", ""),
+            LauncherPortalBridge.splitPortalFields("OK\t0\trefresh\t", 4),
+        )
+        assertNull(LauncherPortalBridge.splitPortalFields("OK\ta\tb\tc\td", 4))
+        assertNull(LauncherPortalBridge.splitPortalFields("OK\t1\textra", 2))
+
+        val hostile = List(8_192) { "x" }.joinToString("\t") + "\t"
+        assertEquals(16_384, hostile.length)
+        assertNull(LauncherPortalBridge.splitPortalFields(hostile, 4))
+        assertNull(LauncherPortalBridge.splitPortalFields(hostile, 2))
     }
 
     @Test

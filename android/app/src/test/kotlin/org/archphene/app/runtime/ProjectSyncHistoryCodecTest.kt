@@ -68,6 +68,57 @@ class ProjectSyncHistoryCodecTest {
         }
     }
 
+    @Test
+    fun conflictPathsEnforceBoundedDepthWithoutDelimiterSplitting() {
+        val maximumDepthPath = List(64) { "a" }.joinToString("/")
+        assertEquals(
+            maximumDepthPath,
+            ProjectSyncHistoryCodec.decode(
+                ProjectSyncHistoryCodec.encode(
+                    listOf(entry.copy(conflictPaths = listOf(maximumDepthPath))),
+                ),
+            ).single().conflictPaths.single(),
+        )
+        assertThrows(IllegalStateException::class.java) {
+            ProjectSyncHistoryCodec.encode(
+                listOf(entry.copy(conflictPaths = listOf(List(65) { "a" }.joinToString("/")))),
+            )
+        }
+        assertThrows(IllegalStateException::class.java) {
+            ProjectSyncHistoryCodec.encode(
+                listOf(entry.copy(conflictPaths = listOf("/".repeat(4 * 1024)))),
+            )
+        }
+    }
+
+    @Test
+    fun multibyteHistoryFieldsEnforceEncodedLimits() {
+        val exactProject = "é".repeat(64)
+        assertEquals(
+            exactProject,
+            ProjectSyncHistoryCodec.decode(
+                ProjectSyncHistoryCodec.encode(listOf(entry.copy(project = exactProject))),
+            ).single().project,
+        )
+        assertThrows(IllegalStateException::class.java) {
+            ProjectSyncHistoryCodec.encode(listOf(entry.copy(project = "é".repeat(65))))
+        }
+        assertThrows(IllegalStateException::class.java) {
+            ProjectSyncHistoryCodec.encode(listOf(entry.copy(message = "\ud800")))
+        }
+    }
+
+    @Test
+    fun aggregateConflictSizeFailsAtEncodedLimit() {
+        val maximumPath = List(17) { "a".repeat(240) }.joinToString("/")
+        assertEquals(4 * 1024, maximumPath.length)
+        assertThrows(IllegalStateException::class.java) {
+            ProjectSyncHistoryCodec.encode(
+                listOf(entry.copy(conflictPaths = List(64) { maximumPath })),
+            )
+        }
+    }
+
     private fun refreshChecksum(encoded: ByteArray) {
         val bodyLength = encoded.size - 8
         val checksum = CRC32().apply { update(encoded, 0, bodyLength) }.value

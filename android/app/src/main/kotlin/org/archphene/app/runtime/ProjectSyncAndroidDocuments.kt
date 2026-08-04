@@ -20,8 +20,8 @@ internal class ProjectSyncAndroidDocuments(private val provider: ProjectSyncProv
                 it.getString(0)
             }
         return name
-            ?.takeIf(String::isNotEmpty)
-            ?: error("Android provider returned no project document name")
+            ?.takeIf(::safeProjectSyncName)
+            ?: throw SecurityException("Android provider returned an unsafe project document name")
     }
 
     fun verifyFingerprint(
@@ -78,10 +78,14 @@ internal class ProjectSyncAndroidDocuments(private val provider: ProjectSyncProv
         parentUri: Uri,
         name: String,
     ): ProjectSyncRemoteEntry? {
+        val parentDocumentId =
+            DocumentsContract.getDocumentId(parentUri)
+                .takeIf(::safeProjectSyncDocumentId)
+                ?: throw SecurityException("Android recovery parent has an unsafe document ID")
         val children =
             DocumentsContract.buildChildDocumentsUriUsingTree(
                 parentUri,
-                DocumentsContract.getDocumentId(parentUri),
+                parentDocumentId,
             )
         return provider.query(
             children,
@@ -96,8 +100,14 @@ internal class ProjectSyncAndroidDocuments(private val provider: ProjectSyncProv
             while (it.moveToNext()) {
                 if (it.getString(1) != name) continue
                 check(match == null) { "Android provider returned duplicate recovery names" }
-                val id = it.getString(0) ?: error("Android recovery document has no ID")
-                val mime = it.getString(2) ?: "application/octet-stream"
+                val id =
+                    it.getString(0)
+                        ?.takeIf(::safeProjectSyncDocumentId)
+                        ?: throw SecurityException("Android recovery document has an unsafe ID")
+                val mime =
+                    (it.getString(2) ?: "application/octet-stream")
+                        .takeIf(::safeProjectSyncMime)
+                        ?: throw SecurityException("Android recovery document has an unsafe MIME type")
                 match =
                     ProjectSyncRemoteEntry(
                         id,

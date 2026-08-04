@@ -330,8 +330,11 @@ the attached launcher Surface.
 
 OpenGL ES acceleration uses a manager-owned virglrenderer helper and Android
 EGL/GLES, with bounded software fallback. The current final Wayland
-presentation path remains shared-memory based. Android HardwareBuffer/dmabuf
-and Vulkan presentation remain separate gates.
+presentation path remains shared-memory based. Android `AHardwareBuffer`
+composition remains a separate gate. Direct client-dmabuf import is also a
+separate, capability-negotiated gate: the current Samsung exposes
+`EGL_ANDROID_image_native_buffer` but not `EGL_EXT_image_dma_buf_import`.
+Vulkan presentation remains incomplete.
 
 ### Android capabilities
 

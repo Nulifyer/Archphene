@@ -3,7 +3,6 @@ package org.archphene.app.launcher
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -17,6 +16,9 @@ import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import org.archphene.app.boundedUtf8Text
+import org.archphene.app.runtime.readBoundedBytes
+import org.archphene.app.utf8EncodedLength
 
 internal data class LauncherApkRequest(
     val androidPackage: String,
@@ -309,10 +311,10 @@ internal object LauncherApkAssembler {
         }
     }
 
-    private fun validLabel(value: String): Boolean =
+    internal fun validLabel(value: String): Boolean =
         value.isNotBlank() &&
             value.length <= 128 &&
-            value.toByteArray(StandardCharsets.UTF_8).size <= 512 &&
+            boundedUtf8Text(value, 512) &&
             value.none { character ->
                 character.isISOControl() ||
                     character == '\u061c' ||
@@ -347,7 +349,7 @@ internal object LauncherApkAssembler {
                         if (name.startsWith("META-INF/")) {
                             continue
                         }
-                        check(safeEntryName(name)) {
+                        check(safeLauncherEntryName(name)) {
                             "Unsafe launcher-template entry"
                         }
                         check(++entries <= ENTRY_COUNT_LIMIT && !expected.containsKey(name)) {
@@ -510,13 +512,17 @@ internal object LauncherApkAssembler {
                         continue
                     }
                     check(
-                        safeEntryName(name) &&
+                        safeLauncherEntryName(name) &&
                             found.size < ENTRY_COUNT_LIMIT &&
                             !found.containsKey(name),
                     ) {
                         "Signed launcher contains an unsafe entry"
                     }
-                    found[name] = sha256(readBounded(input))
+                    found[name] =
+                        input.sha256Bounded(
+                            ENTRY_LIMIT,
+                            "Launcher entry exceeds its size limit",
+                        )
                 }
             }
         }
@@ -623,31 +629,8 @@ internal object LauncherApkAssembler {
         }
     }
 
-    private fun safeEntryName(value: String): Boolean =
-        value.isNotEmpty() &&
-            value.length <= 240 &&
-            !value.startsWith('/') &&
-            !value.endsWith('/') &&
-            !value.contains('\\') &&
-            value.split('/').all { part ->
-                part.isNotEmpty() && part != "." && part != ".."
-            }
-
-    private fun readBounded(input: InputStream): ByteArray {
-        val output = ByteArrayOutputStream()
-        val buffer = ByteArray(16 * 1024)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) {
-                break
-            }
-            check(output.size() + read <= ENTRY_LIMIT) {
-                "Launcher entry exceeds its size limit"
-            }
-            output.write(buffer, 0, read)
-        }
-        return output.toByteArray()
-    }
+    private fun readBounded(input: InputStream): ByteArray =
+        input.readBoundedBytes(ENTRY_LIMIT, "Launcher entry exceeds its size limit")
 
     private fun alignStoredEntry(
         entry: ZipEntry,
@@ -655,7 +638,10 @@ internal object LauncherApkAssembler {
         name: String,
         alignment: Int,
     ) {
-        val nameLength = name.toByteArray(StandardCharsets.UTF_8).size
+        val nameLength =
+            checkNotNull(utf8EncodedLength(name)) {
+                "Launcher entry name is malformed"
+            }
         val payload =
             ((alignment - ((offset + 30 + nameLength + 4) % alignment)) % alignment)
                 .toInt()
@@ -708,6 +694,75 @@ internal object LauncherApkAssembler {
             count += length
         }
     }
+}
+
+internal fun encodeBinaryXmlPoolString(
+    value: String,
+    utf8: Boolean,
+): ByteArray {
+    if (utf8) {
+        val encoded = value.toByteArray(StandardCharsets.UTF_8)
+        val output =
+            ByteArray(
+                Math.addExact(
+                    Math.addExact(binaryXmlLength8Size(value.length), binaryXmlLength8Size(encoded.size)),
+                    Math.addExact(encoded.size, 1),
+                ),
+            )
+        var offset = putBinaryXmlLength8(output, 0, value.length)
+        offset = putBinaryXmlLength8(output, offset, encoded.size)
+        encoded.copyInto(output, offset)
+        return output
+    }
+    val encoded = value.toByteArray(StandardCharsets.UTF_16LE)
+    val output =
+        ByteArray(
+            Math.addExact(
+                binaryXmlLength16Size(value.length),
+                Math.addExact(encoded.size, 2),
+            ),
+        )
+    val offset = putBinaryXmlLength16(output, 0, value.length)
+    encoded.copyInto(output, offset)
+    return output
+}
+
+private fun binaryXmlLength8Size(length: Int): Int {
+    check(length in 0..0x7fff) { "Launcher string is too long" }
+    return if (length > 0x7f) 2 else 1
+}
+
+private fun putBinaryXmlLength8(
+    output: ByteArray,
+    offset: Int,
+    length: Int,
+): Int {
+    var position = offset
+    if (length > 0x7f) {
+        output[position++] = ((length shr 8) or 0x80).toByte()
+    }
+    output[position++] = (length and 0xff).toByte()
+    return position
+}
+
+private fun binaryXmlLength16Size(length: Int): Int {
+    check(length >= 0) { "Launcher string is too long" }
+    return if (length > 0x7fff) 4 else 2
+}
+
+private fun putBinaryXmlLength16(
+    output: ByteArray,
+    offset: Int,
+    length: Int,
+): Int {
+    var position = offset
+    if (length > 0x7fff) {
+        output[position++] = ((length shr 16) and 0xff).toByte()
+        output[position++] = (((length shr 24) and 0x7f) or 0x80).toByte()
+    }
+    output[position++] = (length and 0xff).toByte()
+    output[position++] = ((length shr 8) and 0xff).toByte()
+    return position
 }
 
 private class BinaryAndroidManifest(
@@ -943,7 +998,7 @@ private class BinaryAndroidManifest(
         check(foundIndex >= 0) {
             "Launcher manifest string marker is missing"
         }
-        val encoded = encodePoolString(replacement, utf8)
+        val encoded = encodeBinaryXmlPoolString(replacement, utf8)
         val rawDelta = encoded.size - (oldEnd - oldStart)
         val unalignedPoolSize = poolSize + rawDelta
         val padding = (4 - (unalignedPoolSize and 3)) and 3
@@ -1001,27 +1056,6 @@ private class BinaryAndroidManifest(
         )
     }
 
-    private fun encodePoolString(
-        value: String,
-        utf8: Boolean,
-    ): ByteArray {
-        val output = ByteArrayOutputStream()
-        if (utf8) {
-            val encoded = value.toByteArray(StandardCharsets.UTF_8)
-            writeLength8(output, value.length)
-            writeLength8(output, encoded.size)
-            output.write(encoded)
-            output.write(0)
-        } else {
-            val encoded = value.toByteArray(StandardCharsets.UTF_16LE)
-            writeLength16(output, value.length)
-            output.write(encoded)
-            output.write(0)
-            output.write(0)
-        }
-        return output.toByteArray()
-    }
-
     private fun readLength8(
         value: ByteArray,
         offset: Int,
@@ -1049,30 +1083,6 @@ private class BinaryAndroidManifest(
         }
         check(offset + 3 < limit) { "Truncated launcher string length" }
         return (((first and 0x7fff) shl 16) or u16(value, offset + 2)) to offset + 4
-    }
-
-    private fun writeLength8(
-        output: ByteArrayOutputStream,
-        length: Int,
-    ) {
-        check(length <= 0x7fff) { "Launcher string is too long" }
-        if (length > 0x7f) {
-            output.write((length shr 8) or 0x80)
-        }
-        output.write(length and 0xff)
-    }
-
-    private fun writeLength16(
-        output: ByteArrayOutputStream,
-        length: Int,
-    ) {
-        check(length >= 0) { "Launcher string is too long" }
-        if (length > 0x7fff) {
-            output.write((length shr 16) and 0xff)
-            output.write(((length shr 24) and 0x7f) or 0x80)
-        }
-        output.write(length and 0xff)
-        output.write((length shr 8) and 0xff)
     }
 
     private fun u16(

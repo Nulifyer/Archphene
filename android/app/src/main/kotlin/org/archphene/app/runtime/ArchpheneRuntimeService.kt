@@ -44,6 +44,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.net.URL
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -55,6 +56,11 @@ import javax.net.ssl.HttpsURLConnection
 import org.archphene.app.ArchphenePreferences
 import org.archphene.app.MainActivity
 import org.archphene.app.R
+import org.archphene.app.boundedUtf8Text
+import org.archphene.app.delimitedUtf8Length
+import org.archphene.app.putDelimitedUtf8
+import org.archphene.app.putUtf8
+import org.archphene.app.utf8EncodedLength
 import org.archphene.app.launcher.LauncherApkAssembler
 import org.archphene.app.launcher.LauncherApkRequest
 import org.archphene.app.launcher.LauncherApkSigner
@@ -185,6 +191,99 @@ private data class LauncherRegistryRow(
     val name: String,
     val sourcePackage: String,
 )
+
+internal data class StaleAurBuildOutputCleanupResult(
+    val removed: Int,
+    val unsafeEntries: List<Path>,
+    val visited: Int,
+    val truncated: Boolean,
+    val error: Exception?,
+)
+
+internal fun removeStaleAurBuildOutputs(
+    directory: Path,
+    glob: String,
+    limit: Int,
+): StaleAurBuildOutputCleanupResult {
+    var removed = 0
+    val unsafeEntries = mutableListOf<Path>()
+    var visited = 0
+    var truncated = false
+    var cleanupError: Exception? = null
+    try {
+        Files.newDirectoryStream(directory, glob).use { entries ->
+            for (path in entries) {
+                visited++
+                if (visited > limit) {
+                    truncated = true
+                    break
+                }
+                if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    unsafeEntries.add(path)
+                    continue
+                }
+                if (Files.deleteIfExists(path)) {
+                    removed++
+                }
+            }
+        }
+    } catch (error: Exception) {
+        cleanupError = error
+    }
+    return StaleAurBuildOutputCleanupResult(
+        removed,
+        unsafeEntries,
+        visited,
+        truncated,
+        cleanupError,
+    )
+}
+
+internal data class AndroidDnsSelection(
+    val addresses: List<String>,
+    val truncated: Boolean,
+)
+
+internal fun <T> selectAndroidDnsServers(
+    candidates: Iterable<T>,
+    maximumCandidates: Int,
+    maximumServers: Int,
+    hostAddress: (T) -> String?,
+): AndroidDnsSelection {
+    require(maximumCandidates > 0 && maximumServers > 0)
+    val selected = ArrayList<String>(maximumServers)
+    val iterator = candidates.iterator()
+    var examined = 0
+    while (selected.size < maximumServers && iterator.hasNext()) {
+        if (examined == maximumCandidates) {
+            return AndroidDnsSelection(selected, truncated = true)
+        }
+        examined++
+        val address = hostAddress(iterator.next())
+        if (!address.isNullOrEmpty() && address !in selected) {
+            selected.add(address)
+        }
+    }
+    return AndroidDnsSelection(selected, truncated = false)
+}
+
+internal fun mergeBoundedProjectSyncConflictPaths(
+    destination: MutableSet<String>,
+    source: Iterable<String>,
+    maximumPaths: Int,
+): Boolean {
+    require(maximumPaths > 0 && destination.size <= maximumPaths)
+    for (path in source) {
+        if (path in destination) {
+            continue
+        }
+        if (destination.size == maximumPaths) {
+            return true
+        }
+        destination.add(path)
+    }
+    return false
+}
 
 class ArchpheneRuntimeService : Service() {
     inner class LocalBinder : Binder() {
@@ -1389,15 +1488,6 @@ class ArchpheneRuntimeService : Service() {
         ByteArray(NativeRuntime.TERMINAL_SELECTION_SIZE)
     }
 
-    private data class ResolvedPayload(
-        val repository: String,
-        val name: String,
-        val version: String,
-        val filename: String,
-        val url: String,
-        val size: Long,
-    )
-
     private data class AurSourceReview(
         val architecture: String,
         val expression: String,
@@ -1819,28 +1909,23 @@ class ArchpheneRuntimeService : Service() {
 
     private fun removeStaleAurBuildOutputs() {
         requireRuntimeWorker("Stale AUR build-output cleanup")
-        var removed = 0
-        try {
-            Files.newDirectoryStream(cacheDir.toPath(), AUR_BUILD_OUTPUT_GLOB).use { entries ->
-                for (path in entries) {
-                    if (removed >= MAX_STALE_AUR_BUILD_OUTPUTS) {
-                        Log.w(TAG, "Stopped bounded stale AUR output cleanup")
-                        break
-                    }
-                    if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-                        Log.w(TAG, "Ignored unsafe stale AUR output: ${path.fileName}")
-                        continue
-                    }
-                    if (Files.deleteIfExists(path)) {
-                        removed++
-                    }
-                }
-            }
-        } catch (error: Exception) {
+        val result =
+            removeStaleAurBuildOutputs(
+                cacheDir.toPath(),
+                AUR_BUILD_OUTPUT_GLOB,
+                MAX_STALE_AUR_BUILD_OUTPUTS,
+            )
+        for (path in result.unsafeEntries) {
+            Log.w(TAG, "Ignored unsafe stale AUR output: ${path.fileName}")
+        }
+        if (result.truncated) {
+            Log.w(TAG, "Stopped bounded stale AUR output cleanup")
+        }
+        result.error?.let { error ->
             Log.w(TAG, "Could not clean stale AUR build output", error)
         }
-        if (removed != 0) {
-            Log.i(TAG, "Removed $removed stale AUR build output files")
+        if (result.removed != 0) {
+            Log.i(TAG, "Removed ${result.removed} stale AUR build output files")
         }
     }
 
@@ -1886,7 +1971,7 @@ class ArchpheneRuntimeService : Service() {
                 length,
                 StandardCharsets.UTF_8,
             )
-        val fields = response.removeSuffix("\n").split('\t', limit = 6)
+        val fields = LauncherAuthorizationCodec.decode(response) ?: return null
         val mimeTypes = fields.getOrNull(5)?.let(LauncherIntentMimePolicy::parseSpec)
         if (
             fields.size != 6 ||
@@ -2465,7 +2550,6 @@ class ArchpheneRuntimeService : Service() {
         private const val RUNTIME_SHUTDOWN_WORKER_WAIT_MILLIS = 3_000L
         private const val MAX_TRACKED_LAUNCHER_PROCESSES = 16
         private const val SHELL_CHOICE_LIMIT = 8
-        private const val SHELL_FIELD_LIMIT = 64
         private const val PACKAGE_CAPABILITY_COMMAND_LINE = 2
         private const val BRIDGE_AUDIO_OUTPUT = 1 shl 0
         private const val BRIDGE_PRINTING = 1 shl 1
@@ -2576,6 +2660,8 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 30_000L
         private const val MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS = 750L
         private const val MAX_ANDROID_DNS_SERVERS = 4
+        private const val MAX_ANDROID_DNS_CANDIDATES = 32
+        private const val MAX_PROJECT_SYNC_CONFLICT_PATHS = 64
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
         private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
@@ -2688,7 +2774,6 @@ class ArchpheneRuntimeService : Service() {
 
     private fun recoverInterruptedDocumentExport(preferences: SharedPreferences): String? {
         val encodedUri = preferences.getString(STORAGE_EXPORT_DESTINATION_URI, null) ?: return null
-        val encodedBytes = encodedUri.toByteArray(StandardCharsets.UTF_8)
         val grantFlags =
             preferences.getInt(STORAGE_EXPORT_GRANT_FLAGS, 0) and
                 (Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -2696,7 +2781,7 @@ class ArchpheneRuntimeService : Service() {
         val uri =
             encodedUri
                 .takeIf {
-                    encodedBytes.size in 1..MAX_STORAGE_URI_BYTES &&
+                    boundedUtf8Text(encodedUri, MAX_STORAGE_URI_BYTES) &&
                         grantFlags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0
                 }
                 ?.let(Uri::parse)
@@ -2751,7 +2836,7 @@ class ArchpheneRuntimeService : Service() {
                 pushed = result.pushed.coerceIn(0, MAX_MIRROR_ENTRIES),
                 deferredDeletes = result.deferredDeletes.coerceIn(0, MAX_MIRROR_ENTRIES),
                 message = safeMessage,
-                conflictPaths = result.conflictPaths.take(64),
+                conflictPaths = result.conflictPaths.take(MAX_PROJECT_SYNC_CONFLICT_PATHS),
             )
         try {
             publishProjectSyncHistory(projectSyncHistoryStore.append(entry), mappingId)
@@ -3007,7 +3092,8 @@ class ArchpheneRuntimeService : Service() {
                 Log.e(TAG, "Portal folder import failed: ${readNativeMessage(output, result)}")
                 return null
             }
-            val report = readCString(output).split('\t')
+            val report = StorageReportCodec.decodePortalFolderImport(readCString(output))
+                ?: emptyList()
             val importedName = report.getOrNull(0)?.takeIf(::safeProjectName)
             val entries =
                 report.getOrNull(1)?.toIntOrNull()?.takeIf {
@@ -3263,10 +3349,16 @@ class ArchpheneRuntimeService : Service() {
                                 DocumentsContract.Document.COLUMN_MIME_TYPE,
                                 DocumentsContract.Document.COLUMN_SIZE,
                             )
+                        val rootDocumentId =
+                            DocumentsContract.getTreeDocumentId(activeUri)
+                                .takeIf(::safeProjectSyncDocumentId)
+                                ?: throw SecurityException(
+                                    "Android provider returned an unsafe root document ID",
+                                )
                         mirrorDocumentChildren(
                             activeHandle,
                             activeUri,
-                            DocumentsContract.getTreeDocumentId(activeUri),
+                            rootDocumentId,
                             "",
                             0,
                             projection,
@@ -3284,7 +3376,9 @@ class ArchpheneRuntimeService : Service() {
                             "publish project mirror",
                         )
                         nativeStarted = false
-                        val report = readCString(output).split('\t')
+                        val report =
+                            StorageReportCodec.decodeProjectMirror(readCString(output))
+                                ?: throw IllegalStateException("Invalid native project mirror report")
                         if (
                             report.size != 2 ||
                             report[0].toIntOrNull() != progress.entries ||
@@ -3384,6 +3478,7 @@ class ArchpheneRuntimeService : Service() {
                     requireRuntimeWorker("Android folder synchronization")
                     var nativeStarted = false
                     val aggregate = ProjectSyncResult()
+                    var aggregateConflictPathsTruncated = false
                     try {
                         val request =
                             ByteBuffer.allocateDirect(NativeRuntime.PROJECT_SYNC_BUFFER_SIZE)
@@ -3415,8 +3510,13 @@ class ArchpheneRuntimeService : Service() {
                                     )
                                 if (recovery != null) {
                                     Log.i(TAG, "Recovered interrupted Android project synchronization")
-                                    recovery.retainedConflictPath?.let {
-                                        aggregate.conflictPaths.add(it)
+                                    recovery.retainedConflictPath?.let { path ->
+                                        aggregateConflictPathsTruncated =
+                                            mergeBoundedProjectSyncConflictPaths(
+                                                aggregate.conflictPaths,
+                                                listOf(path),
+                                                MAX_PROJECT_SYNC_CONFLICT_PATHS,
+                                            )
                                     }
                                 }
                             }
@@ -3436,26 +3536,12 @@ class ArchpheneRuntimeService : Service() {
                                 output,
                                 "plan project synchronization",
                             )
-                            val summary = readCString(output).split('\t')
-                            if (summary.size != 7) {
-                                throw IllegalStateException(
-                                    "Native synchronization summary is invalid",
+                            val nativeCounts =
+                                ProjectSyncSummaryCodec.decode(
+                                    readCString(output),
+                                    MAX_MIRROR_ENTRIES,
                                 )
-                            }
-                            val planCount =
-                                summary[0].toIntOrNull()
-                                    ?.takeIf { it in 0..MAX_MIRROR_ENTRIES }
-                                    ?: throw IllegalStateException(
-                                        "Native synchronization count is invalid",
-                                    )
-                            val nativeActionCounts =
-                                summary.drop(1).map { value ->
-                                    value.toIntOrNull()
-                                        ?.takeIf { it in 0..MAX_MIRROR_ENTRIES }
-                                        ?: throw IllegalStateException(
-                                            "Native synchronization summary count is invalid",
-                                        )
-                                }
+                            val planCount = nativeCounts[0]
                             val plan = ArrayList<ProjectSyncPlanEntry>(planCount)
                             repeat(planCount) { index ->
                                 checkFolderMirrorCancellation()
@@ -3477,7 +3563,11 @@ class ArchpheneRuntimeService : Service() {
                                 (SYNC_ACTION_CONVERGED..SYNC_ACTION_CONFLICT).map { action ->
                                     plan.count { it.action == action }
                                 }
-                            check(observedActionCounts == nativeActionCounts) {
+                            check(
+                                observedActionCounts.indices.all { index ->
+                                    observedActionCounts[index] == nativeCounts[index + 1]
+                                },
+                            ) {
                                 "Native synchronization summary differs from its plan"
                             }
                             if (
@@ -3569,7 +3659,14 @@ class ArchpheneRuntimeService : Service() {
                             }
                             aggregate.pulled += result.pulled
                             aggregate.pushed += result.pushed
-                            aggregate.conflictPaths.addAll(result.conflictPaths)
+                            if (!aggregateConflictPathsTruncated) {
+                                aggregateConflictPathsTruncated =
+                                    mergeBoundedProjectSyncConflictPaths(
+                                        aggregate.conflictPaths,
+                                        result.conflictPaths,
+                                        MAX_PROJECT_SYNC_CONFLICT_PATHS,
+                                    )
+                            }
                             aggregate.deferredDeletes = result.deferredDeletes
                             repeatForDeferredDeletes =
                                 (
@@ -3581,10 +3678,13 @@ class ArchpheneRuntimeService : Service() {
                                 ) &&
                                     pass < MAX_MIRROR_ENTRIES
                         } while (repeatForDeferredDeletes)
+                        val conflictCount =
+                            "${aggregate.conflictPaths.size}" +
+                                if (aggregateConflictPathsTruncated) "+" else ""
                         folderStatus =
                             "Synced ${aggregate.pulled + aggregate.pushed} change(s): " +
                                 "${aggregate.pulled} pulled, ${aggregate.pushed} pushed, " +
-                                "${aggregate.conflictPaths.size} conflict(s), " +
+                                "$conflictCount conflict(s), " +
                                 "${aggregate.deferredDeletes} deletion(s) deferred"
                         Log.i(TAG, "Android folder synchronization complete: $folderStatus")
                         recordProjectSyncHistory(
@@ -4149,8 +4249,8 @@ class ArchpheneRuntimeService : Service() {
                 }
                 val documentId =
                     it.getString(0)
-                        ?.takeIf(String::isNotEmpty)
-                        ?: throw SecurityException("Android provider returned no document ID")
+                        ?.takeIf(::safeProjectSyncDocumentId)
+                        ?: throw SecurityException("Android provider returned an unsafe document ID")
                 val name =
                     it.getString(1)
                         ?.takeIf(::safeProjectName)
@@ -4440,10 +4540,10 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun safeTreeUri(uri: Uri): Boolean {
-        val encoded = uri.toString().toByteArray(StandardCharsets.UTF_8)
+        val encoded = uri.toString()
         return uri.scheme == "content" &&
             encoded.isNotEmpty() &&
-            encoded.size <= MAX_STORAGE_URI_BYTES &&
+            utf8EncodedLength(encoded, MAX_STORAGE_URI_BYTES) != null &&
             DocumentsContract.isTreeUri(uri)
     }
 
@@ -4500,7 +4600,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun safeFolderLabel(label: String): Boolean =
-        label.toByteArray(StandardCharsets.UTF_8).size <= MAX_FOLDER_LABEL_BYTES &&
+        boundedUtf8Text(label, MAX_FOLDER_LABEL_BYTES) &&
             safeVisibleName(label)
 
     private fun connectedFolderStatus(
@@ -4525,16 +4625,15 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         for (uri in uris) {
-            val encodedUri = uri.toString().toByteArray(StandardCharsets.UTF_8)
+            val encodedUri = uri.toString()
             if (
                 uri.scheme != "content" ||
-                encodedUri.isEmpty() ||
-                encodedUri.size > MAX_STORAGE_URI_BYTES
+                !boundedUtf8Text(encodedUri, MAX_STORAGE_URI_BYTES)
             ) {
                 storageStatus = "Choose documents supplied by Android Files"
                 return false
             }
-            normalized.putIfAbsent(uri.toString(), uri)
+            normalized.putIfAbsent(encodedUri, uri)
         }
         if (
             readyHandle == 0L ||
@@ -4600,19 +4699,17 @@ class ArchpheneRuntimeService : Service() {
                                     "Importing ${index + 1} of ${normalized.size}: " +
                                         "$displayName into ~/Downloads…",
                                 )
-                                val requestBytes =
-                                    "$root\thome/Downloads\t$displayName"
-                                        .toByteArray(StandardCharsets.UTF_8)
-                                if (
-                                    requestBytes.isEmpty() ||
-                                    requestBytes.size > MAX_STORAGE_REQUEST_BYTES
-                                ) {
-                                    throw IllegalStateException(
-                                        "Document import request is too large",
+                                val requestFields =
+                                    arrayOf(root, "home/Downloads", displayName)
+                                val requestLength =
+                                    putDelimitedUtf8(
+                                        request,
+                                        requestFields,
+                                        '\t',
+                                        MAX_STORAGE_REQUEST_BYTES,
+                                    ) ?: throw IllegalStateException(
+                                        "Document import request is invalid or too large",
                                     )
-                                }
-                                request.clear()
-                                request.put(requestBytes)
                                 output.clear()
                                 val descriptor =
                                     importProvider.open(
@@ -4631,7 +4728,7 @@ class ArchpheneRuntimeService : Service() {
                                         try {
                                             NativeRuntime.nativeImportHomeDocument(
                                                 request,
-                                                requestBytes.size,
+                                                requestLength,
                                                 it.fd,
                                                 debugDocumentImportChunkDelayMillis(),
                                                 providerDeadlineMillis.toInt(),
@@ -4645,18 +4742,17 @@ class ArchpheneRuntimeService : Service() {
                                 if (
                                     result <= 0 ||
                                     result !=
-                                    response.toByteArray(StandardCharsets.UTF_8).size
+                                    utf8EncodedLength(response)
                                 ) {
                                     throw IllegalStateException(
                                         response.ifEmpty { "Native storage error $result" },
                                     )
                                 }
-                                val responseFields = response.split('\t')
-                                if (responseFields.size != 2) {
-                                    throw IllegalStateException(
-                                        "Invalid native import response",
-                                    )
-                                }
+                                val responseFields =
+                                    StorageReportCodec.decodeDocumentImport(response)
+                                        ?: throw IllegalStateException(
+                                            "Invalid native import response",
+                                        )
                                 val importedName = responseFields[0]
                                 val importedBytes =
                                     responseFields[1].toLongOrNull()
@@ -4776,11 +4872,12 @@ class ArchpheneRuntimeService : Service() {
         message: String,
         failed: Boolean,
     ): Boolean {
-        val messageBytes = message.toByteArray(StandardCharsets.UTF_8)
+        val messageLength = utf8EncodedLength(message, MAX_DOCUMENT_HANDOFF_MESSAGE_BYTES)
         if (
             readyHandle == 0L ||
             storageDocumentActive ||
-            messageBytes.size !in 1..MAX_DOCUMENT_HANDOFF_MESSAGE_BYTES ||
+            messageLength == null ||
+            messageLength == 0 ||
             message.any(Char::isISOControl)
         ) {
             return false
@@ -4835,8 +4932,10 @@ class ArchpheneRuntimeService : Service() {
         destinationUri: Uri,
         resultGrantFlags: Int,
     ): Boolean {
-        val sourceBytes = sourceUri.toString().toByteArray(StandardCharsets.UTF_8)
-        val destinationBytes = destinationUri.toString().toByteArray(StandardCharsets.UTF_8)
+        val sourceText = sourceUri.toString()
+        val destinationText = destinationUri.toString()
+        val sourceValid = boundedUtf8Text(sourceText, MAX_STORAGE_URI_BYTES)
+        val destinationValid = boundedUtf8Text(destinationText, MAX_STORAGE_URI_BYTES)
         val retainedGrantFlags =
             resultGrantFlags and
                 (Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -4850,18 +4949,16 @@ class ArchpheneRuntimeService : Service() {
             sourceUri.scheme != "content" ||
             sourceUri.authority != "$packageName.documents" ||
             destinationUri.scheme != "content" ||
-            sourceBytes.isEmpty() ||
-            sourceBytes.size > MAX_STORAGE_URI_BYTES ||
-            destinationBytes.isEmpty() ||
-            destinationBytes.size > MAX_STORAGE_URI_BYTES ||
+            !sourceValid ||
+            !destinationValid ||
             !recoverySafeGrant
         ) {
             if (
                 sourceUri.scheme != "content" ||
                 sourceUri.authority != "$packageName.documents" ||
                 destinationUri.scheme != "content" ||
-                sourceBytes.size > MAX_STORAGE_URI_BYTES ||
-                destinationBytes.size > MAX_STORAGE_URI_BYTES ||
+                !sourceValid ||
+                !destinationValid ||
                 !recoverySafeGrant
             ) {
                 storageStatus =
@@ -4930,7 +5027,7 @@ class ArchpheneRuntimeService : Service() {
                         val response = readCString(output)
                         if (
                             result <= 0 ||
-                            result != response.toByteArray(StandardCharsets.UTF_8).size
+                            result != utf8EncodedLength(response)
                         ) {
                             throw IllegalStateException(
                                 response.ifEmpty { "Native storage error $result" },
@@ -5079,8 +5176,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun safeVisibleName(name: String): Boolean =
-        name.isNotEmpty() &&
-            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_STORAGE_NAME_BYTES &&
+        boundedUtf8Text(name, MAX_STORAGE_NAME_BYTES) &&
             name != "." &&
             name != ".." &&
             !name.startsWith('.') &&
@@ -5389,20 +5485,21 @@ class ArchpheneRuntimeService : Service() {
                 Log.w(TAG, "Could not read Android DNS configuration", error)
                 return false
             }
-        val request = StringBuilder("D1\n")
-        val emitted = ArrayList<String>(MAX_ANDROID_DNS_SERVERS)
-        for (address in linkProperties.dnsServers) {
-            val hostAddress = address.hostAddress ?: continue
-            if (hostAddress.isEmpty() || emitted.contains(hostAddress)) {
-                continue
-            }
-            emitted.add(hostAddress)
-            request.append(hostAddress).append('\n')
-            if (emitted.size == MAX_ANDROID_DNS_SERVERS) {
-                break
-            }
+        val selection =
+            selectAndroidDnsServers(
+                linkProperties.dnsServers,
+                MAX_ANDROID_DNS_CANDIDATES,
+                MAX_ANDROID_DNS_SERVERS,
+            ) { address -> address.hostAddress }
+        if (selection.truncated) {
+            Log.w(TAG, "Android DNS candidate list exceeded its bound; retaining prior resolver")
+            return false
         }
-        if (emitted.isEmpty()) {
+        val request = StringBuilder("D1\n")
+        for (hostAddress in selection.addresses) {
+            request.append(hostAddress).append('\n')
+        }
+        if (selection.addresses.isEmpty()) {
             Log.i(TAG, "Android active network has no DNS servers; retaining prior resolver")
             return false
         }
@@ -5450,17 +5547,15 @@ class ArchpheneRuntimeService : Service() {
                         }
                         handle = activeHandle
                         restoreStorageStatus()
-                        val pathBytes =
-                            File(filesDir, "arch-root")
-                                .absolutePath
-                                .toByteArray(StandardCharsets.UTF_8)
-                        val pathBuffer = ByteBuffer.allocateDirect(pathBytes.size)
-                        pathBuffer.put(pathBytes)
+                        val path = File(filesDir, "arch-root").absolutePath
+                        val pathLength = checkNotNull(utf8EncodedLength(path))
+                        val pathBuffer = ByteBuffer.allocateDirect(pathLength)
+                        check(putUtf8(pathBuffer, path, pathLength) == pathLength)
                         val createdDirectories =
                             NativeRuntime.nativeBootstrapArchRoot(
                                 activeHandle,
                                 pathBuffer,
-                                pathBytes.size,
+                                pathLength,
                                 System.currentTimeMillis(),
                             )
                         if (createdDirectories < 0) {
@@ -5537,10 +5632,8 @@ class ArchpheneRuntimeService : Service() {
                 "arm64-v8a" -> "aarch64" to NativeRuntime.REPOSITORY_AARCH64
                 else -> throw IllegalStateException("Unsupported Android ABI")
             }
-        val nativePathBytes =
-            File(applicationInfo.nativeLibraryDir)
-                .canonicalPath
-                .toByteArray(StandardCharsets.UTF_8)
+        val nativePath = File(applicationInfo.nativeLibraryDir).canonicalPath
+        val nativePathLength = checkNotNull(utf8EncodedLength(nativePath))
         val manifestBytes =
             assets.open("package-runtime-$architecture.tsv").use { input ->
                 input.readBoundedBytes(
@@ -5551,8 +5644,8 @@ class ArchpheneRuntimeService : Service() {
         if (manifestBytes.isEmpty()) {
             throw IllegalStateException("Invalid package-runtime manifest size")
         }
-        val nativePathBuffer = ByteBuffer.allocateDirect(nativePathBytes.size)
-        nativePathBuffer.put(nativePathBytes)
+        val nativePathBuffer = ByteBuffer.allocateDirect(nativePathLength)
+        check(putUtf8(nativePathBuffer, nativePath, nativePathLength) == nativePathLength)
         val manifestBuffer = ByteBuffer.allocateDirect(manifestBytes.size)
         manifestBuffer.put(manifestBytes)
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
@@ -5561,7 +5654,7 @@ class ArchpheneRuntimeService : Service() {
                 activeHandle,
                 repositoryArchitecture,
                 nativePathBuffer,
-                nativePathBytes.size,
+                nativePathLength,
                 manifestBuffer,
                 manifestBytes.size,
                 outputBuffer,
@@ -5596,14 +5689,11 @@ class ArchpheneRuntimeService : Service() {
                 },
             )
         }
-        val outputBytes = ByteArray(outputLength)
+        val outputBytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(outputBytes)
-        return outputBytes
-            .toString(StandardCharsets.UTF_8)
-            .lineSequence()
-            .map(String::trim)
-            .firstOrNull { line -> line.contains("Pacman v") }
+        return PackageRuntimeProbeCodec
+            .firstPacmanVersion(outputBytes.toString(StandardCharsets.UTF_8))
             ?: throw IllegalStateException("Package-runtime probe returned no pacman version")
     }
 
@@ -5819,15 +5909,17 @@ class ArchpheneRuntimeService : Service() {
                 if (desktopEntryOutputBytes[outputLength - 1] != '\n'.code.toByte()) {
                     throw IllegalStateException("Desktop-entry page is not terminated")
                 }
-                val lines =
-                    String(
-                        desktopEntryOutputBytes,
-                        0,
-                        outputLength,
-                        StandardCharsets.UTF_8,
-                    ).dropLast(1).split('\n')
-                val header = lines.first().split('\t')
-                if (header.size != 6 || header[0] != "D3") {
+                val page =
+                    DesktopEntryPageCodec.decode(
+                        String(
+                            desktopEntryOutputBytes,
+                            0,
+                            outputLength,
+                            StandardCharsets.UTF_8,
+                        ),
+                    )
+                val header = page.header
+                if (header[0] != "D3") {
                     throw IllegalStateException("Invalid desktop-entry page header")
                 }
                 val nextOffset = header[1].toInt()
@@ -5843,7 +5935,7 @@ class ArchpheneRuntimeService : Service() {
                 if (
                     total !in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT ||
                     nextOffset !in offset..total ||
-                    lines.size - 1 != nextOffset - offset ||
+                    page.rows.size != nextOffset - offset ||
                     pageExamined !in total..1024 ||
                     pageRejected !in 0..pageExamined ||
                     (expectedTotal >= 0 && expectedTotal != total)
@@ -5854,11 +5946,7 @@ class ArchpheneRuntimeService : Service() {
                 examined = pageExamined
                 rejected = pageRejected
                 truncated = pageTruncated
-                for (line in lines.drop(1)) {
-                    val fields = line.split('\t', limit = 10)
-                    if (fields.size != 10) {
-                        throw IllegalStateException("Invalid desktop-entry row")
-                    }
+                for (fields in page.rows) {
                     val desktopId = fields[0]
                     val name = fields[1]
                     val executable = fields[2]
@@ -5913,28 +6001,10 @@ class ArchpheneRuntimeService : Service() {
                     ) {
                         throw IllegalStateException("Invalid desktop-entry identity")
                     }
-                    if (argumentSpec.isNotEmpty()) {
-                        for (argument in argumentSpec.split('\u001f')) {
-                            when (argument) {
-                                "f", "F", "u", "U", "i", "c", "k" -> Unit
-                                else -> {
-                                    if (!(argument.startsWith("L:") && argument.length > 2)) {
-                                        throw IllegalStateException("Invalid desktop argument")
-                                    }
-                                }
-                            }
-                        }
+                    if (!validDesktopArgumentSpec(argumentSpec)) {
+                        throw IllegalStateException("Invalid desktop argument")
                     }
-                    if (
-                        mimeSpec.isNotEmpty() &&
-                        (
-                            !mimeSpec.endsWith(';') ||
-                                mimeSpec
-                                    .dropLast(1)
-                                    .split(';')
-                                    .any { value -> !value.contains('/') }
-                        )
-                    ) {
+                    if (!validDesktopMimeSpec(mimeSpec)) {
                         throw IllegalStateException("Invalid desktop MIME list")
                     }
                     terminal[desktopIds.size] = rowTerminal
@@ -5951,7 +6021,7 @@ class ArchpheneRuntimeService : Service() {
                 if (offset == total) {
                     break
                 }
-                if (lines.size == 1) {
+                if (page.rows.isEmpty()) {
                     throw IllegalStateException("Desktop-entry pagination made no progress")
                 }
             }
@@ -6112,7 +6182,7 @@ class ArchpheneRuntimeService : Service() {
         val packageName = lastResolvedPackage
         if (
             packageName.isEmpty() ||
-            !searchStatus.lineSequence().any { line -> line.startsWith("Integration:") }
+            !hasPackageStatusLineStartingWith(searchStatus, "Integration:")
         ) {
             return
         }
@@ -6158,9 +6228,9 @@ class ArchpheneRuntimeService : Service() {
                         output.position(0)
                         output.get(bytes, 0, removalLength)
                         val removal =
-                            String(bytes, 0, removalLength, StandardCharsets.US_ASCII)
-                                .trimEnd('\n')
-                                .split('\t')
+                            LauncherClaimCodec.decodeRemoval(
+                                String(bytes, 0, removalLength, StandardCharsets.US_ASCII),
+                            ) ?: throw IllegalStateException("Invalid native launcher removal")
                         check(
                             removal.size == 3 &&
                                 removal[0] == "R1" &&
@@ -6239,9 +6309,9 @@ class ArchpheneRuntimeService : Service() {
                     output.position(0)
                     output.get(bytes, 0, length)
                     val fields =
-                        String(bytes, 0, length, StandardCharsets.UTF_8)
-                            .trimEnd('\n')
-                            .split('\t', limit = 9)
+                        LauncherClaimCodec.decodePublication(
+                            String(bytes, 0, length, StandardCharsets.UTF_8),
+                        ) ?: throw IllegalStateException("Invalid native launcher publication")
                     val mimeTypes =
                         fields.getOrNull(8)?.let(LauncherIntentMimePolicy::parseSpec)
                     check(
@@ -6264,8 +6334,7 @@ class ArchpheneRuntimeService : Service() {
                     check(
                         (fields[6].isEmpty() && fields[7].isEmpty()) ||
                             (
-                                fields[6].startsWith('/') &&
-                                    fields[6].length <= 240 &&
+                                safeLauncherIconLogicalPath(fields[6]) &&
                                     iconDigest != null
                             ),
                     ) {
@@ -6352,13 +6421,10 @@ class ArchpheneRuntimeService : Service() {
         expectedSha256: ByteArray,
     ): ByteArray? {
         val root = File(filesDir, "arch-root").canonicalFile
-        val relative = logicalPath.removePrefix("/")
-        if (
-            relative.isEmpty() ||
-            relative.split('/').any { part -> part.isEmpty() || part == "." || part == ".." }
-        ) {
+        if (!safeLauncherIconLogicalPath(logicalPath)) {
             return null
         }
+        val relative = logicalPath.substring(1)
         val icon = File(root, relative).canonicalFile
         if (icon == root || !icon.path.startsWith("${root.path}${File.separator}")) {
             return null
@@ -6654,7 +6720,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun readLauncherRegistryRows(activeHandle: Long): List<LauncherRegistryRow> {
-        val rows = ArrayList<LauncherRegistryRow>()
+        val rows = ArrayList<LauncherRegistryRow>(NativeRuntime.DESKTOP_ENTRY_LIMIT)
         val output = ByteBuffer.allocateDirect(8192)
         val bytes = ByteArray(8192)
         var offset = 0
@@ -6676,12 +6742,12 @@ class ArchpheneRuntimeService : Service() {
             }
             output.position(0)
             output.get(bytes, 0, length)
-            val lines =
-                String(bytes, 0, length, StandardCharsets.UTF_8)
-                    .trimEnd('\n')
-                    .split('\n')
-            val header = lines.first().split('\t')
-            check(header.size == 3 && header[0] == "P2") {
+            val page =
+                LauncherRegistryPageCodec.decode(
+                    String(bytes, 0, length, StandardCharsets.UTF_8),
+                )
+            val header = page.header
+            check(header[0] == "P2") {
                 "Invalid launcher registry page"
             }
             val next = header[1].toInt()
@@ -6689,17 +6755,16 @@ class ArchpheneRuntimeService : Service() {
             check(
                 total in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT &&
                     next in offset..total &&
-                    lines.size - 1 == next - offset &&
+                    (next > offset || next == total) &&
+                    page.rows.size == next - offset &&
                     (expectedTotal == -1 || expectedTotal == total),
             ) {
                 "Inconsistent launcher registry page"
             }
             expectedTotal = total
-            for (line in lines.drop(1)) {
-                val fields = line.split('\t')
+            for (fields in page.rows) {
                 check(
-                    fields.size == 8 &&
-                        LAUNCHER_PACKAGE.matches(fields[0]) &&
+                    LAUNCHER_PACKAGE.matches(fields[0]) &&
                         LAUNCHER_DESCRIPTOR.matches(fields[1]),
                 ) {
                     "Invalid launcher registry row"
@@ -6715,7 +6780,7 @@ class ArchpheneRuntimeService : Service() {
                         published in 0..desired &&
                         pending in 0..desired &&
                         status in 1..10 &&
-                        name.toByteArray(StandardCharsets.UTF_8).size in 1..256 &&
+                        boundedUtf8Text(name, 256) &&
                         name.none(Char::isISOControl) &&
                         (sourcePackage.isEmpty() || AUR_PACKAGE_NAME.matches(sourcePackage)),
                 ) {
@@ -6917,26 +6982,25 @@ class ArchpheneRuntimeService : Service() {
         }
         desktopEntryOutputBuffer.position(0)
         desktopEntryOutputBuffer.get(desktopEntryOutputBytes, 0, outputLength)
-        val fields =
-            String(
-                desktopEntryOutputBytes,
-                0,
-                outputLength,
-                StandardCharsets.US_ASCII,
-            ).trimEnd('\n').split('\t')
-        if (fields.size != 11 || fields[0] != "L3") {
-            return null
-        }
-        val generation = fields[1].toLongOrNull() ?: return null
-        val total = fields[2].toLongOrNull() ?: return null
-        val needsPublish = fields[3].toLongOrNull() ?: return null
-        val current = fields[4].toLongOrNull() ?: return null
-        val needsRemoval = fields[5].toLongOrNull() ?: return null
-        val active = fields[6].toLongOrNull() ?: return null
-        val failed = fields[7].toLongOrNull() ?: return null
-        val cancelled = fields[8].toLongOrNull() ?: return null
-        val dismissed = fields[9].toLongOrNull() ?: return null
-        val needsReview = fields[10].toLongOrNull() ?: return null
+        val values =
+            LauncherSummaryCodec.decode(
+                String(
+                    desktopEntryOutputBytes,
+                    0,
+                    outputLength,
+                    StandardCharsets.US_ASCII,
+                ),
+            ) ?: return null
+        val generation = values[0]
+        val total = values[1]
+        val needsPublish = values[2]
+        val current = values[3]
+        val needsRemoval = values[4]
+        val active = values[5]
+        val failed = values[6]
+        val cancelled = values[7]
+        val dismissed = values[8]
+        val needsReview = values[9]
         if (
             generation < 0 ||
             total !in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT.toLong() ||
@@ -7220,16 +7284,16 @@ class ArchpheneRuntimeService : Service() {
                 requireRuntimeWorker("Package search")
                 try {
                     deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
-                    val queryBytes = normalized.toByteArray(StandardCharsets.UTF_8)
-                    val queryBuffer = ByteBuffer.allocateDirect(queryBytes.size)
-                    queryBuffer.put(queryBytes)
+                    val queryLength = checkNotNull(utf8EncodedLength(normalized))
+                    val queryBuffer = ByteBuffer.allocateDirect(queryLength)
+                    check(putUtf8(queryBuffer, normalized, queryLength) == queryLength)
                     val outputBuffer =
                         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
                     val outputLength =
                         NativeRuntime.nativeSearchPackages(
                             activeHandle,
                             queryBuffer,
-                            queryBytes.size,
+                            queryLength,
                             outputBuffer,
                         )
                     if (outputLength < 0) {
@@ -7241,7 +7305,7 @@ class ArchpheneRuntimeService : Service() {
                         searchStatus = "No official packages match $normalized"
                         publishAvailablePackageStatus(searchStatus)
                     } else {
-                        val bytes = ByteArray(outputLength)
+                        val bytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
                         outputBuffer.position(0)
                         outputBuffer.get(bytes)
                         publishAvailablePackages(bytes, normalized)
@@ -7283,20 +7347,18 @@ class ArchpheneRuntimeService : Service() {
         bytes: ByteArray,
         query: String,
     ) {
-        val repositories = ArrayList<String>()
-        val names = ArrayList<String>()
-        val versions = ArrayList<String>()
-        val descriptions = ArrayList<String>()
-        val installStates = ArrayList<String>()
-        val installedVersions = ArrayList<String>()
+        val repositories = ArrayList<String>(AVAILABLE_PACKAGE_LIMIT)
+        val names = ArrayList<String>(AVAILABLE_PACKAGE_LIMIT)
+        val versions = ArrayList<String>(AVAILABLE_PACKAGE_LIMIT)
+        val descriptions = ArrayList<String>(AVAILABLE_PACKAGE_LIMIT)
+        val installStates = ArrayList<String>(AVAILABLE_PACKAGE_LIMIT)
+        val installedVersions = ArrayList<String>(AVAILABLE_PACKAGE_LIMIT)
         val installedCapabilities = IntArray(AVAILABLE_PACKAGE_LIMIT)
         val installedCapabilitiesAnalyzed = BooleanArray(AVAILABLE_PACKAGE_LIMIT)
         val installed = installedPackageSnapshot
-        String(bytes, StandardCharsets.UTF_8)
-            .trimEnd('\n')
-            .lineSequence()
-            .forEach { line ->
-                val fields = line.split('\t', limit = 6)
+        PackageSearchPageCodec
+            .decode(String(bytes, StandardCharsets.UTF_8), AVAILABLE_PACKAGE_LIMIT)
+            .forEach { fields ->
                 val validInstalledVersion =
                     fields.size == 6 &&
                         fields[5].length <= 128 &&
@@ -7976,19 +8038,11 @@ class ArchpheneRuntimeService : Service() {
                     readNativeMessage(aurEndpointBuffer, outputLength),
             )
         }
-        val candidateBytes = ByteArray(outputLength)
+        val candidateBytes =
+            ByteArray(checkedNativeOutputLength(outputLength, aurEndpointBuffer.capacity()))
         aurEndpointBuffer.position(0)
         aurEndpointBuffer.get(candidateBytes)
-        val candidates =
-            String(candidateBytes, StandardCharsets.US_ASCII)
-                .lineSequence()
-                .filter(String::isNotBlank)
-                .toList()
-        require(
-            candidates.size <= 32 &&
-                candidates.distinct().size == candidates.size &&
-                candidates.all { candidate -> candidate.matches(AUR_PACKAGE_NAME) },
-        )
+        val candidates = AurProviderCandidatesCodec.decode(String(candidateBytes, StandardCharsets.US_ASCII))
         return when (candidates.size) {
             0 -> throw IllegalStateException("No AUR provider exists for $dependency")
             1 -> candidates.single()
@@ -9006,11 +9060,8 @@ class ArchpheneRuntimeService : Service() {
                 if (poll.logs.isNotEmpty()) {
                     publishAurBuildLogs(poll.logs)
                     val phase =
-                        poll.logs
-                            .lineSequence()
-                            .map(String::trim)
-                            .lastOrNull(String::isNotEmpty)
-                            ?.take(160)
+                        BuildLogPhaseCodec
+                            .lastNonEmptyLine(poll.logs, 160)
                             .orEmpty()
                     searchStatus =
                         if (phase.isEmpty()) {
@@ -10436,7 +10487,9 @@ class ArchpheneRuntimeService : Service() {
                         readNativeMessage(packageResolutionOutputBuffer, outputLength),
                     )
                 }
-                ByteArray(outputLength).also { output ->
+                ByteArray(
+                    checkedNativeOutputLength(outputLength, packageResolutionOutputBuffer.capacity()),
+                ).also { output ->
                     packageResolutionOutputBuffer.position(0)
                     packageResolutionOutputBuffer.get(output)
                 }
@@ -10504,7 +10557,9 @@ class ArchpheneRuntimeService : Service() {
                         readNativeMessage(aurBuildGraphOutputBuffer, outputLength),
                     )
                 }
-                ByteArray(outputLength).also { output ->
+                ByteArray(
+                    checkedNativeOutputLength(outputLength, aurBuildGraphOutputBuffer.capacity()),
+                ).also { output ->
                     aurBuildGraphOutputBuffer.position(0)
                     aurBuildGraphOutputBuffer.get(output)
                 }
@@ -10611,7 +10666,9 @@ class ArchpheneRuntimeService : Service() {
                         readNativeMessage(packageResolutionOutputBuffer, outputLength),
                     )
                 }
-                ByteArray(outputLength).also { output ->
+                ByteArray(
+                    checkedNativeOutputLength(outputLength, packageResolutionOutputBuffer.capacity()),
+                ).also { output ->
                     packageResolutionOutputBuffer.position(0)
                     packageResolutionOutputBuffer.get(output)
                 }
@@ -10641,7 +10698,9 @@ class ArchpheneRuntimeService : Service() {
                         readNativeMessage(aurBuildClosureOutputBuffer, outputLength),
                     )
                 }
-                ByteArray(outputLength).also { output ->
+                ByteArray(
+                    checkedNativeOutputLength(outputLength, aurBuildClosureOutputBuffer.capacity()),
+                ).also { output ->
                     aurBuildClosureOutputBuffer.position(0)
                     aurBuildClosureOutputBuffer.get(output)
                 }
@@ -10664,15 +10723,10 @@ class ArchpheneRuntimeService : Service() {
         manifest: ByteArray,
         resolvedPackages: List<ResolvedPayload>,
     ): List<VerifiedBuildPackage> {
-        require(manifest.isNotEmpty() && manifest.size <= NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE)
-        val lines = String(manifest, StandardCharsets.US_ASCII).lines()
-        require(lines.firstOrNull() == "ABPC0001")
-        val packageLines = lines.drop(1).filter { line -> line.isNotEmpty() }
-        require(packageLines.size == resolvedPackages.size + 1)
-        val summary = packageLines.last().split('\t')
+        val closure = VerifiedBuildClosureCodec.decode(manifest, resolvedPackages.size)
+        val summary = closure.summary
         require(
-            summary.size == 3 &&
-                summary[0] == "summary" &&
+            summary[0] == "summary" &&
                 summary[1].toIntOrNull() == resolvedPackages.size &&
                 summary[2].toLongOrNull() ==
                 resolvedPackages.fold(0L) { total, payload ->
@@ -10680,9 +10734,7 @@ class ArchpheneRuntimeService : Service() {
                 },
         )
         val packages = ArrayList<VerifiedBuildPackage>(resolvedPackages.size)
-        packageLines.dropLast(1).forEachIndexed { index, line ->
-            val fields = line.split('\t')
-            require(fields.size == 9)
+        closure.packageRows.forEachIndexed { index, fields ->
             val archiveBytes = fields[5].toLongOrNull() ?: error("Invalid archive size")
             val signatureBytes = fields[7].toLongOrNull() ?: error("Invalid signature size")
             val resolved = resolvedPackages[index]
@@ -10849,18 +10901,7 @@ class ArchpheneRuntimeService : Service() {
                     decodeAurScript(reader.blob(512 * 1024), allowEmpty = false)
                 require(scriptPackage.matches(AUR_PACKAGE_NAME))
                 require(scriptPackage in requiredPackages)
-                require(
-                    scriptPath.isNotEmpty() &&
-                        !scriptPath.startsWith('/') &&
-                        scriptPath
-                            .split('/')
-                            .all { segment ->
-                                segment.isNotEmpty() &&
-                                    segment != "." &&
-                                    segment != ".." &&
-                                    segment.matches(AUR_SOURCE_FILENAME)
-                            },
-                )
+                require(safeAurInstallScriptPath(scriptPath))
                 AurInstallScriptReview(scriptPackage, scriptPath, scriptContents)
             }
         require(
@@ -11354,17 +11395,22 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         packageName: String,
     ): List<ResolvedPayload> {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
         val bytes =
             synchronized(packageResolutionOutputBuffer) {
-                packageResolutionRequestBuffer.clear()
-                packageResolutionRequestBuffer.put(packageBytes)
+                val packageLength =
+                    checkNotNull(
+                        putUtf8(
+                            packageResolutionRequestBuffer,
+                            packageName,
+                            packageResolutionRequestBuffer.capacity(),
+                        ),
+                    )
                 packageResolutionOutputBuffer.clear()
                 val outputLength =
                     NativeRuntime.nativeResolvePackage(
                         activeHandle,
                         packageResolutionRequestBuffer,
-                        packageBytes.size,
+                        packageLength,
                         packageResolutionOutputBuffer,
                     )
                 if (outputLength <= 0) {
@@ -11372,7 +11418,9 @@ class ArchpheneRuntimeService : Service() {
                         readNativeMessage(packageResolutionOutputBuffer, outputLength),
                     )
                 }
-                ByteArray(outputLength).also { output ->
+                ByteArray(
+                    checkedNativeOutputLength(outputLength, packageResolutionOutputBuffer.capacity()),
+                ).also { output ->
                     packageResolutionOutputBuffer.position(0)
                     packageResolutionOutputBuffer.get(output)
                 }
@@ -11388,11 +11436,16 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         packageName: String,
     ): PackageCompatibility {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
         val bytes =
             synchronized(packageCompatibilityOutputBuffer) {
-                packageCompatibilityRequestBuffer.clear()
-                packageCompatibilityRequestBuffer.put(packageBytes)
+                val packageLength =
+                    checkNotNull(
+                        putUtf8(
+                            packageCompatibilityRequestBuffer,
+                            packageName,
+                            packageCompatibilityRequestBuffer.capacity(),
+                        ),
+                    )
                 packageCompatibilityOutputBuffer.clear()
                 if (!NativeRuntime.nativePreparePackageCompatibilityReview(activeHandle)) {
                     throw IllegalStateException(
@@ -11409,7 +11462,7 @@ class ArchpheneRuntimeService : Service() {
                     NativeRuntime.nativeAnalyzeCachedPackage(
                         activeHandle,
                         packageCompatibilityRequestBuffer,
-                        packageBytes.size,
+                        packageLength,
                         packageCompatibilityOutputBuffer,
                     )
                 if (outputLength <= 0) {
@@ -11417,7 +11470,9 @@ class ArchpheneRuntimeService : Service() {
                         readNativeMessage(packageCompatibilityOutputBuffer, outputLength),
                     )
                 }
-                ByteArray(outputLength).also { output ->
+                ByteArray(
+                    checkedNativeOutputLength(outputLength, packageCompatibilityOutputBuffer.capacity()),
+                ).also { output ->
                     packageCompatibilityOutputBuffer.position(0)
                     packageCompatibilityOutputBuffer.get(output)
                 }
@@ -11429,17 +11484,22 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         packageName: String,
     ): PackageLauncherReview {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
         val bytes =
             synchronized(packageCompatibilityOutputBuffer) {
-                packageCompatibilityRequestBuffer.clear()
-                packageCompatibilityRequestBuffer.put(packageBytes)
+                val packageLength =
+                    checkNotNull(
+                        putUtf8(
+                            packageCompatibilityRequestBuffer,
+                            packageName,
+                            packageCompatibilityRequestBuffer.capacity(),
+                        ),
+                    )
                 packageCompatibilityOutputBuffer.clear()
                 val outputLength =
                     NativeRuntime.nativePackageLauncherReview(
                         activeHandle,
                         packageCompatibilityRequestBuffer,
-                        packageBytes.size,
+                        packageLength,
                         packageCompatibilityOutputBuffer,
                     )
                 if (outputLength <= 0) {
@@ -11447,7 +11507,9 @@ class ArchpheneRuntimeService : Service() {
                         readNativeMessage(packageCompatibilityOutputBuffer, outputLength),
                     )
                 }
-                ByteArray(outputLength).also { output ->
+                ByteArray(
+                    checkedNativeOutputLength(outputLength, packageCompatibilityOutputBuffer.capacity()),
+                ).also { output ->
                     packageCompatibilityOutputBuffer.position(0)
                     packageCompatibilityOutputBuffer.get(output)
                 }
@@ -11632,15 +11694,12 @@ class ArchpheneRuntimeService : Service() {
     private fun withPackageLauncherReview(
         details: String,
         review: PackageLauncherReview,
-    ): String {
-        val lines = details.lineSequence().toMutableList()
-        val index = lines.indexOfFirst { line -> line.startsWith("Integration:") }
-        if (index < 0) {
-            return details
-        }
-        lines[index] = packageLauncherReviewSummary(review)
-        return lines.joinToString("\n")
-    }
+    ): String =
+        replaceFirstPackageStatusLineStartingWith(
+            details,
+            "Integration:",
+            packageLauncherReviewSummary(review),
+        )
 
     private fun packageCompatibilityUnsupportedDetail(
         compatibility: PackageCompatibility,
@@ -11687,56 +11746,28 @@ class ArchpheneRuntimeService : Service() {
     private fun decodeResolvedPayloads(
         bytes: ByteArray,
         maximumPackages: Int,
-    ): List<ResolvedPayload> {
-        require(maximumPackages in 1..512)
-        val packages = ArrayList<ResolvedPayload>()
-        String(bytes, StandardCharsets.UTF_8)
-            .lineSequence()
-            .filter(String::isNotEmpty)
-            .forEach { line ->
-                val fields = line.split('\t', limit = 6)
-                val size = fields.getOrNull(5)?.toLongOrNull()
-                if (fields.size != 6 || size == null || size <= 0) {
-                    throw IllegalStateException("Rust returned an invalid resolution")
-                }
-                packages.add(
-                    ResolvedPayload(
-                        repository = fields[0],
-                        name = fields[1],
-                        version = fields[2],
-                        filename = fields[3],
-                        url = fields[4],
-                        size = size,
-                    ),
-                )
-                if (packages.size > maximumPackages) {
-                    throw IllegalStateException("Package closure exceeds its limit")
-                }
-            }
-        require(packages.isNotEmpty())
-        return packages
-    }
+    ): List<ResolvedPayload> = ResolvedPayloadCodec.decode(bytes, maximumPackages)
 
     private fun installedPackageVersion(
         activeHandle: Long,
         packageName: String,
     ): String {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
-        packageBuffer.put(packageBytes)
+        val packageLength = checkNotNull(utf8EncodedLength(packageName))
+        val packageBuffer = ByteBuffer.allocateDirect(packageLength)
+        check(putUtf8(packageBuffer, packageName, packageLength) == packageLength)
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_INSTALLED_VERSION,
                 packageBuffer,
-                packageBytes.size,
+                packageLength,
                 outputBuffer,
             )
         if (outputLength < 0) {
             throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
         }
-        val bytes = ByteArray(outputLength)
+        val bytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(bytes)
         return String(bytes, StandardCharsets.UTF_8)
@@ -11746,28 +11777,29 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         review: AurReviewData,
     ): AurCandidateState {
-        val request =
-            "${review.packageName}\t${review.version}"
-                .toByteArray(StandardCharsets.UTF_8)
-        require(request.size <= 257)
-        val requestBuffer = ByteBuffer.allocateDirect(request.size)
-        requestBuffer.put(request)
+        val requestFields = arrayOf(review.packageName, review.version)
+        val requestLength =
+            requireNotNull(delimitedUtf8Length(requestFields, '\t', 257))
+        val requestBuffer = ByteBuffer.allocateDirect(requestLength)
+        check(putDelimitedUtf8(requestBuffer, requestFields, '\t', requestLength) == requestLength)
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_AUR_CANDIDATE_STATE,
                 requestBuffer,
-                request.size,
+                requestLength,
                 outputBuffer,
             )
         if (outputLength <= 0) {
             throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
         }
-        val bytes = ByteArray(outputLength)
+        val bytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(bytes)
-        val fields = String(bytes, StandardCharsets.UTF_8).split('\t', limit = 2)
+        val fields =
+            AurCandidateStateCodec.decode(String(bytes, StandardCharsets.UTF_8))
+                ?: throw IllegalArgumentException("Invalid AUR candidate state")
         val state = fields.getOrNull(0)
         val installedVersion = fields.getOrNull(1)
         require(
@@ -11794,22 +11826,22 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         packageName: String,
     ): String {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
-        packageBuffer.put(packageBytes)
+        val packageLength = checkNotNull(utf8EncodedLength(packageName))
+        val packageBuffer = ByteBuffer.allocateDirect(packageLength)
+        check(putUtf8(packageBuffer, packageName, packageLength) == packageLength)
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_AVAILABLE_VERSION_STATE,
                 packageBuffer,
-                packageBytes.size,
+                packageLength,
                 outputBuffer,
             )
         if (outputLength <= 0) {
             throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
         }
-        val bytes = ByteArray(outputLength)
+        val bytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(bytes)
         return String(bytes, StandardCharsets.US_ASCII).also { state ->
@@ -11823,22 +11855,22 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         packageName: String,
     ): Long {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
-        packageBuffer.put(packageBytes)
+        val packageLength = checkNotNull(utf8EncodedLength(packageName))
+        val packageBuffer = ByteBuffer.allocateDirect(packageLength)
+        check(putUtf8(packageBuffer, packageName, packageLength) == packageLength)
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_INSTALLATION_BYTES,
                 packageBuffer,
-                packageBytes.size,
+                packageLength,
                 outputBuffer,
             )
         if (outputLength <= 0) {
             throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
         }
-        val bytes = ByteArray(outputLength)
+        val bytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(bytes)
         return String(bytes, StandardCharsets.US_ASCII)
@@ -11851,22 +11883,22 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         packageName: String,
     ): String {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
-        packageBuffer.put(packageBytes)
+        val packageLength = checkNotNull(utf8EncodedLength(packageName))
+        val packageBuffer = ByteBuffer.allocateDirect(packageLength)
+        check(putUtf8(packageBuffer, packageName, packageLength) == packageLength)
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_INSTALLED_ORIGIN,
                 packageBuffer,
-                packageBytes.size,
+                packageLength,
                 outputBuffer,
             )
         if (outputLength <= 0) {
             throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
         }
-        val bytes = ByteArray(outputLength)
+        val bytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(bytes)
         return String(bytes, StandardCharsets.UTF_8)
@@ -11883,33 +11915,12 @@ class ArchpheneRuntimeService : Service() {
         if (outputLength == 0 || outputLength > NativeRuntime.PACKAGE_OUTPUT_SIZE) {
             throw IllegalStateException("No supported installed shell is available")
         }
-        val bytes = ByteArray(outputLength)
+        val bytes = ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(bytes)
-        val choices = ArrayList<ShellChoice>(2)
-        val seenIds = HashSet<String>(2)
-        String(bytes, StandardCharsets.UTF_8).lineSequence().forEach { line ->
-            if (line.isEmpty()) {
-                return@forEach
-            }
-            if (choices.size >= SHELL_CHOICE_LIMIT) {
-                throw IllegalStateException("Installed shell catalog is too large")
-            }
-            val fields = line.split('\t')
-            if (
-                fields.size < 3 ||
-                fields.size > 7 ||
-                fields.any { field ->
-                    field.isEmpty() ||
-                        field.length > SHELL_FIELD_LIMIT ||
-                        field.any { character ->
-                            character.code !in 0x20..0x7e || character == '\u0000'
-                        }
-                } ||
-                fields.drop(2).any { field -> field.indexOf(' ') >= 0 }
-            ) {
-                throw IllegalStateException("Installed shell catalog is invalid")
-            }
+        val choices = ArrayList<ShellChoice>(SHELL_CHOICE_LIMIT)
+        val seenIds = HashSet<String>(SHELL_CHOICE_LIMIT)
+        ShellCatalogCodec.decode(String(bytes, StandardCharsets.UTF_8)).forEach { fields ->
             val id = fields[0]
             val label = fields[1]
             if (
@@ -11920,20 +11931,9 @@ class ArchpheneRuntimeService : Service() {
             ) {
                 throw IllegalStateException("Installed shell catalog has an invalid identifier")
             }
-            val encoded = fields.drop(2).map { field -> field.toByteArray(StandardCharsets.UTF_8) }
-            val requestLength = encoded.sumOf(ByteArray::size) + encoded.size - 1
-            if (requestLength > NativeRuntime.COMMAND_REQUEST_LIMIT) {
-                throw IllegalStateException("Installed shell launch request is too large")
-            }
-            val requestBytes = ByteArray(requestLength)
-            var offset = 0
-            encoded.forEachIndexed { index, field ->
-                if (index != 0) {
-                    requestBytes[offset++] = 0
-                }
-                field.copyInto(requestBytes, offset)
-                offset += field.size
-            }
+            val requestBytes =
+                encodeNullSeparatedUtf8(fields, 2, NativeRuntime.COMMAND_REQUEST_LIMIT)
+                    ?: throw IllegalStateException("Installed shell launch request is too large")
             choices.add(ShellChoice(id, label, requestBytes))
         }
         if (choices.isEmpty()) {
@@ -11977,16 +11977,23 @@ class ArchpheneRuntimeService : Service() {
     ): Long {
         requireRuntimeWorker("Package transaction journal")
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-        val requestBytes =
-            "$repository\t$packageName".toByteArray(StandardCharsets.UTF_8)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
-        requestBuffer.put(requestBytes)
+        val requestFields = arrayOf(repository, packageName)
+        val requestLength =
+            checkNotNull(
+                delimitedUtf8Length(
+                    requestFields,
+                    '\t',
+                    NativeRuntime.PACKAGE_OUTPUT_SIZE,
+                ),
+            )
+        val requestBuffer = ByteBuffer.allocateDirect(requestLength)
+        check(putDelimitedUtf8(requestBuffer, requestFields, '\t', requestLength) == requestLength)
         val jobId =
             NativeRuntime.nativeQueuePackageJob(
                 activeHandle,
                 operation,
                 requestBuffer,
-                requestBytes.size,
+                requestLength,
                 System.currentTimeMillis(),
                 outputBuffer,
             )
@@ -12576,71 +12583,56 @@ class ArchpheneRuntimeService : Service() {
         val bytes = ByteArray(length)
         aurBuildClosureOutputBuffer.position(0)
         aurBuildClosureOutputBuffer.get(bytes)
-        val lines =
-            String(bytes, StandardCharsets.UTF_8)
-                .trimEnd('\n')
-                .split('\n')
-        val header = lines.firstOrNull()?.split('\t').orEmpty()
-        check(
-            header.size == 2 &&
-                header[0] == "ABCY0001" &&
-                header[1].toIntOrNull() == requiredPackages.size &&
-                lines.size == requiredPackages.size + 1,
-        ) {
-            "Invalid persisted AUR output header"
-        }
+        val rows = PersistedAurOutputCodec.decode(bytes, requiredPackages.size)
         val cacheRoot =
             File(filesDir, "arch-root/var/cache/archphene/aur-packages").canonicalFile
-        return lines
-            .drop(1)
-            .mapIndexed { index, line ->
-                val fields = line.split('\t')
-                check(
-                    fields.size == 7 &&
-                        fields[0] == requiredPackages[index] &&
-                        AUR_BUILT_PACKAGE_FILENAME.matches(fields[1]) &&
-                        fields[5].matches(SHA256_HEX),
-                ) {
-                    "Invalid persisted AUR output identity"
-                }
-                val archiveBytes = fields[2].toLongOrNull()
-                val installedBytes = fields[3].toLongOrNull()
-                val buildPackageCount = fields[4].toIntOrNull()
-                check(
-                    archiveBytes != null &&
-                        archiveBytes > 0L &&
-                        installedBytes != null &&
-                        installedBytes > 0L &&
-                        buildPackageCount != null &&
-                        buildPackageCount in 1..768,
-                ) {
-                    "Invalid persisted AUR output metrics"
-                }
-                val file = File(fields[6]).canonicalFile
-                val expected =
-                    File(cacheRoot, "${fields[5]}-${fields[1]}").canonicalFile
-                check(
-                    file == expected &&
-                        file.parentFile == cacheRoot &&
-                        file.isFile &&
-                        file.length() == archiveBytes
-                ) {
-                    "Persisted AUR output path changed"
-                }
-                AurBuiltPackage(
-                    packageName = fields[0],
-                    filename = fields[1],
-                    archiveBytes = archiveBytes,
-                    installedBytes = installedBytes,
-                    buildPackageCount = buildPackageCount,
-                    sha256 = fields[5],
-                    file = file,
-                    logs =
-                        logs[fields[0]]
-                            ?: "Restored independently verified build output after restart",
-                    persistent = true,
-                )
-            }.toTypedArray()
+        return Array(rows.size) { index ->
+            val fields = rows[index]
+            check(
+                fields[0] == requiredPackages[index] &&
+                    AUR_BUILT_PACKAGE_FILENAME.matches(fields[1]) &&
+                    fields[5].matches(SHA256_HEX),
+            ) {
+                "Invalid persisted AUR output identity"
+            }
+            val archiveBytes = fields[2].toLongOrNull()
+            val installedBytes = fields[3].toLongOrNull()
+            val buildPackageCount = fields[4].toIntOrNull()
+            check(
+                archiveBytes != null &&
+                    archiveBytes > 0L &&
+                    installedBytes != null &&
+                    installedBytes > 0L &&
+                    buildPackageCount != null &&
+                    buildPackageCount in 1..768,
+            ) {
+                "Invalid persisted AUR output metrics"
+            }
+            val file = File(fields[6]).canonicalFile
+            val expected =
+                File(cacheRoot, "${fields[5]}-${fields[1]}").canonicalFile
+            check(
+                file == expected &&
+                    file.parentFile == cacheRoot &&
+                    file.isFile &&
+                    file.length() == archiveBytes
+            ) {
+                "Persisted AUR output path changed"
+            }
+            AurBuiltPackage(
+                packageName = fields[0],
+                filename = fields[1],
+                archiveBytes = archiveBytes,
+                installedBytes = installedBytes,
+                buildPackageCount = buildPackageCount,
+                sha256 = fields[5],
+                file = file,
+                logs =
+                    logs[fields[0]]
+                        ?: "Restored independently verified build output after restart",
+                persistent = true,
+            )
+        }
     }
 
     private fun persistAurGraphBuiltPackages(
@@ -12740,20 +12732,8 @@ class ArchpheneRuntimeService : Service() {
         val bytes = ByteArray(length)
         aurBuildClosureOutputBuffer.position(0)
         aurBuildClosureOutputBuffer.get(bytes)
-        val lines =
-            String(bytes, StandardCharsets.UTF_8)
-                .trimEnd('\n')
-                .split('\n')
-        val header = lines.firstOrNull()?.split('\t').orEmpty()
-        val outputCount = header.getOrNull(1)?.toIntOrNull()
-        check(
-            header.size == 2 &&
-                header[0] == "ABGY0001" &&
-                outputCount != null &&
-                outputCount > 0,
-        ) {
-            "Invalid persisted AUR graph output header"
-        }
+        val persistedOutput = PersistedAurGraphOutputCodec.decode(bytes)
+        val outputCount = persistedOutput.outputCount
         val completedBaseCount =
             completedAurGraphBaseCount(graph, reviewsByBase, outputCount)
         val expected =
@@ -12767,72 +12747,66 @@ class ArchpheneRuntimeService : Service() {
                     Triple(packageBase, packageName, review.version)
                 }
             }
-        check(
-            outputCount == expected.size &&
-                lines.size == expected.size + 1,
-        ) {
+        check(outputCount == expected.size) {
             "Invalid persisted AUR graph output header"
         }
         val cacheRoot =
             File(filesDir, "arch-root/var/cache/archphene/aur-packages").canonicalFile
-        return lines
-            .drop(1)
-            .mapIndexed { index, line ->
-                val fields = line.split('\t')
-                val (expectedBase, expectedPackage, expectedVersion) = expected[index]
-                check(
-                    fields.size == 8 &&
-                        fields[0] == expectedBase &&
-                        fields[1] == expectedPackage &&
-                        AUR_BUILT_PACKAGE_FILENAME.matches(fields[2]) &&
-                        fields[6].matches(SHA256_HEX),
-                ) {
-                    "Invalid persisted AUR graph output identity"
-                }
-                val archiveBytes = fields[3].toLongOrNull()
-                val installedBytes = fields[4].toLongOrNull()
-                val buildPackageCount = fields[5].toIntOrNull()
-                check(
-                    archiveBytes != null &&
-                        archiveBytes > 0L &&
-                        installedBytes != null &&
-                        installedBytes > 0L &&
-                        buildPackageCount != null &&
-                        buildPackageCount in 1..768,
-                ) {
-                    "Invalid persisted AUR graph output metrics"
-                }
-                val file = File(fields[7]).canonicalFile
-                val expectedFile =
-                    File(cacheRoot, "${fields[6]}-${fields[2]}").canonicalFile
-                check(
-                    file == expectedFile &&
-                        file.parentFile == cacheRoot &&
-                        file.isFile &&
-                        file.length() == archiveBytes,
-                ) {
-                    "Persisted AUR graph output path changed"
-                }
-                AurGraphBuiltPackage(
-                    packageBase = expectedBase,
-                    version = expectedVersion,
-                    architecture = currentLinuxArchitecture(),
-                    built =
-                        AurBuiltPackage(
-                            packageName = fields[1],
-                            filename = fields[2],
-                            archiveBytes = archiveBytes,
-                            installedBytes = installedBytes,
-                            buildPackageCount = buildPackageCount,
-                            sha256 = fields[6],
-                            file = file,
-                            logs =
-                                logs[graphOutputLogKey(expectedBase, expectedPackage)]
-                                    ?: "Restored independently verified graph output after restart",
-                            persistent = true,
-                        ),
-                )
-            }.toTypedArray()
+        return Array(persistedOutput.rows.size) { index ->
+            val fields = persistedOutput.rows[index]
+            val (expectedBase, expectedPackage, expectedVersion) = expected[index]
+            check(
+                fields[0] == expectedBase &&
+                    fields[1] == expectedPackage &&
+                    AUR_BUILT_PACKAGE_FILENAME.matches(fields[2]) &&
+                    fields[6].matches(SHA256_HEX),
+            ) {
+                "Invalid persisted AUR graph output identity"
+            }
+            val archiveBytes = fields[3].toLongOrNull()
+            val installedBytes = fields[4].toLongOrNull()
+            val buildPackageCount = fields[5].toIntOrNull()
+            check(
+                archiveBytes != null &&
+                    archiveBytes > 0L &&
+                    installedBytes != null &&
+                    installedBytes > 0L &&
+                    buildPackageCount != null &&
+                    buildPackageCount in 1..768,
+            ) {
+                "Invalid persisted AUR graph output metrics"
+            }
+            val file = File(fields[7]).canonicalFile
+            val expectedFile =
+                File(cacheRoot, "${fields[6]}-${fields[2]}").canonicalFile
+            check(
+                file == expectedFile &&
+                    file.parentFile == cacheRoot &&
+                    file.isFile &&
+                    file.length() == archiveBytes,
+            ) {
+                "Persisted AUR graph output path changed"
+            }
+            AurGraphBuiltPackage(
+                packageBase = expectedBase,
+                version = expectedVersion,
+                architecture = currentLinuxArchitecture(),
+                built =
+                    AurBuiltPackage(
+                        packageName = fields[1],
+                        filename = fields[2],
+                        archiveBytes = archiveBytes,
+                        installedBytes = installedBytes,
+                        buildPackageCount = buildPackageCount,
+                        sha256 = fields[6],
+                        file = file,
+                        logs =
+                            logs[graphOutputLogKey(expectedBase, expectedPackage)]
+                                ?: "Restored independently verified graph output after restart",
+                        persistent = true,
+                    ),
+            )
+        }
     }
 
     private fun currentLinuxArchitecture(): String =
@@ -13194,16 +13168,17 @@ class ArchpheneRuntimeService : Service() {
         packageName: String,
         scratch: PackageIoScratch,
     ) {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        scratch.requestBuffer.clear()
-        scratch.requestBuffer.put(packageBytes)
+        val packageLength =
+            checkNotNull(
+                putUtf8(scratch.requestBuffer, packageName, scratch.requestBuffer.capacity()),
+            )
         scratch.outputBuffer.clear()
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 action,
                 scratch.requestBuffer,
-                packageBytes.size,
+                packageLength,
                 scratch.outputBuffer,
             )
         if (outputLength < 0) {
@@ -13216,22 +13191,24 @@ class ArchpheneRuntimeService : Service() {
         packageName: String,
         scratch: PackageIoScratch,
     ): List<PlannedPackageRemoval> {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        scratch.requestBuffer.clear()
-        scratch.requestBuffer.put(packageBytes)
+        val packageLength =
+            checkNotNull(
+                putUtf8(scratch.requestBuffer, packageName, scratch.requestBuffer.capacity()),
+            )
         scratch.outputBuffer.clear()
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_INSTALL_PLAN,
                 scratch.requestBuffer,
-                packageBytes.size,
+                packageLength,
                 scratch.outputBuffer,
             )
         if (outputLength < 0) {
             throw IllegalStateException(readNativeMessage(scratch.outputBuffer, outputLength))
         }
-        val output = ByteArray(outputLength)
+        val output =
+            ByteArray(checkedNativeOutputLength(outputLength, scratch.outputBuffer.capacity()))
         scratch.outputBuffer.position(0)
         scratch.outputBuffer.get(output)
         return PackageInstallPlanCodec.decode(output)
@@ -13242,22 +13219,24 @@ class ArchpheneRuntimeService : Service() {
         packageName: String,
         scratch: PackageIoScratch,
     ): List<PlannedPackageRemoval> {
-        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        scratch.requestBuffer.clear()
-        scratch.requestBuffer.put(packageBytes)
+        val packageLength =
+            checkNotNull(
+                putUtf8(scratch.requestBuffer, packageName, scratch.requestBuffer.capacity()),
+            )
         scratch.outputBuffer.clear()
         val outputLength =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_REMOVAL_PLAN,
                 scratch.requestBuffer,
-                packageBytes.size,
+                packageLength,
                 scratch.outputBuffer,
             )
         if (outputLength < 0) {
             throw IllegalStateException(readNativeMessage(scratch.outputBuffer, outputLength))
         }
-        val output = ByteArray(outputLength)
+        val output =
+            ByteArray(checkedNativeOutputLength(outputLength, scratch.outputBuffer.capacity()))
         scratch.outputBuffer.position(0)
         scratch.outputBuffer.get(output)
         return PackageRemovalPlanCodec.decode(output)
@@ -13281,16 +13260,21 @@ class ArchpheneRuntimeService : Service() {
     private fun refreshPendingPackageMutation(activeHandle: Long) {
         val requestedPackage = jobPackage.ifEmpty { "base" }
         val scratch = PackageIoScratch()
-        val packageBytes = requestedPackage.toByteArray(StandardCharsets.UTF_8)
-        scratch.requestBuffer.clear()
-        scratch.requestBuffer.put(packageBytes)
+        val packageLength =
+            checkNotNull(
+                putUtf8(
+                    scratch.requestBuffer,
+                    requestedPackage,
+                    scratch.requestBuffer.capacity(),
+                ),
+            )
         scratch.outputBuffer.clear()
         val length =
             NativeRuntime.nativePackageCommand(
                 activeHandle,
                 NativeRuntime.PACKAGE_COMMAND_PENDING_MUTATION_ANY,
                 scratch.requestBuffer,
-                packageBytes.size,
+                packageLength,
                 scratch.outputBuffer,
             )
         if (length < 0) {
@@ -13302,7 +13286,7 @@ class ArchpheneRuntimeService : Service() {
             )
             return
         }
-        val bytes = ByteArray(length)
+        val bytes = ByteArray(checkedNativeOutputLength(length, scratch.outputBuffer.capacity()))
         scratch.outputBuffer.position(0)
         scratch.outputBuffer.get(bytes)
         if (bytes.isEmpty()) {
@@ -13924,25 +13908,21 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return false
         }
-        val selected = packages.copyOf()
+        val selected = packages.copyOf().apply { sort() }
         if (
-            selected.any { packageName ->
+            selected.indices.any { index ->
+                val packageName = selected[index]
                 packageName.isEmpty() ||
                     packageName.length > 128 ||
-                    current.names.binarySearch(packageName) < 0
-            } ||
-            selected.toSet().size != selected.size
+                    current.names.binarySearch(packageName) < 0 ||
+                    (index > 0 && selected[index - 1] >= packageName)
+            }
         ) {
             return false
         }
-        val requestBytes =
-            selected
-                .sorted()
-                .joinToString("\n")
-                .toByteArray(StandardCharsets.UTF_8)
-        if (requestBytes.isEmpty() || requestBytes.size > PACKAGE_CACHE_SELECTION_BYTES) {
-            return false
-        }
+        val requestLength =
+            delimitedUtf8Length(selected, '\n', PACKAGE_CACHE_SELECTION_BYTES)
+                ?: return false
         packageCacheActive = true
         packageCacheSnapshot =
             copyPackageCacheSnapshot("Clearing selected downloaded packages…")
@@ -13950,15 +13930,18 @@ class ArchpheneRuntimeService : Service() {
             {
                 requireRuntimeWorker("Selected package cache cleanup")
                 try {
-                    val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
-                    requestBuffer.put(requestBytes)
+                    val requestBuffer = ByteBuffer.allocateDirect(requestLength)
+                    check(
+                        putDelimitedUtf8(requestBuffer, selected, '\n', requestLength) ==
+                            requestLength,
+                    )
                     val outputBuffer =
                         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
                     val reclaimedBytes =
                         NativeRuntime.nativeClearSelectedPackageCache(
                             activeHandle,
                             requestBuffer,
-                            requestBytes.size,
+                            requestLength,
                             outputBuffer,
                         )
                     if (reclaimedBytes < 0L) {
@@ -14072,24 +14055,24 @@ class ArchpheneRuntimeService : Service() {
         if (summaryLength < 0) {
             throw IllegalStateException(readNativeMessage(outputBuffer, summaryLength))
         }
-        val summary = readUtf8(outputBuffer, summaryLength).trimEnd().split('\t')
-        if (summary.size != 3 || summary[0] != "C1") {
-            throw IllegalStateException("Package cache returned an invalid summary")
-        }
-        val expectedEntries = summary[1].toIntOrNull() ?: -1
-        val expectedBytes = summary[2].toLongOrNull() ?: -1L
+        val summary =
+            PackageCacheSummaryCodec.decode(readUtf8(outputBuffer, summaryLength))
+                ?: throw IllegalStateException("Package cache returned an invalid summary")
+        val expectedEntriesValue = summary[0]
+        val expectedBytes = summary[1]
         if (
-            expectedEntries !in 0..PACKAGE_CACHE_ENTRY_LIMIT ||
+            expectedEntriesValue !in 0L..PACKAGE_CACHE_ENTRY_LIMIT.toLong() ||
             expectedBytes < 0L
         ) {
             throw IllegalStateException("Package cache summary exceeds its bounds")
         }
-        val names = ArrayList<String>()
-        val versions = ArrayList<String>()
-        val latestVersions = ArrayList<String>()
-        val sizes = ArrayList<Long>()
-        val artifacts = ArrayList<Int>()
-        val versionCounts = ArrayList<Int>()
+        val expectedEntries = expectedEntriesValue.toInt()
+        val names = ArrayList<String>(expectedEntries)
+        val versions = ArrayList<String>(expectedEntries)
+        val latestVersions = ArrayList<String>(expectedEntries)
+        val sizes = ArrayList<Long>(expectedEntries)
+        val artifacts = ArrayList<Int>(expectedEntries)
+        val versionCounts = ArrayList<Int>(expectedEntries)
         var offset = 0
         var observedBytes = 0L
         while (offset < expectedEntries) {
@@ -14106,22 +14089,19 @@ class ArchpheneRuntimeService : Service() {
             if (pageLength == 0) {
                 throw IllegalStateException("Package cache ended before its declared count")
             }
-            var pageRows = 0
-            readUtf8(outputBuffer, pageLength)
-                .trimEnd('\n')
-                .lineSequence()
-                .forEach { row ->
-                    val fields = row.split('\t')
-                    if (fields.size != 5) {
-                        throw IllegalStateException("Package cache returned an invalid row")
-                    }
-                    val packageName = fields[0]
-                    val version = fields[1]
-                    val architecture = fields[2]
-                    val bytes = fields[3].toLongOrNull() ?: -1L
-                    val artifactCount = fields[4].toIntOrNull() ?: -1
-                    if (
-                        packageName.isEmpty() ||
+            val rows =
+                PackageCachePageCodec.decode(
+                    readUtf8(outputBuffer, pageLength),
+                    maximumRows = minOf(PACKAGE_CACHE_PAGE_SIZE, expectedEntries - offset),
+                )
+            rows.forEach { fields ->
+                val packageName = fields[0]
+                val version = fields[1]
+                val architecture = fields[2]
+                val bytes = fields[3].toLongOrNull() ?: -1L
+                val artifactCount = fields[4].toIntOrNull() ?: -1
+                if (
+                    packageName.isEmpty() ||
                         packageName.length > 128 ||
                         version.isEmpty() ||
                         version.length > 193 ||
@@ -14129,39 +14109,32 @@ class ArchpheneRuntimeService : Service() {
                         architecture.length > 32 ||
                         bytes < 0L ||
                         artifactCount <= 0
-                    ) {
-                        throw IllegalStateException("Package cache row exceeds its bounds")
-                    }
-                    observedBytes =
-                        Math.addExact(observedBytes, bytes)
-                    val lastIndex = names.lastIndex
-                    if (lastIndex >= 0 && names[lastIndex] == packageName) {
-                        sizes[lastIndex] = Math.addExact(sizes[lastIndex], bytes)
-                        artifacts[lastIndex] =
-                            Math.addExact(artifacts[lastIndex], artifactCount)
-                        if (latestVersions[lastIndex] != version) {
-                            latestVersions[lastIndex] = version
-                            versionCounts[lastIndex] =
-                                Math.addExact(versionCounts[lastIndex], 1)
-                            versions[lastIndex] =
-                                "${versionCounts[lastIndex]} cached versions"
-                        }
-                    } else {
-                        if (lastIndex >= 0 && names[lastIndex] >= packageName) {
-                            throw IllegalStateException("Package cache rows are not ordered")
-                        }
-                        names.add(packageName)
-                        versions.add(version)
-                        latestVersions.add(version)
-                        sizes.add(bytes)
-                        artifacts.add(artifactCount)
-                        versionCounts.add(1)
-                    }
-                    pageRows++
+                ) {
+                    throw IllegalStateException("Package cache row exceeds its bounds")
                 }
-            if (pageRows !in 1..PACKAGE_CACHE_PAGE_SIZE) {
-                throw IllegalStateException("Package cache page exceeds its row bound")
+                observedBytes = Math.addExact(observedBytes, bytes)
+                val lastIndex = names.lastIndex
+                if (lastIndex >= 0 && names[lastIndex] == packageName) {
+                    sizes[lastIndex] = Math.addExact(sizes[lastIndex], bytes)
+                    artifacts[lastIndex] = Math.addExact(artifacts[lastIndex], artifactCount)
+                    if (latestVersions[lastIndex] != version) {
+                        latestVersions[lastIndex] = version
+                        versionCounts[lastIndex] = Math.addExact(versionCounts[lastIndex], 1)
+                        versions[lastIndex] = "${versionCounts[lastIndex]} cached versions"
+                    }
+                } else {
+                    if (lastIndex >= 0 && names[lastIndex] >= packageName) {
+                        throw IllegalStateException("Package cache rows are not ordered")
+                    }
+                    names.add(packageName)
+                    versions.add(version)
+                    latestVersions.add(version)
+                    sizes.add(bytes)
+                    artifacts.add(artifactCount)
+                    versionCounts.add(1)
+                }
             }
+            val pageRows = rows.size
             offset = Math.addExact(offset, pageRows)
         }
         if (offset != expectedEntries || observedBytes != expectedBytes) {
@@ -14517,28 +14490,28 @@ class ArchpheneRuntimeService : Service() {
         packages: List<String>,
     ): Long {
         require(packages.isNotEmpty() && packages.size <= MAX_PACKAGE_CACHE_SELECTION)
-        val selected = packages.sorted()
+        val selected = packages.toTypedArray().apply { sort() }
         require(
-            selected.zipWithNext().none { (left, right) -> left >= right } &&
-                selected.all { packageName ->
+            selected.indices.all { index ->
+                val packageName = selected[index]
+                (index == 0 || selected[index - 1] < packageName) &&
                     packageName.isNotEmpty() &&
-                        packageName.length <= 128 &&
-                        packageName.none(Char::isWhitespace)
-                },
+                    packageName.length <= 128 &&
+                    packageName.none(Char::isWhitespace)
+            },
         )
-        val requestBytes =
-            selected
-                .joinToString("\n")
-                .toByteArray(StandardCharsets.UTF_8)
-        require(requestBytes.isNotEmpty() && requestBytes.size <= PACKAGE_CACHE_SELECTION_BYTES)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
-        requestBuffer.put(requestBytes)
+        val requestLength =
+            requireNotNull(
+                delimitedUtf8Length(selected, '\n', PACKAGE_CACHE_SELECTION_BYTES),
+            )
+        val requestBuffer = ByteBuffer.allocateDirect(requestLength)
+        check(putDelimitedUtf8(requestBuffer, selected, '\n', requestLength) == requestLength)
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val reclaimedBytes =
             NativeRuntime.nativeClearSelectedPackageCache(
                 activeHandle,
                 requestBuffer,
-                requestBytes.size,
+                requestLength,
                 outputBuffer,
             )
         if (reclaimedBytes < 0L) {
@@ -14553,10 +14526,7 @@ class ArchpheneRuntimeService : Service() {
         buffer: ByteBuffer,
         length: Int,
     ): String {
-        if (length < 0 || length > buffer.capacity()) {
-            throw IllegalStateException("Native output exceeds its buffer")
-        }
-        val bytes = ByteArray(length)
+        val bytes = ByteArray(checkedNativeOutputLength(length, buffer.capacity()))
         buffer.position(0)
         buffer.get(bytes)
         return String(bytes, StandardCharsets.UTF_8)
@@ -15358,19 +15328,16 @@ class ArchpheneRuntimeService : Service() {
     private fun withInstalledStatus(
         details: String,
         installedVersion: String,
-    ): String {
-        val lines = details.lineSequence().toMutableList()
-        if (lines.size < 2) {
-            return details
-        }
-        lines[1] =
+    ): String =
+        replacePackageStatusLine(
+            details,
+            1,
             if (installedVersion.isEmpty()) {
                 "Not installed"
             } else {
                 "Installed: $installedVersion"
-            }
-        return lines.joinToString("\n")
-    }
+            },
+        )
 
     private fun publishAvailablePackageInstalledVersion(
         packageName: String,
@@ -15404,9 +15371,10 @@ class ArchpheneRuntimeService : Service() {
         scratch: PackageIoScratch,
     ) {
         val safeMessage = boundedJobMessage(message)
-        val messageBytes = safeMessage.toByteArray(StandardCharsets.UTF_8)
-        scratch.messageBuffer.clear()
-        scratch.messageBuffer.put(messageBytes)
+        val messageLength =
+            checkNotNull(
+                putUtf8(scratch.messageBuffer, safeMessage, scratch.messageBuffer.capacity()),
+            )
         val result =
             NativeRuntime.nativeUpdatePackageJob(
                 activeHandle,
@@ -15415,7 +15383,7 @@ class ArchpheneRuntimeService : Service() {
                 phase,
                 progress,
                 scratch.messageBuffer,
-                messageBytes.size,
+                messageLength,
                 System.currentTimeMillis(),
                 scratch.outputBuffer,
             )
@@ -15453,20 +15421,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun boundedJobMessage(message: String): String {
-        val sanitized =
-            message
-                .replace('\t', ' ')
-                .replace('\r', ' ')
-                .replace('\n', ' ')
-                .ifEmpty { "Package operation" }
-        var end = minOf(sanitized.length, 192)
-        while (
-            end > 0 &&
-            sanitized.substring(0, end).toByteArray(StandardCharsets.UTF_8).size > 192
-        ) {
-            end -= 1
-        }
-        return sanitized.substring(0, end).ifEmpty { "Package operation" }
+        return boundedPackageJobMessage(message)
     }
 
     private fun jobStateName(state: Int): String =
@@ -15580,14 +15535,19 @@ class ArchpheneRuntimeService : Service() {
         signature: Boolean,
         scratch: PackageIoScratch,
     ) {
-        val filenameBytes = payload.filename.toByteArray(StandardCharsets.UTF_8)
-        scratch.requestBuffer.clear()
-        scratch.requestBuffer.put(filenameBytes)
+        val filenameLength =
+            checkNotNull(
+                putUtf8(
+                    scratch.requestBuffer,
+                    payload.filename,
+                    scratch.requestBuffer.capacity(),
+                ),
+            )
         val descriptor =
             NativeRuntime.nativeBeginPackageDownload(
                 activeHandle,
                 scratch.requestBuffer,
-                filenameBytes.size,
+                filenameLength,
                 payload.size,
                 signature,
                 scratch.outputBuffer,
@@ -15696,16 +15656,21 @@ class ArchpheneRuntimeService : Service() {
         payload: ResolvedPayload,
         scratch: PackageIoScratch,
     ) {
-        val requestBytes =
-            "${payload.filename}\t${payload.name}\t${payload.version}"
-                .toByteArray(StandardCharsets.UTF_8)
-        scratch.requestBuffer.clear()
-        scratch.requestBuffer.put(requestBytes)
+        val requestFields = arrayOf(payload.filename, payload.name, payload.version)
+        val requestLength =
+            checkNotNull(
+                putDelimitedUtf8(
+                    scratch.requestBuffer,
+                    requestFields,
+                    '\t',
+                    scratch.requestBuffer.capacity(),
+                ),
+            )
         val result =
             NativeRuntime.nativeVerifyPackage(
                 activeHandle,
                 scratch.requestBuffer,
-                requestBytes.size,
+                requestLength,
                 payload.size,
                 scratch.outputBuffer,
             )
@@ -15719,16 +15684,21 @@ class ArchpheneRuntimeService : Service() {
         payload: ResolvedPayload,
         scratch: PackageIoScratch,
     ): Boolean {
-        val requestBytes =
-            "${payload.filename}\t${payload.name}\t${payload.version}"
-                .toByteArray(StandardCharsets.UTF_8)
-        scratch.requestBuffer.clear()
-        scratch.requestBuffer.put(requestBytes)
+        val requestFields = arrayOf(payload.filename, payload.name, payload.version)
+        val requestLength =
+            checkNotNull(
+                putDelimitedUtf8(
+                    scratch.requestBuffer,
+                    requestFields,
+                    '\t',
+                    scratch.requestBuffer.capacity(),
+                ),
+            )
         val result =
             NativeRuntime.nativeVerifyPackage(
                 activeHandle,
                 scratch.requestBuffer,
-                requestBytes.size,
+                requestLength,
                 payload.size,
                 scratch.outputBuffer,
             )
@@ -15761,20 +15731,15 @@ class ArchpheneRuntimeService : Service() {
             }
             return false
         }
-        val encoded = tokens.map { token -> token.toByteArray(StandardCharsets.UTF_8) }
-        val requestLength =
-            encoded.sumOf { bytes -> bytes.size } + (encoded.size - 1).coerceAtLeast(0)
-        if (requestLength > NativeRuntime.COMMAND_REQUEST_LIMIT) {
+        val requestBytes =
+            encodeNullSeparatedUtf8(tokens, 0, NativeRuntime.COMMAND_REQUEST_LIMIT)
+        if (requestBytes == null) {
             commandStatus = "Command request is too large"
             return false
         }
+        val requestLength = requestBytes.size
         val requestBuffer = ByteBuffer.allocateDirect(requestLength)
-        encoded.forEachIndexed { index, bytes ->
-            if (index != 0) {
-                requestBuffer.put(0.toByte())
-            }
-            requestBuffer.put(bytes)
-        }
+        requestBuffer.put(requestBytes)
         commandActive = true
         shellWasStarted = false
         directCommandStarted = true
@@ -15798,7 +15763,8 @@ class ArchpheneRuntimeService : Service() {
                                 readNativeMessage(outputBuffer, outputLength),
                             )
                         }
-                        val bytes = ByteArray(outputLength)
+                        val bytes =
+                            ByteArray(checkedNativeOutputLength(outputLength, outputBuffer.capacity()))
                         outputBuffer.position(0)
                         outputBuffer.get(bytes)
                         val separator = bytes.indexOf('\n'.code.toByte())
@@ -16344,13 +16310,12 @@ class ArchpheneRuntimeService : Service() {
             jobRevision++
             return "No package transaction"
         }
-        val bytes = ByteArray(length)
+        val bytes = ByteArray(checkedNativeOutputLength(length, outputBuffer.capacity()))
         outputBuffer.position(0)
         outputBuffer.get(bytes)
-        val fields = String(bytes, StandardCharsets.UTF_8).trimEnd().split('\t', limit = 9)
-        if (fields.size != 9) {
-            return "Package journal returned an invalid record"
-        }
+        val fields =
+            PackageJobRecordCodec.decode(String(bytes, StandardCharsets.UTF_8))
+                ?: return "Package journal returned an invalid record"
         val id = fields[0].toLongOrNull() ?: return "Package journal returned invalid identifier"
         if (id <= 0L) {
             return "Package journal returned invalid identifier"

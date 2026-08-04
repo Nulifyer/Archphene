@@ -1,56 +1,57 @@
 # Roadmap
 
-Archphene is moving from application-specific proofs toward a package-driven Android application platform.
+Updated: 2026-08-04
 
-## P0: product foundation
+This is the public roadmap. The detailed ordered implementation plan is
+[`todo.md`](../todo.md), validated evidence is in
+[`project-status.md`](project-status.md), and supported application claims are
+in the [`compatibility matrix`](compatibility-matrix.md).
 
-1. **On-device package conversion**
-   - synchronize Arch and Arch Linux ARM repository databases;
-   - resolve dependency closures;
-   - verify package signatures and extraction safety;
-   - discover and register desktop entrypoints, icons, toolkit, ABI, and capabilities from the shared Arch root;
-   - generate a wrapper APK from a reusable template;
-   - sign with a persistent per-device identity;
-   - install through Android PackageInstaller;
-   - authenticate the thin launcher over Binder and render a manager-owned Linux process into its Surface;
-   - preserve per-package progress, cancellation, retry, and process-death reconciliation;
-   - allow bounded parallel preparation while serializing wrapper mutation, signing, and Android confirmation.
+## Established foundation
 
-2. **Shared Wayland compositor**
-   - maintain the shared Rust compositor used by KCalc, Mousepad, generated wrappers, and native probes;
-   - expand generated Wayland protocol bindings beyond the validated core;
-   - retain the validated native SHM, xdg-toplevel, pointer, XKB keymap, focus, and hardware-key lifecycle gates for x86_64 and AArch64;
-   - enforce object, role, version, configure/ack, buffer, popup, and subsurface lifecycles;
-   - add deterministic protocol errors and fuzzable parsers.
+Archphene now has the core production model: one manager-owned Arch root,
+verified official and reviewed AUR package workflows, generated Android app
+shells, authenticated Binder sessions, manager-owned Linux processes, a private
+Rust Wayland compositor, Android input and capability brokers, production
+Terminal and storage integration, and exact-ABI x86_64/AArch64 device evidence.
 
-3. **Production runtime model**
-   - keep one conventional manager-owned Arch root and package database;
-   - validate 4 KB and 16 KB page-size compatibility;
-   - supervise each launch in a dedicated manager-owned process group tied to an authenticated Binder death token;
-   - avoid per-wrapper Linux roots and runtime-pack duplication;
-   - document that installed Linux packages intentionally share one trust domain.
+## Native platform release
 
-4. **Permission and document policy**
-   - generate manifest permissions from declared capabilities;
-   - extend the manager-owned user-document provider from individual document grants to persisted GUI project trees.
-   - expose Android services through descriptor-gated manager brokers and authenticated launcher requests;
-   - expose the validated URL and notification brokers through app-private standard XDG portal and freedesktop.org adapters.
+The next release milestones are:
 
-## P1: desktop usability
+1. **Android app-shell windows** — evolve the current single-task shell into a
+   bounded phone and desktop task/window model without duplicating Linux roots
+   or process ownership.
+2. **Graphics without readback** — GPU-compose SHM clients and let virpipe render
+   into Android HardwareBuffers while preserving tested CPU and software
+   fallbacks.
+3. **Phone and desktop UX** — complete touch, pointer, IME, accessibility,
+   document, freeform, DeX, and connected-display workflows using capability-
+   driven policy rather than OEM detection.
+4. **Daily-driver acceptance** — finish the Code, .NET, Git, debugger, browser,
+   and representative application workflows on both maintained ABIs.
+5. **Release operations** — add GrapheneOS Pixel and broader GPU/device evidence,
+   automate physical-device soaks, and complete provenance, signing,
+   reproducibility, licensing, update, rollback, and documentation audits.
 
-- general secondary-window mapping for phone, tablet, and Android desktop/freeform modes;
-- binary/custom clipboard MIME types beyond the validated bounded plain-text plus HTML/fallback path, a package-installed Linux HTML producer gate, and remaining pointer protocol completeness;
-- zero-copy Android HardwareBuffer/dmabuf and Vulkan presentation building on the validated OpenGL ES virpipe path, with SHM fallback;
-- remaining portal adapters and richer notification, file-transfer, and device-service policies;
-- broader accessibility and input-method compatibility beyond the validated Qt/GTK AT-SPI2 paths;
-- rollback, health checks, storage quotas, and vulnerability status.
+## Compatibility expansion
 
-## P2: compatibility and platform validation
+After the native release path is complete:
 
-- broader Qt, GTK, SDL, Electron, and Rust-native application coverage;
-- reproducible x86_64 and AArch64 CI package fixtures;
-- supported GrapheneOS Pixel validation;
-- broader 16 KB device coverage; current ARM64 runtime artifacts and manager/self-update paths pass, while upstream Arch x86_64 packages remain 4 KB-only;
-- sustained desktop-mode performance and multi-window testing.
+- add private rootless XWayland sessions for legacy X11 applications;
+- add an Android-backed Vulkan path only after multi-vendor presentation and
+  synchronization evidence;
+- broaden office, browser, Rust-native GPU, creative, multimedia, USB, stylus,
+  gamepad, accessibility, and multi-window coverage;
+- build a complete separately signed 16 KiB x86_64 package universe before
+  enabling official x86_64 packages on 16 KiB Android.
 
-Historical alternatives and evidence are indexed under [Research](../research/README.md).
+## Optional foreign runtimes
+
+FEX-based x86 Linux support and native ARM64 Wine/Hangover Windows support are
+separate later compatibility profiles. They must reuse Archphene's app shells,
+Wayland compositor, Android brokers, lifecycle, and diagnostics. Proton/DXVK
+work begins only after the Vulkan bridge is proven.
+
+Lepton, Waydroid, PRoot, VNC, root/chroot operation, and a custom Android Home
+launcher are not part of the Android application architecture.

@@ -7,7 +7,7 @@ import org.junit.Test
 
 class PendingPackageMutationCodecTest {
     @Test
-    fun decodesInstallRollbackAndRemovalRecords() {
+    fun admitsExactFourFieldInstallRecord() {
         assertEquals(
             PendingPackageMutation(
                 packageName = "dotnet-sdk-bin",
@@ -16,6 +16,10 @@ class PendingPackageMutationCodecTest {
             ),
             decode("dotnet-sdk-bin\tinstall\t10.0.10.sdk302-1\trollback"),
         )
+    }
+
+    @Test
+    fun decodesRemovalRecord() {
         assertEquals(
             PendingPackageMutation(
                 packageName = "foot",
@@ -43,6 +47,13 @@ class PendingPackageMutationCodecTest {
         }
         assertThrows(IllegalArgumentException::class.java) {
             PendingPackageMutationCodec.decode(ByteArray(16 * 1024 + 1))
+        }
+    }
+
+    @Test
+    fun rejectsExactMaximumSizeTabFlood() {
+        assertThrows(IllegalArgumentException::class.java) {
+            PendingPackageMutationCodec.decode(ByteArray(16 * 1024) { '\t'.code.toByte() })
         }
     }
 

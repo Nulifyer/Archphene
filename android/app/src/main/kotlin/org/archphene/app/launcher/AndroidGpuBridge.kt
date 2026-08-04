@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import java.io.File
-import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.SecureRandom
@@ -44,10 +43,7 @@ internal class AndroidGpuBridge(
             return null
         }
         val candidate = File(runtimeDirectory, SOCKET_NAME)
-        if (
-            candidate.absolutePath.toByteArray(StandardCharsets.UTF_8).size >=
-            UNIX_SOCKET_PATH_LIMIT
-        ) {
+        if (!fitsLauncherUnixSocketPath(candidate.absolutePath, UNIX_SOCKET_PATH_LIMIT)) {
             Log.w(TAG, "GPU socket path is too long; session=$sessionId uses llvmpipe")
             cleanupFiles(candidate)
             return null

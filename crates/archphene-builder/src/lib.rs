@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -72,6 +73,8 @@ const AUR_DEPENDENCY_HOOKS_NAME: &str = "hooks";
 const AUR_DEPENDENCY_MANIFEST_NAME: &str = "manifest";
 const MAX_AUR_DEPENDENCY_PACKAGES: usize = 256;
 const MAX_AUR_DEPENDENCY_MANIFEST_BYTES: usize = 256 * 1024;
+#[cfg(any(target_os = "android", test))]
+const MAX_AUR_REQUIREMENTS_BYTES: usize = 128 * 1024;
 
 #[derive(Debug)]
 pub enum BuilderError {
@@ -760,12 +763,20 @@ impl AurDependencyArchiveSession {
     }
 }
 
-pub fn install_staged_aur_dependencies(
+fn matches_pacman_query_output(output: &[u8], name: &str, version: &str) -> bool {
+    output
+        .strip_suffix(b"\n")
+        .and_then(|output| output.strip_prefix(name.as_bytes()))
+        .and_then(|output| output.strip_prefix(b" "))
+        .is_some_and(|output| output == version.as_bytes())
+}
+
+pub fn install_staged_aur_dependencies<T: AsRef<str>>(
     files_directory: &Path,
     native_directory: &Path,
     runtime_manifest: &[u8],
     expected_manifest_sha256: [u8; 32],
-    requirements: &[String],
+    requirements: &[T],
 ) -> Result<AurDependencyInstallReport, BuilderError> {
     terminate_stale_builder_processes()?;
     if expected_manifest_sha256 == [0; 32]
@@ -773,8 +784,10 @@ pub fn install_staged_aur_dependencies(
         || requirements.len() > 256
         || requirements
             .iter()
-            .any(|value| !safe_aur_requirement(value))
-        || !requirements.windows(2).all(|pair| pair[0] < pair[1])
+            .any(|value| !safe_aur_requirement(value.as_ref()))
+        || !requirements
+            .windows(2)
+            .all(|pair| pair[0].as_ref() < pair[1].as_ref())
     {
         return Err(BuilderError::InvalidArgument);
     }
@@ -836,50 +849,53 @@ HookDir = /run/archphene-aur-dependencies-v1/hooks\n";
     write_atomic(&directory, "pacman.conf", configuration)?;
     fsync(&directory)?;
 
-    let mut install_arguments = vec![
-        "--config".to_owned(),
-        format!("/run/{AUR_DEPENDENCIES_NAME}/pacman.conf"),
-        "--root".to_owned(),
-        "/".to_owned(),
-        "--dbpath".to_owned(),
-        "/var/lib/pacman".to_owned(),
-        "--cachedir".to_owned(),
-        "/var/cache/pacman/pkg".to_owned(),
-        "--hookdir".to_owned(),
-        format!("/run/{AUR_DEPENDENCIES_NAME}/{AUR_DEPENDENCY_HOOKS_NAME}"),
-        "--noconfirm".to_owned(),
-        "--noprogressbar".to_owned(),
-        "--noscriptlet".to_owned(),
-        "--nodeps".to_owned(),
-        "--nodeps".to_owned(),
-        "--asdeps".to_owned(),
-        "-U".to_owned(),
-    ];
+    let dependency_configuration = format!("/run/{AUR_DEPENDENCIES_NAME}/pacman.conf");
+    let dependency_hooks = format!("/run/{AUR_DEPENDENCIES_NAME}/{AUR_DEPENDENCY_HOOKS_NAME}");
+    let mut install_arguments = Vec::with_capacity(17 + packages.len());
+    install_arguments.extend([
+        Cow::Borrowed("--config"),
+        Cow::Borrowed(dependency_configuration.as_str()),
+        Cow::Borrowed("--root"),
+        Cow::Borrowed("/"),
+        Cow::Borrowed("--dbpath"),
+        Cow::Borrowed("/var/lib/pacman"),
+        Cow::Borrowed("--cachedir"),
+        Cow::Borrowed("/var/cache/pacman/pkg"),
+        Cow::Borrowed("--hookdir"),
+        Cow::Borrowed(dependency_hooks.as_str()),
+        Cow::Borrowed("--noconfirm"),
+        Cow::Borrowed("--noprogressbar"),
+        Cow::Borrowed("--noscriptlet"),
+        Cow::Borrowed("--nodeps"),
+        Cow::Borrowed("--nodeps"),
+        Cow::Borrowed("--asdeps"),
+        Cow::Borrowed("-U"),
+    ]);
     install_arguments.extend(packages.iter().map(|package| {
-        format!(
+        Cow::Owned(format!(
             "/run/{AUR_DEPENDENCIES_NAME}/{AUR_DEPENDENCY_ARCHIVES_NAME}/{}",
             package.staged_filename,
-        )
+        ))
     }));
-    let install_arguments: Vec<&str> = install_arguments.iter().map(String::as_str).collect();
     let exit_code = runtime
         .environment
         .run_as_root_quiet("pacman", &install_arguments)?;
     if exit_code != 0 {
         return Err(BuilderError::InvalidInput);
     }
+    drop(install_arguments);
 
-    let mut dependency_arguments = vec![
-        "--config".to_owned(),
-        format!("/run/{AUR_DEPENDENCIES_NAME}/pacman.conf"),
-        "--root".to_owned(),
-        "/".to_owned(),
-        "--dbpath".to_owned(),
-        "/var/lib/pacman".to_owned(),
-        "-T".to_owned(),
-    ];
-    dependency_arguments.extend(requirements.iter().cloned());
-    let dependency_arguments: Vec<&str> = dependency_arguments.iter().map(String::as_str).collect();
+    let mut dependency_arguments = Vec::with_capacity(7 + requirements.len());
+    dependency_arguments.extend([
+        "--config",
+        dependency_configuration.as_str(),
+        "--root",
+        "/",
+        "--dbpath",
+        "/var/lib/pacman",
+        "-T",
+    ]);
+    dependency_arguments.extend(requirements.iter().map(AsRef::as_ref));
     let output = runtime
         .environment
         .run_as_root("pacman", &dependency_arguments)?;
@@ -892,7 +908,7 @@ HookDir = /run/archphene-aur-dependencies-v1/hooks\n";
             "pacman",
             &[
                 "--config",
-                &format!("/run/{AUR_DEPENDENCIES_NAME}/pacman.conf"),
+                &dependency_configuration,
                 "--root",
                 "/",
                 "--dbpath",
@@ -901,8 +917,13 @@ HookDir = /run/archphene-aur-dependencies-v1/hooks\n";
                 &package.package_name,
             ],
         )?;
-        let expected = format!("{} {}\n", package.package_name, package.version);
-        if output.exit_code() != 0 || output.as_bytes() != expected.as_bytes() {
+        if output.exit_code() != 0
+            || !matches_pacman_query_output(
+                output.as_bytes(),
+                &package.package_name,
+                &package.version,
+            )
+        {
             return Err(BuilderError::InvalidInput);
         }
     }
@@ -1928,7 +1949,7 @@ fn inspect_aur_dependency_tar(
     let mut entry_count = 0_u64;
     let mut expanded_bytes = 0_u64;
     for entry in archive.entries()? {
-        let entry = entry?;
+        let mut entry = entry?;
         let path = entry.path()?.into_owned();
         validate_archive_path(&path)?;
         let entry_type = entry.header().entry_type();
@@ -1959,12 +1980,12 @@ fn inspect_aur_dependency_tar(
         {
             return Err(BuilderError::InvalidArchive);
         }
-        let mut bytes = Vec::with_capacity(entry.header().size()? as usize);
-        entry.take((target.1 + 1) as u64).read_to_end(&mut bytes)?;
-        if bytes.is_empty() || bytes.len() > target.1 {
-            return Err(BuilderError::InvalidArchive);
-        }
-        *target.0 = Some(bytes);
+        let expected_length = entry.header().size()?;
+        *target.0 = Some(read_exact_archive_entry(
+            &mut entry,
+            expected_length,
+            target.1,
+        )?);
     }
     if entry_count == 0 || expanded_bytes == 0 {
         return Err(BuilderError::InvalidArchive);
@@ -2073,7 +2094,7 @@ fn inspect_built_package_tar(
     let mut entry_count = 0_u64;
     let mut expanded_bytes = 0_u64;
     for entry in archive.entries()? {
-        let entry = entry?;
+        let mut entry = entry?;
         let path = entry.path()?.into_owned();
         validate_archive_path(&path)?;
         let entry_type = entry.header().entry_type();
@@ -2105,12 +2126,12 @@ fn inspect_built_package_tar(
         {
             return Err(BuilderError::InvalidArchive);
         }
-        let mut bytes = Vec::with_capacity(entry.header().size()? as usize);
-        entry.take((target.1 + 1) as u64).read_to_end(&mut bytes)?;
-        if bytes.is_empty() || bytes.len() > target.1 {
-            return Err(BuilderError::InvalidArchive);
-        }
-        *target.0 = Some(bytes);
+        let expected_length = entry.header().size()?;
+        *target.0 = Some(read_exact_archive_entry(
+            &mut entry,
+            expected_length,
+            target.1,
+        )?);
     }
     if entry_count == 0 || expanded_bytes == 0 {
         return Err(BuilderError::InvalidArchive);
@@ -2555,6 +2576,36 @@ fn extract_reviewed_snapshot(
     Ok(report)
 }
 
+#[cfg(any(target_os = "android", test))]
+const MAX_STALE_BUILDER_PROCESS_SCAN: usize = 4_096;
+#[cfg(any(target_os = "android", test))]
+const MAX_STALE_BUILDER_PROCESS_TARGETS: usize = 1_024;
+
+#[cfg(any(target_os = "android", test))]
+fn count_stale_builder_process_entry(scanned: &mut usize) -> Result<(), BuilderError> {
+    *scanned = scanned.checked_add(1).ok_or(BuilderError::OutputLimit)?;
+    if *scanned > MAX_STALE_BUILDER_PROCESS_SCAN {
+        return Err(BuilderError::OutputLimit);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", test))]
+fn retain_stale_builder_process_target<T>(
+    targets: &mut Vec<T>,
+    target: T,
+) -> Result<(), BuilderError> {
+    let retained = targets
+        .len()
+        .checked_add(1)
+        .ok_or(BuilderError::OutputLimit)?;
+    if retained > MAX_STALE_BUILDER_PROCESS_TARGETS {
+        return Err(BuilderError::OutputLimit);
+    }
+    targets.push(target);
+    Ok(())
+}
+
 #[cfg(target_os = "android")]
 fn terminate_stale_builder_processes() -> Result<(), BuilderError> {
     use std::thread;
@@ -2566,8 +2617,10 @@ fn terminate_stale_builder_processes() -> Result<(), BuilderError> {
     let uid = getuid().as_raw();
     for _ in 0..8 {
         let mut stale = Vec::<(Pid, u64)>::new();
+        let mut scanned = 0_usize;
         for entry in std::fs::read_dir("/proc")? {
             let entry = entry?;
+            count_stale_builder_process_entry(&mut scanned)?;
             let Some(raw_pid) = entry
                 .file_name()
                 .to_str()
@@ -2591,10 +2644,7 @@ fn terminate_stale_builder_processes() -> Result<(), BuilderError> {
             let Some(start_time) = read_proc_start_time(&process)? else {
                 continue;
             };
-            stale.push((pid, start_time));
-            if stale.len() > 4096 {
-                return Err(BuilderError::OutputLimit);
-            }
+            retain_stale_builder_process_target(&mut stale, (pid, start_time))?;
         }
         if stale.is_empty() {
             return Ok(());
@@ -2648,17 +2698,39 @@ fn read_bounded_proc_file(path: &Path) -> Result<Option<String>, BuilderError> {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let mut bytes = Vec::with_capacity(4096);
-    Read::by_ref(&mut file)
-        .take(16 * 1024)
-        .read_to_end(&mut bytes)?;
-    let mut extra = [0_u8; 1];
-    if file.read(&mut extra)? != 0 {
-        return Err(BuilderError::OutputLimit);
-    }
+    let bytes = read_bounded_stream(&mut file, 16 * 1024)?;
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| BuilderError::UnsafeWorkspace)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn read_bounded_stream(reader: &mut impl Read, limit: usize) -> Result<Vec<u8>, BuilderError> {
+    if limit == 0 {
+        return Err(BuilderError::OutputLimit);
+    }
+    let mut bytes = vec![0_u8; limit];
+    let mut length = 0_usize;
+    while length < limit {
+        match reader.read(&mut bytes[length..]) {
+            Ok(0) => {
+                bytes.truncate(length);
+                return Ok(bytes);
+            }
+            Ok(count) => length += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut overflow = [0_u8; 1];
+    loop {
+        match reader.read(&mut overflow) {
+            Ok(0) => return Ok(bytes),
+            Ok(_) => return Err(BuilderError::OutputLimit),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -2900,7 +2972,7 @@ fn read_package_metadata_tar(
     let mut found_package_info = false;
     let mut found_install_script = false;
     for entry in archive.entries()? {
-        let entry = entry?;
+        let mut entry = entry?;
         let (output, maximum, found) = match entry.path()?.as_os_str().as_bytes() {
             b".PKGINFO" => (
                 &mut *package_info,
@@ -2922,12 +2994,10 @@ fn read_package_metadata_tar(
             return Err(BuilderError::InvalidArchive);
         }
         *found = true;
-        output.clear();
-        entry.take((maximum + 1) as u64).read_to_end(output)?;
-        if output.is_empty()
-            || output.len() > maximum
-            || (maximum == MAX_INSTALL_SCRIPT_BYTES
-                && (output.contains(&0) || std::str::from_utf8(output).is_err()))
+        let expected_length = entry.header().size()?;
+        *output = read_exact_archive_entry(&mut entry, expected_length, maximum)?;
+        if maximum == MAX_INSTALL_SCRIPT_BYTES
+            && (output.contains(&0) || std::str::from_utf8(output).is_err())
         {
             return Err(BuilderError::InvalidArchive);
         }
@@ -2936,6 +3006,30 @@ fn read_package_metadata_tar(
         return Err(BuilderError::InvalidArchive);
     }
     Ok(found_install_script)
+}
+
+fn read_exact_archive_entry(
+    input: &mut impl Read,
+    expected_length: u64,
+    maximum: usize,
+) -> Result<Vec<u8>, BuilderError> {
+    let expected = usize::try_from(expected_length).map_err(|_| BuilderError::OutputLimit)?;
+    if expected == 0 || expected > maximum {
+        return Err(BuilderError::InvalidArchive);
+    }
+    let mut output = vec![0_u8; expected];
+    if let Err(error) = input.read_exact(&mut output) {
+        return if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            Err(BuilderError::InvalidArchive)
+        } else {
+            Err(error.into())
+        };
+    }
+    let mut trailing = [0_u8; 1];
+    if input.read(&mut trailing)? != 0 {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok(output)
 }
 
 fn validate_package_info<'a>(
@@ -3257,24 +3351,27 @@ fn parse_aur_dependency_manifest(
     if lines.next() != Some("ABDI0001") {
         return Err(BuilderError::InvalidInput);
     }
-    let mut packages = Vec::new();
+    let mut packages = Vec::with_capacity(MAX_AUR_DEPENDENCY_PACKAGES);
     let mut summary = None;
     for line in lines {
-        let fields: Vec<&str> = line.split('\t').collect();
-        match fields.as_slice() {
-            [
-                "package",
-                package_base,
-                package_name,
-                version,
-                architecture,
-                filename,
-                staged_filename,
-                archive_bytes,
-                archive_sha256,
-                installed_bytes,
-                build_package_count,
-            ] if summary.is_none() && packages.len() < MAX_AUR_DEPENDENCY_PACKAGES => {
+        let mut fields = line.split('\t');
+        match fields.next() {
+            Some("package")
+                if summary.is_none() && packages.len() < MAX_AUR_DEPENDENCY_PACKAGES =>
+            {
+                let package_base = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let package_name = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let version = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let architecture = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let filename = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let staged_filename = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let archive_bytes = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let archive_sha256 = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let installed_bytes = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let build_package_count = fields.next().ok_or(BuilderError::InvalidInput)?;
+                if fields.next().is_some() {
+                    return Err(BuilderError::InvalidInput);
+                }
                 let archive_bytes = parse_bounded_size(archive_bytes, MAX_ARCHIVE_BYTES)?;
                 let installed_bytes = parse_bounded_size(installed_bytes, MAX_EXPANDED_BYTES)?;
                 let build_package_count = build_package_count
@@ -3289,7 +3386,7 @@ fn parse_aur_dependency_manifest(
                     .and_then(|(prefix, suffix)| {
                         (prefix.len() == 3
                             && prefix.bytes().all(|byte| byte.is_ascii_digit())
-                            && suffix == *filename)
+                            && suffix == filename)
                             .then(|| prefix.parse::<usize>().ok())
                             .flatten()
                     })
@@ -3300,13 +3397,13 @@ fn parse_aur_dependency_manifest(
                     || version.is_empty()
                     || version.len() > 128
                     || version.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
-                    || !matches!(*architecture, "aarch64" | "x86_64")
+                    || !matches!(architecture, "aarch64" | "x86_64")
                     || !safe_filename(filename)
                     || !safe_filename(staged_filename)
                     || packages.iter().any(|package: &StagedAurDependencyPackage| {
-                        package.package_name == *package_name
-                            || package.filename == *filename
-                            || package.staged_filename == *staged_filename
+                        package.package_name == package_name
+                            || package.filename == filename
+                            || package.staged_filename == staged_filename
                     })
                     || packages.iter().any(|package| {
                         package
@@ -3317,19 +3414,25 @@ fn parse_aur_dependency_manifest(
                     return Err(BuilderError::InvalidInput);
                 }
                 packages.push(StagedAurDependencyPackage {
-                    package_base: (*package_base).to_owned(),
-                    package_name: (*package_name).to_owned(),
-                    version: (*version).to_owned(),
-                    architecture: (*architecture).to_owned(),
-                    filename: (*filename).to_owned(),
-                    staged_filename: (*staged_filename).to_owned(),
+                    package_base: package_base.to_owned(),
+                    package_name: package_name.to_owned(),
+                    version: version.to_owned(),
+                    architecture: architecture.to_owned(),
+                    filename: filename.to_owned(),
+                    staged_filename: staged_filename.to_owned(),
                     archive_bytes,
                     installed_bytes,
                     archive_sha256: parse_sha256(archive_sha256)?,
                     build_package_count,
                 });
             }
-            ["summary", count, archive_bytes, installed_bytes] if summary.is_none() => {
+            Some("summary") if summary.is_none() => {
+                let count = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let archive_bytes = fields.next().ok_or(BuilderError::InvalidInput)?;
+                let installed_bytes = fields.next().ok_or(BuilderError::InvalidInput)?;
+                if fields.next().is_some() {
+                    return Err(BuilderError::InvalidInput);
+                }
                 summary = Some((
                     count
                         .parse::<usize>()
@@ -3995,6 +4098,29 @@ fn safe_aur_requirement(value: &str) -> bool {
     ) && operator_length < constraint.len()
 }
 
+#[cfg(any(target_os = "android", test))]
+fn parse_aur_requirements(input: &str) -> Result<Vec<&str>, BuilderError> {
+    if input.is_empty() || input.len() > MAX_AUR_REQUIREMENTS_BYTES || !input.ends_with('\n') {
+        return Err(BuilderError::InvalidArgument);
+    }
+    let mut requirements = Vec::with_capacity(8);
+    for requirement in input.lines() {
+        if requirements.len() >= MAX_AUR_DEPENDENCY_PACKAGES
+            || !safe_aur_requirement(requirement)
+            || requirements
+                .last()
+                .is_some_and(|previous| *previous >= requirement)
+        {
+            return Err(BuilderError::InvalidArgument);
+        }
+        requirements.push(requirement);
+    }
+    if requirements.is_empty() {
+        return Err(BuilderError::InvalidArgument);
+    }
+    Ok(requirements)
+}
+
 fn safe_filename(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 240
@@ -4042,9 +4168,10 @@ mod android {
 
     use super::{
         AurBuildSession, AurDependencyArchiveSession, BuilderRuntime, ClosureSession,
-        ExtractionReport, ProvisionSession, ReviewedInputRole, ReviewedInputSession,
-        builder_storage_usage, clear_builder_storage, install_staged_aur_dependencies,
-        parse_sha256, prepare_recipe_workspace,
+        ExtractionReport, MAX_AUR_REQUIREMENTS_BYTES, ProvisionSession, ReviewedInputRole,
+        ReviewedInputSession, builder_storage_usage, clear_builder_storage,
+        install_staged_aur_dependencies, parse_aur_requirements, parse_sha256,
+        prepare_recipe_workspace,
     };
 
     const ERROR_INVALID_ARGUMENT: jint = -1;
@@ -4069,7 +4196,6 @@ mod android {
     const AUR_DEPENDENCY_REPORT_BYTES: usize = 64;
     const AUR_DEPENDENCY_STAGE_REPORT_MAGIC: &[u8; 8] = b"ABDS0001";
     const AUR_DEPENDENCY_INSTALL_REPORT_MAGIC: &[u8; 8] = b"ABDI0002";
-    const MAX_AUR_REQUIREMENTS_BYTES: usize = 128 * 1024;
 
     static REVIEWED_INPUTS: OnceLock<Mutex<Option<ReviewedInputSession>>> = OnceLock::new();
     static BUILD: OnceLock<Mutex<Option<AurBuildSession>>> = OnceLock::new();
@@ -5000,10 +5126,9 @@ mod android {
         let Ok(requirement_text) = std::str::from_utf8(requirement_bytes) else {
             return ERROR_INVALID_ARGUMENT;
         };
-        if !requirement_text.ends_with('\n') {
+        let Ok(requirements) = parse_aur_requirements(requirement_text) else {
             return ERROR_INVALID_ARGUMENT;
-        }
-        let requirements: Vec<String> = requirement_text.lines().map(str::to_owned).collect();
+        };
         let Ok(_guards) = lock_idle_builder() else {
             return ERROR_INVALID_STATE;
         };
@@ -5429,6 +5554,121 @@ mod tests {
     use xz2::write::XzEncoder;
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn pacman_query_output_matches_exact_package_and_version() {
+        assert!(matches_pacman_query_output(
+            b"example-bin 1.2.3-1\n",
+            "example-bin",
+            "1.2.3-1",
+        ));
+        for invalid in [
+            b"example-bin 1.2.3-1".as_slice(),
+            b"example-bin 1.2.3-1\n\n",
+            b"example-bin  1.2.3-1\n",
+            b"example-bin-extra 1.2.3-1\n",
+            b"example-bin 1.2.3-1-extra\n",
+            b"example-bin 1.2.3-1 \n",
+        ] {
+            assert!(!matches_pacman_query_output(
+                invalid,
+                "example-bin",
+                "1.2.3-1",
+            ));
+        }
+    }
+
+    #[test]
+    fn aur_requirements_are_borrowed_sorted_and_bounded_before_retention() {
+        let mut exact = String::new();
+        for index in 0..MAX_AUR_DEPENDENCY_PACKAGES {
+            exact.push_str(&format!("dependency-{index:03}\n"));
+        }
+        let parsed = parse_aur_requirements(&exact).expect("exact requirement bound");
+        assert_eq!(parsed.len(), MAX_AUR_DEPENDENCY_PACKAGES);
+        assert_eq!(parsed[0], "dependency-000");
+        assert_eq!(parsed[MAX_AUR_DEPENDENCY_PACKAGES - 1], "dependency-255");
+
+        exact.push_str("dependency-overflow\n");
+        assert!(matches!(
+            parse_aur_requirements(&exact),
+            Err(BuilderError::InvalidArgument)
+        ));
+        for invalid in ["", "dependency", "z\na\n", "a\na\n", "../escape\n"] {
+            assert!(matches!(
+                parse_aur_requirements(invalid),
+                Err(BuilderError::InvalidArgument)
+            ));
+        }
+    }
+
+    #[test]
+    fn bounded_stream_uses_one_limit_sized_buffer_and_rejects_overflow() {
+        assert_eq!(
+            read_bounded_stream(&mut Cursor::new(b"proc"), 8).expect("short stream"),
+            b"proc",
+        );
+        assert_eq!(
+            read_bounded_stream(&mut Cursor::new(b"procstat"), 8).expect("exact stream"),
+            b"procstat",
+        );
+        assert!(matches!(
+            read_bounded_stream(&mut Cursor::new(b"procstat!"), 8),
+            Err(BuilderError::OutputLimit),
+        ));
+        assert!(matches!(
+            read_bounded_stream(&mut Cursor::new([]), 0),
+            Err(BuilderError::OutputLimit),
+        ));
+    }
+
+    #[test]
+    fn archive_metadata_read_is_exact_and_rejects_size_changes() {
+        let expected = b"archive metadata";
+        assert_eq!(
+            read_exact_archive_entry(&mut &expected[..], expected.len() as u64, expected.len())
+                .expect("exact metadata"),
+            expected,
+        );
+        assert!(matches!(
+            read_exact_archive_entry(
+                &mut &expected[..expected.len() - 1],
+                expected.len() as u64,
+                expected.len(),
+            ),
+            Err(BuilderError::InvalidArchive),
+        ));
+        assert!(matches!(
+            read_exact_archive_entry(
+                &mut &expected[..],
+                (expected.len() - 1) as u64,
+                expected.len(),
+            ),
+            Err(BuilderError::InvalidArchive),
+        ));
+    }
+
+    #[test]
+    fn stale_builder_process_admission_is_bounded() {
+        let mut scanned = 0_usize;
+        for _ in 0..MAX_STALE_BUILDER_PROCESS_SCAN {
+            count_stale_builder_process_entry(&mut scanned).expect("scan within bound");
+        }
+        assert!(matches!(
+            count_stale_builder_process_entry(&mut scanned),
+            Err(BuilderError::OutputLimit),
+        ));
+
+        let mut targets = Vec::new();
+        for target in 0..MAX_STALE_BUILDER_PROCESS_TARGETS {
+            retain_stale_builder_process_target(&mut targets, target).expect("target within bound");
+        }
+        assert!(matches!(
+            retain_stale_builder_process_target(&mut targets, usize::MAX),
+            Err(BuilderError::OutputLimit),
+        ));
+        assert_eq!(targets.len(), MAX_STALE_BUILDER_PROCESS_TARGETS);
+    }
 
     fn test_directory() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -6467,6 +6707,25 @@ summary\t1\t{}\n",
         assert!(safe_aur_requirement("example-bin>=1:1.2.3-1"));
         assert!(!safe_aur_requirement("example-bin||substituted"));
         fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn aur_dependency_manifest_rejects_field_flood_at_the_stream_limit() {
+        let mut manifest = String::from("ABDI0001\npackage");
+        while manifest.len() + 2 <= MAX_AUR_DEPENDENCY_MANIFEST_BYTES {
+            manifest.push_str("\tx");
+        }
+        manifest.extend(std::iter::repeat_n(
+            'x',
+            MAX_AUR_DEPENDENCY_MANIFEST_BYTES - manifest.len(),
+        ));
+        let digest = sha256_bytes(manifest.as_bytes());
+
+        assert_eq!(manifest.len(), MAX_AUR_DEPENDENCY_MANIFEST_BYTES);
+        assert!(matches!(
+            parse_expected_aur_dependency_manifest(Some(manifest.as_bytes()), Some(digest)),
+            Err(BuilderError::InvalidInput)
+        ));
     }
 
     #[test]

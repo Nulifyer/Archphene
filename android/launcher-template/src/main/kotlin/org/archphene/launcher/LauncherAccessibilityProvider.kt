@@ -23,6 +23,19 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
+private const val MAX_ACCESSIBILITY_SEARCH_UTF16 = 1_024
+
+internal fun normalizeAccessibilitySearch(searched: String?): String? {
+    if (
+        searched == null ||
+        searched.length > MAX_ACCESSIBILITY_SEARCH_UTF16 ||
+        searched.isBlank()
+    ) {
+        return null
+    }
+    return searched.lowercase(Locale.ROOT)
+}
+
 /**
  * Bounded Android virtual accessibility tree for one manager-owned Linux app.
  *
@@ -296,8 +309,7 @@ internal class LauncherAccessibilityProvider(
         searched: String?,
         virtualViewId: Int,
     ): List<AccessibilityNodeInfo> {
-        if (searched.isNullOrBlank()) return emptyList()
-        val match = searched.lowercase(Locale.ROOT)
+        val match = normalizeAccessibilitySearch(searched) ?: return emptyList()
         val result = ArrayList<AccessibilityNodeInfo>()
         for (node in tree.ordered) {
             if (
@@ -365,7 +377,7 @@ internal class LauncherAccessibilityProvider(
                         .orEmpty()
                 if (
                     text.length > MAX_TEXT_UTF16 ||
-                    text.toByteArray(StandardCharsets.UTF_8).size > MAX_TEXT_BYTES
+                    !LauncherUtf8Policy.lengthAtMost(text, MAX_TEXT_BYTES)
                 ) {
                     return false
                 }

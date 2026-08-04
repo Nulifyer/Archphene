@@ -31,7 +31,22 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
     if (!text.endsWith('\n') || text.count { character -> character == '\n' } != 1) {
         throw IllegalStateException("Rust returned invalid package launcher review")
     }
-    val fields = text.dropLast(1).split('\t')
+    val terminalNewline = text.lastIndex
+    val fields = ArrayList<String>(19)
+    var fieldStart = 0
+    for (index in 0 until terminalNewline) {
+        if (text[index] == '\t') {
+            if (fields.size == 18) {
+                throw IllegalStateException("Rust returned inconsistent package launcher review")
+            }
+            fields.add(text.substring(fieldStart, index))
+            fieldStart = index + 1
+        }
+    }
+    if (fields.size != 18) {
+        throw IllegalStateException("Rust returned inconsistent package launcher review")
+    }
+    fields.add(text.substring(fieldStart, terminalNewline))
     val status = fields.getOrNull(1)
     val capabilities = reviewCapabilities(fields.getOrNull(2))
     val analyzed =
@@ -68,7 +83,6 @@ internal fun decodePackageLauncherReview(bytes: ByteArray): PackageLauncherRevie
             else -> false
         }
     if (
-        fields.size != 19 ||
         fields[0] != "R4" ||
         !validStatus ||
         capabilities == null ||

@@ -12,6 +12,8 @@ old_dependencies=()
 new_dependencies=()
 rollback_gate=false
 rollback_absent=()
+rollback_script_file=
+rollback_script_line=
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
@@ -24,8 +26,16 @@ while (($#)); do
     --new-dependency) new_dependencies+=("${2:?missing value for --new-dependency}"); shift 2 ;;
     --rollback-gate) rollback_gate=true; shift ;;
     --rollback-absent) rollback_absent+=("${2:?missing value for --rollback-absent}"); shift 2 ;;
+    --rollback-script-file)
+      rollback_script_file="${2:?missing value for --rollback-script-file}"
+      shift 2
+      ;;
+    --rollback-script-line)
+      rollback_script_line="${2:?missing value for --rollback-script-line}"
+      shift 2
+      ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH --package NAME --old-version VERSION --new-version VERSION --install-reason explicit|dependency [--old-dependency NAME] [--new-dependency NAME] [--rollback-gate] [--rollback-absent NAME]"
+      echo "usage: $0 --serial SERIAL --apk PATH --package NAME --old-version VERSION --new-version VERSION --install-reason explicit|dependency [--old-dependency NAME] [--new-dependency NAME] [--rollback-gate] [--rollback-absent NAME] [--rollback-script-file ROOT_RELATIVE_PATH --rollback-script-line EXACT_LINE]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -48,6 +58,12 @@ for dependency in \
   [[ "$dependency" =~ ^[a-zA-Z0-9@._+-]{1,128}$ ]] ||
     archphene_die "dependency package name is invalid: $dependency"
 done
+[[ -z "$rollback_script_file" && -z "$rollback_script_line" ]] ||
+  [[ "$rollback_gate" == true &&
+    "$rollback_script_file" =~ ^[a-zA-Z0-9@._+-]+(/[a-zA-Z0-9@._+-]+){0,15}$ &&
+    "$rollback_script_line" =~ ^[a-zA-Z0-9@._+:/-]{1,256}$ ]] ||
+  archphene_die \
+    "rollback script evidence requires a safe file, exact line, and --rollback-gate"
 
 archphene_test_init "$serial"
 archphene_require_file "$apk"
@@ -141,6 +157,16 @@ old_metadata="$(
   archphene_adb_run exec-out run-as "$manager" sh -c \
     "$remote_metadata" | tr -d '\r'
 )"
+if [[ -n "$rollback_script_file" ]]; then
+  remote_install_script="${remote_metadata% .PKGINFO} .INSTALL"
+  old_install_script="$(
+    archphene_adb_run exec-out run-as "$manager" sh -c \
+      "$remote_install_script" | tr -d '\r'
+  )"
+  grep -Fq "$rollback_script_line" <<<"$old_install_script" ||
+    archphene_die \
+      "older archive install script does not reference the expected evidence line"
+fi
 for dependency in "${old_dependencies[@]}"; do
   grep -Fqx "depend = $dependency" <<<"$old_metadata" ||
     archphene_die "older archive does not declare expected dependency: $dependency"
@@ -230,6 +256,22 @@ if [[ "$rollback_gate" == true ]]; then
   archphene_adb_run exec-out run-as "$manager" cat "$intent" |
     grep -Fqx $'rollback\tready' ||
     archphene_die "mutation intent did not retain a complete rollback plan"
+  if [[ -n "$rollback_script_file" ]]; then
+    script_evidence_path="$root/$rollback_script_file"
+    archphene_adb_run exec-out run-as "$manager" cat "$script_evidence_path" |
+      grep -Fqx "$rollback_script_line" ||
+      archphene_die \
+        "forward transaction did not retain the script evidence baseline"
+    escaped_script_line="$(
+      sed 's/[][\\.^$*+?{}|()#]/\\&/g' <<<"$rollback_script_line"
+    )"
+    archphene_adb_run shell run-as "$manager" sed -i \
+      "\\#^${escaped_script_line}\$#d" "$script_evidence_path"
+    if archphene_adb_run exec-out run-as "$manager" cat "$script_evidence_path" |
+        grep -Fqx "$rollback_script_line"; then
+      archphene_die "could not remove the rollback script evidence line"
+    fi
+  fi
   android_pid="$(archphene_android_pid "$manager")"
   archphene_adb_run shell run-as "$manager" kill -9 "$android_pid" >/dev/null
   deadline=$((SECONDS + 15))
@@ -282,6 +324,17 @@ if [[ "$rollback_gate" == true ]]; then
     [[ -z "$installed_dependency" ]] ||
       archphene_die "rollback retained newly introduced package $dependency"
   done
+  if [[ -n "$rollback_script_file" ]]; then
+    restored_count="$(
+      archphene_adb_run exec-out run-as "$manager" \
+        cat "$root/$rollback_script_file" |
+        grep -Fxc "$rollback_script_line" ||
+        true
+    )"
+    [[ "$restored_count" == 1 ]] ||
+      archphene_die \
+        "rollback did not execute the restored archive script exactly once"
+  fi
   for residue in \
     "$intent" "$root/run/package-install-reasons-v1" \
     "$root/run/package-database-repair-v1" \

@@ -21,10 +21,117 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.Locale
 import org.archphene.app.R
+import org.archphene.app.boundedUtf8Text
+import org.archphene.app.putTabSeparatedUtf8
 import org.archphene.app.runtime.NativeRuntime
+import org.archphene.app.tabSeparatedUtf8Length
+
+internal enum class DirectoryEntryLimit {
+    PHYSICAL,
+    VISIBLE,
+}
+
+internal class DirectoryEntryLimitExceededException(
+    val limit: DirectoryEntryLimit,
+) : Exception()
+
+internal fun Path.readVisibleDirectoryEntries(maximumVisible: Int): List<Path> {
+    val visibleEntries = ArrayList<Path>(maximumVisible)
+    Files.newDirectoryStream(this).use { entries ->
+        val iterator = entries.iterator()
+        var visitedEntries = 0
+        while (iterator.hasNext()) {
+            if (visitedEntries == MAX_PHYSICAL_DIRECTORY_ENTRIES) {
+                throw DirectoryEntryLimitExceededException(DirectoryEntryLimit.PHYSICAL)
+            }
+            val entry = iterator.next()
+            visitedEntries++
+            if (!visibleName(entry.fileName.toString()) || Files.isSymbolicLink(entry)) {
+                continue
+            }
+            if (visibleEntries.size == maximumVisible) {
+                throw DirectoryEntryLimitExceededException(DirectoryEntryLimit.VISIBLE)
+            }
+            visibleEntries.add(entry)
+        }
+    }
+    return visibleEntries
+}
+
+internal fun visibleName(name: String): Boolean =
+    boundedUtf8Text(name, MAX_DOCUMENT_NAME_BYTES) &&
+        name != "." &&
+        name != ".." &&
+        !name.startsWith('.') &&
+        '/' !in name &&
+        '\\' !in name &&
+        name.none { character ->
+            character.isBidirectionalControl() || character.isISOControl()
+        }
+
+internal fun boundedHomeDocumentSegments(documentId: String): List<String>? {
+    var utf8Bytes = 0
+    var index = 0
+    while (index < documentId.length) {
+        val character = documentId[index]
+        val bytes =
+            when {
+                character.code <= 0x7f -> 1
+                character.code <= 0x7ff -> 2
+                character.isHighSurrogate() -> {
+                    if (
+                        index + 1 >= documentId.length ||
+                        !documentId[index + 1].isLowSurrogate()
+                    ) {
+                        return null
+                    }
+                    index++
+                    4
+                }
+                character.isLowSurrogate() -> return null
+                else -> 3
+            }
+        if (utf8Bytes > MAX_DOCUMENT_ID_BYTES - bytes) return null
+        utf8Bytes += bytes
+        index++
+    }
+    if (documentId == DOCUMENT_HOME_ID) return emptyList()
+    if (!documentId.startsWith("$DOCUMENT_HOME_ID/")) return null
+
+    val segments = ArrayList<String>(MAX_DOCUMENT_DEPTH)
+    var start = DOCUMENT_HOME_ID.length + 1
+    while (segments.size < MAX_DOCUMENT_DEPTH) {
+        val delimiter = documentId.indexOf('/', start)
+        val segment =
+            if (delimiter < 0) {
+                documentId.substring(start)
+            } else {
+                documentId.substring(start, delimiter)
+            }
+        if (!visibleName(segment)) return null
+        segments.add(segment)
+        if (delimiter < 0) return segments
+        start = delimiter + 1
+    }
+    return null
+}
+
+private fun Char.isBidirectionalControl(): Boolean =
+    this == '\u061c' ||
+        this == '\u200e' ||
+        this == '\u200f' ||
+        this in '\u202a'..'\u202e' ||
+        this in '\u2066'..'\u2069'
+
+private const val MAX_PHYSICAL_DIRECTORY_ENTRIES = 4096
+private const val MAX_DOCUMENT_NAME_BYTES = 255
+private const val DOCUMENT_HOME_ID = "home"
+private const val MAX_DOCUMENT_ID_BYTES = 1024
+private const val MAX_DOCUMENT_DEPTH = 32
 
 class ArchpheneDocumentsProvider : DocumentsProvider() {
     override fun onCreate(): Boolean = true
@@ -111,21 +218,22 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             }
         val visibleChildren =
             try {
-                Files.newDirectoryStream(parentFile.toPath()).use { entries ->
-                    entries
-                        .asSequence()
-                        .filter { path -> visibleName(path.fileName.toString()) }
-                        .filterNot(Files::isSymbolicLink)
-                        .take(maximumChildren + 1)
-                        .map { path -> path.toFile() }
-                        .toList()
-                }
+                parentFile
+                    .toPath()
+                    .readVisibleDirectoryEntries(maximumChildren)
+                    .map(Path::toFile)
+            } catch (error: DirectoryEntryLimitExceededException) {
+                val message =
+                    when (error.limit) {
+                        DirectoryEntryLimit.PHYSICAL ->
+                            "Directory exceeds the physical-entry limit"
+                        DirectoryEntryLimit.VISIBLE ->
+                            "Directory exceeds the visible-entry limit"
+                    }
+                throw missing(message)
             } catch (error: Exception) {
                 throw missing("Could not list directory: $parentDocumentId", error)
             }
-        if (visibleChildren.size > maximumChildren) {
-            throw missing("Directory exceeds the visible-entry limit")
-        }
         val children =
             visibleChildren.sortedWith(
                 compareBy<File>({ it.name.lowercase(Locale.ROOT) }, File::getName),
@@ -178,11 +286,9 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         val descriptor =
             if (document.kind == DocumentKind.SHELL_STARTUP_FILE) {
                 nativeOperation(
-                    listOf(
-                        homePath(),
-                        document.startupId
-                            ?: throw missing("Startup document identity is unavailable"),
-                    ),
+                    homePath(),
+                    document.startupId
+                        ?: throw missing("Startup document identity is unavailable"),
                 ) { request, length, output ->
                     NativeRuntime.nativeOpenShellStartupDocument(
                         request,
@@ -192,7 +298,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
                     )
                 }
             } else {
-                nativeOperation(listOf(homePath(), documentId)) { request, length, output ->
+                nativeOperation(homePath(), documentId) { request, length, output ->
                     NativeRuntime.nativeOpenHomeDocument(
                         request,
                         length,
@@ -220,7 +326,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             throw missing("Cannot create shell startup documents")
         }
         requireVisibleName(displayName)
-        nativeOperation(listOf(homePath(), parentDocumentId, displayName)) {
+        nativeOperation(homePath(), parentDocumentId, displayName) {
                 request,
                 length,
                 output,
@@ -251,7 +357,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             throw missing("Cannot rename shell startup documents")
         }
         requireVisibleName(displayName)
-        nativeOperation(listOf(homePath(), documentId, displayName)) {
+        nativeOperation(homePath(), documentId, displayName) {
                 request,
                 length,
                 output,
@@ -273,7 +379,7 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         if (documentForId(documentId).kind != DocumentKind.PHYSICAL) {
             throw missing("Cannot delete shell startup documents")
         }
-        nativeOperation(listOf(homePath(), documentId)) { request, length, output ->
+        nativeOperation(homePath(), documentId) { request, length, output ->
             NativeRuntime.nativeDeleteHomeDocument(request, length, output)
         }
         notifyChildren(documentId.substringBeforeLast('/'))
@@ -433,21 +539,8 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
     }
 
     private fun parseDocumentId(documentId: String): List<String> {
-        if (documentId.toByteArray(StandardCharsets.UTF_8).size > MAX_DOCUMENT_ID_BYTES) {
-            throw missing("Document ID is too long")
-        }
-        if (documentId == HOME_ID) {
-            return emptyList()
-        }
-        if (!documentId.startsWith("$HOME_ID/")) {
-            throw missing("Unknown document: $documentId")
-        }
-        val segments = documentId.removePrefix("$HOME_ID/").split('/')
-        if (segments.isEmpty() || segments.size > MAX_DOCUMENT_DEPTH) {
-            throw missing("Invalid document depth")
-        }
-        segments.forEach(::requireVisibleName)
-        return segments
+        return boundedHomeDocumentSegments(documentId)
+            ?: throw missing("Invalid document ID")
     }
 
     private fun requireVisibleName(name: String) {
@@ -455,18 +548,6 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             throw missing("Private or invalid document name")
         }
     }
-
-    private fun visibleName(name: String): Boolean =
-        name.isNotEmpty() &&
-            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_DOCUMENT_NAME_BYTES &&
-            name != "." &&
-            name != ".." &&
-            !name.startsWith('.') &&
-            '/' !in name &&
-            '\\' !in name &&
-            name.none { character ->
-                character.isISOControl() || character.isBidirectionalControl()
-            }
 
     private fun homeDirectory(): File =
         homeDirectoryOrNull()
@@ -509,17 +590,16 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         }
 
     private fun nativeOperation(
-        fields: List<String>,
+        vararg fields: String,
         operation: (ByteBuffer, Int, ByteBuffer) -> Int,
     ): Int {
-        val bytes = fields.joinToString("\t").toByteArray(StandardCharsets.UTF_8)
-        if (bytes.isEmpty() || bytes.size > MAX_NATIVE_REQUEST_BYTES) {
-            throw missing("Document request is too large")
-        }
-        val request = ByteBuffer.allocateDirect(bytes.size)
-        request.put(bytes)
+        val requestLength =
+            tabSeparatedUtf8Length(fields, MAX_NATIVE_REQUEST_BYTES)
+                ?: throw missing("Document request is invalid or too large")
+        val request = ByteBuffer.allocateDirect(requestLength)
+        check(putTabSeparatedUtf8(request, fields, requestLength) == requestLength)
         val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
-        val result = operation(request, bytes.size, output)
+        val result = operation(request, requestLength, output)
         if (result < 0) {
             output.position(0)
             val diagnostic = ByteArray(NativeRuntime.STORAGE_OUTPUT_SIZE)
@@ -673,13 +753,6 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             ?: "application/octet-stream"
     }
 
-    private fun Char.isBidirectionalControl(): Boolean =
-        this == '\u061c' ||
-            this == '\u200e' ||
-            this == '\u200f' ||
-            this in '\u202a'..'\u202e' ||
-            this in '\u2066'..'\u2069'
-
     private enum class DocumentKind {
         PHYSICAL,
         SHELL_STARTUP_DIRECTORY,
@@ -710,16 +783,13 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
     private companion object {
         private const val ROOT_ID = "archphene-home"
         private const val TAG = "ArchpheneDocuments"
-        private const val HOME_ID = "home"
+        private const val HOME_ID = DOCUMENT_HOME_ID
         private const val SHELL_STARTUP_ID = "shell-startup"
         private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/bashrc"
         private const val BASH_PROFILE_DOCUMENT_ID = "$SHELL_STARTUP_ID/bash-profile"
         private const val ZSHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/zshrc"
         private const val FISH_CONFIG_DOCUMENT_ID = "$SHELL_STARTUP_ID/fish-config"
         private const val HOME_RELATIVE_PATH = "arch-root/home/archphene"
-        private const val MAX_DOCUMENT_ID_BYTES = 1024
-        private const val MAX_DOCUMENT_NAME_BYTES = 255
-        private const val MAX_DOCUMENT_DEPTH = 32
         private const val MAX_VISIBLE_CHILDREN = 4096
         private const val MAX_NATIVE_REQUEST_BYTES = 4 * 1024
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"

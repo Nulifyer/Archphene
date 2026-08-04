@@ -3,7 +3,7 @@
 
 pub mod integration;
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -59,6 +59,7 @@ const GUI_INTEGRATION_STEADY_OBSERVATION_INTERVAL: Duration = Duration::from_sec
 const GUI_INTEGRATION_WARM_OBSERVATIONS: u8 = 15;
 const TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_GDK_PIXBUF_MODULE_FILE_BYTES: u64 = 16 * 1024;
+const MAX_GUI_CONFIG_BYTES: usize = 64 * 1024;
 const MAX_ELF_PROGRAM_HEADERS: usize = 128;
 const MAX_ELF_DYNAMIC_ENTRIES: u64 = 4096;
 const MAX_ELF_RUNPATH_BYTES: usize = 2048;
@@ -68,6 +69,8 @@ const MAX_ELF_DEPENDENCY_OBJECTS: usize = 256;
 const MAX_ELF_PRIVATE_LIBRARY_PATHS: usize = 64;
 const GTK_SETTINGS_ROOT_RELATIVE_PATH: &str = "home/archphene/.config/gtk-3.0/settings.ini";
 const QT_KDE_CONFIG_LIBRARY: &str = "libarchphene_kde_config.so";
+const O_CLOEXEC: i32 = 0o2000000;
+const O_NOFOLLOW: i32 = 0o400000;
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -423,22 +426,26 @@ impl CommandEnvironment {
         self
     }
 
-    pub fn run(&self, command: &str, arguments: &[&str]) -> Result<CommandOutput, ProcessError> {
+    pub fn run<T: AsRef<str>>(
+        &self,
+        command: &str,
+        arguments: &[T],
+    ) -> Result<CommandOutput, ProcessError> {
         self.run_with_identity(command, arguments, false)
     }
 
-    pub fn run_as_root(
+    pub fn run_as_root<T: AsRef<str>>(
         &self,
         command: &str,
-        arguments: &[&str],
+        arguments: &[T],
     ) -> Result<CommandOutput, ProcessError> {
         self.run_with_identity(command, arguments, true)
     }
 
-    pub fn run_as_root_quiet(
+    pub fn run_as_root_quiet<T: AsRef<str>>(
         &self,
         command: &str,
-        arguments: &[&str],
+        arguments: &[T],
     ) -> Result<i32, ProcessError> {
         validate_request(command, arguments)?;
         let command_path = resolve_installed_command(&self.arch_root, command)?;
@@ -469,10 +476,10 @@ impl CommandEnvironment {
         }
     }
 
-    fn run_with_identity(
+    fn run_with_identity<T: AsRef<str>>(
         &self,
         command: &str,
-        arguments: &[&str],
+        arguments: &[T],
         root_identity: bool,
     ) -> Result<CommandOutput, ProcessError> {
         validate_request(command, arguments)?;
@@ -508,7 +515,7 @@ impl CommandEnvironment {
     }
 
     pub fn command_available(&self, command: &str) -> Result<bool, ProcessError> {
-        validate_request(command, &[])?;
+        validate_request(command, &[] as &[&str])?;
         let command_path = match resolve_installed_command(&self.arch_root, command) {
             Ok(path) => path,
             Err(ProcessError::MissingCommand) => return Ok(false),
@@ -647,7 +654,12 @@ impl CommandEnvironment {
         Ok(resolved)
     }
 
-    fn build_command(&self, launch: &LaunchPlan, arguments: &[&str], terminal: &str) -> Command {
+    fn build_command<T: AsRef<str>>(
+        &self,
+        launch: &LaunchPlan,
+        arguments: &[T],
+        terminal: &str,
+    ) -> Command {
         let mut library_path = self.library_path.clone();
         if self.pulse_server_address.is_some() {
             library_path.push(":");
@@ -671,7 +683,7 @@ impl CommandEnvironment {
             command.arg(script);
         }
         command
-            .args(arguments)
+            .args(arguments.iter().map(AsRef::as_ref))
             .current_dir(self.arch_root.join("home/archphene"))
             .env_clear()
             .env("HOME", "/home/archphene")
@@ -1817,7 +1829,7 @@ fn validate_wayland_display(display: &str) -> Result<(), ProcessError> {
     Ok(())
 }
 
-fn validate_request(command: &str, arguments: &[&str]) -> Result<(), ProcessError> {
+fn validate_request<T: AsRef<str>>(command: &str, arguments: &[T]) -> Result<(), ProcessError> {
     if command.is_empty()
         || command.len() > MAX_COMMAND_NAME_BYTES
         || !command
@@ -1831,6 +1843,7 @@ fn validate_request(command: &str, arguments: &[&str]) -> Result<(), ProcessErro
     }
     let mut total = command.len();
     for argument in arguments {
+        let argument = argument.as_ref();
         if argument.len() > MAX_COMMAND_ARGUMENT_BYTES || argument.as_bytes().contains(&0) {
             return Err(ProcessError::InvalidArgument);
         }
@@ -1998,16 +2011,15 @@ fn elf_absolute_library_paths(root: &Path, program: &Path) -> Result<Vec<PathBuf
     if canonical_program == canonical_root || !canonical_program.starts_with(&canonical_root) {
         return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
     }
-    let mut queue = VecDeque::from([canonical_program]);
-    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::with_capacity(MAX_ELF_DEPENDENCY_OBJECTS);
+    queue.push_back(canonical_program);
+    let mut visited = Vec::with_capacity(MAX_ELF_DEPENDENCY_OBJECTS);
     let mut paths = Vec::new();
     while let Some(object) = queue.pop_front() {
-        if !visited.insert(object.clone()) {
-            continue;
-        }
-        if visited.len() > MAX_ELF_DEPENDENCY_OBJECTS {
+        if visited.len() >= MAX_ELF_DEPENDENCY_OBJECTS {
             return Err(ProcessError::UnsupportedProgram);
         }
+        visited.push(object.clone());
         let linkage = elf_dynamic_linkage(root, &canonical_root, &object)?;
         for path in &linkage.search_paths {
             if path.export_to_loader && !paths.contains(&path.physical) {
@@ -2025,11 +2037,26 @@ fn elf_absolute_library_paths(root: &Path, program: &Path) -> Result<Vec<PathBuf
                 &linkage.search_paths,
                 &needed,
             )? {
-                queue.push_back(dependency);
+                enqueue_elf_dependency(&mut queue, &visited, dependency)?;
             }
         }
     }
     Ok(paths)
+}
+
+fn enqueue_elf_dependency(
+    queue: &mut VecDeque<PathBuf>,
+    visited: &[PathBuf],
+    dependency: PathBuf,
+) -> Result<(), ProcessError> {
+    if visited.contains(&dependency) || queue.contains(&dependency) {
+        return Ok(());
+    }
+    if visited.len() + queue.len() >= MAX_ELF_DEPENDENCY_OBJECTS {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    queue.push_back(dependency);
+    Ok(())
 }
 
 fn elf_dynamic_linkage(
@@ -2075,10 +2102,16 @@ fn elf_dynamic_linkage(
         let address = little_u64(&entry[16..24]);
         let bytes = little_u64(&entry[32..40]);
         if kind == 1 {
+            if offset > file_bytes
+                || bytes > file_bytes - offset
+                || address.checked_add(bytes).is_none()
+            {
+                return Err(ProcessError::UnsupportedProgram);
+            }
             loads[load_count] = (address, offset, bytes);
             load_count += 1;
-        } else if kind == 2 && dynamic.is_none() {
-            dynamic = Some((offset, bytes));
+        } else if kind == 2 && dynamic.replace((offset, bytes)).is_some() {
+            return Err(ProcessError::UnsupportedProgram);
         }
     }
     let Some((dynamic_offset, dynamic_bytes)) = dynamic else {
@@ -2089,6 +2122,7 @@ fn elf_dynamic_linkage(
     };
     if dynamic_offset > file_bytes
         || dynamic_bytes > file_bytes - dynamic_offset
+        || dynamic_bytes % 16 != 0
         || dynamic_bytes / 16 > MAX_ELF_DYNAMIC_ENTRIES
     {
         return Err(ProcessError::UnsupportedProgram);
@@ -2097,7 +2131,9 @@ fn elf_dynamic_linkage(
     let mut string_bytes = None;
     let mut rpath_index = None;
     let mut runpath_index = None;
-    let mut needed_indices = Vec::new();
+    let mut needed_indices = [0_u64; MAX_ELF_NEEDED_PER_OBJECT];
+    let mut needed_count = 0_usize;
+    let mut terminated = false;
     file.seek(SeekFrom::Start(dynamic_offset))?;
     for _ in 0..dynamic_bytes / 16 {
         let mut entry = [0_u8; 16];
@@ -2105,12 +2141,16 @@ fn elf_dynamic_linkage(
         let tag = little_i64(&entry[..8]);
         let value = little_u64(&entry[8..]);
         match tag {
-            0 => break,
+            0 => {
+                terminated = true;
+                break;
+            }
             1 => {
-                if needed_indices.len() >= MAX_ELF_NEEDED_PER_OBJECT {
+                if needed_count >= needed_indices.len() {
                     return Err(ProcessError::UnsupportedProgram);
                 }
-                needed_indices.push(value);
+                needed_indices[needed_count] = value;
+                needed_count += 1;
             }
             5 => string_address = Some(value),
             10 => string_bytes = Some(value),
@@ -2119,7 +2159,10 @@ fn elf_dynamic_linkage(
             _ => {}
         }
     }
-    if needed_indices.is_empty() && rpath_index.is_none() && runpath_index.is_none() {
+    if !terminated {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    if needed_count == 0 && rpath_index.is_none() && runpath_index.is_none() {
         return Ok(ElfDynamicLinkage {
             search_paths: Vec::new(),
             needed: Vec::new(),
@@ -2128,14 +2171,22 @@ fn elf_dynamic_linkage(
     let (Some(string_address), Some(string_bytes)) = (string_address, string_bytes) else {
         return Err(ProcessError::UnsupportedProgram);
     };
-    let string_offset = loads[..load_count]
+    let (string_offset, string_available) = loads[..load_count]
         .iter()
         .find_map(|(address, offset, bytes)| {
-            (string_address >= *address && string_address - *address < *bytes)
-                .then_some(offset + (string_address - address))
+            let delta = string_address.checked_sub(*address)?;
+            if delta < *bytes {
+                Some((offset.checked_add(delta)?, bytes.checked_sub(delta)?))
+            } else {
+                None
+            }
         })
         .ok_or(ProcessError::UnsupportedProgram)?;
+    if string_bytes > string_available {
+        return Err(ProcessError::UnsupportedProgram);
+    }
 
+    let mut string_scratch = [0_u8; MAX_ELF_RUNPATH_BYTES + 1];
     let mut search_paths = Vec::new();
     if let Some(path_index) = runpath_index.or(rpath_index) {
         let runpath = read_elf_dynamic_string(
@@ -2145,6 +2196,7 @@ fn elf_dynamic_linkage(
             string_bytes,
             path_index,
             MAX_ELF_RUNPATH_BYTES,
+            &mut string_scratch,
         )?;
         for value in runpath.split(':') {
             let Some(path) = resolve_elf_search_path(root, canonical_root, program, value)? else {
@@ -2162,8 +2214,8 @@ fn elf_dynamic_linkage(
         }
     }
 
-    let mut needed = Vec::with_capacity(needed_indices.len());
-    for index in needed_indices {
+    let mut needed = Vec::with_capacity(needed_count);
+    for index in needed_indices[..needed_count].iter().copied() {
         let name = read_elf_dynamic_string(
             &mut file,
             file_bytes,
@@ -2171,6 +2223,7 @@ fn elf_dynamic_linkage(
             string_bytes,
             index,
             MAX_ELF_NEEDED_NAME_BYTES,
+            &mut string_scratch,
         )?;
         if name.is_empty()
             || name.contains('/')
@@ -2180,7 +2233,7 @@ fn elf_dynamic_linkage(
         {
             return Err(ProcessError::UnsupportedProgram);
         }
-        needed.push(name);
+        needed.push(name.to_owned());
     }
     Ok(ElfDynamicLinkage {
         search_paths,
@@ -2188,14 +2241,15 @@ fn elf_dynamic_linkage(
     })
 }
 
-fn read_elf_dynamic_string(
+fn read_elf_dynamic_string<'a>(
     file: &mut File,
     file_bytes: u64,
     string_offset: u64,
     string_bytes: u64,
     index: u64,
     limit: usize,
-) -> Result<String, ProcessError> {
+    scratch: &'a mut [u8],
+) -> Result<&'a str, ProcessError> {
     if index >= string_bytes {
         return Err(ProcessError::UnsupportedProgram);
     }
@@ -2203,15 +2257,19 @@ fn read_elf_dynamic_string(
         .checked_add(index)
         .filter(|offset| *offset < file_bytes)
         .ok_or(ProcessError::UnsupportedProgram)?;
+    let admitted = limit
+        .checked_add(1)
+        .filter(|admitted| *admitted <= scratch.len())
+        .ok_or(ProcessError::UnsupportedProgram)?;
     let maximum = (string_bytes - index)
-        .min((limit + 1) as u64)
+        .min(admitted as u64)
         .min(file_bytes - offset);
     if maximum == 0 {
         return Err(ProcessError::UnsupportedProgram);
     }
-    let mut bytes = vec![0_u8; maximum as usize];
+    let bytes = &mut scratch[..maximum as usize];
     file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(&mut bytes)?;
+    file.read_exact(bytes)?;
     let end = bytes
         .iter()
         .position(|byte| *byte == 0)
@@ -2219,9 +2277,7 @@ fn read_elf_dynamic_string(
     if end > limit {
         return Err(ProcessError::UnsupportedProgram);
     }
-    std::str::from_utf8(&bytes[..end])
-        .map(str::to_owned)
-        .map_err(|_| ProcessError::UnsupportedProgram)
+    std::str::from_utf8(&bytes[..end]).map_err(|_| ProcessError::UnsupportedProgram)
 }
 
 fn resolve_elf_search_path(
@@ -2295,11 +2351,11 @@ fn resolve_elf_dependency(
     search_paths: &[ElfSearchPath],
     name: &str,
 ) -> Result<Option<PathBuf>, ProcessError> {
-    let mut candidates = Vec::with_capacity(search_paths.len() + 2);
-    candidates.push(root.join("usr/lib").join(name));
-    candidates.push(root.join("lib").join(name));
-    candidates.extend(search_paths.iter().map(|path| path.physical.join(name)));
-    for candidate in candidates {
+    let defaults = [root.join("usr/lib").join(name), root.join("lib").join(name)];
+    for candidate in defaults
+        .into_iter()
+        .chain(search_paths.iter().map(|path| path.physical.join(name)))
+    {
         let resolved = match candidate.canonicalize() {
             Ok(path) => path,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -2340,7 +2396,7 @@ fn conventional_command_name(path: &str) -> Option<&str> {
     if name.is_empty() || name.contains('/') {
         return None;
     }
-    validate_request(name, &[]).ok()?;
+    validate_request(name, &[] as &[&str]).ok()?;
     Some(name)
 }
 
@@ -2487,7 +2543,7 @@ fn prepare_gui_config_directory(path: &Path) -> Result<(), ProcessError> {
 }
 
 fn publish_gui_config(path: &Path, content: &[u8]) -> Result<(), ProcessError> {
-    if content.is_empty() || content.len() > 64 * 1024 {
+    if content.is_empty() || content.len() > MAX_GUI_CONFIG_BYTES {
         return Err(ProcessError::InvalidEnvironment);
     }
     let parent = path.parent().ok_or(ProcessError::InvalidEnvironment)?;
@@ -2517,15 +2573,45 @@ fn publish_gui_config(path: &Path, content: &[u8]) -> Result<(), ProcessError> {
 }
 
 fn gui_managed_kde_file(path: &Path) -> Result<bool, ProcessError> {
-    let metadata = match fs::symlink_metadata(path) {
+    let path_metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
         Err(error) => return Err(ProcessError::Io(error)),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 64 * 1024 {
+    if path_metadata.file_type().is_symlink()
+        || !path_metadata.is_file()
+        || path_metadata.len() > MAX_GUI_CONFIG_BYTES as u64
+    {
         return Err(ProcessError::InvalidEnvironment);
     }
-    let content = fs::read(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file()
+        || opened_metadata.len() > MAX_GUI_CONFIG_BYTES as u64
+        || !same_gui_config_metadata(&path_metadata, &opened_metadata)
+    {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let expected_length = usize::try_from(opened_metadata.len())
+        .ok()
+        .filter(|length| *length <= MAX_GUI_CONFIG_BYTES)
+        .ok_or(ProcessError::InvalidEnvironment)?;
+    let mut content = vec![0; expected_length + 1];
+    let length = read_bounded_gui_config(&mut file, &mut content)?;
+    if length != expected_length {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let final_opened_metadata = file.metadata()?;
+    let final_path_metadata = fs::symlink_metadata(path)?;
+    if !same_gui_config_metadata(&opened_metadata, &final_opened_metadata)
+        || !same_gui_config_metadata(&final_opened_metadata, &final_path_metadata)
+    {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let content = &content[..length];
     Ok(
         content.starts_with(b"# Managed by Archphene appearance settings.\n")
             || (content
@@ -2535,6 +2621,30 @@ fn gui_managed_kde_file(path: &Path) -> Result<bool, ProcessError> {
                     .windows(b"[Archphene]".len())
                     .any(|value| value == b"[Archphene]")),
     )
+}
+
+fn read_bounded_gui_config(reader: &mut impl Read, output: &mut [u8]) -> io::Result<usize> {
+    let mut length = 0;
+    while length < output.len() {
+        match reader.read(&mut output[length..]) {
+            Ok(0) => break,
+            Ok(count) => length += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(length)
+}
+
+fn same_gui_config_metadata(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.mode() == right.mode()
+        && left.len() == right.len()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
 }
 
 fn css_color(color: [u8; 3]) -> String {
@@ -2670,7 +2780,7 @@ mod system {
     }
 
     struct ProcessStat {
-        content: String,
+        fields: Option<(u32, u64)>,
         device: u64,
         inode: u64,
     }
@@ -2757,8 +2867,7 @@ mod system {
             }
             Err(error) => return Err(error),
         };
-        if process_fields(&stat.content).map(|(_, start_time)| start_time)
-            != Some(process.start_time)
+        if stat.fields.map(|(_, start_time)| start_time) != Some(process.start_time)
             || stat.device != process.device
             || stat.inode != process.inode
         {
@@ -2847,7 +2956,7 @@ mod system {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
         let root_stat = read_process_stat(root)?;
-        let Some((_, root_start_time)) = process_fields(&root_stat.content) else {
+        let Some((_, root_start_time)) = root_stat.fields else {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         };
         let root_identity = ProcessIdentity {
@@ -2886,7 +2995,7 @@ mod system {
                 }
                 Err(error) => return Err(error),
             };
-            let Some((parent, start_time)) = process_fields(&stat.content) else {
+            let Some((parent, start_time)) = stat.fields else {
                 continue;
             };
             if parent == 0 {
@@ -2904,7 +3013,7 @@ mod system {
                 }
                 Err(error) => return Err(error),
             };
-            let Some((_, parent_start_time)) = process_fields(&parent_stat.content) else {
+            let Some((_, parent_start_time)) = parent_stat.fields else {
                 continue;
             };
             let confirmed_stat = match read_process_stat(process) {
@@ -2919,7 +3028,7 @@ mod system {
                 }
                 Err(error) => return Err(error),
             };
-            if process_fields(&confirmed_stat.content) != Some((parent, start_time))
+            if confirmed_stat.fields != Some((parent, start_time))
                 || confirmed_stat.device != stat.device
                 || confirmed_stat.inode != stat.inode
             {
@@ -3022,7 +3131,8 @@ mod system {
     #[cfg(test)]
     pub(super) fn process_identity_for_test(process: u32) -> io::Result<ProcessIdentity> {
         let stat = read_process_stat(process)?;
-        let start_time = process_fields(&stat.content)
+        let start_time = stat
+            .fields
             .map(|(_, start_time)| start_time)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
         Ok(ProcessIdentity {
@@ -3062,10 +3172,9 @@ mod system {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
         let content = std::str::from_utf8(&bytes[..length])
-            .map(str::to_owned)
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
         Ok(ProcessStat {
-            content,
+            fields: process_fields(content),
             device: final_descriptor.dev(),
             inode: final_descriptor.ino(),
         })
@@ -3312,7 +3421,7 @@ mod tests {
     fn request_limits_reject_shell_syntax_and_unbounded_arguments() {
         assert!(validate_request("btop", &["--version"]).is_ok());
         assert!(matches!(
-            validate_request("../btop", &[]),
+            validate_request("../btop", &[] as &[&str]),
             Err(ProcessError::InvalidCommand)
         ));
         assert!(matches!(
@@ -3432,7 +3541,7 @@ mod tests {
             script: None,
             library_paths: Vec::new(),
         };
-        let command = environment.build_command(&launch, &[], "xterm-256color");
+        let command = environment.build_command(&launch, &[] as &[&str], "xterm-256color");
         let value = |name: &str| {
             command
                 .get_envs()
@@ -3478,7 +3587,7 @@ mod tests {
         );
         assert_eq!(value("ARCHPHENE_ROOT_IDENTITY"), None);
 
-        let mut root_command = environment.build_command(&launch, &[], "dumb");
+        let mut root_command = environment.build_command(&launch, &[] as &[&str], "dumb");
         root_command
             .current_dir(&environment.arch_root)
             .env("ARCHPHENE_ROOT_IDENTITY", "1")
@@ -3606,7 +3715,7 @@ mod tests {
             .clone()
             .with_build_jobs(4)
             .expect("bounded build jobs")
-            .build_command(&launch, &[], "dumb");
+            .build_command(&launch, &[] as &[&str], "dumb");
         let adaptive_value = |name: &str| {
             adaptive
                 .get_envs()
@@ -3776,6 +3885,62 @@ mod tests {
     }
 
     #[test]
+    fn kde_config_reads_are_bounded_and_reject_unsafe_files() {
+        let mut output = vec![0; MAX_GUI_CONFIG_BYTES + 1];
+        let mut exact = io::Cursor::new(vec![1; MAX_GUI_CONFIG_BYTES]);
+        assert_eq!(
+            read_bounded_gui_config(&mut exact, &mut output).expect("exact bounded read"),
+            MAX_GUI_CONFIG_BYTES,
+        );
+        let mut grown = io::Cursor::new(vec![2; MAX_GUI_CONFIG_BYTES + 2]);
+        assert_eq!(
+            read_bounded_gui_config(&mut grown, &mut output).expect("growth probe"),
+            MAX_GUI_CONFIG_BYTES + 1,
+        );
+        assert_eq!(grown.position(), (MAX_GUI_CONFIG_BYTES + 1) as u64);
+
+        let root = TestRoot::new();
+        let config = root.0.join("home/archphene/.config");
+        fs::create_dir_all(&config).expect("KDE config directory");
+        let path = config.join("kdeglobals");
+        let marker = b"# Managed by Archphene appearance settings.\n";
+        let mut managed = vec![0; MAX_GUI_CONFIG_BYTES];
+        managed[..marker.len()].copy_from_slice(marker);
+        fs::write(&path, managed).expect("exact KDE config");
+        assert!(gui_managed_kde_file(&path).expect("managed KDE config"));
+        let original_metadata = fs::symlink_metadata(&path).expect("original KDE metadata");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("change KDE config mode");
+        let remoded_metadata = fs::symlink_metadata(&path).expect("remoded KDE metadata");
+        assert!(!same_gui_config_metadata(
+            &original_metadata,
+            &remoded_metadata,
+        ));
+        fs::remove_file(&path).expect("remove original KDE config");
+        fs::write(&path, marker).expect("replacement KDE config");
+        let replacement_metadata = fs::symlink_metadata(&path).expect("replacement KDE metadata");
+        assert!(!same_gui_config_metadata(
+            &remoded_metadata,
+            &replacement_metadata,
+        ));
+
+        fs::write(&path, vec![0; MAX_GUI_CONFIG_BYTES + 1]).expect("oversized KDE config");
+        assert!(matches!(
+            gui_managed_kde_file(&path),
+            Err(ProcessError::InvalidEnvironment),
+        ));
+
+        fs::remove_file(&path).expect("remove oversized KDE config");
+        let target = config.join("outside-kdeglobals");
+        fs::write(&target, marker).expect("KDE link target");
+        symlink(&target, &path).expect("KDE config link");
+        assert!(matches!(
+            gui_managed_kde_file(&path),
+            Err(ProcessError::InvalidEnvironment),
+        ));
+    }
+
+    #[test]
     fn launch_plans_use_only_installed_elf_interpreters() {
         let root = TestRoot::new();
         root.elf_program("bash");
@@ -3828,6 +3993,89 @@ mod tests {
                     .expect("canonical runpath")
             ]
         );
+    }
+
+    #[test]
+    fn elf_dependency_frontier_is_unique_and_bounded_before_retention() {
+        let visited: Vec<PathBuf> = (0..MAX_ELF_DEPENDENCY_OBJECTS - 1)
+            .map(|index| PathBuf::from(format!("/usr/lib/object-{index}.so")))
+            .collect();
+        let mut queue = VecDeque::new();
+        let final_object = PathBuf::from("/usr/lib/final.so");
+        enqueue_elf_dependency(&mut queue, &visited, final_object.clone())
+            .expect("exact object limit");
+        enqueue_elf_dependency(&mut queue, &visited, final_object).expect("queued duplicate");
+        enqueue_elf_dependency(&mut queue, &visited, visited[0].clone())
+            .expect("visited duplicate");
+        assert_eq!(queue.len(), 1);
+        assert!(matches!(
+            enqueue_elf_dependency(&mut queue, &visited, PathBuf::from("/usr/lib/overflow.so"),),
+            Err(ProcessError::UnsupportedProgram)
+        ));
+    }
+
+    #[test]
+    fn launch_plan_rejects_invalid_elf_segment_and_dynamic_bounds() {
+        let root = TestRoot::new();
+        fs::create_dir_all(root.0.join("usr/lib/private")).expect("runpath");
+
+        root.elf_runpath_program("load-overflow", "/usr/lib/private");
+        let load_overflow = root.0.join("usr/bin/load-overflow");
+        let mut bytes = fs::read(&load_overflow).expect("read ELF");
+        let file_bytes = bytes.len() as u64;
+        bytes[72..80].copy_from_slice(&file_bytes.to_le_bytes());
+        fs::write(&load_overflow, bytes).expect("write ELF");
+        assert!(matches!(
+            prepare_launch(&root.0, "load-overflow", load_overflow),
+            Err(ProcessError::UnsupportedProgram)
+        ));
+
+        root.elf_runpath_program("misaligned-dynamic", "/usr/lib/private");
+        let misaligned_dynamic = root.0.join("usr/bin/misaligned-dynamic");
+        let mut bytes = fs::read(&misaligned_dynamic).expect("read ELF");
+        let dynamic_bytes = little_u64(&bytes[152..160]);
+        bytes[152..160].copy_from_slice(&(dynamic_bytes + 1).to_le_bytes());
+        fs::write(&misaligned_dynamic, bytes).expect("write ELF");
+        assert!(matches!(
+            prepare_launch(&root.0, "misaligned-dynamic", misaligned_dynamic),
+            Err(ProcessError::UnsupportedProgram)
+        ));
+
+        root.elf_runpath_program("unterminated-dynamic", "/usr/lib/private");
+        let unterminated_dynamic = root.0.join("usr/bin/unterminated-dynamic");
+        let mut bytes = fs::read(&unterminated_dynamic).expect("read ELF");
+        bytes[224..232].copy_from_slice(&42_i64.to_le_bytes());
+        fs::write(&unterminated_dynamic, bytes).expect("write ELF");
+        assert!(matches!(
+            prepare_launch(&root.0, "unterminated-dynamic", unterminated_dynamic),
+            Err(ProcessError::UnsupportedProgram)
+        ));
+
+        root.elf_runpath_program("unmapped-string-table", "/usr/lib/private");
+        let unmapped_string_table = root.0.join("usr/bin/unmapped-string-table");
+        let mut bytes = fs::read(&unmapped_string_table).expect("read ELF");
+        let dynamic_offset = little_u64(&bytes[128..136]) as usize;
+        let string_offset = little_u64(&bytes[dynamic_offset + 8..dynamic_offset + 16]);
+        bytes[96..104].copy_from_slice(&(string_offset + 1).to_le_bytes());
+        fs::write(&unmapped_string_table, bytes).expect("write ELF");
+        assert!(matches!(
+            prepare_launch(&root.0, "unmapped-string-table", unmapped_string_table),
+            Err(ProcessError::UnsupportedProgram)
+        ));
+
+        root.elf_runpath_program("duplicate-dynamic", "/usr/lib/private");
+        let duplicate_dynamic = root.0.join("usr/bin/duplicate-dynamic");
+        let mut bytes = fs::read(&duplicate_dynamic).expect("read ELF");
+        let dynamic_offset = little_u64(&bytes[128..136]);
+        let dynamic_bytes = little_u64(&bytes[152..160]);
+        bytes[64..68].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[72..80].copy_from_slice(&dynamic_offset.to_le_bytes());
+        bytes[96..104].copy_from_slice(&dynamic_bytes.to_le_bytes());
+        fs::write(&duplicate_dynamic, bytes).expect("write ELF");
+        assert!(matches!(
+            prepare_launch(&root.0, "duplicate-dynamic", duplicate_dynamic),
+            Err(ProcessError::UnsupportedProgram)
+        ));
     }
 
     #[test]

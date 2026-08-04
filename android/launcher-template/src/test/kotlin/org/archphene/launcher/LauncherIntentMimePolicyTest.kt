@@ -17,4 +17,17 @@ class LauncherIntentMimePolicyTest {
         assertFalse(LauncherIntentMimePolicy.matches(declared, "application/pdf"))
         assertNull(LauncherIntentMimePolicy.parseSpec("text/plain;text/plain"))
     }
+
+    @Test
+    fun boundsMimeTypesWhileParsingTheSignedDeclaration() {
+        val exact = List(16) { index -> "application/x-archphene-$index" }.joinToString(";")
+        assertEquals(16, LauncherIntentMimePolicy.parseSpec(exact)?.size)
+
+        val overflow = "$exact;application/x-archphene-16"
+        assertNull(LauncherIntentMimePolicy.parseSpec(overflow))
+
+        val hostile = buildString(2_080) { while (length < 2_080) append("a;") }
+        assertEquals(2_080, hostile.length)
+        assertNull(LauncherIntentMimePolicy.parseSpec(hostile))
+    }
 }

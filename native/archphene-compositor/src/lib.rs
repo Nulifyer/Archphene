@@ -2019,7 +2019,7 @@ fn copy_wayland_pixels_to_android(
     format: wl_shm::Format,
     destination: &mut [u8],
 ) -> Result<(), ()> {
-    if source.len() != destination.len() || source.len() % 4 != 0 {
+    if source.len() != destination.len() || !source.len().is_multiple_of(4) {
         return Err(());
     }
     for (source, destination) in source.chunks_exact(4).zip(destination.chunks_exact_mut(4)) {
@@ -2058,6 +2058,7 @@ mod android_graphics_ffi {
     const MAX_HARDWARE_BUFFER_SLOTS: usize = 15;
     const HARDWARE_BUFFER_CPU_WRITE_OFTEN: u64 = 3 << 4;
     const HARDWARE_BUFFER_GPU_SAMPLED_IMAGE: u64 = 1 << 8;
+    const HARDWARE_BUFFER_GPU_COLOR_OUTPUT: u64 = 1 << 9;
     const SURFACE_VISIBILITY_SHOW: i8 = 1;
     const SURFACE_TRANSPARENCY_OPAQUE: i8 = 2;
 
@@ -2128,6 +2129,10 @@ mod android_graphics_ffi {
         fn android_hardware_buffer_allocate(
             description: *const HardwareBufferDescription,
             output: *mut *mut AndroidHardwareBuffer,
+        ) -> i32;
+        #[link_name = "AHardwareBuffer_isSupported"]
+        fn android_hardware_buffer_is_supported(
+            description: *const HardwareBufferDescription,
         ) -> i32;
         #[link_name = "AHardwareBuffer_release"]
         fn android_hardware_buffer_release(buffer: *mut AndroidHardwareBuffer);
@@ -2468,20 +2473,42 @@ mod android_graphics_ffi {
         width: usize,
         height: usize,
     ) -> Result<Vec<Box<HardwareBufferSlot>>, ()> {
-        let mut slots = Vec::with_capacity(HARDWARE_BUFFER_SLOTS);
-        let description = HardwareBufferDescription {
+        let mut description = HardwareBufferDescription {
             width: width as u32,
             height: height as u32,
             layers: 1,
             format: ANDROID_RGBA_8888 as u32,
-            usage: HARDWARE_BUFFER_CPU_WRITE_OFTEN | HARDWARE_BUFFER_GPU_SAMPLED_IMAGE,
+            usage: 0,
             stride: 0,
             reserved_zero: 0,
             reserved_one: 0,
         };
+        let baseline_usage = HARDWARE_BUFFER_CPU_WRITE_OFTEN | HARDWARE_BUFFER_GPU_SAMPLED_IMAGE;
+        for usage in [
+            baseline_usage | HARDWARE_BUFFER_GPU_COLOR_OUTPUT,
+            baseline_usage,
+        ] {
+            description.usage = usage;
+            // SAFETY: `description` is a fully initialized ABI-compatible value.
+            if unsafe { android_hardware_buffer_is_supported(&description) } == 0 {
+                continue;
+            }
+            if let Ok(slots) = allocate_hardware_buffers_with_description(&description) {
+                return Ok(slots);
+            }
+        }
+        Err(())
+    }
+
+    fn allocate_hardware_buffers_with_description(
+        description: &HardwareBufferDescription,
+    ) -> Result<Vec<Box<HardwareBufferSlot>>, ()> {
+        let width = description.width as usize;
+        let height = description.height as usize;
+        let mut slots = Vec::with_capacity(HARDWARE_BUFFER_SLOTS);
         for _ in 0..HARDWARE_BUFFER_SLOTS {
             let mut raw = ptr::null_mut();
-            if unsafe { android_hardware_buffer_allocate(&description, &mut raw) } != 0 {
+            if unsafe { android_hardware_buffer_allocate(description, &mut raw) } != 0 {
                 release_hardware_slots(&mut slots);
                 return Err(());
             }
@@ -3734,6 +3761,25 @@ fn copy_frame_to_native_window_buffer(
         stride_bytes: destination_stride,
         pixels: destination,
     } = buffer;
+    copy_frame_to_rgba_buffer(
+        frame,
+        width,
+        height,
+        destination_stride,
+        destination,
+        damage,
+    )
+}
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn copy_frame_to_rgba_buffer(
+    frame: &CommittedFrame,
+    width: usize,
+    height: usize,
+    destination_stride: usize,
+    destination: &mut [u8],
+    damage: PresentationCopyDamage,
+) -> i32 {
     let frame_width = frame.width as usize;
     let frame_height = frame.height as usize;
     if frame_width == 0 || frame_height == 0 {
@@ -4080,16 +4126,16 @@ impl ShmBufferInner {
                 state.viewport_active,
             )
         };
-        if state.allow_in_place {
-            if let Some(previous) = compatible_previous.as_ref() {
-                match damage {
-                    ShmReadDamage::Unchanged => return Ok(Arc::clone(previous)),
-                    ShmReadDamage::Region(region) => {
-                        self.apply_region_patch(previous, row_bytes, region)?;
-                        return Ok(Arc::clone(previous));
-                    }
-                    ShmReadDamage::Full => {}
+        if state.allow_in_place
+            && let Some(previous) = compatible_previous.as_ref()
+        {
+            match damage {
+                ShmReadDamage::Unchanged => return Ok(Arc::clone(previous)),
+                ShmReadDamage::Region(region) => {
+                    self.apply_region_patch(previous, row_bytes, region)?;
+                    return Ok(Arc::clone(previous));
                 }
+                ShmReadDamage::Full => {}
             }
         }
         let mut pixels = match (compatible_previous, damage) {
@@ -4828,13 +4874,12 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                         .as_ref()
                         .and_then(|grab| grab.stack.last())
                         .is_some_and(|topmost| topmost.id() != resource.id())
+                    && let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>()
                 {
-                    if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
-                        xdg_data.wm_base.post_error(
-                            xdg_wm_base::Error::NotTheTopmostPopup,
-                            "nested xdg_popups must be destroyed topmost first",
-                        );
-                    }
+                    xdg_data.wm_base.post_error(
+                        xdg_wm_base::Error::NotTheTopmostPopup,
+                        "nested xdg_popups must be destroyed topmost first",
+                    );
                 }
             }
             xdg_popup::Request::Grab { seat, serial } => {
@@ -5008,27 +5053,25 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
     fn destroyed(state: &mut Self, _client: ClientId, resource: &XdgPopup, data: &XdgPopupData) {
         let mut restored_focus = None;
         let mut clear_grab = false;
-        if data.grabbed.load(Ordering::Acquire) {
-            if let Some(grab) = state.popup_grab.as_mut() {
-                if grab
-                    .stack
+        if data.grabbed.load(Ordering::Acquire)
+            && let Some(grab) = state.popup_grab.as_mut()
+            && grab
+                .stack
+                .last()
+                .is_some_and(|popup| popup.id() == resource.id())
+        {
+            grab.stack.pop();
+            restored_focus = if grab.active {
+                grab.stack
                     .last()
-                    .is_some_and(|popup| popup.id() == resource.id())
-                {
-                    grab.stack.pop();
-                    restored_focus = if grab.active {
-                        grab.stack
-                            .last()
-                            .and_then(|popup| popup.data::<XdgPopupData>())
-                            .and_then(|popup_data| popup_data.xdg_surface.data::<XdgSurfaceData>())
-                            .map(|xdg_data| xdg_data.wl_surface.clone())
-                            .or_else(|| Some(grab.root.clone()))
-                    } else {
-                        Some(grab.root.clone())
-                    };
-                    clear_grab = grab.stack.is_empty();
-                }
-            }
+                    .and_then(|popup| popup.data::<XdgPopupData>())
+                    .and_then(|popup_data| popup_data.xdg_surface.data::<XdgSurfaceData>())
+                    .map(|xdg_data| xdg_data.wl_surface.clone())
+                    .or_else(|| Some(grab.root.clone()))
+            } else {
+                Some(grab.root.clone())
+            };
+            clear_grab = grab.stack.is_empty();
         }
         if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
             let mut xdg_state = xdg_data
@@ -5893,12 +5936,11 @@ fn pointer_constraint_local_coordinates(
         .root_surface
         .as_ref()
         .is_some_and(|root| root.id() == data.surface.id())
+        && let Some(frame) = surface_frame(&data.surface)
     {
-        if let Some(frame) = surface_frame(&data.surface) {
-            let (target_width, target_height) = root_input_dimensions(state);
-            local_x = scale_input_coordinate(local_x, target_width, frame.width);
-            local_y = scale_input_coordinate(local_y, target_height, frame.height);
-        }
+        let (target_width, target_height) = root_input_dimensions(state);
+        local_x = scale_input_coordinate(local_x, target_width, frame.width);
+        local_y = scale_input_coordinate(local_y, target_height, frame.height);
     }
     (local_x, local_y)
 }
@@ -6065,18 +6107,18 @@ fn first_confinement_boundary(
             local_delta_y,
         );
     }
-    if let Some(frame) = surface_frame(&data.surface) {
-        if let Some(bounds) = RegionRectangle::new(0, 0, frame.width as i32, frame.height as i32) {
-            append_rectangle_boundaries(
-                &mut boundaries,
-                &mut boundary_count,
-                bounds,
-                local_start_x,
-                local_start_y,
-                local_delta_x,
-                local_delta_y,
-            );
-        }
+    if let Some(frame) = surface_frame(&data.surface)
+        && let Some(bounds) = RegionRectangle::new(0, 0, frame.width as i32, frame.height as i32)
+    {
+        append_rectangle_boundaries(
+            &mut boundaries,
+            &mut boundary_count,
+            bounds,
+            local_start_x,
+            local_start_y,
+            local_delta_x,
+            local_delta_y,
+        );
     }
     let contains_fraction = |fraction: f64| {
         pointer_constraint_contains(
@@ -7430,14 +7472,13 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
                         return;
                     }
                 }
-                if let Some(previous) = state.selection_source.take() {
-                    if source
+                if let Some(previous) = state.selection_source.take()
+                    && source
                         .as_ref()
                         .is_none_or(|source| source.id() != previous.id())
-                        && previous.is_alive()
-                    {
-                        previous.cancelled();
-                    }
+                    && previous.is_alive()
+                {
+                    previous.cancelled();
                 }
                 state.android_clipboard_offered = false;
                 state.android_clipboard_has_html = false;
@@ -7480,10 +7521,10 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
                     );
                     return;
                 }
-                if let Some(previous) = state.linux_drag_source.take() {
-                    if previous.is_alive() {
-                        previous.cancelled();
-                    }
+                if let Some(previous) = state.linux_drag_source.take()
+                    && previous.is_alive()
+                {
+                    previous.cancelled();
                 }
                 state.pending_linux_drag_fds.clear();
                 state.pending_linux_drag_mime_types.clear();
@@ -8906,23 +8947,20 @@ fn apply_cached_subsurface_stack(
             .unwrap_or_else(|error| error.into_inner())
             .subsurface
             .clone();
-        if apply_parent_state {
-            if let Some(data) = subsurface
+        if apply_parent_state
+            && let Some(data) = subsurface
                 .as_ref()
                 .and_then(|subsurface| subsurface.data::<SubsurfaceData>())
-            {
-                if let Some(position) = data
-                    .pending_position
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .take()
-                {
-                    *data
-                        .position
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner()) = position;
-                }
-            }
+            && let Some(position) = data
+                .pending_position
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+        {
+            *data
+                .position
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = position;
         }
         let (mut local_damage, retained_frame_bytes) = {
             let mut surface_state = surface_data
@@ -10102,16 +10140,15 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 .as_ref()
                                 .is_some_and(|active| active.id() == current.id())
                         });
-                        if newly_active {
-                            if let Some(previous) =
+                        if newly_active
+                            && let Some(previous) =
                                 previously_active_toplevel.as_ref().filter(|previous| {
                                     xdg_toplevel
                                         .as_ref()
                                         .is_some_and(|current| previous.id() != current.id())
                                 })
-                            {
-                                configure_toplevel_activation(state, previous, false);
-                            }
+                        {
+                            configure_toplevel_activation(state, previous, false);
                         }
                         let parented = xdg_toplevel.as_ref().is_some_and(|toplevel| {
                             toplevel.data::<XdgToplevelData>().is_some_and(|data| {
@@ -11362,8 +11399,8 @@ fn commit_xdg_surface_state(xdg_surface: &XdgSurface) -> bool {
             state.commit_windowed_restoration(),
         )
     };
-    if restores_windowed {
-        if let Some(toplevel) = xdg_data
+    if restores_windowed
+        && let Some(toplevel) = xdg_data
             .wl_surface
             .data::<SurfaceData>()
             .and_then(|surface_data| {
@@ -11374,14 +11411,12 @@ fn commit_xdg_surface_state(xdg_surface: &XdgSurface) -> bool {
                     .xdg_toplevel
                     .clone()
             })
-        {
-            if let Some(data) = toplevel.data::<XdgToplevelData>() {
-                *data
-                    .windowed_size
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = None;
-            }
-        }
+        && let Some(data) = toplevel.data::<XdgToplevelData>()
+    {
+        *data
+            .windowed_size
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
     }
     let popup_geometry_changed = popup_geometry.is_some_and(|geometry| {
         xdg_data
@@ -11898,32 +11933,32 @@ fn update_composited_frame(state: &mut CompositorState) {
         state.last_frame = None;
         return;
     }
-    if popup_base.is_none() && layout.overlay_primary {
-        if let Some(primary) = primary_surface(state) {
-            if let Some(frame) = surface_frame(&primary) {
-                let geometry = window_geometry_for_surface(&primary).unwrap_or(WindowGeometry {
-                    x: 0,
-                    y: 0,
-                    width: frame.width as i32,
-                    height: frame.height as i32,
-                });
-                blend_surface_tree(
-                    state,
-                    &mut composed,
-                    &primary,
-                    scale_x(geometry.x.saturating_neg()),
-                    scale_y(geometry.y.saturating_neg()),
-                    scale_x(frame.width as i32),
-                    scale_y(frame.height as i32),
-                    0,
-                    prefer_original_buffers,
-                );
-                for pixel in composed.pixels_mut().chunks_exact_mut(4) {
-                    pixel[0] = ((u16::from(pixel[0]) * 3) / 5) as u8;
-                    pixel[1] = ((u16::from(pixel[1]) * 3) / 5) as u8;
-                    pixel[2] = ((u16::from(pixel[2]) * 3) / 5) as u8;
-                }
-            }
+    if popup_base.is_none()
+        && layout.overlay_primary
+        && let Some(primary) = primary_surface(state)
+        && let Some(frame) = surface_frame(&primary)
+    {
+        let geometry = window_geometry_for_surface(&primary).unwrap_or(WindowGeometry {
+            x: 0,
+            y: 0,
+            width: frame.width as i32,
+            height: frame.height as i32,
+        });
+        blend_surface_tree(
+            state,
+            &mut composed,
+            &primary,
+            scale_x(geometry.x.saturating_neg()),
+            scale_y(geometry.y.saturating_neg()),
+            scale_x(frame.width as i32),
+            scale_y(frame.height as i32),
+            0,
+            prefer_original_buffers,
+        );
+        for pixel in composed.pixels_mut().chunks_exact_mut(4) {
+            pixel[0] = ((u16::from(pixel[0]) * 3) / 5) as u8;
+            pixel[1] = ((u16::from(pixel[1]) * 3) / 5) as u8;
+            pixel[2] = ((u16::from(pixel[2]) * 3) / 5) as u8;
         }
     }
     let root_surface = state.root_surface.clone();
@@ -12463,30 +12498,29 @@ impl CompositorCore {
                     .xdg_surface
                     .data::<XdgSurfaceData>()
                     .map(|xdg_data| xdg_data.wl_surface.clone())
+                    && let Some(surface_data) = surface.data::<SurfaceData>()
                 {
-                    if let Some(surface_data) = surface.data::<SurfaceData>() {
-                        let retained_frame_bytes = {
-                            let mut surface_state = surface_data
-                                .inner
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner());
-                            surface_state.committed_frame = None;
-                            retained_surface_frame_bytes(
-                                None,
-                                surface_state
-                                    .cached_frame
-                                    .as_ref()
-                                    .and_then(|frame| frame.as_ref()),
-                            )
-                        };
-                        if let Some(owner) = surface.client() {
-                            update_surface_frame_usage(
-                                &mut self.state,
-                                &surface,
-                                owner.id(),
-                                retained_frame_bytes,
-                            );
-                        }
+                    let retained_frame_bytes = {
+                        let mut surface_state = surface_data
+                            .inner
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        surface_state.committed_frame = None;
+                        retained_surface_frame_bytes(
+                            None,
+                            surface_state
+                                .cached_frame
+                                .as_ref()
+                                .and_then(|frame| frame.as_ref()),
+                        )
+                    };
+                    if let Some(owner) = surface.client() {
+                        update_surface_frame_usage(
+                            &mut self.state,
+                            &surface,
+                            owner.id(),
+                            retained_frame_bytes,
+                        );
                     }
                 }
                 popup.popup_done();
@@ -13684,14 +13718,13 @@ impl CompositorCore {
             .root_surface
             .as_ref()
             .is_some_and(|root| root.id() == surface.id())
+            && let Some(frame) = surface_frame(surface)
         {
-            if let Some(frame) = surface_frame(surface) {
-                let (target_width, target_height) = root_input_dimensions(&self.state);
-                return (
-                    scale_input_coordinate(local_x, target_width, frame.width),
-                    scale_input_coordinate(local_y, target_height, frame.height),
-                );
-            }
+            let (target_width, target_height) = root_input_dimensions(&self.state);
+            return (
+                scale_input_coordinate(local_x, target_width, frame.width),
+                scale_input_coordinate(local_y, target_height, frame.height),
+            );
         }
         (local_x, local_y)
     }
@@ -14788,8 +14821,12 @@ fn receive_probe_drag_source_send(
             }
             pending.drain(..size);
         }
-        if targeted && action_copy && sent && synced && destination.is_some() {
-            let mut destination = destination.expect("checked destination");
+        if targeted
+            && action_copy
+            && sent
+            && synced
+            && let Some(mut destination) = destination.take()
+        {
             destination.write_all(payload)?;
             return Ok(payload.len());
         }

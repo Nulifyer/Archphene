@@ -18,12 +18,9 @@ import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.charset.CodingErrorAction
 import java.nio.ByteBuffer
-import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.SimpleFileVisitor
-import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Future
 import java.util.concurrent.ThreadPoolExecutor
@@ -205,7 +202,7 @@ internal class LauncherAudioBridge(
             unlinkIfPresent(inputFifo, "microphone input FIFO")
         }
         val socketPath = socket.canonicalPath
-        if (socketPath.toByteArray(StandardCharsets.UTF_8).size >= UNIX_SOCKET_PATH_LIMIT) {
+        if (!fitsLauncherUnixSocketPath(socketPath, UNIX_SOCKET_PATH_LIMIT)) {
             throw IOException("PulseAudio socket path is too long")
         }
 
@@ -486,7 +483,7 @@ internal class LauncherAudioBridge(
             Log.w(TAG, "Could not remove audio runtime while a helper remains alive")
         } else {
             unlinkIfPresentQuietly(socket)
-            deleteTree(runtimeDirectory)
+            deleteTree(runtimeDirectory.toPath())
         }
     }
 
@@ -1265,6 +1262,10 @@ internal class LauncherAudioBridge(
         private const val INPUT_HELPER = "libarchphene_audio_input.so"
         private const val PROBE = "libarchphene_pulse_probe.so"
         private const val CONTROL = "libarchphene_pulse_control.so"
+        private const val RUNTIME_PREFIX = "audio-"
+        private const val MAX_RUNTIME_ENTRIES = 160
+        private const val MAX_RUNTIME_DEPTH = 3
+        private const val MAX_STALE_DIRECTORIES = 32
         private const val UNIX_SOCKET_PATH_LIMIT = 100
         private const val MAX_BROKER_BYTES = 128
         private const val START_TIMEOUT_MILLIS = 20_000L
@@ -1460,38 +1461,65 @@ internal class LauncherAudioBridge(
         }
 
         fun cleanupStaleRuntimeDirectories(context: Context) {
-            context.cacheDir
-                .listFiles { file -> file.name.startsWith("audio-") }
-                ?.forEach(::deleteTree)
+            cleanupStaleRuntimeDirectories(context.cacheDir.toPath())
         }
 
-        private fun deleteTree(root: File) {
-            val rootPath = root.toPath()
-            if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) return
+        internal fun cleanupStaleRuntimeDirectories(
+            cacheDirectory: Path,
+            reportFailure: (String, Throwable) -> Unit = { message, error ->
+                Log.w(TAG, message, error)
+            },
+        ) {
+            if (!Files.isDirectory(cacheDirectory, LinkOption.NOFOLLOW_LINKS)) return
             runCatching {
-                Files.walkFileTree(
-                    rootPath,
-                    object : SimpleFileVisitor<Path>() {
-                        override fun visitFile(
-                            file: Path,
-                            attributes: BasicFileAttributes,
-                        ): FileVisitResult {
-                            Files.deleteIfExists(file)
-                            return FileVisitResult.CONTINUE
+                var visited = 0
+                Files.newDirectoryStream(cacheDirectory, "$RUNTIME_PREFIX*").use { entries ->
+                    for (entry in entries) {
+                        if (visited++ >= MAX_STALE_DIRECTORIES) {
+                            Log.w(TAG, "Audio stale-runtime cleanup reached its bounded limit")
+                            break
                         }
-
-                        override fun postVisitDirectory(
-                            directory: Path,
-                            error: IOException?,
-                        ): FileVisitResult {
-                            if (error != null) throw error
-                            Files.deleteIfExists(directory)
-                            return FileVisitResult.CONTINUE
-                        }
-                    },
-                )
+                        deleteTree(entry, reportFailure)
+                    }
+                }
             }.onFailure { error ->
-                Log.w(TAG, "Could not remove stale audio tree=${root.name}", error)
+                reportFailure("Could not inspect stale audio runtime directories", error)
+            }
+        }
+
+        private fun deleteTree(
+            root: Path,
+            reportFailure: (String, Throwable) -> Unit = { message, error ->
+                Log.w(TAG, message, error)
+            },
+        ) {
+            if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return
+            runCatching {
+                val postorder = ArrayList<Path>(MAX_RUNTIME_ENTRIES + 1)
+                var visited = 0
+                fun collect(
+                    path: Path,
+                    depth: Int,
+                ) {
+                    check(depth <= MAX_RUNTIME_DEPTH) {
+                        "Audio runtime nesting exceeds its bound"
+                    }
+                    if (depth > 0) {
+                        check(++visited <= MAX_RUNTIME_ENTRIES) {
+                            "Audio runtime entry count exceeds its bound"
+                        }
+                    }
+                    if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+                        Files.newDirectoryStream(path).use { entries ->
+                            for (entry in entries) collect(entry, depth + 1)
+                        }
+                    }
+                    postorder.add(path)
+                }
+                collect(root, 0)
+                postorder.forEach(Files::deleteIfExists)
+            }.onFailure { error ->
+                reportFailure("Could not remove stale audio tree=${root.fileName}", error)
             }
         }
     }

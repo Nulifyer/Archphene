@@ -37,6 +37,7 @@ import android.view.inputmethod.EditorInfo
 import org.archphene.app.appearance.LinuxAppearanceOverrides
 import org.archphene.app.appearance.LinuxAppearancePreferences
 import org.archphene.app.performance.PerformanceMetrics
+import org.archphene.app.runtime.checkedNativeOutputLength
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -53,8 +54,10 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.archphene.app.ArchphenePreferences
 import org.archphene.app.MainActivity
 import org.archphene.app.R
+import org.archphene.app.boundedUtf8Text
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.LauncherAuthorization
+import org.archphene.app.utf8LengthAtMost
 
 class LauncherSessionService : Service() {
     private val preferenceAppearanceListener =
@@ -982,8 +985,7 @@ class LauncherSessionService : Service() {
                         (internalRefresh && text.isNotEmpty()) ||
                         action !in ACCESSIBILITY_ACTIONS ||
                         text.length > MAX_ACCESSIBILITY_TEXT_UTF16 ||
-                        text.toByteArray(StandardCharsets.UTF_8).size >
-                        MAX_ACCESSIBILITY_TEXT_BYTES ||
+                        !utf8LengthAtMost(text, MAX_ACCESSIBILITY_TEXT_BYTES) ||
                         (action != "set-text" && text.isNotEmpty()) ||
                         !hasWellFormedUtf16(text) ||
                         data.dataAvail() != 0
@@ -1706,7 +1708,7 @@ class LauncherSessionService : Service() {
             !isValidLauncherPackage(androidPackage) ||
             title.isBlank() ||
             title.length > MAX_PRINT_TITLE_UTF16 ||
-            title.toByteArray(StandardCharsets.UTF_8).size > MAX_PRINT_TITLE_BYTES ||
+            !utf8LengthAtMost(title, MAX_PRINT_TITLE_BYTES) ||
             payload.size > MAX_DEBUG_DOCUMENT_BYTES
         ) {
             return LauncherSessionDebugResult(false, 0, "invalid-print")
@@ -2956,10 +2958,22 @@ class LauncherSessionService : Service() {
                             CLIPBOARD_IO_TIMEOUT_MILLIS,
                         )
                     val transferThread = Thread.currentThread().name
+                    val admittedLength =
+                        if (length < 0) {
+                            null
+                        } else {
+                            runCatching {
+                                checkedNativeOutputLength(
+                                    length,
+                                    session.clipboardReadBuffer.capacity(),
+                                    MAX_CLIPBOARD_BYTES,
+                                )
+                            }.getOrNull()
+                        }
                     val content =
-                        if (length >= 0) {
+                        if (admittedLength != null) {
                             session.clipboardReadBuffer.position(0)
-                            ByteArray(length)
+                            ByteArray(admittedLength)
                                 .also { bytes -> session.clipboardReadBuffer.get(bytes) }
                                 .let(::decodeClipboardText)
                         } else {
@@ -3240,7 +3254,7 @@ class LauncherSessionService : Service() {
                 .toString()
                 .takeIf {
                     it.length <= MAX_CLIPBOARD_UTF16 &&
-                        it.toByteArray(StandardCharsets.UTF_8).size <= MAX_CLIPBOARD_BYTES
+                        utf8LengthAtMost(it, MAX_CLIPBOARD_BYTES)
                 }
         }.getOrNull()
 
@@ -3910,7 +3924,7 @@ class LauncherSessionService : Service() {
             session.authorization.bridgeCapabilities and BRIDGE_PRINTING == 0 ||
             title.isBlank() ||
             title.length > MAX_PRINT_TITLE_UTF16 ||
-            title.toByteArray(StandardCharsets.UTF_8).size > MAX_PRINT_TITLE_BYTES ||
+            !utf8LengthAtMost(title, MAX_PRINT_TITLE_BYTES) ||
             title.any { character -> character.isISOControl() }
         ) {
             return false
@@ -4445,7 +4459,7 @@ class LauncherSessionService : Service() {
 
     private fun safeDocumentName(name: String): Boolean =
         name.length in 1..MAX_DOCUMENT_NAME_UTF16 &&
-            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_DOCUMENT_NAME_BYTES &&
+            boundedUtf8Text(name, MAX_DOCUMENT_NAME_BYTES) &&
             name != "." &&
             name != ".." &&
             name.none { character ->

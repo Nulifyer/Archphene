@@ -2,7 +2,6 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -127,17 +126,16 @@ pub fn discover_desktop_entries(arch_root: &Path) -> Result<DesktopCatalog, Desk
             continue;
         };
         if desktop_id.ends_with(".desktop") {
-            let candidate = (desktop_id.to_owned(), item.path());
             if candidates.len() < MAX_DESKTOP_FILES_EXAMINED {
-                candidates.push(candidate);
+                candidates.push((desktop_id.to_owned(), item.path()));
             } else {
                 scan_truncated = true;
                 if candidates
                     .peek()
-                    .is_some_and(|largest| candidate.0 < largest.0)
+                    .is_some_and(|largest| desktop_id < largest.0.as_str())
                 {
                     candidates.pop();
-                    candidates.push(candidate);
+                    candidates.push((desktop_id.to_owned(), item.path()));
                 }
             }
         }
@@ -594,7 +592,7 @@ fn read_desktop_file(path: &Path) -> Option<Vec<u8>> {
     if size == 0 || size > MAX_DESKTOP_ENTRY_BYTES {
         return None;
     }
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(path)
@@ -603,32 +601,26 @@ fn read_desktop_file(path: &Path) -> Option<Vec<u8>> {
     if !opened.is_file() || opened.len() != metadata.len() {
         return None;
     }
-    let mut bytes = Vec::with_capacity(size);
-    file.take(u64::try_from(MAX_DESKTOP_ENTRY_BYTES + 1).expect("desktop limit"))
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() != size || bytes.len() > MAX_DESKTOP_ENTRY_BYTES {
-        return None;
-    }
-    Some(bytes)
+    super::read_bounded_exact(
+        &mut file,
+        u64::try_from(size).ok()?,
+        u64::try_from(MAX_DESKTOP_ENTRY_BYTES).expect("desktop limit"),
+    )
+    .ok()?
 }
 
 fn resolve_executable(root: &Path, program: &str) -> Option<String> {
-    let mut candidates = Vec::with_capacity(3);
     if let Some(relative) = program.strip_prefix('/') {
         if relative.is_empty() {
             return None;
         }
-        candidates.push(root.join(relative));
-    } else {
-        if program.contains('/') || program.is_empty() {
-            return None;
-        }
-        for directory in ["/usr/local/bin", "/usr/bin", "/bin"] {
-            candidates.push(root.join(directory.trim_start_matches('/')).join(program));
-        }
+        return resolve_root_regular_file(root, &root.join(relative), true);
     }
-    for candidate in candidates {
+    if program.contains('/') || program.is_empty() {
+        return None;
+    }
+    for directory in ["usr/local/bin", "usr/bin", "bin"] {
+        let candidate = root.join(directory).join(program);
         if let Some(resolved) = resolve_root_regular_file(root, &candidate, true) {
             return Some(resolved);
         }
@@ -1009,6 +1001,23 @@ Icon=/usr/share/pixmaps/My\\sEditor.png\n",
         let catalog = discover_desktop_entries(&root.path).expect("desktop catalog");
         assert_eq!(catalog.entries.len(), 1);
         assert_eq!(catalog.entries[0].executable, "/usr/bin/real-editor");
+    }
+
+    #[test]
+    fn executable_resolution_preserves_usr_local_precedence() {
+        let root = TestRoot::new();
+        root.executable("editor");
+        root.regular_file("usr/local/bin/editor", b"\x7fELF local fixture");
+        fs::set_permissions(
+            root.path.join("usr/local/bin/editor"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("local executable mode");
+
+        assert_eq!(
+            resolve_executable(&root.path, "editor").as_deref(),
+            Some("/usr/local/bin/editor")
+        );
     }
 
     #[test]

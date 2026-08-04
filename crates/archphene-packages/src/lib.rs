@@ -44,6 +44,7 @@ const MAX_PACKAGE_FILE_LIST_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PACKAGE_TRANSACTION_FILE_ENTRIES: usize = 256 * 1024;
 const MAX_PACKAGE_TRANSACTION_FILE_PATH_BYTES: usize = 32 * 1024 * 1024;
 const MAX_INSTALL_PLAN_REMOVALS: usize = 48;
+const MAX_ROLLBACK_PACKAGES: usize = 256;
 const ALIAS_DIRECTORY: &str = "run/package-runtime-v1";
 const GDK_PIXBUF_MODULE_FILE: &str = "run/gdk-pixbuf-loaders-v1.cache";
 const GDK_PIXBUF_MODULE_TEMP_FILE: &str = "run/.gdk-pixbuf-loaders-v1.tmp";
@@ -111,6 +112,7 @@ const PACKAGE_COMPATIBILITY_CACHE_DIRECTORY: &str = "var/cache/archphene/package
 const PACKAGE_COMPATIBILITY_CACHE_DOMAIN: &[u8] = b"org.archphene.package-compatibility-cache.v2\0";
 const PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT: u64 = 1024;
 const PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT: usize = 1024;
+const PACKAGE_COMPATIBILITY_CACHE_SCAN_LIMIT: usize = PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT + 1;
 const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
 const PACKAGE_TRUST_STATE: &str = "source-v1";
 const PACKAGE_TRUST_STATE_LIMIT: u64 = 512;
@@ -856,14 +858,15 @@ impl desktop::DesktopCatalog {
         }
 
         let mut output = empty_tool_output();
-        let header = format!(
-            "D3\t{next}\t{}\t{}\t{}\t{}\n",
+        writeln!(
+            &mut output,
+            "D3\t{next}\t{}\t{}\t{}\t{}",
             self.entries.len(),
             self.examined,
             self.rejected,
             u8::from(self.truncated),
-        );
-        output.push(header.as_bytes())?;
+        )
+        .map_err(|_| PackageRuntimeError::OutputLimit)?;
         for entry in self.entries.iter().take(next).skip(offset) {
             push_desktop_record(&mut output, entry)?;
         }
@@ -1261,7 +1264,8 @@ impl PackageRuntime {
                 !line.starts_with('#') && paths.contains(&line)
             });
             if declared && environment.command_available(command)? {
-                output.push(format!("{id}\t{label}\t{command}\t{arguments}\n").as_bytes())?;
+                writeln!(&mut output, "{id}\t{label}\t{command}\t{arguments}")
+                    .map_err(|_| PackageRuntimeError::OutputLimit)?;
             }
         }
         Ok(output)
@@ -1404,7 +1408,7 @@ impl PackageRuntime {
                 return Ok(false);
             }
         }
-        let output = environment.run_as_root("update-ca-trust", &[])?;
+        let output = environment.run_as_root("update-ca-trust", &[] as &[&str])?;
         if output.exit_code() != 0 {
             let mut diagnostic = empty_tool_output();
             diagnostic.push(output.as_bytes())?;
@@ -1797,8 +1801,7 @@ impl PackageRuntime {
             fs::remove_file(path)?;
             return Ok(None);
         }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .custom_flags(O_NOFOLLOW | O_CLOEXEC)
             .open(&path)?;
@@ -1806,11 +1809,12 @@ impl PackageRuntime {
         if !opened.is_file() || opened.len() != metadata.len() {
             return Err(PackageRuntimeError::SizeMismatch);
         }
-        file.take(PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != metadata.len() {
-            return Err(PackageRuntimeError::SizeMismatch);
-        }
+        let bytes = read_bounded_exact(
+            &mut file,
+            metadata.len(),
+            PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT,
+        )?
+        .ok_or(PackageRuntimeError::SizeMismatch)?;
         match decode_package_compatibility_cache_record(content_digest, &bytes) {
             Ok(output) => Ok(Some(output)),
             Err(PackageRuntimeError::InvalidPayload) => {
@@ -2405,7 +2409,7 @@ impl PackageRuntime {
             {
                 return Err(PackageRuntimeError::UnsafeEntry(description));
             }
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .read(true)
                 .custom_flags(O_NOFOLLOW | O_CLOEXEC)
                 .open(&description)?;
@@ -2413,22 +2417,18 @@ impl PackageRuntime {
             if !opened.is_file() || opened.len() != metadata.len() {
                 return Err(PackageRuntimeError::UnsafeEntry(description));
             }
-            let mut contents =
-                String::with_capacity(usize::try_from(metadata.len()).unwrap_or(4096).min(4096));
-            file.take(LOCAL_DESCRIPTION_LIMIT + 1)
-                .read_to_string(&mut contents)?;
-            if u64::try_from(contents.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
-                != metadata.len()
-            {
-                return Err(PackageRuntimeError::SizeMismatch);
-            }
-            if local_description_field(&contents, "%NAME%")? != Some(package) {
+            let bytes = read_bounded_exact(&mut file, metadata.len(), LOCAL_DESCRIPTION_LIMIT)?
+                .ok_or(PackageRuntimeError::SizeMismatch)?;
+            let contents = str::from_utf8(&bytes).map_err(|error| {
+                PackageRuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+            })?;
+            if local_description_field(contents, "%NAME%")? != Some(package) {
                 continue;
             }
             if matched.is_some() {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
-            matched = Some(match local_description_field(&contents, "%VALIDATION%")? {
+            matched = Some(match local_description_field(contents, "%VALIDATION%")? {
                 Some("none") => "aur",
                 Some("pgp") => "official",
                 _ => return Err(PackageRuntimeError::InvalidResolution),
@@ -2458,7 +2458,7 @@ impl PackageRuntime {
         }
 
         let mut packages = Vec::new();
-        let mut contents = String::with_capacity(4096);
+        let mut contents = Vec::with_capacity(4096);
         let mut files_total_bytes = 0_u64;
         for entry in fs::read_dir(&local)? {
             if packages.len() >= LOCAL_DATABASE_ENTRY_LIMIT {
@@ -2487,19 +2487,22 @@ impl PackageRuntime {
             {
                 return Err(PackageRuntimeError::UnsafeEntry(description));
             }
-            contents.clear();
-            File::open(&description)?
-                .take(LOCAL_DESCRIPTION_LIMIT + 1)
-                .read_to_string(&mut contents)?;
-            if u64::try_from(contents.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
-                != metadata.len()
-            {
+            let mut file = File::open(&description)?;
+            if !read_bounded_exact_reusable(
+                &mut file,
+                metadata.len(),
+                LOCAL_DESCRIPTION_LIMIT,
+                &mut contents,
+            )? {
                 return Err(PackageRuntimeError::SizeMismatch);
             }
-            let name = local_description_field(&contents, "%NAME%")?
+            let description_text = str::from_utf8(&contents).map_err(|error| {
+                PackageRuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+            })?;
+            let name = local_description_field(description_text, "%NAME%")?
                 .filter(|name| safe_logical_name(name))
                 .ok_or(PackageRuntimeError::InvalidResolution)?;
-            let version = local_description_field(&contents, "%VERSION%")?
+            let version = local_description_field(description_text, "%VERSION%")?
                 .filter(|version| {
                     !version.is_empty()
                         && version.len() <= 128
@@ -2508,7 +2511,8 @@ impl PackageRuntime {
                             .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
                 })
                 .ok_or(PackageRuntimeError::InvalidResolution)?;
-            let explicitly_installed = match local_description_field(&contents, "%REASON%")? {
+            let explicitly_installed = match local_description_field(description_text, "%REASON%")?
+            {
                 None | Some("0") => true,
                 Some("1") => false,
                 Some(_) => return Err(PackageRuntimeError::InvalidResolution),
@@ -2831,15 +2835,19 @@ impl PackageRuntime {
         Ok(output)
     }
 
-    pub fn install_dependencies(&self, packages: &[&str]) -> Result<(), PackageRuntimeError> {
+    pub fn install_dependencies<T: AsRef<str>>(
+        &self,
+        packages: &[T],
+    ) -> Result<(), PackageRuntimeError> {
         if packages.len() >= 256 {
             return Err(PackageRuntimeError::OutputLimit);
         }
         let mut targets = Vec::with_capacity(packages.len().saturating_add(1));
         targets.push(BASE_PACKAGE);
         for package in packages {
-            if *package != BASE_PACKAGE {
-                targets.push(*package);
+            let package = package.as_ref();
+            if package != BASE_PACKAGE {
+                targets.push(package);
             }
         }
         // Reviewed AUR dependencies may name a repository-provided capability
@@ -3587,7 +3595,7 @@ impl PackageRuntime {
     fn verified_aur_transaction_plan(
         &self,
         archives: &[InstallArchive],
-        assumed_dependencies: &[&str],
+        assumed_dependencies: &[String],
     ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
         if assumed_dependencies.len() >= 256
             || assumed_dependencies
@@ -3625,7 +3633,7 @@ impl PackageRuntime {
             "--noprogressbar",
         ];
         for dependency in assumed_dependencies {
-            plan_arguments.extend(["--assume-installed", *dependency]);
+            plan_arguments.extend(["--assume-installed", dependency.as_str()]);
         }
         plan_arguments.extend(["-U", "--print", "--print-format", "%n\t%v"]);
         plan_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
@@ -3681,9 +3689,7 @@ impl PackageRuntime {
         let (archives, lifecycle_capabilities) =
             self.prepare_verified_aur_archives(inputs, selected_package)?;
         let assumptions = self.verified_aur_runtime_assumptions(&archives)?;
-        let assumed_dependencies = assumptions.iter().map(String::as_str).collect::<Vec<_>>();
-        let transaction_plan =
-            self.verified_aur_transaction_plan(&archives, &assumed_dependencies)?;
+        let transaction_plan = self.verified_aur_transaction_plan(&archives, &assumptions)?;
         let input_sha256 =
             aur_install_input_sha256(selected_package, &archives, &lifecycle_capabilities)?;
         self.publish_package_replacement_review_digest(
@@ -4043,21 +4049,24 @@ impl PackageRuntime {
         if archives.is_empty() || archives.len() > aur::MAX_AUR_DEPENDENCIES {
             return Err(PackageRuntimeError::InvalidPayload);
         }
-        let transaction_packages = archives
-            .iter()
-            .map(|archive| archive.name.as_str())
-            .collect::<BTreeSet<_>>();
-        let replacement_packages = allowed_replacements
-            .iter()
-            .map(|replacement| replacement.name.as_str())
-            .collect::<BTreeSet<_>>();
-        if transaction_packages.len() != archives.len() {
+        if archives.iter().enumerate().any(|(index, archive)| {
+            archives[..index]
+                .iter()
+                .any(|prior| prior.name == archive.name)
+        }) {
             return Err(PackageRuntimeError::InvalidPayload);
         }
-        if replacement_packages.len() != allowed_replacements.len()
-            || replacement_packages
-                .iter()
-                .any(|package| transaction_packages.contains(package))
+        if allowed_replacements
+            .iter()
+            .enumerate()
+            .any(|(index, replacement)| {
+                allowed_replacements[..index]
+                    .iter()
+                    .any(|prior| prior.name == replacement.name)
+                    || archives
+                        .iter()
+                        .any(|archive| archive.name == replacement.name)
+            })
         {
             return Err(PackageRuntimeError::InvalidResolution);
         }
@@ -4099,8 +4108,10 @@ impl PackageRuntime {
                 return Err(PackageRuntimeError::UnsafeEntry(path));
             }
             let identity = read_local_package_identity(&path)?;
-            if transaction_packages.contains(identity.name.as_str())
-                || replacement_packages.contains(identity.name.as_str())
+            if archives.iter().any(|archive| archive.name == identity.name)
+                || allowed_replacements
+                    .iter()
+                    .any(|replacement| replacement.name == identity.name)
             {
                 continue;
             }
@@ -4128,10 +4139,10 @@ impl PackageRuntime {
         Ok(())
     }
 
-    fn install_resolution(
+    fn install_resolution<T: AsRef<str>>(
         &self,
         resolution: &PackageResolution,
-        explicit_targets: &[&str],
+        explicit_targets: &[T],
         recovery_target: &str,
         mode: InstallResolutionMode,
         expected_replacements: &[InstalledPackageIdentity],
@@ -4161,7 +4172,9 @@ impl PackageRuntime {
                     .to_owned(),
                 name: payload.name.to_owned(),
                 version: payload.version.to_owned(),
-                explicitly_installed: explicit_targets.contains(&payload.name),
+                explicitly_installed: explicit_targets
+                    .iter()
+                    .any(|target| target.as_ref() == payload.name),
             });
         }
         if archives.is_empty() || archives.len() > 256 {
@@ -4381,7 +4394,7 @@ impl PackageRuntime {
     fn preview_aur_install_transaction(
         &self,
         archives: &[InstallArchive],
-        assumed_dependencies: &[&str],
+        assumed_dependencies: &[String],
     ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
         self.preview_install_transaction_with_config(
             archives,
@@ -4394,7 +4407,7 @@ impl PackageRuntime {
         &self,
         archives: &[InstallArchive],
         config_path: &Path,
-        assumed_dependencies: &[&str],
+        assumed_dependencies: &[String],
     ) -> Result<InstallTransactionPlan, PackageRuntimeError> {
         let live_local = self.arch_root.join("var/lib/pacman/local");
         let before = read_local_package_identities(&live_local)?;
@@ -4438,7 +4451,7 @@ impl PackageRuntime {
                 "4",
             ];
             for dependency in assumed_dependencies {
-                arguments.extend(["--assume-installed", *dependency]);
+                arguments.extend(["--assume-installed", dependency.as_str()]);
             }
             append_install_transaction_mode(&mut arguments, InstallResolutionMode::Normal);
             arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
@@ -4501,8 +4514,11 @@ impl PackageRuntime {
                 }
                 validate_database_repair_entry(&source)?;
                 let identity = read_local_package_identity(&source)?;
-                let expected_entry = format!("{}-{}", identity.name, identity.version);
-                if entry.file_name().to_str() != Some(expected_entry.as_str()) {
+                if !local_database_entry_name_matches(
+                    &entry.file_name(),
+                    &identity.name,
+                    &identity.version,
+                ) {
                     return Err(PackageRuntimeError::InvalidResolution);
                 }
                 copy_database_repair_entry(&source, &destination)?;
@@ -4772,11 +4788,8 @@ impl PackageRuntime {
                 .cmp(&(right.name != package))
                 .then_with(|| left.name.cmp(&right.name))
         });
-        let names = canonical_expected
-            .iter()
-            .map(|removal| removal.name.as_str())
-            .collect::<Vec<_>>();
-        let mut plan_arguments = vec![
+        let mut arguments = Vec::with_capacity(10 + canonical_expected.len());
+        arguments.extend([
             "--config",
             config,
             "--root",
@@ -4787,9 +4800,13 @@ impl PackageRuntime {
             "--print-format",
             "%n\t%v",
             "-R",
-        ];
-        plan_arguments.extend(names.iter().copied());
-        let plan = self.run_with_timeout(PackageTool::Pacman, &plan_arguments, COMMAND_TIMEOUT)?;
+        ]);
+        arguments.extend(
+            canonical_expected
+                .iter()
+                .map(|removal| removal.name.as_str()),
+        );
+        let plan = self.run_with_timeout(PackageTool::Pacman, &arguments, COMMAND_TIMEOUT)?;
         let planned = parse_removal_plan(plan.as_str()?, package)?;
         if planned != canonical_expected {
             return Err(PackageRuntimeError::InvalidResolution);
@@ -4811,21 +4828,14 @@ impl PackageRuntime {
                 official_scriptlets |= has_scriptlet;
             }
         }
-        let mut arguments = vec![
-            "--config",
-            config,
-            "--root",
-            root,
-            "--dbpath",
-            database,
-            "--noconfirm",
-            "--noprogressbar",
-        ];
+        arguments[6] = "--noconfirm";
+        arguments[7] = "--noprogressbar";
         if !run_scriptlets && !official_scriptlets {
-            arguments.push("--noscriptlet");
+            arguments[8] = "--noscriptlet";
+        } else {
+            arguments[8] = "-R";
+            arguments.remove(9);
         }
-        arguments.push("-R");
-        arguments.extend(names.iter().copied());
         if let Err(error) =
             self.run_with_timeout(PackageTool::Pacman, &arguments, TRANSACTION_TIMEOUT)
         {
@@ -5083,47 +5093,36 @@ impl PackageRuntime {
                 self.recover_pending_install_reasons()?;
             }
         }
-        let mut additions = Vec::with_capacity(rollback.previously_absent.len());
+        const PLAN_PREFIX_LENGTH: usize = 10;
+        let mut arguments =
+            Vec::with_capacity(PLAN_PREFIX_LENGTH.saturating_add(rollback.previously_absent.len()));
+        arguments.extend([
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--print",
+            "--print-format",
+            "%n",
+            "-R",
+        ]);
         for name in &rollback.previously_absent {
             if !self.installed_version(name)?.as_bytes().is_empty() {
-                additions.push(name.as_str());
+                arguments.push(name);
             }
         }
-        if !additions.is_empty() {
-            let mut plan_arguments = vec![
-                "--config",
-                config,
-                "--root",
-                root,
-                "--dbpath",
-                database,
-                "--print",
-                "--print-format",
-                "%n",
-                "-R",
-            ];
-            plan_arguments.extend(additions.iter().copied());
+        if arguments.len() > PLAN_PREFIX_LENGTH {
             let plan =
-                self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
-            let mut planned = plan.as_str()?.lines().collect::<Vec<_>>();
-            planned.sort_unstable();
-            let mut expected = additions.clone();
-            expected.sort_unstable();
-            if planned != expected {
+                self.run_with_timeout(PackageTool::Pacman, &arguments, TRANSACTION_TIMEOUT)?;
+            if !exact_bounded_line_set(plan.as_str()?, &arguments[PLAN_PREFIX_LENGTH..]) {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
-            let mut arguments = vec![
-                "--config",
-                config,
-                "--root",
-                root,
-                "--dbpath",
-                database,
-                "--noconfirm",
-                "--noprogressbar",
-                "-R",
-            ];
-            arguments.extend(additions.iter().copied());
+            arguments[6] = "--noconfirm";
+            arguments[7] = "--noprogressbar";
+            arguments[8] = "-R";
+            arguments.remove(9);
             if let Err(error) = self.run_bytes_with_timeout(
                 PackageTool::Pacman,
                 &arguments,
@@ -5245,52 +5244,40 @@ impl PackageRuntime {
         }
 
         let installed = self.installed_package_catalog()?;
-        let additions = rollback
-            .previously_absent
-            .iter()
-            .filter(|name| {
-                installed
-                    .packages
-                    .iter()
-                    .any(|package| package.name == name.as_str())
-            })
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        if !additions.is_empty() {
-            let mut plan_arguments = vec![
-                "--config",
-                config,
-                "--root",
-                root,
-                "--dbpath",
-                database,
-                "--print",
-                "--print-format",
-                "%n",
-                "-R",
-            ];
-            plan_arguments.extend(additions.iter().copied());
+        const PLAN_PREFIX_LENGTH: usize = 10;
+        let mut arguments =
+            Vec::with_capacity(PLAN_PREFIX_LENGTH.saturating_add(rollback.previously_absent.len()));
+        arguments.extend([
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--print",
+            "--print-format",
+            "%n",
+            "-R",
+        ]);
+        for name in &rollback.previously_absent {
+            if installed
+                .packages
+                .iter()
+                .any(|package| package.name == *name)
+            {
+                arguments.push(name);
+            }
+        }
+        if arguments.len() > PLAN_PREFIX_LENGTH {
             let plan =
-                self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
-            let mut planned = plan.as_str()?.lines().collect::<Vec<_>>();
-            planned.sort_unstable();
-            let mut expected = additions.clone();
-            expected.sort_unstable();
-            if planned != expected {
+                self.run_with_timeout(PackageTool::Pacman, &arguments, TRANSACTION_TIMEOUT)?;
+            if !exact_bounded_line_set(plan.as_str()?, &arguments[PLAN_PREFIX_LENGTH..]) {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
-            let mut arguments = vec![
-                "--config",
-                config,
-                "--root",
-                root,
-                "--dbpath",
-                database,
-                "--noconfirm",
-                "--noprogressbar",
-                "-R",
-            ];
-            arguments.extend(additions.iter().copied());
+            arguments[6] = "--noconfirm";
+            arguments[7] = "--noprogressbar";
+            arguments[8] = "-R";
+            arguments.remove(9);
             if let Err(error) = self.run_bytes_with_timeout(
                 PackageTool::Pacman,
                 &arguments,
@@ -5368,10 +5355,6 @@ impl PackageRuntime {
                     return Err(PackageRuntimeError::Busy);
                 }
                 self.restore_replacement_repair(&replacements)?;
-                let explicit = explicit_targets
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
                 let replacement_identities = replacements
                     .iter()
                     .map(|replacement| InstalledPackageIdentity {
@@ -5381,7 +5364,7 @@ impl PackageRuntime {
                     .collect::<Vec<_>>();
                 self.install_resolution(
                     &resolution,
-                    &explicit,
+                    &explicit_targets,
                     &request,
                     InstallResolutionMode::Repair,
                     &replacement_identities,
@@ -5417,10 +5400,10 @@ impl PackageRuntime {
         }
     }
 
-    fn publish_install_mutation_intent(
+    fn publish_install_mutation_intent<T: AsRef<str>>(
         &self,
         request: &str,
-        explicit_targets: &[&str],
+        explicit_targets: &[T],
         resolution: &PackageResolution,
         replacements: &[ReplacementRepairRecord],
         rollback: Option<InstallRollbackPlan>,
@@ -5429,7 +5412,7 @@ impl PackageRuntime {
             request: request.to_owned(),
             explicit_targets: explicit_targets
                 .iter()
-                .map(|target| (*target).to_owned())
+                .map(|target| target.as_ref().to_owned())
                 .collect(),
             resolution: resolution.clone(),
             replacements: replacements.to_vec(),
@@ -5467,12 +5450,12 @@ impl PackageRuntime {
                     .filter(|filename| safe_package_filename(filename))
                     .ok_or(PackageRuntimeError::InvalidPath)?;
                 let metadata = fs::symlink_metadata(path)?;
+                let archive_sha256 = hex_sha256(&capability.archive_sha256);
                 if metadata.file_type().is_symlink()
                     || !metadata.is_file()
                     || metadata.len() == 0
                     || metadata.len() > PACKAGE_ARCHIVE_LIMIT
-                    || !filename
-                        .starts_with(&format!("{}-", hex_sha256(&capability.archive_sha256)))
+                    || !digest_prefixed_filename(filename, &archive_sha256)
                 {
                     return Err(PackageRuntimeError::InvalidResolution);
                 }
@@ -5481,7 +5464,7 @@ impl PackageRuntime {
                     version: archive.version.clone(),
                     filename: filename.to_owned(),
                     archive_bytes: metadata.len(),
-                    archive_sha256: hex_sha256(&capability.archive_sha256),
+                    archive_sha256,
                     install_script_sha256: capability
                         .install_script_sha256
                         .as_ref()
@@ -5516,9 +5499,7 @@ impl PackageRuntime {
             let path = cache.join(&record.filename);
             if hash_regular_file(&path, record.archive_bytes, PACKAGE_ARCHIVE_LIMIT)?
                 != archive_sha256
-                || !record
-                    .filename
-                    .starts_with(&format!("{}-", record.archive_sha256))
+                || !digest_prefixed_filename(&record.filename, &record.archive_sha256)
             {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
@@ -5761,10 +5742,7 @@ impl PackageRuntime {
         }
         let content =
             std::str::from_utf8(&content).map_err(|_| PackageRuntimeError::InvalidResolution)?;
-        Ok(parse_install_reason_intent(content)?
-            .into_iter()
-            .map(str::to_owned)
-            .collect())
+        parse_install_reason_intent_owned(content)
     }
 
     fn preserve_pending_install_reasons(
@@ -5998,8 +5976,9 @@ impl PackageRuntime {
                 }
                 let entry = entry?;
                 let path = entry.path();
+                let entry_name = entry.file_name();
                 let metadata = fs::symlink_metadata(&path)?;
-                if entry.file_name() == "ALPM_DB_VERSION"
+                if entry_name == "ALPM_DB_VERSION"
                     && metadata.is_file()
                     && !metadata.file_type().is_symlink()
                 {
@@ -6009,7 +5988,11 @@ impl PackageRuntime {
                     return Err(PackageRuntimeError::UnsafeEntry(path));
                 }
                 if replacements.iter().any(|candidate| {
-                    path == local.join(format!("{}-{}", candidate.name, candidate.version))
+                    local_database_entry_name_matches(
+                        &entry_name,
+                        &candidate.name,
+                        &candidate.version,
+                    )
                 }) {
                     continue;
                 }
@@ -6167,7 +6150,7 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::UnsafeEntry(local));
         }
         let mut count = 0_usize;
-        let mut contents = String::with_capacity(4096);
+        let mut contents = Vec::with_capacity(4096);
         for entry in fs::read_dir(&local)? {
             count = count.saturating_add(1);
             if count > LOCAL_DATABASE_ENTRY_LIMIT {
@@ -6200,22 +6183,25 @@ impl PackageRuntime {
             {
                 return Err(PackageRuntimeError::UnsafeEntry(description));
             }
-            contents.clear();
-            File::open(&description)?
-                .take(LOCAL_DESCRIPTION_LIMIT + 1)
-                .read_to_string(&mut contents)?;
-            if u64::try_from(contents.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
-                != metadata.len()
-            {
+            let mut file = File::open(&description)?;
+            if !read_bounded_exact_reusable(
+                &mut file,
+                metadata.len(),
+                LOCAL_DESCRIPTION_LIMIT,
+                &mut contents,
+            )? {
                 return Err(PackageRuntimeError::SizeMismatch);
             }
-            let Some(name) = local_description_field(&contents, "%NAME%")? else {
+            let description_text = str::from_utf8(&contents).map_err(|error| {
+                PackageRuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+            })?;
+            let Some(name) = local_description_field(description_text, "%NAME%")? else {
                 return Err(PackageRuntimeError::InvalidResolution);
             };
             let Some(archive) = archives.iter_mut().find(|archive| archive.name == name) else {
                 continue;
             };
-            match local_description_field(&contents, "%REASON%")? {
+            match local_description_field(description_text, "%REASON%")? {
                 None | Some("0") => archive.explicitly_installed = true,
                 Some("1") => {}
                 Some(_) => return Err(PackageRuntimeError::InvalidResolution),
@@ -6358,7 +6344,6 @@ impl PackageRuntime {
             return Ok(None);
         };
         let digest = hex_sha256(&capability.archive_sha256);
-        let prefix = format!("{digest}-");
         let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
         let metadata = fs::symlink_metadata(&directory)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -6381,7 +6366,7 @@ impl PackageRuntime {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(PackageRuntimeError::UnsafeEntry(path));
             }
-            if !name.starts_with(&prefix) {
+            if !digest_prefixed_filename(&name, &digest) {
                 continue;
             }
             if !safe_package_filename(&name)
@@ -6645,16 +6630,15 @@ impl PackageRuntime {
         if packages.is_empty() || packages.len() > 256 {
             return Err(PackageRuntimeError::InvalidQuery);
         }
-        let mut selected = BTreeSet::new();
-        for package in packages {
-            if !safe_logical_name(package) || !selected.insert(*package) {
+        for (index, package) in packages.iter().enumerate() {
+            if !safe_logical_name(package) || packages[..index].contains(package) {
                 return Err(PackageRuntimeError::InvalidQuery);
             }
         }
         let (directory, artifacts) = self.scan_package_cache()?;
         let mut reclaimed_bytes = 0_u64;
         for artifact in artifacts {
-            if selected.contains(artifact.package.as_str()) {
+            if packages.contains(&artifact.package.as_str()) {
                 reclaimed_bytes = reclaimed_bytes
                     .checked_add(artifact.bytes)
                     .ok_or(PackageRuntimeError::OutputLimit)?;
@@ -7331,7 +7315,8 @@ fn find_local_file_conflict(
 ) -> Result<Option<Vec<u8>>, PackageRuntimeError> {
     let mut read_bytes = 0_u64;
     let mut chunk = [0_u8; 8 * 1024];
-    let mut line = Vec::with_capacity(256);
+    let mut line = [0_u8; LOCAL_FILE_PATH_LIMIT];
+    let mut line_length = 0_usize;
     let mut in_files = false;
     let mut found_files_header = false;
     loop {
@@ -7346,31 +7331,32 @@ fn find_local_file_conflict(
         for byte in &chunk[..read] {
             if *byte == b'\n' {
                 if let Some(conflict) = process_local_file_conflict_line(
-                    &line,
+                    &line[..line_length],
                     &mut in_files,
                     &mut found_files_header,
                     incoming_paths,
                 )? {
                     return Ok(Some(conflict));
                 }
-                line.clear();
+                line_length = 0;
             } else {
-                if line.len() >= LOCAL_FILE_PATH_LIMIT {
+                if line_length >= line.len() {
                     return Err(PackageRuntimeError::OutputLimit);
                 }
-                line.push(*byte);
+                line[line_length] = *byte;
+                line_length += 1;
             }
         }
     }
-    if !line.is_empty() {
-        if let Some(conflict) = process_local_file_conflict_line(
-            &line,
+    if line_length != 0
+        && let Some(conflict) = process_local_file_conflict_line(
+            &line[..line_length],
             &mut in_files,
             &mut found_files_header,
             incoming_paths,
-        )? {
-            return Ok(Some(conflict));
-        }
+        )?
+    {
+        return Ok(Some(conflict));
     }
     if read_bytes != expected_bytes {
         return Err(PackageRuntimeError::SizeMismatch);
@@ -7804,10 +7790,8 @@ fn pacman_assumed_dependency(value: &str) -> Option<String> {
         version
     } else if let Some(version) = suffix.strip_prefix("<=") {
         version
-    } else if let Some(version) = suffix.strip_prefix('=') {
-        version
     } else {
-        return None;
+        suffix.strip_prefix('=')?
     };
     Some(format!("{name}={version}"))
 }
@@ -7993,7 +7977,7 @@ fn prepare_package_hook_overrides(
         fs::remove_file(path)?;
     }
 
-    let mut hook_names = BTreeSet::new();
+    let mut hook_names = Vec::new();
     let mut scanned_entries = 0_usize;
     for relative in ["usr/share/libalpm/hooks", "etc/pacman.d/hooks"] {
         let directory = arch_root.join(relative);
@@ -8018,9 +8002,7 @@ fn prepare_package_hook_overrides(
             if !name.ends_with(".hook") {
                 continue;
             }
-            if !safe_package_hook_name(&name)
-                || hook_names.len() >= PACKAGE_HOOK_DIRECTORY_ENTRY_LIMIT
-            {
+            if !safe_package_hook_name(&name) {
                 return Err(PackageRuntimeError::InvalidPayload);
             }
             let path = entry.path();
@@ -8035,9 +8017,15 @@ fn prepare_package_hook_overrides(
             {
                 return Err(PackageRuntimeError::UnsafeEntry(path));
             }
-            hook_names.insert(name);
+            if !hook_names.contains(&name) {
+                if hook_names.len() >= PACKAGE_HOOK_DIRECTORY_ENTRY_LIMIT {
+                    return Err(PackageRuntimeError::InvalidPayload);
+                }
+                hook_names.push(name);
+            }
         }
     }
+    hook_names.sort_unstable();
     for name in hook_names {
         symlink("/dev/null", override_root.join(name))?;
     }
@@ -8233,18 +8221,47 @@ fn read_bounded_exact(
         Ok(capacity) => capacity,
         Err(_) => return Ok(None),
     };
-    let mut content = Vec::with_capacity(capacity);
-    Read::by_ref(reader)
-        .take(expected)
-        .read_to_end(&mut content)?;
-    if content.len() as u64 != expected {
-        return Ok(None);
+    let mut content = vec![0_u8; capacity];
+    if let Err(error) = reader.read_exact(&mut content) {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            return Ok(None);
+        }
+        return Err(error);
     }
     let mut overflow = [0_u8; 1];
     if reader.read(&mut overflow)? != 0 {
         return Ok(None);
     }
     Ok(Some(content))
+}
+
+fn read_bounded_exact_reusable(
+    reader: &mut impl Read,
+    expected: u64,
+    limit: u64,
+    content: &mut Vec<u8>,
+) -> io::Result<bool> {
+    if expected == 0 || expected > limit {
+        return Ok(false);
+    }
+    let length = match usize::try_from(expected) {
+        Ok(length) => length,
+        Err(_) => return Ok(false),
+    };
+    content.resize(length, 0);
+    if let Err(error) = reader.read_exact(content) {
+        content.clear();
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    let mut overflow = [0_u8; 1];
+    if reader.read(&mut overflow)? != 0 {
+        content.clear();
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn bounded_regular_file(path: &Path, limit: u64) -> Result<bool, PackageRuntimeError> {
@@ -8357,6 +8374,12 @@ fn hex_sha256(value: &[u8; 32]) -> String {
     output
 }
 
+fn digest_prefixed_filename(filename: &str, digest: &str) -> bool {
+    filename
+        .strip_prefix(digest)
+        .is_some_and(|suffix| suffix.starts_with('-'))
+}
+
 fn validate_aur_capability_identity(
     package_base: &str,
     package_name: &str,
@@ -8366,7 +8389,6 @@ fn validate_aur_capability_identity(
     closure_sha256: [u8; 32],
     required_packages: &[String],
 ) -> Result<(), PackageRuntimeError> {
-    let unique_packages: BTreeSet<&str> = required_packages.iter().map(String::as_str).collect();
     if !safe_logical_name(package_base)
         || !safe_logical_name(package_name)
         || version.is_empty()
@@ -8378,11 +8400,11 @@ fn validate_aur_capability_identity(
         || review_sha256 == [0; 32]
         || closure_sha256 == [0; 32]
         || required_packages.is_empty()
-        || required_packages.len() > 256
+        || required_packages.len() > MAX_ROLLBACK_PACKAGES
         || !required_packages
             .iter()
             .all(|package| safe_logical_name(package))
-        || unique_packages.len() != required_packages.len()
+        || !unique_bounded_strings(required_packages)
         || !required_packages
             .iter()
             .any(|package| package == package_name)
@@ -8390,6 +8412,14 @@ fn validate_aur_capability_identity(
         return Err(PackageRuntimeError::InvalidPayload);
     }
     Ok(())
+}
+
+fn unique_bounded_strings(values: &[String]) -> bool {
+    values.len() <= MAX_ROLLBACK_PACKAGES
+        && values
+            .iter()
+            .enumerate()
+            .all(|(index, value)| !values[..index].contains(value))
 }
 
 struct AurGraphOutputFields<'a> {
@@ -8601,7 +8631,7 @@ fn read_aur_capability(
     {
         return Err(PackageRuntimeError::UnsafeEntry(path));
     }
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(&path)?;
@@ -8609,14 +8639,8 @@ fn read_aur_capability(
     if !opened.is_file() || opened.len() != metadata.len() {
         return Err(PackageRuntimeError::InvalidManifest);
     }
-    let mut bytes = Vec::with_capacity(
-        usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
-    );
-    file.take(AUR_BUILT_CAPABILITY_LIMIT + 1)
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).map_err(|_| PackageRuntimeError::OutputLimit)? != metadata.len() {
-        return Err(PackageRuntimeError::InvalidManifest);
-    }
+    let bytes = read_bounded_exact(&mut file, metadata.len(), AUR_BUILT_CAPABILITY_LIMIT)?
+        .ok_or(PackageRuntimeError::InvalidManifest)?;
     Ok(Some(bytes))
 }
 
@@ -8702,7 +8726,7 @@ fn read_aur_lifecycle_capabilities(
     {
         return Err(PackageRuntimeError::UnsafeEntry(path));
     }
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(&path)?;
@@ -8710,14 +8734,9 @@ fn read_aur_lifecycle_capabilities(
     if !opened.is_file() || opened.len() != metadata.len() {
         return Err(PackageRuntimeError::InvalidManifest);
     }
-    let mut bytes = Vec::with_capacity(
-        usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
-    );
-    file.take(AUR_LIFECYCLE_CAPABILITY_LIMIT + 1)
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).map_err(|_| PackageRuntimeError::OutputLimit)? != metadata.len()
-        || !bytes.ends_with(b"\n")
-    {
+    let bytes = read_bounded_exact(&mut file, metadata.len(), AUR_LIFECYCLE_CAPABILITY_LIMIT)?
+        .ok_or(PackageRuntimeError::InvalidManifest)?;
+    if !bytes.ends_with(b"\n") {
         return Err(PackageRuntimeError::InvalidManifest);
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| PackageRuntimeError::InvalidManifest)?;
@@ -8949,14 +8968,12 @@ impl BoundedCommandOutput {
         self.next = (self.next + remaining.len()) % self.maximum;
     }
 
-    fn into_bytes(self) -> Vec<u8> {
+    fn into_bytes(mut self) -> Vec<u8> {
         if self.bytes.len() < self.maximum || self.next == 0 {
             return self.bytes;
         }
-        let mut ordered = Vec::with_capacity(self.bytes.len());
-        ordered.extend_from_slice(&self.bytes[self.next..]);
-        ordered.extend_from_slice(&self.bytes[..self.next]);
-        ordered
+        self.bytes.rotate_left(self.next);
+        self.bytes
     }
 
     fn into_tail_with_truncation_notice(self) -> Vec<u8> {
@@ -9018,6 +9035,30 @@ fn exact_search_pattern(query: &str) -> String {
     pattern
 }
 
+fn exact_bounded_line_set(output: &str, expected: &[&str]) -> bool {
+    if expected.len() > MAX_ROLLBACK_PACKAGES {
+        return false;
+    }
+    let mut seen = [0_u64; MAX_ROLLBACK_PACKAGES / 64];
+    let mut count = 0_usize;
+    for line in output.lines() {
+        let Some(index) = expected.iter().position(|candidate| *candidate == line) else {
+            return false;
+        };
+        let word = index / 64;
+        let mask = 1_u64 << (index % 64);
+        if seen[word] & mask != 0 {
+            return false;
+        }
+        seen[word] |= mask;
+        count += 1;
+        if count > expected.len() {
+            return false;
+        }
+    }
+    count == expected.len()
+}
+
 fn parse_search_output(
     input: &str,
     preferred_name: &str,
@@ -9064,15 +9105,16 @@ fn differing_search_packages(output: &ToolOutput) -> Result<Vec<String>, Package
 fn parse_quiet_update_names(
     input: &str,
     candidates: &[String],
-) -> Result<BTreeSet<String>, PackageRuntimeError> {
-    let mut updates = BTreeSet::new();
+) -> Result<Vec<String>, PackageRuntimeError> {
+    let mut updates = Vec::with_capacity(candidates.len());
     for name in input.lines() {
         if !safe_logical_name(name)
             || !candidates.iter().any(|candidate| candidate == name)
-            || !updates.insert(name.to_owned())
+            || updates.iter().any(|update| update == name)
         {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        updates.push(name.to_owned());
     }
     Ok(updates)
 }
@@ -9094,7 +9136,7 @@ fn parse_exact_quiet_update(
 
 fn annotate_search_update_names(
     output: ToolOutput,
-    updates: &BTreeSet<String>,
+    updates: &[String],
 ) -> Result<ToolOutput, PackageRuntimeError> {
     let mut annotated = empty_tool_output();
     for line in output.as_str()?.lines() {
@@ -9126,7 +9168,7 @@ fn annotate_search_update_names(
             name,
             version,
             description,
-            if state == "different" && updates.contains(name) {
+            if state == "different" && updates.iter().any(|update| update == name) {
                 "update"
             } else {
                 state
@@ -9203,21 +9245,20 @@ fn append_search_output_pass(
             pending = Some((repository, name, version, state, installed_version));
         }
     }
-    if *count < 100 {
-        if let Some((repository, name, version, state, installed_version)) = pending {
-            if (name == preferred_name) == exact_match {
-                append_search_result(
-                    output,
-                    repository,
-                    name,
-                    version,
-                    "",
-                    state,
-                    installed_version,
-                )?;
-                *count += 1;
-            }
-        }
+    if *count < 100
+        && let Some((repository, name, version, state, installed_version)) = pending
+        && (name == preferred_name) == exact_match
+    {
+        append_search_result(
+            output,
+            repository,
+            name,
+            version,
+            "",
+            state,
+            installed_version,
+        )?;
+        *count += 1;
     }
     Ok(())
 }
@@ -9271,7 +9312,11 @@ fn missing_package_query(output: &str, package: &str) -> bool {
     let Some(line) = lines.next() else {
         return false;
     };
-    lines.next().is_none() && line == format!("error: package '{package}' was not found")
+    lines.next().is_none()
+        && line
+            .strip_prefix("error: package '")
+            .and_then(|value| value.strip_suffix("' was not found"))
+            == Some(package)
 }
 
 fn parse_installed_version(
@@ -9308,7 +9353,7 @@ fn read_local_package_name(path: &Path) -> Option<String> {
     {
         return None;
     }
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(O_NOFOLLOW | O_CLOEXEC)
         .open(description)
@@ -9317,14 +9362,11 @@ fn read_local_package_name(path: &Path) -> Option<String> {
     if !opened.is_file() || opened.len() != metadata.len() {
         return None;
     }
-    let mut contents = String::with_capacity(usize::try_from(metadata.len()).ok()?.min(4 * 1024));
-    file.take(LOCAL_DESCRIPTION_LIMIT + 1)
-        .read_to_string(&mut contents)
-        .ok()?;
-    if u64::try_from(contents.len()).ok()? != metadata.len() {
-        return None;
-    }
-    local_description_field(&contents, "%NAME%")
+    let bytes = read_bounded_exact(&mut file, metadata.len(), LOCAL_DESCRIPTION_LIMIT)
+        .ok()
+        .flatten()?;
+    let contents = str::from_utf8(&bytes).ok()?;
+    local_description_field(contents, "%NAME%")
         .ok()
         .flatten()
         .filter(|name| safe_logical_name(name))
@@ -9723,8 +9765,14 @@ fn prune_package_compatibility_cache(
 ) -> Result<(), PackageRuntimeError> {
     let retained = hex_sha256(retained_digest);
     let mut records = Vec::new();
+    let mut temporary = Vec::new();
+    let mut scanned = 0;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
+        scanned += 1;
+        if scanned > PACKAGE_COMPATIBILITY_CACHE_SCAN_LIMIT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -9735,7 +9783,7 @@ fn prune_package_compatibility_cache(
             .into_string()
             .map_err(|_| PackageRuntimeError::InvalidPayload)?;
         if name.starts_with('.') && name.ends_with(".tmp") {
-            fs::remove_file(path)?;
+            temporary.push(path);
             continue;
         }
         if !is_lower_hex_sha256(&name) {
@@ -9745,6 +9793,9 @@ fn prune_package_compatibility_cache(
         if records.len() > PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT {
             return Err(PackageRuntimeError::OutputLimit);
         }
+    }
+    for path in temporary {
+        fs::remove_file(path)?;
     }
     if records.len() >= PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT
         && !records.iter().any(|name| name == &retained)
@@ -9963,11 +10014,12 @@ fn inspect_package_tar_cancellable(
             let desktop_size = usize::try_from(entry.header().size()?)
                 .map_err(|_| PackageRuntimeError::OutputLimit)?;
             if desktop_size <= desktop::MAX_DESKTOP_ENTRY_BYTES {
-                let mut contents = Vec::with_capacity(desktop_size);
-                contents.extend_from_slice(&header[..header_bytes]);
-                entry.read_to_end(&mut contents)?;
+                let mut contents = vec![0_u8; desktop_size];
+                contents[..header_bytes].copy_from_slice(&header[..header_bytes]);
+                entry.read_exact(&mut contents[header_bytes..])?;
                 cancellation.check()?;
-                if contents.len() != desktop_size {
+                let mut overflow = [0_u8; 1];
+                if entry.read(&mut overflow)? != 0 {
                     return Err(PackageRuntimeError::SizeMismatch);
                 }
                 if let Some(entry) = desktop_id.as_deref().and_then(|desktop_id| {
@@ -10249,7 +10301,8 @@ fn scan_desktop_owners(
 ) -> bool {
     let mut read_bytes = 0_u64;
     let mut chunk = [0_u8; 8 * 1024];
-    let mut line = Vec::with_capacity(256);
+    let mut line = [0_u8; LOCAL_FILE_PATH_LIMIT];
+    let mut line_length = 0_usize;
     let mut overlong = false;
     let mut in_files = false;
     let mut valid = true;
@@ -10269,7 +10322,7 @@ fn scan_desktop_owners(
             if *byte == b'\n' {
                 if !overlong {
                     process_local_files_line(
-                        &line,
+                        &line[..line_length],
                         &mut in_files,
                         package,
                         targets,
@@ -10278,22 +10331,23 @@ fn scan_desktop_owners(
                         executable_ambiguous,
                     );
                 }
-                line.clear();
+                line_length = 0;
                 overlong = false;
             } else if !overlong {
-                if line.len() >= LOCAL_FILE_PATH_LIMIT {
-                    line.clear();
+                if line_length >= line.len() {
+                    line_length = 0;
                     overlong = true;
                     valid = false;
                 } else {
-                    line.push(*byte);
+                    line[line_length] = *byte;
+                    line_length += 1;
                 }
             }
         }
     }
-    if !line.is_empty() && !overlong {
+    if line_length != 0 && !overlong {
         process_local_files_line(
-            &line,
+            &line[..line_length],
             &mut in_files,
             package,
             targets,
@@ -10442,6 +10496,14 @@ fn read_local_package_identity(
     })
 }
 
+fn local_database_entry_name_matches(entry: &OsStr, name: &str, version: &str) -> bool {
+    entry
+        .to_str()
+        .and_then(|entry| entry.strip_prefix(name))
+        .and_then(|suffix| suffix.strip_prefix('-'))
+        == Some(version)
+}
+
 fn read_local_package_identities(
     local: &Path,
 ) -> Result<Vec<InstalledPackageIdentity>, PackageRuntimeError> {
@@ -10477,8 +10539,8 @@ fn read_local_package_identities(
             return Err(PackageRuntimeError::UnsafeEntry(path));
         }
         let identity = read_local_package_identity(&path)?;
-        let expected_entry = format!("{}-{}", identity.name, identity.version);
-        if entry.file_name().to_str() != Some(expected_entry.as_str()) {
+        if !local_database_entry_name_matches(&entry.file_name(), &identity.name, &identity.version)
+        {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         packages.push(identity);
@@ -10526,15 +10588,19 @@ fn derive_install_transaction_plan(
             _ => return Err(PackageRuntimeError::InvalidResolution),
         }
     }
-    let removals = before
-        .iter()
-        .filter(|package| {
-            after
-                .binary_search_by(|candidate| candidate.name.cmp(&package.name))
-                .is_err()
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut removals = Vec::with_capacity(MAX_INSTALL_PLAN_REMOVALS);
+    for package in before {
+        if after
+            .binary_search_by(|candidate| candidate.name.cmp(&package.name))
+            .is_ok()
+        {
+            continue;
+        }
+        if removals.len() >= MAX_INSTALL_PLAN_REMOVALS {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        removals.push(package.clone());
+    }
     Ok(InstallTransactionPlan { removals })
 }
 
@@ -10649,10 +10715,21 @@ fn remove_database_repair_entry_if_present(path: &Path) -> Result<(), PackageRun
 }
 
 fn remove_database_repair_entry(path: &Path) -> Result<(), PackageRuntimeError> {
+    remove_database_repair_entry_after_validation(path, || Ok(()))
+}
+
+fn remove_database_repair_entry_after_validation(
+    path: &Path,
+    after_open: impl FnOnce() -> Result<(), PackageRuntimeError>,
+) -> Result<(), PackageRuntimeError> {
     validate_database_repair_entry(path)?;
     let directory = File::open(path)?;
+    after_open()?;
     let mut files = Vec::with_capacity(LOCAL_DATABASE_PACKAGE_FILE_COUNT);
     for entry in fs::read_dir(path)? {
+        if files.len() >= LOCAL_DATABASE_PACKAGE_FILE_COUNT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
         files.push(entry?.path());
     }
     for file in files {
@@ -10711,40 +10788,48 @@ fn validate_replacement_repair_directory(
     path: &Path,
     replacements: &[ReplacementRepairRecord],
 ) -> Result<(), PackageRuntimeError> {
+    if replacements.len() > MAX_INSTALL_PLAN_REMOVALS {
+        return Err(PackageRuntimeError::OutputLimit);
+    }
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
     }
-    let mut seen = Vec::with_capacity(replacements.len());
+    let mut seen = 0_u64;
+    let mut seen_count = 0_usize;
     for entry in fs::read_dir(path)? {
-        if seen.len() >= MAX_INSTALL_PLAN_REMOVALS {
+        if seen_count >= MAX_INSTALL_PLAN_REMOVALS {
             return Err(PackageRuntimeError::OutputLimit);
         }
         let entry = entry?;
         let entry_path = entry.path();
         validate_database_repair_entry(&entry_path)?;
         let identity = read_local_package_identity(&entry_path)?;
-        if entry.file_name().to_str()
-            != Some(format!("{}-{}", identity.name, identity.version).as_str())
+        if !local_database_entry_name_matches(&entry.file_name(), &identity.name, &identity.version)
         {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        let replacement = replacements
+        let (replacement_index, replacement) = replacements
             .iter()
-            .find(|replacement| {
+            .enumerate()
+            .find(|(_, replacement)| {
                 replacement.name == identity.name && replacement.version == identity.version
             })
             .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let replacement_bit = 1_u64 << replacement_index;
         if !valid_sha256_hex(&replacement.database_sha256)
             || removal_repair_sha256(&entry_path, &replacement.name, &replacement.version)?
                 != replacement.database_sha256
-            || seen.iter().any(|name| name == &replacement.name)
+            || replacements.iter().enumerate().any(|(index, candidate)| {
+                seen & (1_u64 << index) != 0 && candidate.name == replacement.name
+            })
         {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        seen.push(replacement.name.clone());
+        seen |= replacement_bit;
+        seen_count += 1;
     }
-    if seen.len() != replacements.len() {
+    if seen_count != replacements.len() {
         return Err(PackageRuntimeError::InvalidResolution);
     }
     Ok(())
@@ -10768,8 +10853,7 @@ fn clear_replacement_repair_directory_if_present(path: &Path) -> Result<(), Pack
         let entry_path = entry.path();
         validate_database_repair_entry(&entry_path)?;
         let identity = read_local_package_identity(&entry_path)?;
-        if entry.file_name().to_str()
-            != Some(format!("{}-{}", identity.name, identity.version).as_str())
+        if !local_database_entry_name_matches(&entry.file_name(), &identity.name, &identity.version)
         {
             return Err(PackageRuntimeError::InvalidResolution);
         }
@@ -10923,8 +11007,11 @@ fn exact_missing_repository_target(error: &PackageRuntimeError, target: &str) ->
     let Ok(diagnostic) = output.as_str() else {
         return false;
     };
-    diagnostic == format!("error: target not found: {target}\n")
-        || diagnostic == format!("error: target not found: {target}")
+    diagnostic
+        .strip_suffix('\n')
+        .unwrap_or(diagnostic)
+        .strip_prefix("error: target not found: ")
+        == Some(target)
 }
 
 fn partition_repository_targets<F>(
@@ -11010,17 +11097,17 @@ where
     })
 }
 
-fn parse_resolution_output(
+fn parse_resolution_output<T: AsRef<str>>(
     input: &str,
-    targets: &[&str],
+    targets: &[T],
     architecture: RepositoryArchitecture,
 ) -> Result<PackageResolution, PackageRuntimeError> {
     parse_resolution_output_mode(input, targets, architecture, true)
 }
 
-fn parse_resolution_output_mode(
+fn parse_resolution_output_mode<T: AsRef<str>>(
     input: &str,
-    targets: &[&str],
+    targets: &[T],
     architecture: RepositoryArchitecture,
     require_named_targets: bool,
 ) -> Result<PackageResolution, PackageRuntimeError> {
@@ -11029,7 +11116,9 @@ fn parse_resolution_output_mode(
     };
     if targets.is_empty()
         || targets.len() > 256
-        || targets.iter().any(|target| !safe_logical_name(target))
+        || targets
+            .iter()
+            .any(|target| !safe_logical_name(target.as_ref()))
     {
         return Err(PackageRuntimeError::InvalidQuery);
     }
@@ -11084,7 +11173,7 @@ fn parse_resolution_output_mode(
             return Err(PackageRuntimeError::OutputLimit);
         }
         for (index, target) in targets.iter().enumerate() {
-            contains_targets[index] |= name == *target;
+            contains_targets[index] |= name == target.as_ref();
         }
         for (index, field) in [repository, name, version, filename, url, size]
             .into_iter()
@@ -11505,11 +11594,8 @@ fn parse_package_mutation_intent(
         if explicit_targets.is_empty() || resolution_text.is_empty() {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        let target_refs = explicit_targets
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let resolution = parse_resolution_output(&resolution_text, &target_refs, architecture)?;
+        let resolution =
+            parse_resolution_output(&resolution_text, &explicit_targets, architecture)?;
         resolved_version(&resolution, request)?;
         let rollback = match rollback_ready {
             Some(true) => {
@@ -11675,29 +11761,33 @@ fn parse_package_mutation_intent(
             rollback,
         })
     } else if let Some(removal) = operation.strip_prefix("remove\t") {
-        let fields = removal.split('\t').collect::<Vec<_>>();
+        let mut fields = removal.split('\t');
         let package = fields
-            .first()
-            .copied()
+            .next()
             .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let legacy_version = fields.next();
+        let legacy_database_sha256 = fields.next();
+        if fields.next().is_some() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
         if !safe_logical_name(package) {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         // Accept the original single-record form so an app upgrade can still
         // repair a transaction journal written by an older Manager.
-        let removals = if fields.len() == 2 || fields.len() == 3 {
+        let removals = if let Some(version) = legacy_version {
             if lines.next().is_some()
-                || !safe_package_version(fields[1])
-                || fields.get(2).is_some_and(|value| !valid_sha256_hex(value))
+                || !safe_package_version(version)
+                || legacy_database_sha256.is_some_and(|value| !valid_sha256_hex(value))
             {
                 return Err(PackageRuntimeError::InvalidResolution);
             }
             vec![ReplacementRepairRecord {
                 name: package.to_owned(),
-                version: fields[1].to_owned(),
-                database_sha256: fields.get(2).copied().unwrap_or_default().to_owned(),
+                version: version.to_owned(),
+                database_sha256: legacy_database_sha256.unwrap_or_default().to_owned(),
             }]
-        } else if fields.len() == 1 {
+        } else if legacy_database_sha256.is_none() {
             let mut removals = Vec::with_capacity(4);
             for line in lines {
                 let Some(record) = line.strip_prefix("remove-record\t") else {
@@ -11902,6 +11992,17 @@ fn encode_package_removal_plan(
 }
 
 fn parse_install_reason_intent(input: &str) -> Result<Vec<&str>, PackageRuntimeError> {
+    parse_install_reason_intent_with(input, |package| package)
+}
+
+fn parse_install_reason_intent_owned(input: &str) -> Result<Vec<String>, PackageRuntimeError> {
+    parse_install_reason_intent_with(input, str::to_owned)
+}
+
+fn parse_install_reason_intent_with<'a, T: AsRef<str>>(
+    input: &'a str,
+    mut retain: impl FnMut(&'a str) -> T,
+) -> Result<Vec<T>, PackageRuntimeError> {
     if input.len() as u64 > INSTALL_REASON_INTENT_LIMIT {
         return Err(PackageRuntimeError::InvalidResolution);
     }
@@ -11909,12 +12010,15 @@ fn parse_install_reason_intent(input: &str) -> Result<Vec<&str>, PackageRuntimeE
     if lines.next() != Some(INSTALL_REASON_INTENT_HEADER) {
         return Err(PackageRuntimeError::InvalidResolution);
     }
-    let mut packages = Vec::with_capacity(8);
+    let mut packages: Vec<T> = Vec::with_capacity(8);
     for package in lines {
-        if !safe_logical_name(package) || packages.len() >= 256 || packages.contains(&package) {
+        if !safe_logical_name(package)
+            || packages.len() >= 256
+            || packages.iter().any(|retained| retained.as_ref() == package)
+        {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        packages.push(package);
+        packages.push(retain(package));
     }
     if packages.is_empty() || !input.ends_with('\n') {
         return Err(PackageRuntimeError::InvalidResolution);
@@ -12277,6 +12381,46 @@ mod tests {
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
 
     #[test]
+    fn digest_prefixed_filenames_require_the_exact_digest_boundary() {
+        let digest = "a".repeat(64);
+        assert!(digest_prefixed_filename(
+            &format!("{digest}-package.pkg.tar.zst"),
+            &digest,
+        ));
+        assert!(digest_prefixed_filename(&format!("{digest}-"), &digest));
+        assert!(!digest_prefixed_filename(&digest, &digest));
+        assert!(!digest_prefixed_filename(
+            &format!("{digest}.package.pkg.tar.zst"),
+            &digest,
+        ));
+        assert!(!digest_prefixed_filename(
+            &format!("b{digest}-package.pkg.tar.zst"),
+            &digest,
+        ));
+    }
+
+    #[test]
+    fn local_database_entry_names_match_borrowed_identity_components() {
+        assert!(local_database_entry_name_matches(
+            OsStr::new("libfoo-bar-1.2-3"),
+            "libfoo-bar",
+            "1.2-3",
+        ));
+        for entry in [
+            "libfoo-bar1.2-3",
+            "libfoo-bar-1.2-3.extra",
+            "extra-libfoo-bar-1.2-3",
+            "libfoo-1.2-3",
+        ] {
+            assert!(!local_database_entry_name_matches(
+                OsStr::new(entry),
+                "libfoo-bar",
+                "1.2-3",
+            ));
+        }
+    }
+
+    #[test]
     fn bounded_exact_read_rejects_growth_after_metadata() {
         assert_eq!(
             read_bounded_exact(&mut Cursor::new(b"state"), 5, 5).expect("exact"),
@@ -12294,6 +12438,20 @@ mod tests {
             read_bounded_exact(&mut std::io::repeat(0), 5, 5).expect("unbounded source"),
             None,
         );
+
+        let mut reusable = Vec::with_capacity(2);
+        assert!(
+            read_bounded_exact_reusable(&mut Cursor::new(b"state"), 5, 5, &mut reusable)
+                .expect("exact reusable")
+        );
+        assert_eq!(reusable, b"state");
+        for bytes in [&b"stat"[..], &b"state!"[..]] {
+            assert!(
+                !read_bounded_exact_reusable(&mut Cursor::new(bytes), 5, 5, &mut reusable)
+                    .expect("changed reusable")
+            );
+            assert!(reusable.is_empty());
+        }
     }
 
     #[test]
@@ -12996,6 +13154,11 @@ library\txdg-open\tlibarchphene_pkg_777777777777777777777777.so\t4\n";
             b"[Action]\nWhen=PostTransaction\nExec=/usr/bin/cache\n",
         )
         .expect("custom hook");
+        fs::write(
+            custom_hooks.join("30-system-cache.hook"),
+            b"[Action]\nWhen=PostTransaction\nExec=/usr/bin/custom-cache\n",
+        )
+        .expect("shadowing custom hook");
         fs::write(custom_hooks.join("README"), b"ignored").expect("non-hook file");
         let overrides = tree.root.join(PACKAGE_HOOK_OVERRIDE_DIRECTORY);
 
@@ -13538,6 +13701,51 @@ extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\tinstalled\t8.0.29.sdk
     }
 
     #[test]
+    fn bounded_line_set_accepts_only_one_of_each_expected_line() {
+        let names = (0..MAX_ROLLBACK_PACKAGES)
+            .map(|index| format!("package-{index:03}"))
+            .collect::<Vec<_>>();
+        let expected = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut reversed = String::new();
+        for name in names.iter().rev() {
+            reversed.push_str(name);
+            reversed.push('\n');
+        }
+
+        assert!(exact_bounded_line_set(&reversed, &expected));
+        assert!(!exact_bounded_line_set(
+            "package-000\npackage-000\n",
+            &expected[..2],
+        ));
+        assert!(!exact_bounded_line_set("package-000\n", &expected[..2]));
+        assert!(!exact_bounded_line_set("unknown\n", &expected[..1]));
+        assert!(!exact_bounded_line_set(
+            "package-000\n\npackage-001\n",
+            &expected[..2],
+        ));
+        assert!(!exact_bounded_line_set(
+            "",
+            &["package"; MAX_ROLLBACK_PACKAGES + 1],
+        ));
+    }
+
+    #[test]
+    fn bounded_string_uniqueness_accepts_the_exact_package_limit() {
+        let packages = (0..MAX_ROLLBACK_PACKAGES)
+            .map(|index| format!("package-{index:03}"))
+            .collect::<Vec<_>>();
+        assert!(unique_bounded_strings(&packages));
+
+        let mut duplicate = packages.clone();
+        duplicate[MAX_ROLLBACK_PACKAGES - 1] = duplicate[0].clone();
+        assert!(!unique_bounded_strings(&duplicate));
+
+        let mut oversized = packages;
+        oversized.push("package-overflow".to_owned());
+        assert!(!unique_bounded_strings(&oversized));
+    }
+
+    #[test]
     fn package_search_ranks_an_exact_name_before_substring_matches() {
         let parsed = parse_search_output(
             "extra/gst-plugin-rstracers 1.26.4-1\n    GStreamer tracing plugins\n\
@@ -13593,6 +13801,10 @@ extra\tavailable\t1.0-1\tAvailable package\tavailable\t\n",
             Err(PackageRuntimeError::InvalidResolution)
         ));
         assert!(matches!(
+            parse_quiet_update_names("changed\nchanged\n", &differing),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
             parse_search_output(
                 "extra/broken 1.0-1 [installed: invalid version]\n    Broken\n",
                 "broken",
@@ -13611,6 +13823,14 @@ extra\tavailable\t1.0-1\tAvailable package\tavailable\t\n",
         ));
         assert!(!missing_package_query(
             "error: failed to read the package database\n",
+            "btop",
+        ));
+        assert!(!missing_package_query(
+            "error: package 'other' was not found\n",
+            "btop",
+        ));
+        assert!(!missing_package_query(
+            "error: package 'btop' was not found\nadditional output\n",
             "btop",
         ));
         assert!(matches!(
@@ -14338,6 +14558,25 @@ https://geo.mirror.pkgbuild.com/core/os/x86_64/{filename}\t7\n"
     }
 
     #[test]
+    fn compatibility_cache_scan_limit_preserves_temporary_files() {
+        let tree = TestTree::new();
+        let directory = tree.root.join(PACKAGE_COMPATIBILITY_CACHE_DIRECTORY);
+        prepare_private_directory(&directory).expect("compatibility cache directory");
+        let temporary = (0..=PACKAGE_COMPATIBILITY_CACHE_SCAN_LIMIT)
+            .map(|index| directory.join(format!(".{index:064x}.tmp")))
+            .collect::<Vec<_>>();
+        for path in &temporary {
+            fs::write(path, b"temporary").expect("temporary cache fixture");
+        }
+
+        assert!(matches!(
+            prune_package_compatibility_cache(&directory, &[0x6b; 32]),
+            Err(PackageRuntimeError::OutputLimit)
+        ));
+        assert!(temporary.iter().all(|path| path.is_file()));
+    }
+
+    #[test]
     fn package_resolution_output_is_strict_and_contains_target() {
         let input = "core\tglibc\t2.42+r33+gde5fe48316ed-1\tglibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/core/os/x86_64/glibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\t10158024\n\
 extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/extra/os/x86_64/dotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\t123456789\n";
@@ -14476,6 +14715,21 @@ https://geo.mirror.pkgbuild.com/core/os/x86_64/pacman-7.1.0-2-x86_64.pkg.tar.zst
             }),
             Err(PackageRuntimeError::ToolFailed(2, _))
         ));
+
+        assert!(exact_missing_repository_target(
+            &test_tool_failure(1, b"error: target not found: aur-runtime"),
+            "aur-runtime",
+        ));
+        for diagnostic in [
+            b"error: target not found: other\n".as_slice(),
+            b"error: target not found: aur-runtime\n\n".as_slice(),
+            b"error: target not found: aur-runtime.extra\n".as_slice(),
+        ] {
+            assert!(!exact_missing_repository_target(
+                &test_tool_failure(1, diagnostic),
+                "aur-runtime",
+            ));
+        }
     }
 
     #[test]
@@ -14835,6 +15089,20 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
         )
         .expect("changed dependency plan");
         assert!(dependency_plan.removals.is_empty());
+
+        let mut oversized_before = vec![package("base", "3-2")];
+        oversized_before.extend(
+            (0..=MAX_INSTALL_PLAN_REMOVALS)
+                .map(|index| package(&format!("old-{index:03}"), "1.0-1")),
+        );
+        assert!(matches!(
+            derive_install_transaction_plan(
+                &oversized_before,
+                &[package("base", "3-2")],
+                &[archive("base", "3-2")],
+            ),
+            Err(PackageRuntimeError::OutputLimit)
+        ));
     }
 
     #[test]
@@ -14934,6 +15202,19 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
                 Err(PackageRuntimeError::InvalidResolution)
             ));
         }
+
+        let limit = usize::try_from(PACKAGE_MUTATION_INTENT_LIMIT).expect("intent limit");
+        let mut field_flood = format!("{PACKAGE_MUTATION_INTENT_HEADER}\nremove\tbtop");
+        while field_flood.len() + 2 < limit {
+            field_flood.push_str("\tx");
+        }
+        field_flood.extend(std::iter::repeat_n('x', limit - 1 - field_flood.len()));
+        field_flood.push('\n');
+        assert_eq!(field_flood.len(), limit);
+        assert!(matches!(
+            parse_package_mutation_intent(&field_flood, RepositoryArchitecture::X86_64),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
     }
 
     #[test]
@@ -15039,6 +15320,27 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
     }
 
     #[test]
+    fn database_repair_removal_rejects_growth_before_deleting_files() {
+        let tree = TestTree::new();
+        tree.local_package("foot-1.0-1", "foot", b"%FILES%\nusr/bin/foot\n");
+        let local_entry = tree.root.join("var/lib/pacman/local/foot-1.0-1");
+        for name in ["changelog", "install", "mtree"] {
+            fs::write(local_entry.join(name), b"").expect("allowed database file");
+        }
+        let files = ["desc", "files", "changelog", "install", "mtree", "grown"];
+
+        let error = remove_database_repair_entry_after_validation(&local_entry, || {
+            fs::write(local_entry.join("grown"), b"")?;
+            Ok(())
+        })
+        .expect_err("reject database entry growth");
+
+        assert!(matches!(error, PackageRuntimeError::OutputLimit));
+        assert!(local_entry.is_dir());
+        assert!(files.iter().all(|name| local_entry.join(name).is_file()));
+    }
+
+    #[test]
     fn removal_repair_restores_the_exact_bounded_local_database_record() {
         let tree = TestTree::new();
         let runtime = tree.package_runtime();
@@ -15119,6 +15421,17 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
                 .iter()
                 .all(|record| valid_sha256_hex(&record.database_sha256))
         );
+        assert!(matches!(
+            runtime.restore_replacement_repair(&records[..1]),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
+            runtime.restore_replacement_repair(&vec![
+                records[0].clone();
+                MAX_INSTALL_PLAN_REMOVALS + 1
+            ]),
+            Err(PackageRuntimeError::OutputLimit)
+        ));
 
         let local = tree.root.join("var/lib/pacman/local");
         fs::remove_dir_all(local.join("old-tool-1.0-1")).expect("remove old tool record");
@@ -16291,5 +16604,32 @@ glibc\t2.42-1\tx86_64\t7\t1\n",
                 .expect("scan unrelated ownership"),
             None,
         );
+
+        let exact_path = vec![b'a'; LOCAL_FILE_PATH_LIMIT];
+        let mut exact = b"%FILES%\n".to_vec();
+        exact.extend_from_slice(&exact_path);
+        exact.push(b'\n');
+        fs::write(&path, &exact).expect("replace exact-limit ownership fixture");
+        let mut file = File::open(&path).expect("reopen exact-limit ownership fixture");
+        assert_eq!(
+            find_local_file_conflict(
+                &mut file,
+                exact.len() as u64,
+                &BTreeSet::from([exact_path.clone()]),
+            )
+            .expect("scan exact-limit ownership"),
+            Some(exact_path),
+        );
+
+        let overlong = vec![b'a'; LOCAL_FILE_PATH_LIMIT + 1];
+        let mut oversized = b"%FILES%\n".to_vec();
+        oversized.extend_from_slice(&overlong);
+        oversized.push(b'\n');
+        fs::write(&path, &oversized).expect("replace over-limit ownership fixture");
+        let mut file = File::open(&path).expect("reopen over-limit ownership fixture");
+        assert!(matches!(
+            find_local_file_conflict(&mut file, oversized.len() as u64, &BTreeSet::new()),
+            Err(PackageRuntimeError::OutputLimit)
+        ));
     }
 }

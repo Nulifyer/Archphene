@@ -361,11 +361,25 @@ fn managed_resolver_matches(
     if metadata.st_mode & 0o7777 != 0o600 || metadata.st_size != expected_size {
         return Ok(false);
     }
-    let mut current = Vec::with_capacity(expected.len());
-    File::from(descriptor)
-        .take(expected.len() as u64 + 1)
-        .read_to_end(&mut current)?;
-    Ok(current == expected)
+    exact_content_matches(&mut File::from(descriptor), expected)
+}
+
+fn exact_content_matches(input: &mut impl Read, expected: &[u8]) -> Result<bool, RootError> {
+    let mut buffer = [0_u8; 128];
+    for expected_chunk in expected.chunks(buffer.len()) {
+        if let Err(error) = input.read_exact(&mut buffer[..expected_chunk.len()]) {
+            return if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                Ok(false)
+            } else {
+                Err(error.into())
+            };
+        }
+        if buffer[..expected_chunk.len()] != *expected_chunk {
+            return Ok(false);
+        }
+    }
+    let mut trailing = [0_u8; 1];
+    Ok(input.read(&mut trailing)? == 0)
 }
 
 fn remove_regular_if_present(
@@ -532,8 +546,10 @@ fn ensure_managed_file(path: &Path, content: &[u8]) -> Result<(), RootError> {
                     let final_descriptor = fstat(&file)?;
                     let final_path = statat(CWD, path, AtFlags::SYMLINK_NOFOLLOW)
                         .map_err(|_| RootError::InvalidEntry(path.to_path_buf()))?;
-                    if FileType::from_raw_mode(final_path.st_mode) == FileType::RegularFile
-                        && final_descriptor.st_dev == metadata.st_dev
+                    if FileType::from_raw_mode(final_path.st_mode) != FileType::RegularFile {
+                        return Err(RootError::InvalidEntry(path.to_path_buf()));
+                    }
+                    if final_descriptor.st_dev == metadata.st_dev
                         && final_descriptor.st_ino == metadata.st_ino
                         && final_descriptor.st_size == metadata.st_size
                         && final_descriptor.st_mode & 0o7777 == 0o600
@@ -552,7 +568,6 @@ fn ensure_managed_file(path: &Path, content: &[u8]) -> Result<(), RootError> {
                     {
                         return Ok(());
                     }
-                    return Err(RootError::InvalidEntry(path.to_path_buf()));
                 }
             }
         }
@@ -917,6 +932,21 @@ nameserver 2001:db8::1\n",
 options timeout:2 attempts:2\n\
 nameserver 192.0.2.53\n",
         );
+    }
+
+    #[test]
+    fn resolver_content_comparison_is_streamed_and_exact() {
+        let expected = vec![b'x'; 257];
+        assert!(exact_content_matches(&mut &expected[..], &expected).expect("exact"));
+
+        let mut different = expected.clone();
+        different[128] = b'y';
+        assert!(!exact_content_matches(&mut &different[..], &expected).expect("different"));
+        assert!(!exact_content_matches(&mut &expected[..256], &expected).expect("short"));
+
+        let mut longer = expected.clone();
+        longer.push(b'y');
+        assert!(!exact_content_matches(&mut &longer[..], &expected).expect("long"));
     }
 
     #[test]

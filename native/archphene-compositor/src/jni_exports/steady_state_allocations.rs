@@ -23,8 +23,9 @@ use wayland_server::Resource;
 use super::{
     BufferTransform, CommittedFrame, CompositorCore, RegionRectangle, ShmBufferInner,
     ShmPoolInner, ShmSnapshotState, SurfaceData, SurfaceState, apply_cached_subsurface_children,
-    damage_for_commit_into, push_bounded_damage, restore_commit_damage_scratch,
-    restore_pending_damage_buffers, surface_snapshot_allows_in_place, take_pending_damage,
+    copy_frame_to_rgba_buffer, damage_for_commit_into, push_bounded_damage,
+    restore_commit_damage_scratch, restore_pending_damage_buffers,
+    surface_snapshot_allows_in_place, take_pending_damage, PresentationCopyDamage,
 };
 
 #[derive(Default)]
@@ -314,6 +315,46 @@ fn warmed_retained_shm_damage_does_not_allocate() {
         true,
         false,
     ));
+}
+
+#[test]
+fn warmed_hardware_buffer_damage_conversion_does_not_allocate() {
+    let frame = CommittedFrame::new(
+        4,
+        2,
+        wl_shm::Format::Xrgb8888,
+        vec![
+            1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0, 13, 14, 15, 0, 16,
+            17, 18, 0, 19, 20, 21, 0, 22, 23, 24, 0,
+        ],
+        None,
+    );
+    let damage = PresentationCopyDamage::Region(
+        RegionRectangle::new(1, 0, 2, 2).expect("bounded conversion damage"),
+    );
+    let mut destination = vec![0xaa; 40];
+
+    assert_eq!(
+        copy_frame_to_rgba_buffer(&frame, 4, 2, 20, &mut destination, damage),
+        0,
+    );
+    destination.fill(0xaa);
+    let allocations = count_allocations(|| {
+        for _ in 0..1_000 {
+            assert_eq!(
+                copy_frame_to_rgba_buffer(&frame, 4, 2, 20, &mut destination, damage),
+                0,
+            );
+        }
+    });
+
+    assert_eq!(allocations, 0);
+    assert_eq!(&destination[0..4], &[0xaa; 4]);
+    assert_eq!(&destination[4..12], &[6, 5, 4, 255, 9, 8, 7, 255]);
+    assert_eq!(&destination[12..20], &[0xaa; 8]);
+    assert_eq!(&destination[20..24], &[0xaa; 4]);
+    assert_eq!(&destination[24..32], &[18, 17, 16, 255, 21, 20, 19, 255]);
+    assert_eq!(&destination[32..40], &[0xaa; 8]);
 }
 
 #[test]

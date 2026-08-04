@@ -4,6 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import org.archphene.app.putTabSeparatedUtf8
 
 internal const val SYNC_PLAN_HEADER_BYTES = 136
 internal const val SYNC_KIND_ABSENT = 0
@@ -24,6 +25,8 @@ internal const val SYNC_LOCAL_PRESERVE_CONFLICT = 5
 private const val MAX_PATH_BYTES = 4 * 1024
 private const val MAX_DEPTH = 64
 private const val MAX_NAME_BYTES = 255
+private const val MAX_PROVIDER_DOCUMENT_ID_BYTES = 4 * 1024
+private const val MAX_PROVIDER_MIME_BYTES = 255
 private const val MAX_FILE_BYTES = 2L * 1024 * 1024 * 1024
 private val PLAN_MAGIC = "ASPE0001".toByteArray(StandardCharsets.US_ASCII)
 
@@ -90,12 +93,7 @@ internal fun decodeProjectSyncPlanEntry(
             .onUnmappableCharacter(CodingErrorAction.REPORT)
             .decode(ByteBuffer.wrap(pathBytes))
             .toString()
-    val segments = path.split('/')
-    check(
-        segments.isNotEmpty() &&
-            segments.size <= MAX_DEPTH &&
-            segments.all(::safeProjectSyncName),
-    ) {
+    check(safeProjectSyncPath(path)) {
         "Native synchronization path is unsafe"
     }
     return ProjectSyncPlanEntry(path, action, baseline, linux, android)
@@ -105,20 +103,33 @@ internal fun decodeProjectSyncFingerprintText(value: String): ProjectSyncFingerp
     if (value == "d") {
         return ProjectSyncFingerprint(SYNC_KIND_DIRECTORY, 0, ByteArray(32))
     }
-    val fields = value.split(':')
-    check(fields.size == 3 && fields[0] == "f") {
+    val sizeEnd = value.indexOf(':', 2)
+    check(
+        value.length >= 2 &&
+            value[0] == 'f' &&
+            value[1] == ':' &&
+            sizeEnd >= 2 &&
+            value.indexOf(':', sizeEnd + 1) < 0,
+    ) {
         "Project synchronization journal fingerprint is invalid"
     }
     val bytes =
-        fields[1].toLongOrNull()?.takeIf { it in 0..MAX_FILE_BYTES }
+        value.substring(2, sizeEnd).toLongOrNull()?.takeIf { it in 0..MAX_FILE_BYTES }
             ?: error("Project synchronization journal size is invalid")
-    val digest = fields[2]
-    check(digest.length == 64 && digest.all { it in '0'..'9' || it in 'a'..'f' }) {
+    val digestStart = sizeEnd + 1
+    check(value.length - digestStart == 64) {
         "Project synchronization journal digest is invalid"
     }
     val sha256 = ByteArray(32)
     repeat(32) { index ->
-        sha256[index] = digest.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        val high = value[digestStart + index * 2]
+        val low = value[digestStart + index * 2 + 1]
+        check((high in '0'..'9' || high in 'a'..'f') && (low in '0'..'9' || low in 'a'..'f')) {
+            "Project synchronization journal digest is invalid"
+        }
+        val highNibble = if (high <= '9') high - '0' else high - 'a' + 10
+        val lowNibble = if (low <= '9') low - '0' else low - 'a' + 10
+        sha256[index] = ((highNibble shl 4) or lowNibble).toByte()
     }
     return ProjectSyncFingerprint(SYNC_KIND_FILE, bytes, sha256)
 }
@@ -127,16 +138,15 @@ internal fun putProjectSyncRequest(
     destination: ByteBuffer,
     vararg fields: String,
 ): Int {
-    check(fields.isNotEmpty() && fields.none { it.isEmpty() || '\t' in it }) {
-        "Project synchronization request is invalid"
+    return checkNotNull(
+        putTabSeparatedUtf8(
+            destination,
+            fields,
+            NativeRuntime.PROJECT_SYNC_BUFFER_SIZE,
+        ),
+    ) {
+        "Project synchronization request is invalid or too long"
     }
-    val encoded = fields.joinToString("\t").toByteArray(StandardCharsets.UTF_8)
-    check(encoded.size <= NativeRuntime.PROJECT_SYNC_BUFFER_SIZE) {
-        "Project synchronization request is too long"
-    }
-    destination.clear()
-    destination.put(encoded)
-    return encoded.size
 }
 
 private fun decodeProjectSyncFingerprint(
@@ -176,12 +186,49 @@ internal fun safeProjectSyncName(name: String): Boolean =
     name.isNotEmpty() &&
         name != "." &&
         name != ".." &&
-        projectSyncUtf8Length(name) <= MAX_NAME_BYTES &&
+        projectSyncUtf8LengthAtMost(name, MAX_NAME_BYTES) &&
         '/' !in name &&
         '\\' !in name &&
         '\u0000' !in name &&
         '\t' !in name &&
         safeProjectSyncCharacters(name)
+
+internal fun safeProjectSyncPath(path: String): Boolean {
+    if (path.isEmpty()) {
+        return false
+    }
+    var segmentStart = 0
+    var segmentCount = 0
+    while (true) {
+        val segmentEnd = path.indexOf('/', segmentStart)
+        segmentCount++
+        if (segmentCount > MAX_DEPTH) {
+            return false
+        }
+        if (segmentEnd < 0) {
+            return safeProjectSyncName(path.substring(segmentStart))
+        }
+        if (!safeProjectSyncName(path.substring(segmentStart, segmentEnd))) {
+            return false
+        }
+        segmentStart = segmentEnd + 1
+    }
+}
+
+internal fun safeProjectSyncDocumentId(documentId: String): Boolean =
+    documentId.isNotEmpty() &&
+        projectSyncUtf8LengthAtMost(documentId, MAX_PROVIDER_DOCUMENT_ID_BYTES) &&
+        safeProjectSyncCharacters(documentId)
+
+internal fun safeProjectSyncMime(mime: String): Boolean =
+    mime.isNotEmpty() &&
+        projectSyncUtf8LengthAtMost(mime, MAX_PROVIDER_MIME_BYTES) &&
+        safeProjectSyncCharacters(mime)
+
+private fun projectSyncUtf8LengthAtMost(
+    value: String,
+    maximum: Int,
+): Boolean = org.archphene.app.utf8EncodedLength(value, maximum) != null
 
 private fun safeProjectSyncCharacters(value: String): Boolean {
     var index = 0

@@ -27,9 +27,17 @@ class PortalUriPolicyTest {
     }
 
     @Test
-    fun rejectsOversizedUris() {
-        val oversized = "https://example.com/" + "a".repeat(PortalUriPolicy.MAX_URI_BYTES)
-        assertFalse(PortalUriPolicy.valid(oversized))
+    fun enforcesUtf8UriSizeBoundary() {
+        val prefix = "https://example.com/"
+        val exactAscii = prefix + "a".repeat(PortalUriPolicy.MAX_URI_BYTES - prefix.length)
+        val exactMultibyte = prefix + "é".repeat((PortalUriPolicy.MAX_URI_BYTES - prefix.length) / 2)
+
+        assertTrue(PortalUriPolicy.valid(exactAscii))
+        assertFalse(PortalUriPolicy.valid("${exactAscii}a"))
+        assertTrue(PortalUriPolicy.valid(exactMultibyte))
+        assertFalse(PortalUriPolicy.valid("${exactMultibyte}é"))
+        assertFalse(PortalUriPolicy.valid("${prefix}\uD800"))
+        assertFalse(PortalUriPolicy.valid("${prefix}\uDC00"))
     }
 
     @Test
@@ -40,11 +48,33 @@ class PortalUriPolicyTest {
                 "/home/archphene/Projects/Project One/\u2713.txt",
             ),
         )
+        assertEquals(
+            "file:///home/archphene////...//a..//.hidden///file",
+            PortalFileUri.fromLogicalPath("/home/archphene////...//a..//.hidden///file"),
+        )
+    }
+
+    @Test
+    fun enforcesTheExactAsciiFileUriExpansionBoundary() {
+        val prefix = "/home/archphene/"
+        val exactPath = prefix + "a".repeat(PortalUriPolicy.MAX_URI_BYTES - 7 - prefix.length)
+        assertEquals(PortalUriPolicy.MAX_URI_BYTES, PortalFileUri.fromLogicalPath(exactPath).length)
+        assertThrows(IllegalArgumentException::class.java) {
+            PortalFileUri.fromLogicalPath("${exactPath}a")
+        }
     }
 
     @Test
     fun rejectsUnboundedOrTraversingFilePaths() {
-        for (path in listOf("/tmp/file", "/home/archphene/../secret", "/home/archphene/a\u0000b")) {
+        for (
+            path in listOf(
+                "/tmp/file",
+                "/home/archphene/../secret",
+                "/home/archphene////safe//..//secret",
+                "/home/archphene/a\u0000b",
+                "/home/archphene/\uD800",
+            )
+        ) {
             assertThrows(IllegalArgumentException::class.java) {
                 PortalFileUri.fromLogicalPath(path)
             }

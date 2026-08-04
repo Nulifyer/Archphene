@@ -105,5 +105,15 @@ class PackageLauncherReviewStateTest {
         }
     }
 
+    @Test
+    fun rejectsMaximumSizeTabFlood() {
+        val wire = ByteArray(NativeRuntime.PACKAGE_OUTPUT_SIZE) { '\t'.code.toByte() }
+        wire[wire.lastIndex] = '\n'.code.toByte()
+
+        assertThrows(IllegalStateException::class.java) {
+            decodePackageLauncherReview(wire)
+        }
+    }
+
     private fun String.ascii(): ByteArray = toByteArray(StandardCharsets.US_ASCII)
 }

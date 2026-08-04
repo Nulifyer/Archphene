@@ -2,8 +2,12 @@ package org.archphene.app.launcher
 
 import java.io.ByteArrayInputStream
 import java.io.InputStream
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.util.Comparator
 import java.util.concurrent.atomic.AtomicInteger
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -116,5 +120,105 @@ class LauncherCameraBridgeTest {
             ),
         )
         assertFalse(LauncherCameraBridge.isRuntimeDirectoryName("unrelated-cache"))
+    }
+
+    @Test
+    fun validCameraRuntimeIsRemoved() {
+        val cache = Files.createTempDirectory("camera-cleanup-valid")
+        val root = cache.resolve("camera-7-0123456789abcdef")
+        try {
+            Files.createDirectories(root.resolve("spa-0.2/support"))
+            Files.write(root.resolve("spa-0.2/support/libspa-support.so"), byteArrayOf(1, 2, 3))
+            val failures = mutableListOf<Throwable>()
+
+            LauncherCameraBridge.cleanupRuntimeDirectory(
+                root,
+                log = false,
+                reportFailure = failures::add,
+            )
+
+            assertTrue(failures.isEmpty())
+            assertFalse(Files.exists(root, LinkOption.NOFOLLOW_LINKS))
+        } finally {
+            if (Files.exists(cache)) {
+                Files.walk(cache).use { paths ->
+                    paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun cameraRuntimeOverEntryLimitIsRetainedExactly() {
+        val cache = Files.createTempDirectory("camera-cleanup-entry-limit")
+        val root = Files.createDirectory(cache.resolve("camera-7-0123456789abcdef"))
+        val expected =
+            (0 until 161).associate { index ->
+                "entry-$index" to "payload-$index".toByteArray()
+            }
+        try {
+            expected.forEach { (name, bytes) -> Files.write(root.resolve(name), bytes) }
+            val failures = mutableListOf<Throwable>()
+
+            LauncherCameraBridge.cleanupRuntimeDirectory(
+                root,
+                log = false,
+                reportFailure = failures::add,
+            )
+
+            assertEquals(1, failures.size)
+            val retainedNames = mutableSetOf<String>()
+            Files.newDirectoryStream(root).use { entries ->
+                entries.forEach { retainedNames.add(it.fileName.toString()) }
+            }
+            assertEquals(expected.keys, retainedNames)
+            expected.forEach { (name, bytes) ->
+                assertArrayEquals(bytes, Files.readAllBytes(root.resolve(name)))
+            }
+        } finally {
+            Files.walk(cache).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun cameraRuntimeOverDepthLimitIsRetainedExactly() {
+        val cache = Files.createTempDirectory("camera-cleanup-depth-limit")
+        val root = Files.createDirectory(cache.resolve("camera-7-0123456789abcdef"))
+        val marker = "retained".toByteArray()
+        try {
+            Files.write(root.resolve("marker"), marker)
+            Files.createDirectories(root.resolve("depth-1/depth-2/depth-3/depth-4"))
+            val failures = mutableListOf<Throwable>()
+
+            LauncherCameraBridge.cleanupRuntimeDirectory(
+                root,
+                log = false,
+                reportFailure = failures::add,
+            )
+
+            assertEquals(1, failures.size)
+            val retainedPaths = mutableSetOf<String>()
+            Files.walk(root).use { paths ->
+                paths.forEach { retainedPaths.add(root.relativize(it).toString()) }
+            }
+            assertEquals(
+                setOf(
+                    "",
+                    "marker",
+                    "depth-1",
+                    "depth-1/depth-2",
+                    "depth-1/depth-2/depth-3",
+                    "depth-1/depth-2/depth-3/depth-4",
+                ),
+                retainedPaths,
+            )
+            assertArrayEquals(marker, Files.readAllBytes(root.resolve("marker")))
+        } finally {
+            Files.walk(cache).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
     }
 }

@@ -4,11 +4,11 @@ pub use archphene_process::integration::{
     TOPOLOGY_CHROMIUM, TOPOLOGY_GTK3, TOPOLOGY_GTK4, TOPOLOGY_OPENGL, TOPOLOGY_QT5, TOPOLOGY_QT6,
     TOPOLOGY_SDL2, TOPOLOGY_SDL3, TOPOLOGY_VULKAN, TOPOLOGY_WAYLAND, TOPOLOGY_X11,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const O_CLOEXEC: i32 = 0o2000000;
 const O_NOFOLLOW: i32 = 0o400000;
@@ -62,7 +62,7 @@ struct ScriptProfile {
     delegates: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct LoadSegment {
     offset: u64,
     virtual_address: u64,
@@ -93,7 +93,7 @@ impl<'a> IntegrationProfiler<'a> {
             return IntegrationProfile::default();
         };
         let mut queue = VecDeque::from([executable]);
-        let mut visited = BTreeSet::new();
+        let mut visited = Vec::with_capacity(MAX_PROFILE_OBJECTS);
         let mut topology = 0_u16;
         let mut bridge_capabilities = 0_u8;
         let mut complete = true;
@@ -102,19 +102,21 @@ impl<'a> IntegrationProfiler<'a> {
         let mut root_script = false;
 
         while let Some(logical_path) = queue.pop_front() {
-            if !visited.insert(logical_path.clone()) {
+            if visited.iter().any(|current| current == &logical_path) {
                 continue;
             }
-            if visited.len() > MAX_PROFILE_OBJECTS {
+            if visited.len() >= MAX_PROFILE_OBJECTS {
                 complete = false;
                 break;
             }
-            let profile = self.object_profile(&logical_path);
+            visited.push(logical_path);
+            let logical_path = visited.last().expect("retained profile path");
+            let profile = self.object_profile(logical_path);
             let needed = match profile {
                 ObjectProfile::Elf(needed) => {
                     if visited.len() == 1 {
                         root_profiled = true;
-                        match self.runtime_hint_profile(&logical_path) {
+                        match self.runtime_hint_profile(logical_path) {
                             Ok((topology_hints, bridge_hints)) => {
                                 topology |= topology_hints;
                                 bridge_capabilities |= bridge_hints;
@@ -139,7 +141,9 @@ impl<'a> IntegrationProfiler<'a> {
                         ) else {
                             continue;
                         };
-                        queue.push_back(path);
+                        if !enqueue_profile_path(&mut queue, &visited, path) {
+                            complete = false;
+                        }
                     }
                     continue;
                 }
@@ -161,9 +165,12 @@ impl<'a> IntegrationProfiler<'a> {
             for name in needed {
                 topology |= classify_library(&name);
                 bridge_capabilities |= classify_bridge_library(&name);
-                match self.resolve_library(&logical_path, &name) {
-                    Some(path) => queue.push_back(path),
-                    None => complete = false,
+                if let Some(path) = self.resolve_library(logical_path, &name) {
+                    if !enqueue_profile_path(&mut queue, &visited, path) {
+                        complete = false;
+                    }
+                } else {
+                    complete = false;
                 }
             }
         }
@@ -201,13 +208,13 @@ impl<'a> IntegrationProfiler<'a> {
             return None;
         }
         let source_directory = Path::new(source).parent()?;
-        [
-            source_directory.join(name),
-            PathBuf::from("/usr/lib").join(name),
-            PathBuf::from("/lib").join(name),
-        ]
-        .into_iter()
-        .find_map(|candidate| desktop::resolve_root_regular_file(self.root, &candidate, false))
+        std::iter::once(source_directory.join(name))
+            .chain(
+                ["/usr/lib", "/lib"]
+                    .into_iter()
+                    .map(|directory| Path::new(directory).join(name)),
+            )
+            .find_map(|candidate| desktop::resolve_root_regular_file(self.root, &candidate, false))
     }
 
     fn runtime_hint_profile(&mut self, logical_path: &str) -> io::Result<(u16, u8)> {
@@ -225,6 +232,19 @@ impl<'a> IntegrationProfiler<'a> {
         self.runtime_hints.insert(logical_path.to_owned(), profile);
         Ok(profile)
     }
+}
+
+fn enqueue_profile_path(queue: &mut VecDeque<String>, visited: &[String], path: String) -> bool {
+    if visited.iter().any(|current| current == &path)
+        || queue.iter().any(|current| current == &path)
+    {
+        return true;
+    }
+    if visited.len() + queue.len() >= MAX_PROFILE_OBJECTS {
+        return false;
+    }
+    queue.push_back(path);
+    true
 }
 
 fn classify_bridge_library(name: &str) -> u8 {
@@ -511,7 +531,8 @@ fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
 
-    let mut loads = Vec::new();
+    let mut loads = [LoadSegment::default(); MAX_PROGRAM_HEADERS];
+    let mut load_count = 0_usize;
     let mut dynamic = None;
     let mut program = [0_u8; PROGRAM_HEADER_BYTES];
     for index in 0..program_count {
@@ -534,7 +555,11 @@ fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
                 {
                     return Err(io::Error::from(io::ErrorKind::InvalidData));
                 }
-                loads.push(segment);
+                if load_count >= loads.len() {
+                    return Err(io::Error::from(io::ErrorKind::InvalidData));
+                }
+                loads[load_count] = segment;
+                load_count += 1;
             }
             2 => {
                 if dynamic.is_some() {
@@ -560,7 +585,8 @@ fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
     };
     let mut string_table_address = None;
     let mut string_table_bytes = None;
-    let mut needed_offsets = Vec::new();
+    let mut needed_offsets = [0_u64; MAX_NEEDED_PER_OBJECT];
+    let mut needed_count = 0_usize;
     let entries = usize::try_from(dynamic_bytes / 16)
         .ok()
         .filter(|count| *count <= MAX_DYNAMIC_ENTRIES)
@@ -578,10 +604,11 @@ fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
                 break;
             }
             1 => {
-                if needed_offsets.len() >= MAX_NEEDED_PER_OBJECT {
+                if needed_count >= needed_offsets.len() {
                     return Err(io::Error::from(io::ErrorKind::InvalidData));
                 }
-                needed_offsets.push(value);
+                needed_offsets[needed_count] = value;
+                needed_count += 1;
             }
             5 => string_table_address = Some(value),
             10 => string_table_bytes = Some(value),
@@ -591,7 +618,7 @@ fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
     if !terminated {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
-    if needed_offsets.is_empty() {
+    if needed_count == 0 {
         return Ok(Some(Vec::new()));
     }
     let string_table_address =
@@ -599,12 +626,13 @@ fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
     let string_table_bytes =
         string_table_bytes.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
     let (string_table_offset, string_table_available) =
-        virtual_to_file_region(&loads, string_table_address)?;
+        virtual_to_file_region(&loads[..load_count], string_table_address)?;
     if string_table_bytes > string_table_available {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
-    let mut needed = Vec::with_capacity(needed_offsets.len());
-    for offset in needed_offsets {
+    let mut needed = Vec::with_capacity(needed_count);
+    let mut name_bytes = [0_u8; MAX_NEEDED_NAME_BYTES + 1];
+    for offset in needed_offsets[..needed_count].iter().copied() {
         if offset >= string_table_bytes {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
@@ -615,24 +643,21 @@ fn parse_dynamic_dependencies(path: &Path) -> io::Result<Option<Vec<String>>> {
             .filter(|value| *value < metadata.len())
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
         file.seek(SeekFrom::Start(string_offset))?;
-        let mut bytes = Vec::with_capacity(limit as usize);
-        for _ in 0..limit {
-            let mut byte = [0_u8; 1];
-            file.read_exact(&mut byte)?;
-            if byte[0] == 0 {
-                break;
-            }
-            bytes.push(byte[0]);
-        }
-        if bytes.is_empty() || bytes.len() > MAX_NEEDED_NAME_BYTES || bytes.len() as u64 == limit {
+        let length =
+            usize::try_from(limit).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        file.read_exact(&mut name_bytes[..length])?;
+        let Some(name_length) = name_bytes[..length].iter().position(|byte| *byte == 0) else {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        };
+        if name_length == 0 {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
-        let name =
-            String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        if !valid_library_name(&name) {
+        let name = str::from_utf8(&name_bytes[..name_length])
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        if !valid_library_name(name) {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
-        needed.push(name);
+        needed.push(name.to_owned());
     }
     Ok(Some(needed))
 }
@@ -691,6 +716,26 @@ mod tests {
         let executable = std::env::current_exe().expect("current executable");
         let result = parse_dynamic_dependencies(&executable).expect("ELF profile");
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn profile_frontier_is_unique_and_bounded_before_retention() {
+        let visited = vec!["/usr/bin/app".to_owned()];
+        let mut queue = (1..MAX_PROFILE_OBJECTS)
+            .map(|index| format!("/usr/lib/library-{index:03}.so"))
+            .collect::<VecDeque<_>>();
+        assert!(enqueue_profile_path(
+            &mut queue,
+            &visited,
+            "/usr/lib/library-001.so".to_owned(),
+        ));
+        assert_eq!(queue.len(), MAX_PROFILE_OBJECTS - 1);
+        assert!(!enqueue_profile_path(
+            &mut queue,
+            &visited,
+            "/usr/lib/overflow.so".to_owned(),
+        ));
+        assert_eq!(queue.len(), MAX_PROFILE_OBJECTS - 1);
     }
 
     #[test]
@@ -1032,7 +1077,7 @@ mod tests {
         bytes
     }
 
-    fn test_root() -> PathBuf {
+    fn test_root() -> std::path::PathBuf {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "archphene-elf-profile-test-{}-{id}",

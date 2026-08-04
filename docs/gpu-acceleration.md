@@ -98,11 +98,16 @@ diagnostic profiles did not produce a safe accelerated path. Those temporary
 profiles were removed. Chromium acceleration therefore remains gated on both a
 safe userspace render-node/GBM strategy and compatible Wayland GPU
 presentation/readback rather than an app-specific override.
-The next presentation milestone is Android `AHardwareBuffer`/dmabuf import
-with explicit synchronization and SHM fallback. No Venus or Android-host
-Vulkan transport is published yet, so accelerated Vulkan and Wayland Vulkan
-presentation remain incomplete. Production power/thermal measurements and
-broad physical-device testing are also incomplete.
+The next presentation milestone is EGL-backed Android `AHardwareBuffer` image
+import and composition with explicit synchronization and SHM fallback. The
+2026-08-04 Samsung `SM_S908U` SurfaceFlinger probe exposes
+`EGL_ANDROID_image_native_buffer` and `GL_OES_EGL_image`, but not
+`EGL_EXT_image_dma_buf_import`. Native-buffer image import is therefore a
+viable Android composition boundary on that device; direct client-dmabuf import
+must be capability-negotiated and cannot replace SHM there. No Venus or
+Android-host Vulkan transport is published yet, so accelerated Vulkan and
+Wayland Vulkan presentation remain incomplete. Production power/thermal
+measurements and broad physical-device testing are also incomplete.
 
 References:
 

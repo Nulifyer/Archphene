@@ -66,7 +66,12 @@ impl AurSourceChecksum {
             // Preserve the established SHA-256 cache path so an upgrade can
             // reverify and reuse already downloaded AUR sources.
             Self::Sha256(value) => hex_bytes(&value),
-            Self::Sha512(value) => format!("sha512-{}", hex_bytes(&value)),
+            Self::Sha512(value) => {
+                let mut output = String::with_capacity("sha512-".len() + value.len() * 2);
+                output.push_str("sha512-");
+                push_hex_bytes(&mut output, &value);
+                output
+            }
         }
     }
 
@@ -637,8 +642,7 @@ pub fn aur_provider_candidates(
     let mut candidates = Vec::with_capacity(envelope.results.len());
     for package in envelope.results {
         validate_rpc_package(&package)?;
-        let expected_snapshot = format!("/cgit/aur.git/snapshot/{}.tar.gz", package.name);
-        if package.snapshot_path != expected_snapshot
+        if !snapshot_path_matches(package.snapshot_path, package.name)
             || !(package.name == dependency
                 || package
                     .provides
@@ -649,10 +653,11 @@ pub fn aur_provider_candidates(
         {
             return Err(AurReviewError::RpcMismatch);
         }
-        candidates.push(package.name.to_owned());
+        if !candidates.iter().any(|candidate| candidate == package.name) {
+            candidates.push(package.name.to_owned());
+        }
     }
     candidates.sort();
-    candidates.dedup();
     Ok(candidates)
 }
 
@@ -1021,7 +1026,7 @@ impl AurReview {
 pub fn plan_reviewed_aur_graph(
     reviews: &[AurReview],
     root_package: &str,
-    official_providers: &std::collections::BTreeSet<String>,
+    official_providers: &[String],
 ) -> Result<AurBuildGraph, AurBuildGraphError> {
     if reviews.is_empty() || reviews.len() > MAX_AUR_GRAPH_BASES {
         return Err(AurBuildGraphError::Limit("package-base"));
@@ -1094,7 +1099,7 @@ pub fn plan_reviewed_aur_graph(
     let root = root.ok_or(AurBuildGraphError::InvalidReview)?;
 
     let mut graph_edges = Vec::new();
-    let mut dependency_pairs = std::collections::BTreeSet::new();
+    let mut dependency_rows = [0_u32; MAX_AUR_GRAPH_BASES];
     for (index, review) in reviews.iter().enumerate() {
         let dependencies = review
             .dependencies
@@ -1104,7 +1109,9 @@ pub fn plan_reviewed_aur_graph(
         for declaration in dependencies {
             let dependency =
                 dependency_name(declaration).map_err(|_| AurBuildGraphError::InvalidReview)?;
-            if official_providers.contains(dependency)
+            if official_providers
+                .iter()
+                .any(|provider| provider == dependency)
                 || review
                     .provided_packages
                     .binary_search_by(|provider| provider.as_str().cmp(dependency))
@@ -1133,7 +1140,7 @@ pub fn plan_reviewed_aur_graph(
                 dependency: dependency.to_owned(),
                 requirement: declaration.clone(),
             });
-            dependency_pairs.insert((index, provider));
+            dependency_rows[index] |= 1_u32 << provider;
         }
     }
     graph_edges.sort_by(|left, right| {
@@ -1152,43 +1159,57 @@ pub fn plan_reviewed_aur_graph(
     });
     graph_edges.dedup();
 
-    let mut reachable = std::collections::BTreeSet::from([root]);
-    let mut pending = vec![root];
+    let mut reachable = [false; MAX_AUR_GRAPH_BASES];
+    reachable[root] = true;
+    let mut reachable_count = 1;
+    let mut pending = Vec::with_capacity(reviews.len());
+    pending.push(root);
     while let Some(current) = pending.pop() {
-        for &(dependent, dependency) in &dependency_pairs {
-            if dependent == current && reachable.insert(dependency) {
+        for (dependency, is_reachable) in reachable.iter_mut().enumerate().take(reviews.len()) {
+            if dependency_rows[current] & (1_u32 << dependency) != 0 && !*is_reachable {
+                *is_reachable = true;
+                reachable_count += 1;
                 pending.push(dependency);
             }
         }
     }
-    if reachable.len() != reviews.len() {
+    if reachable_count != reviews.len() {
         return Err(AurBuildGraphError::DisconnectedReview);
     }
 
     let mut indegree = vec![0_usize; reviews.len()];
-    for &(dependent, _) in &dependency_pairs {
-        indegree[dependent] = indegree[dependent]
-            .checked_add(1)
-            .ok_or(AurBuildGraphError::Limit("edge"))?;
+    for (dependent, row) in dependency_rows.iter().enumerate().take(reviews.len()) {
+        indegree[dependent] = row.count_ones() as usize;
     }
-    let mut ready = std::collections::BTreeSet::new();
+    let mut ready = Vec::with_capacity(reviews.len());
     for (index, degree) in indegree.iter().enumerate() {
         if *degree == 0 {
-            ready.insert((reviews[index].package_base.as_str(), index));
+            ready.push(index);
         }
     }
     let mut package_bases = Vec::with_capacity(reviews.len());
-    while let Some((_, current)) = ready.pop_first() {
+    while !ready.is_empty() {
+        let next = ready
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                reviews[**left]
+                    .package_base
+                    .cmp(&reviews[**right].package_base)
+            })
+            .map(|(position, _)| position)
+            .ok_or(AurBuildGraphError::InvalidReview)?;
+        let current = ready.swap_remove(next);
         package_bases.push(reviews[current].package_base.clone());
-        for &(dependent, dependency) in &dependency_pairs {
-            if dependency != current {
+        for (dependent, row) in dependency_rows.iter().enumerate().take(reviews.len()) {
+            if row & (1_u32 << current) == 0 {
                 continue;
             }
             indegree[dependent] = indegree[dependent]
                 .checked_sub(1)
                 .ok_or(AurBuildGraphError::InvalidReview)?;
             if indegree[dependent] == 0 {
-                ready.insert((reviews[dependent].package_base.as_str(), dependent));
+                ready.push(dependent);
             }
         }
     }
@@ -1275,12 +1296,8 @@ fn read_snapshot(snapshot_bytes: &[u8], expected_base: &str) -> Result<Snapshot,
                     "invalid global provenance header",
                 ));
             }
-            let mut bytes = Vec::with_capacity(entry_size as usize);
-            entry
-                .by_ref()
-                .take(entry_size + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| AurReviewError::InvalidSnapshot("truncated provenance header"))?;
+            let bytes =
+                read_snapshot_entry_exact(&mut entry, entry_size, "truncated provenance header")?;
             commit = Some(parse_snapshot_commit(&bytes)?);
             continue;
         }
@@ -1318,13 +1335,8 @@ fn read_snapshot(snapshot_bytes: &[u8], expected_base: &str) -> Result<Snapshot,
         if expanded_bytes > MAX_AUR_SNAPSHOT_EXPANDED_BYTES {
             return Err(AurReviewError::SizeLimit("expanded snapshot"));
         }
-        let mut bytes = Vec::with_capacity(size);
-        entry
-            .by_ref()
-            .take(size as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| AurReviewError::InvalidSnapshot("truncated entry"))?;
-        if bytes.len() != size || files.insert(relative, bytes).is_some() {
+        let bytes = read_snapshot_entry_exact(&mut entry, entry_size, "truncated entry")?;
+        if files.insert(relative, bytes).is_some() {
             return Err(AurReviewError::InvalidSnapshot(
                 "entry size mismatch or duplicate path",
             ));
@@ -1336,6 +1348,27 @@ fn read_snapshot(snapshot_bytes: &[u8], expected_base: &str) -> Result<Snapshot,
         ))?,
         files,
     })
+}
+
+fn read_snapshot_entry_exact(
+    reader: &mut impl Read,
+    expected: u64,
+    mismatch: &'static str,
+) -> Result<Vec<u8>, AurReviewError> {
+    let length = usize::try_from(expected).map_err(|_| AurReviewError::Limit("snapshot entry"))?;
+    let mut bytes = vec![0_u8; length];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|_| AurReviewError::InvalidSnapshot(mismatch))?;
+    let mut overflow = [0_u8; 1];
+    if reader
+        .read(&mut overflow)
+        .map_err(|_| AurReviewError::InvalidSnapshot(mismatch))?
+        != 0
+    {
+        return Err(AurReviewError::InvalidSnapshot(mismatch));
+    }
+    Ok(bytes)
 }
 
 fn parse_snapshot_commit(bytes: &[u8]) -> Result<String, AurReviewError> {
@@ -1425,8 +1458,9 @@ fn parse_rpc<'a>(
     // canonical package-base endpoint expands with a package-base directory.
     // Validate the server-provided identity here, then have the caller fetch
     // the canonical package-base snapshot used by the isolated builder.
-    let expected_snapshot = format!("/cgit/aur.git/snapshot/{requested_package}.tar.gz");
-    if package.name != requested_package || package.snapshot_path != expected_snapshot {
+    if package.name != requested_package
+        || !snapshot_path_matches(package.snapshot_path, requested_package)
+    {
         return Err(AurReviewError::RpcMismatch);
     }
     Ok(package)
@@ -1457,6 +1491,12 @@ fn canonical_snapshot_path(package_base: &str) -> String {
     format!("/cgit/aur.git/snapshot/{package_base}.tar.gz")
 }
 
+fn snapshot_path_matches(path: &str, package: &str) -> bool {
+    path.strip_prefix("/cgit/aur.git/snapshot/")
+        .and_then(|value| value.strip_suffix(".tar.gz"))
+        == Some(package)
+}
+
 fn parse_srcinfo(
     bytes: &[u8],
     requested_package: &str,
@@ -1466,13 +1506,7 @@ fn parse_srcinfo(
     validate_text(text, MAX_AUR_SRCINFO_BYTES)?;
     let mut info = SrcInfo::default();
     let mut current_package: Option<&str> = None;
-    let depends_architecture = format!("depends_{architecture}");
-    let provides_architecture = format!("provides_{architecture}");
-    let make_dependencies_architecture = format!("makedepends_{architecture}");
-    let check_dependencies_architecture = format!("checkdepends_{architecture}");
-    let sources_architecture = format!("source_{architecture}");
-    let source_sha256_architecture = format!("sha256sums_{architecture}");
-    let source_sha512_architecture = format!("sha512sums_{architecture}");
+    let architecture_key = |key: &str, prefix: &str| key.strip_prefix(prefix) == Some(architecture);
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -1509,7 +1543,7 @@ fn parse_srcinfo(
             }
             continue;
         }
-        if key == "depends" || key == depends_architecture {
+        if key == "depends" || architecture_key(key, "depends_") {
             let dependencies = if let Some(package) = current_package {
                 info.package_dependencies
                     .get_mut(package)
@@ -1520,7 +1554,7 @@ fn parse_srcinfo(
             push_limited(dependencies, value, MAX_AUR_DEPENDENCIES, "dependencies")?;
             continue;
         }
-        if key == "provides" || key == provides_architecture {
+        if key == "provides" || architecture_key(key, "provides_") {
             let provides = if let Some(package) = current_package {
                 info.package_provides
                     .get_mut(package)
@@ -1584,31 +1618,31 @@ fn parse_srcinfo(
                 "source SHA-512 hashes",
             )?,
             "validpgpkeys" => push_limited(&mut info.valid_pgp_keys, value, 32, "PGP keys")?,
-            _ if key == make_dependencies_architecture => push_limited(
+            _ if architecture_key(key, "makedepends_") => push_limited(
                 &mut info.make_dependencies,
                 value,
                 MAX_AUR_DEPENDENCIES,
                 "make dependencies",
             )?,
-            _ if key == check_dependencies_architecture => push_limited(
+            _ if architecture_key(key, "checkdepends_") => push_limited(
                 &mut info.check_dependencies,
                 value,
                 MAX_AUR_DEPENDENCIES,
                 "check dependencies",
             )?,
-            _ if key == sources_architecture => push_limited(
+            _ if architecture_key(key, "source_") => push_limited(
                 &mut info.architecture_sources,
                 value,
                 MAX_AUR_SOURCES,
                 "architecture sources",
             )?,
-            _ if key == source_sha256_architecture => push_ordered_limited(
+            _ if architecture_key(key, "sha256sums_") => push_ordered_limited(
                 &mut info.architecture_sha256,
                 value,
                 MAX_AUR_SOURCES,
                 "architecture source SHA-256 hashes",
             )?,
-            _ if key == source_sha512_architecture => push_ordered_limited(
+            _ if architecture_key(key, "sha512sums_") => push_ordered_limited(
                 &mut info.architecture_sha512,
                 value,
                 MAX_AUR_SOURCES,
@@ -1792,13 +1826,17 @@ fn hex_sha256(value: &[u8; 32]) -> String {
 }
 
 fn hex_bytes(value: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(value.len() * 2);
+    push_hex_bytes(&mut output, value);
+    output
+}
+
+fn push_hex_bytes(output: &mut String, value: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in value {
         output.push(HEX[(byte >> 4) as usize] as char);
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    output
 }
 
 fn parse_sha256(value: &str) -> Result<[u8; 32], AurReviewError> {
@@ -1830,8 +1868,6 @@ fn hex_nibble(value: u8) -> Result<u8, AurReviewError> {
 }
 
 fn scan_build_steps(pkgbuild: &str, package_name: &str) -> Vec<AurBuildStep> {
-    let package_function = format!("package_{package_name}");
-    let normalized_package_function = format!("package_{}", package_name.replace('-', "_"));
     let mut steps = Vec::with_capacity(4);
     for raw_line in pkgbuild.lines() {
         let line = raw_line.trim_start();
@@ -1852,7 +1888,7 @@ fn scan_build_steps(pkgbuild: &str, package_name: &str) -> Vec<AurBuildStep> {
             Some("build") => Some(AurBuildStep::Build),
             Some("check") => Some(AurBuildStep::Check),
             Some("package") => Some(AurBuildStep::Package),
-            Some(name) if name == package_function || name == normalized_package_function => {
+            Some(name) if package_function_matches(name, package_name) => {
                 Some(AurBuildStep::Package)
             }
             _ => None,
@@ -1864,6 +1900,18 @@ fn scan_build_steps(pkgbuild: &str, package_name: &str) -> Vec<AurBuildStep> {
         }
     }
     steps
+}
+
+fn package_function_matches(function: &str, package_name: &str) -> bool {
+    let Some(suffix) = function.strip_prefix("package_") else {
+        return false;
+    };
+    suffix == package_name
+        || (suffix.len() == package_name.len()
+            && suffix
+                .bytes()
+                .zip(package_name.bytes())
+                .all(|(actual, expected)| actual == if expected == b'-' { b'_' } else { expected }))
 }
 
 fn srcinfo_version(info: &SrcInfo) -> Result<String, AurReviewError> {
@@ -1890,15 +1938,17 @@ fn required_split_packages(
     if !info.package_dependencies.contains_key(requested_package) {
         return Err(AurReviewError::InvalidSrcInfo);
     }
-    let mut required = std::collections::BTreeSet::new();
+    let mut required =
+        Vec::with_capacity(info.package_dependencies.len().min(MAX_AUR_DEPENDENCIES));
     let mut pending = vec![requested_package];
     while let Some(package) = pending.pop() {
-        if !required.insert(package.to_owned()) {
+        if required.iter().any(|current| current == package) {
             continue;
         }
-        if required.len() > MAX_AUR_DEPENDENCIES {
+        if required.len() >= MAX_AUR_DEPENDENCIES {
             return Err(AurReviewError::Limit("required split packages"));
         }
+        required.push(package.to_owned());
         let dependencies = info
             .package_dependencies
             .get(package)
@@ -1906,13 +1956,18 @@ fn required_split_packages(
         for dependency in dependencies {
             let name = dependency_name(dependency)?;
             if let Some(provider) = split_provider(info, name)?
-                && !required.contains(provider)
+                && !required.iter().any(|current| current == provider)
+                && !pending.contains(&provider)
             {
+                if required.len() + pending.len() >= MAX_AUR_DEPENDENCIES {
+                    return Err(AurReviewError::Limit("required split packages"));
+                }
                 pending.push(provider);
             }
         }
     }
-    Ok(required.into_iter().collect())
+    required.sort_unstable();
+    Ok(required)
 }
 
 fn required_install_scripts(
@@ -1942,26 +1997,42 @@ fn required_provided_packages(
     info: &SrcInfo,
     required_packages: &[String],
 ) -> Result<Vec<String>, AurReviewError> {
-    let mut provided = std::collections::BTreeSet::new();
+    let mut provided = Vec::with_capacity(required_packages.len().min(MAX_AUR_DEPENDENCIES));
     for package_name in required_packages {
-        provided.insert(package_name.clone());
+        push_unique_limited(
+            &mut provided,
+            package_name,
+            MAX_AUR_DEPENDENCIES,
+            "provided packages",
+        )?;
         for declaration in info
             .package_provides
             .get(package_name)
             .ok_or(AurReviewError::InvalidSrcInfo)?
         {
-            provided.insert(dependency_name(declaration)?.to_owned());
+            push_unique_limited(
+                &mut provided,
+                dependency_name(declaration)?,
+                MAX_AUR_DEPENDENCIES,
+                "provided packages",
+            )?;
         }
     }
     if info.package_dependencies.len() == 1 && required_packages.len() == 1 {
         for declaration in &info.provides {
-            provided.insert(dependency_name(declaration)?.to_owned());
+            push_unique_limited(
+                &mut provided,
+                dependency_name(declaration)?,
+                MAX_AUR_DEPENDENCIES,
+                "provided packages",
+            )?;
         }
     }
-    if provided.is_empty() || provided.len() > MAX_AUR_DEPENDENCIES {
+    if provided.is_empty() {
         return Err(AurReviewError::Limit("provided packages"));
     }
-    Ok(provided.into_iter().collect())
+    provided.sort_unstable();
+    Ok(provided)
 }
 
 fn required_runtime_dependencies(
@@ -2125,6 +2196,22 @@ fn push_limited(
     Ok(())
 }
 
+fn push_unique_limited(
+    target: &mut Vec<String>,
+    value: &str,
+    limit: usize,
+    field: &'static str,
+) -> Result<(), AurReviewError> {
+    if target.iter().any(|current| current == value) {
+        return Ok(());
+    }
+    if target.len() >= limit {
+        return Err(AurReviewError::Limit(field));
+    }
+    target.push(value.to_owned());
+    Ok(())
+}
+
 fn push_ordered_limited(
     target: &mut Vec<String>,
     value: &str,
@@ -2143,11 +2230,28 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
     use tar::{Builder, Header};
 
     static TEST_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn snapshot_entry_read_allocates_exactly_and_rejects_size_changes() {
+        assert_eq!(
+            read_snapshot_entry_exact(&mut Cursor::new(b"entry"), 5, "size mismatch")
+                .expect("exact entry"),
+            b"entry",
+        );
+        assert!(matches!(
+            read_snapshot_entry_exact(&mut Cursor::new(b"entr"), 5, "size mismatch"),
+            Err(AurReviewError::InvalidSnapshot("size mismatch")),
+        ));
+        assert!(matches!(
+            read_snapshot_entry_exact(&mut Cursor::new(b"entry!"), 5, "size mismatch"),
+            Err(AurReviewError::InvalidSnapshot("size mismatch")),
+        ));
+    }
 
     const RPC: &[u8] = br#"{
       "resultcount": 1,
@@ -2412,6 +2516,29 @@ package_dotnet-sdk-bin() {
             aur_provider_candidates(PROVIDER_RPC, "virtual-sdk").expect("provider candidates"),
             ["virtual-sdk", "z-provider-bin"]
         );
+        let mut duplicate: serde_json::Value =
+            serde_json::from_slice(PROVIDER_RPC).expect("provider RPC JSON");
+        let results = duplicate["results"]
+            .as_array_mut()
+            .expect("provider results");
+        results.push(results[0].clone());
+        duplicate["resultcount"] = serde_json::json!(3);
+        assert_eq!(
+            aur_provider_candidates(
+                &serde_json::to_vec(&duplicate).expect("duplicate provider RPC"),
+                "virtual-sdk",
+            )
+            .expect("deduplicated provider candidates"),
+            ["virtual-sdk", "z-provider-bin"]
+        );
+        duplicate["results"][2]["URLPath"] = serde_json::json!("/invalid");
+        assert!(matches!(
+            aur_provider_candidates(
+                &serde_json::to_vec(&duplicate).expect("invalid duplicate provider RPC"),
+                "virtual-sdk",
+            ),
+            Err(AurReviewError::RpcMismatch)
+        ));
         let mismatched = String::from_utf8(PROVIDER_RPC.to_vec())
             .expect("provider RPC")
             .replace(
@@ -2477,6 +2604,71 @@ package_dotnet-sdk-bin() {
     }
 
     #[test]
+    fn package_function_names_match_exact_or_normalized_package_names() {
+        assert!(package_function_matches(
+            "package_visual-studio-code-bin",
+            "visual-studio-code-bin",
+        ));
+        assert!(package_function_matches(
+            "package_visual_studio_code_bin",
+            "visual-studio-code-bin",
+        ));
+        for function in [
+            "package_visual_studio_code_bin_extra",
+            "package_visual_studio-code-bin",
+            "visual_studio_code_bin",
+            "package_visual_studio_code",
+        ] {
+            assert!(!package_function_matches(
+                function,
+                "visual-studio-code-bin",
+            ));
+        }
+    }
+
+    #[test]
+    fn unique_bounded_values_reject_growth_before_retention() {
+        let mut values = Vec::new();
+        push_unique_limited(&mut values, "first", 2, "values").expect("first value");
+        push_unique_limited(&mut values, "second", 2, "values").expect("second value");
+        push_unique_limited(&mut values, "first", 2, "values").expect("duplicate at capacity");
+        assert_eq!(values, ["first", "second"]);
+        assert!(matches!(
+            push_unique_limited(&mut values, "third", 2, "values"),
+            Err(AurReviewError::Limit("values")),
+        ));
+        assert_eq!(values, ["first", "second"]);
+    }
+
+    #[test]
+    fn required_split_package_frontier_is_unique_and_bounded() {
+        fn split_chain(count: usize) -> SrcInfo {
+            let mut info = SrcInfo::default();
+            for index in 0..count {
+                let dependencies = if index + 1 < count {
+                    vec![format!("package-{:03}", index + 1)]
+                } else {
+                    Vec::new()
+                };
+                info.package_dependencies
+                    .insert(format!("package-{index:03}"), dependencies);
+            }
+            info
+        }
+
+        let exact = required_split_packages(&split_chain(MAX_AUR_DEPENDENCIES), "package-000")
+            .expect("exact split-package boundary");
+        assert_eq!(exact.len(), MAX_AUR_DEPENDENCIES);
+        assert_eq!(exact.first().map(String::as_str), Some("package-000"));
+        assert_eq!(exact.last().map(String::as_str), Some("package-255"));
+
+        assert!(matches!(
+            required_split_packages(&split_chain(MAX_AUR_DEPENDENCIES + 1), "package-000",),
+            Err(AurReviewError::Limit("required split packages")),
+        ));
+    }
+
+    #[test]
     fn common_provides_requires_one_unambiguous_output() {
         let info = parse_srcinfo(SRCINFO, "visual-studio-code-bin", "aarch64")
             .expect("single-output srcinfo");
@@ -2503,7 +2695,7 @@ package_dotnet-sdk-bin() {
             &[],
         );
         let dependency = graph_review("language-server-bin", &[], &["language-server"]);
-        let official = std::collections::BTreeSet::from(["official-runtime".to_owned()]);
+        let official = vec!["official-runtime".to_owned()];
         let graph =
             plan_reviewed_aur_graph(&[root.clone(), dependency.clone()], "editor-bin", &official)
                 .expect("reviewed graph");
@@ -2542,15 +2734,26 @@ package_dotnet-sdk-bin() {
         .concat();
         assert_eq!(&wire[..wire_length], expected);
 
-        let official_preferred = std::collections::BTreeSet::from([
-            "language-server".to_owned(),
-            "official-runtime".to_owned(),
-        ]);
+        let official_preferred = vec!["language-server".to_owned(), "official-runtime".to_owned()];
         assert_eq!(
             plan_reviewed_aur_graph(&[root], "editor-bin", &official_preferred)
                 .expect("official provider is preferred")
                 .package_bases,
             vec!["editor-bin"],
+        );
+
+        let root = graph_review(
+            "editor-bin",
+            &["z-runtime>=1", "a-runtime", "z-runtime>=2"],
+            &[],
+        );
+        let z_provider = graph_review("z-provider", &[], &["z-runtime"]);
+        let a_provider = graph_review("a-provider", &[], &["a-runtime"]);
+        assert_eq!(
+            plan_reviewed_aur_graph(&[root, z_provider, a_provider], "editor-bin", &[],)
+                .expect("deduplicated dependency topology")
+                .package_bases,
+            ["a-provider", "z-provider", "editor-bin"],
         );
     }
 
@@ -2558,11 +2761,7 @@ package_dotnet-sdk-bin() {
     fn aur_dependency_graph_rejects_missing_ambiguous_cyclic_and_unused_reviews() {
         let root = graph_review("root-bin", &["virtual-runtime"], &[]);
         assert_eq!(
-            plan_reviewed_aur_graph(
-                std::slice::from_ref(&root),
-                "root-bin",
-                &std::collections::BTreeSet::new(),
-            ),
+            plan_reviewed_aur_graph(std::slice::from_ref(&root), "root-bin", &[],),
             Err(AurBuildGraphError::MissingProvider(
                 "virtual-runtime".to_owned(),
             )),
@@ -2571,11 +2770,7 @@ package_dotnet-sdk-bin() {
         let first = graph_review("first-provider", &[], &["virtual-runtime"]);
         let second = graph_review("second-provider", &[], &["virtual-runtime"]);
         assert_eq!(
-            plan_reviewed_aur_graph(
-                &[root.clone(), first, second],
-                "root-bin",
-                &std::collections::BTreeSet::new(),
-            ),
+            plan_reviewed_aur_graph(&[root.clone(), first, second], "root-bin", &[],),
             Err(AurBuildGraphError::AmbiguousProvider(
                 "virtual-runtime".to_owned(),
             )),
@@ -2584,22 +2779,14 @@ package_dotnet-sdk-bin() {
         let cyclic_root = graph_review("cyclic-root", &["cyclic-dependency"], &[]);
         let cyclic_dependency = graph_review("cyclic-dependency", &["cyclic-root"], &[]);
         assert_eq!(
-            plan_reviewed_aur_graph(
-                &[cyclic_root, cyclic_dependency],
-                "cyclic-root",
-                &std::collections::BTreeSet::new(),
-            ),
+            plan_reviewed_aur_graph(&[cyclic_root, cyclic_dependency], "cyclic-root", &[],),
             Err(AurBuildGraphError::Cycle),
         );
 
         let unused = graph_review("unused", &[], &[]);
         let provider = graph_review("virtual-runtime", &[], &[]);
         assert_eq!(
-            plan_reviewed_aur_graph(
-                &[root, provider, unused],
-                "root-bin",
-                &std::collections::BTreeSet::new(),
-            ),
+            plan_reviewed_aur_graph(&[root, provider, unused], "root-bin", &[],),
             Err(AurBuildGraphError::DisconnectedReview),
         );
     }
@@ -2807,6 +2994,9 @@ package_dotnet-sdk-bin() {
     fn stages_and_reopens_a_sha512_remote_source() {
         let root = temporary_root("sha512-source-download");
         let checksum = AurSourceChecksum::Sha512(Sha512::digest(b"verified SHA-512 source").into());
+        let cache_key = checksum.cache_key();
+        assert_eq!(cache_key.len(), "sha512-".len() + 128);
+        assert!(cache_key.starts_with("sha512-"));
         let download = AurSourceDownload::begin(&root, "source.tar.gz", checksum, 1024)
             .expect("begin SHA-512 source");
         let mut output = download.duplicate_file().expect("source descriptor");
@@ -2902,6 +3092,16 @@ package_dotnet-sdk-bin() {
         assert_eq!(review.sources.len(), 2);
         assert_eq!(review.sources[1].architecture.as_deref(), Some("x86_64"));
         assert!(review.sources[1].expression.ends_with("/x64"));
+
+        let mut near_prefix = SRCINFO.to_vec();
+        near_prefix.extend_from_slice(
+            b"source_x86_64_extra = ignored::https://example.org/ignored\n\
+sha256sums_x86_64_extra = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        );
+        let info = parse_srcinfo(&near_prefix, "visual-studio-code-bin", "x86_64")
+            .expect("near-prefix architecture keys");
+        assert_eq!(info.architecture_sources.len(), 1);
+        assert_eq!(info.architecture_sha256.len(), 1);
     }
 
     #[test]
@@ -2936,6 +3136,20 @@ package_dotnet-sdk-bin() {
         assert_eq!(
             review_aur_package(
                 wrong_rpc.as_bytes(),
+                SRCINFO,
+                PKGBUILD,
+                "visual-studio-code-bin",
+                RepositoryArchitecture::Aarch64,
+            ),
+            Err(AurReviewError::RpcMismatch)
+        );
+        let wrong_snapshot = String::from_utf8(RPC.to_vec()).expect("RPC").replace(
+            "/cgit/aur.git/snapshot/visual-studio-code-bin.tar.gz",
+            "/cgit/aur.git/snapshot/visual-studio-code-bin.tar.gz.extra",
+        );
+        assert_eq!(
+            review_aur_package(
+                wrong_snapshot.as_bytes(),
                 SRCINFO,
                 PKGBUILD,
                 "visual-studio-code-bin",

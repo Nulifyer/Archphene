@@ -4236,10 +4236,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         unavailableMessage: Int,
     ): String? {
         val authority = "$packageName.documents"
+        val uriText = uri.toString()
         if (
             uri.scheme != "content" ||
             uri.authority != authority ||
-            uri.toString().toByteArray(Charsets.UTF_8).size !in 1..MAX_DOCUMENT_URI_BYTES
+            !boundedUtf8Text(uriText, MAX_DOCUMENT_URI_BYTES)
         ) {
             Toast.makeText(
                 this,
@@ -4283,7 +4284,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 DocumentsContract.getDocumentId(uri)
             }.getOrNull() ?: return null
         if (
-            documentId.toByteArray(Charsets.UTF_8).size !in 1..MAX_DOCUMENT_ID_BYTES ||
+            !boundedUtf8Text(documentId, MAX_DOCUMENT_ID_BYTES) ||
             documentId == DOCUMENTS_HOME_ID ||
             documentId == SHELL_STARTUP_DOCUMENT_ID
         ) {
@@ -4298,7 +4299,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 else -> documentId.substringAfterLast('/')
             }
         return name.takeIf { candidate ->
-            candidate.toByteArray(Charsets.UTF_8).size in 1..MAX_DOCUMENT_NAME_BYTES &&
+            boundedUtf8Text(candidate, MAX_DOCUMENT_NAME_BYTES) &&
                 candidate != "." &&
                 candidate != ".." &&
                 candidate.none { it.isISOControl() || it.isBidirectionalControl() }
@@ -4317,7 +4318,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         resultFlags: Int,
     ) {
         selectManagerSection(MANAGER_SECTION_FILES)
-        val encodedBytes = uri.toString().toByteArray(Charsets.UTF_8).size
+        val uriText = uri.toString()
         val grantedFlags =
             resultFlags and
                 (
@@ -4327,7 +4328,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 )
         if (
             uri.scheme != "content" ||
-            encodedBytes !in 1..MAX_FOLDER_URI_BYTES ||
+            !boundedUtf8Text(uriText, MAX_FOLDER_URI_BYTES) ||
             !DocumentsContract.isTreeUri(uri) ||
             grantedFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0 ||
             grantedFlags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION == 0
@@ -4382,14 +4383,17 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         includeStreams: Boolean,
     ): List<Uri> {
         val result = ArrayList<Uri>()
+        fun rejectOversizedBatch(): List<Uri> {
+            setTextIfChanged(
+                storageStatusView,
+                "Choose at most ${DocumentImportPolicy.MAX_DOCUMENTS} Android documents",
+            )
+            return emptyList()
+        }
         source.data?.let(result::add)
         source.clipData?.let { clip ->
-            if (clip.itemCount > DocumentImportPolicy.MAX_DOCUMENTS) {
-                setTextIfChanged(
-                    storageStatusView,
-                    "Choose at most ${DocumentImportPolicy.MAX_DOCUMENTS} Android documents",
-                )
-                return emptyList()
+            if (!DocumentImportPolicy.admitsAdditionalDocuments(result.size, clip.itemCount)) {
+                return rejectOversizedBatch()
             }
             repeat(clip.itemCount) { index ->
                 clip.getItemAt(index).uri?.let(result::add)
@@ -4404,7 +4408,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         @Suppress("DEPRECATION")
                         source.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
                     }
-                streams?.let(result::addAll)
+                streams?.let { incoming ->
+                    if (!DocumentImportPolicy.admitsAdditionalDocuments(result.size, incoming.size)) {
+                        return rejectOversizedBatch()
+                    }
+                    result.addAll(incoming)
+                }
             } else {
                 val stream =
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -4413,7 +4422,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         @Suppress("DEPRECATION")
                         source.getParcelableExtra(Intent.EXTRA_STREAM)
                     }
-                stream?.let(result::add)
+                stream?.let { incoming ->
+                    if (!DocumentImportPolicy.admitsAdditionalDocuments(result.size, 1)) {
+                        return rejectOversizedBatch()
+                    }
+                    result.add(incoming)
+                }
             }
         }
         return result

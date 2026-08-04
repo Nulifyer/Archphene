@@ -68,21 +68,80 @@ fn hex_sha256(bytes: [u8; 32]) -> String {
 }
 
 fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
-    let file = File::open(path)?;
+    let mut file = File::open(path)?;
     let declared_size = file.metadata()?.len();
-    if declared_size > limit as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "input exceeds its size limit",
-        ));
-    }
-    let mut bytes = Vec::with_capacity(declared_size as usize);
-    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit || fs::metadata(path)?.len() != declared_size {
+    let bytes = read_exact_input(&mut file, declared_size, limit)?;
+    if fs::metadata(path)?.len() != declared_size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "input changed or exceeded its size limit",
         ));
     }
     Ok(bytes)
+}
+
+fn read_exact_input(
+    reader: &mut impl Read,
+    declared_size: u64,
+    limit: usize,
+) -> io::Result<Vec<u8>> {
+    let length = usize::try_from(declared_size)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "input exceeds its size limit"))?;
+    if length > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input exceeds its size limit",
+        ));
+    }
+    let mut bytes = vec![0_u8; length];
+    reader.read_exact(&mut bytes).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "input changed or exceeded its size limit",
+            )
+        } else {
+            error
+        }
+    })?;
+    let mut overflow = [0_u8; 1];
+    if reader.read(&mut overflow)? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input changed or exceeded its size limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn exact_input_rejects_declared_size_changes() {
+        assert_eq!(
+            read_exact_input(&mut Cursor::new(b"input"), 5, 5).expect("exact input"),
+            b"input",
+        );
+        assert_eq!(
+            read_exact_input(&mut Cursor::new([]), 0, 5).expect("empty input"),
+            b"",
+        );
+        for bytes in [&b"inpu"[..], &b"input!"[..]] {
+            assert_eq!(
+                read_exact_input(&mut Cursor::new(bytes), 5, 5)
+                    .expect_err("size change")
+                    .kind(),
+                io::ErrorKind::InvalidData,
+            );
+        }
+        assert_eq!(
+            read_exact_input(&mut Cursor::new(b"input"), 5, 4)
+                .expect_err("limit")
+                .kind(),
+            io::ErrorKind::InvalidData,
+        );
+    }
 }

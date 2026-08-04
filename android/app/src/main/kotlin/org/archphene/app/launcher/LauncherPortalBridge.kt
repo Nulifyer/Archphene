@@ -32,6 +32,7 @@ import java.util.Locale
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+import org.archphene.app.boundedUtf8Text
 
 internal data class LauncherPortalSaveResult(
     val descriptor: ParcelFileDescriptor?,
@@ -283,7 +284,7 @@ internal class LauncherPortalBridge(
         }
         busSocket = socket
         val socketPath = socket.canonicalPath
-        check(socketPath.toByteArray(StandardCharsets.UTF_8).size < 100) {
+        check(fitsLauncherUnixSocketPath(socketPath, 100)) {
             "D-Bus socket path is too long"
         }
         val config = File(runtimeDirectory, "session.conf")
@@ -528,7 +529,10 @@ internal class LauncherPortalBridge(
                         return
                     }
                     descriptors = client.ancillaryFileDescriptors ?: emptyArray()
-                    val fields = request.split('\t')
+                    val fields = splitPortalRequest(request) ?: run {
+                        writeResponse(client, "ERROR\tINVALID_REQUEST")
+                        return
+                    }
                     if (
                         fields.isEmpty() ||
                         (
@@ -753,7 +757,7 @@ internal class LauncherPortalBridge(
 
     private fun validAccessibilityActionResponse(response: String): Boolean {
         if (response == "ERROR\tEMPTY") return true
-        val fields = response.split('\t', limit = 4)
+        val fields = splitPortalFields(response, 4) ?: return false
         val nodeId = fields.getOrNull(1)?.toIntOrNull()
         val action = fields.getOrNull(2).orEmpty()
         val encoded = fields.getOrNull(3).orEmpty()
@@ -1873,7 +1877,14 @@ internal class LauncherPortalBridge(
         check(canonicalDirectory.parentFile == savesBaseDirectory.canonicalFile) {
             "Portal save directory escaped its private base"
         }
-        for (entry in savesDirectory.listFiles() ?: error("Could not inspect portal saves")) {
+        for (
+            entry in
+                collectBoundedDirectoryEntries(
+                    savesDirectory,
+                    MAX_ACTIVE_SAVES,
+                    "Too many portal save entries",
+                )
+        ) {
             check(entry.canonicalFile.parentFile == canonicalDirectory && entry.isFile) {
                 "Unsafe stale portal save"
             }
@@ -1948,7 +1959,7 @@ internal class LauncherPortalBridge(
 
     private fun safeName(name: String): Boolean =
         name.length in 1..255 &&
-            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_DOCUMENT_NAME_BYTES &&
+            boundedUtf8Text(name, MAX_DOCUMENT_NAME_BYTES) &&
             name != "." &&
             name != ".." &&
             name.none { character ->
@@ -2006,7 +2017,7 @@ internal class LauncherPortalBridge(
                 if (response == "ERROR\tNOT_FOUND") {
                     true
                 } else {
-                    val fields = response.split('\t')
+                    val fields = splitPortalFields(response, 4) ?: return false
                     fields.size == 4 &&
                         fields[0] == "OK" &&
                         decodeFieldAllowEmpty(fields[1], MAX_SECRET_LABEL_BYTES) != null &&
@@ -2017,7 +2028,7 @@ internal class LauncherPortalBridge(
             "LIST_SECRETS",
             "CATALOG_SECRETS",
             -> {
-                val fields = response.split('\t')
+                val fields = splitPortalFields(response, 2) ?: return false
                 fields.size == 2 &&
                     fields[0] == "OK" &&
                     fields[1].toIntOrNull() in 0..MAX_SECRET_ITEMS
@@ -2037,7 +2048,7 @@ internal class LauncherPortalBridge(
             "STREAM_CAMERA_I420",
             -> response == "OK"
             "CAPTURE_CAMERA_JPEG" -> {
-                val fields = response.split('\t')
+                val fields = splitPortalFields(response, 4) ?: return false
                 fields.size == 4 &&
                     fields[0] == "OK" &&
                     fields[1].toIntOrNull() in 1..MAX_CAMERA_DIMENSION &&
@@ -2126,6 +2137,7 @@ internal class LauncherPortalBridge(
         private const val BROKER_IO_TIMEOUT_MILLIS = 1_000
         private const val MAX_BROKER_CLIENTS = 4
         private const val MAX_REQUEST_BYTES = 16_384
+        private const val MAX_REQUEST_FIELDS = 6
         private const val MAX_TITLE_BYTES = 512
         private const val MAX_NAME_BYTES = 512
         private const val MAX_DOCUMENT_NAME_BYTES = 255
@@ -2169,6 +2181,7 @@ internal class LauncherPortalBridge(
         private const val MAX_RECOVERED_SAVE_DIRECTORIES = 128
         private const val MAX_RECOVERED_SAVES = 32
         private const val MAX_RECOVERED_SAVE_BYTES = 1_024L * 1_024 * 1_024
+        private const val MAX_PORTAL_CACHE_ENTRIES = 4_096
         private const val MAX_RUNTIME_ENTRIES = 4
         private const val HEX = "0123456789abcdef"
         private val runtimeLifecycleLock = Any()
@@ -2228,6 +2241,28 @@ internal class LauncherPortalBridge(
         private val STALE_RUNTIME_DIRECTORY_NAME =
             Regex("p[1-9][0-9]*-[0-9a-f]{16}")
         private val RECOVERED_SAVE_NAME = Regex("Recovered portal save [0-9a-f]{32}")
+
+        internal fun splitPortalRequest(request: String): List<String>? =
+            splitPortalFields(request, MAX_REQUEST_FIELDS)
+
+        internal fun splitPortalFields(
+            value: String,
+            maximumFields: Int,
+        ): List<String>? {
+            require(maximumFields in 1..MAX_REQUEST_FIELDS)
+            val fields = ArrayList<String>(maximumFields)
+            var start = 0
+            while (fields.size < maximumFields) {
+                val delimiter = value.indexOf('\t', start)
+                if (delimiter < 0) {
+                    fields.add(value.substring(start))
+                    return fields
+                }
+                fields.add(value.substring(start, delimiter))
+                start = delimiter + 1
+            }
+            return null
+        }
 
         internal fun stopProcessBoundedly(
             process: java.lang.Process?,
@@ -2380,12 +2415,18 @@ internal class LauncherPortalBridge(
             ) {
                 "Invalid portal cache root"
             }
-            val directories =
-                cacheRoot.listFiles { entry ->
-                    entry.name.matches(STALE_RUNTIME_DIRECTORY_NAME)
-                } ?: error("Could not inspect stale portal runtime directories")
-            check(directories.size <= MAX_RECOVERED_SAVE_DIRECTORIES) {
-                "Too many stale portal runtime directories"
+            val directories = ArrayList<File>(MAX_RECOVERED_SAVE_DIRECTORIES)
+            visitBoundedDirectoryEntries(
+                cacheRoot,
+                MAX_PORTAL_CACHE_ENTRIES,
+                "Too many portal cache entries",
+            ) { entry ->
+                if (entry.name.matches(STALE_RUNTIME_DIRECTORY_NAME)) {
+                    check(directories.size < MAX_RECOVERED_SAVE_DIRECTORIES) {
+                        "Too many stale portal runtime directories"
+                    }
+                    directories.add(entry)
+                }
             }
             for (directory in directories) {
                 if (!shouldRecoverPortalPath(directory.toPath(), ownedPaths)) continue
@@ -2397,10 +2438,11 @@ internal class LauncherPortalBridge(
                     "Unsafe stale portal runtime directory"
                 }
                 val entries =
-                    directory.listFiles() ?: error("Could not inspect stale portal runtime")
-                check(entries.size <= MAX_RUNTIME_ENTRIES) {
-                    "Too many files in stale portal runtime directory"
-                }
+                    collectBoundedDirectoryEntries(
+                        directory,
+                        MAX_RUNTIME_ENTRIES,
+                        "Too many files in stale portal runtime directory",
+                    )
                 for (entry in entries) {
                     check(
                         !Files.isSymbolicLink(entry.toPath()) &&
@@ -2429,10 +2471,11 @@ internal class LauncherPortalBridge(
             val recoveryDirectory = File(checkNotNull(archRoot.parentFile), "portal-save-recovery")
             prepareRecoveryDirectory(recoveryDirectory)
             val directories =
-                base.listFiles() ?: error("Could not inspect stale portal save directories")
-            check(directories.size <= MAX_RECOVERED_SAVE_DIRECTORIES) {
-                "Too many stale portal save directories"
-            }
+                collectBoundedDirectoryEntries(
+                    base,
+                    MAX_RECOVERED_SAVE_DIRECTORIES,
+                    "Too many stale portal save directories",
+                )
             for (directory in directories) {
                 if (!shouldRecoverPortalPath(directory.toPath(), ownedPaths)) continue
                 val path = directory.toPath()
@@ -2446,10 +2489,12 @@ internal class LauncherPortalBridge(
                     "Unsafe stale portal save directory"
                 }
                 val entries =
-                    directory.listFiles() ?: error("Could not inspect stale portal save")
-                check(entries.size <= MAX_ACTIVE_SAVES) {
-                    "Too many files in stale portal save directory"
-                }
+                    collectBoundedDirectoryEntries(
+                        directory,
+                        MAX_ACTIVE_SAVES,
+                        "Too many files in stale portal save directory",
+                    )
+                val recoveryEntries = ArrayList<Pair<File, File?>>(entries.size)
                 for (entry in entries) {
                     val entryPath = entry.toPath()
                     if (Files.isDirectory(entryPath, LinkOption.NOFOLLOW_LINKS)) {
@@ -2459,12 +2504,17 @@ internal class LauncherPortalBridge(
                         ) {
                             "Unsafe stale portal save slot"
                         }
-                        val staged = entry.listFiles()
-                            ?: error("Could not inspect stale portal save slot")
-                        check(staged.size <= 1) {
-                            "Invalid stale portal save slot"
+                        val staged =
+                            collectBoundedDirectoryEntries(
+                                entry,
+                                1,
+                                "Invalid stale portal save slot",
+                            )
+                        val file = staged.singleOrNull()
+                        if (file == null) {
+                            recoveryEntries.add(entry to null)
+                            continue
                         }
-                        val file = staged.singleOrNull() ?: continue
                         check(
                             !Files.isSymbolicLink(file.toPath()) &&
                                 Files.isRegularFile(
@@ -2475,6 +2525,7 @@ internal class LauncherPortalBridge(
                         ) {
                             "Unsafe stale portal save"
                         }
+                        recoveryEntries.add(entry to file)
                     } else {
                         check(
                             !Files.isSymbolicLink(entryPath) &&
@@ -2483,15 +2534,11 @@ internal class LauncherPortalBridge(
                         ) {
                             "Unsafe legacy portal save"
                         }
+                        recoveryEntries.add(entry to entry)
                     }
                 }
-                for (entry in entries) {
-                    if (entry.isDirectory) {
-                        val staged = checkNotNull(entry.listFiles()).singleOrNull()
-                        if (staged != null) recoverPortalSaveFile(staged, recoveryDirectory)
-                    } else {
-                        recoverPortalSaveFile(entry, recoveryDirectory)
-                    }
+                for ((entry, staged) in recoveryEntries) {
+                    if (staged != null) recoverPortalSaveFile(staged, recoveryDirectory)
                     check(!entry.exists() || entry.delete()) {
                         "Could not remove stale portal save entry"
                     }

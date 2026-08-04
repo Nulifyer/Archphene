@@ -9,6 +9,7 @@ import java.io.File
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
@@ -105,7 +106,7 @@ internal class LauncherCameraBridge(
         if (
             !validBrokerAddress(brokerAddress) ||
             !prepareRuntimeDirectory() ||
-            socketPath.toByteArray(StandardCharsets.UTF_8).size >= UNIX_SOCKET_PATH_LIMIT
+            !fitsLauncherUnixSocketPath(socketPath, UNIX_SOCKET_PATH_LIMIT)
         ) {
             close()
             return false
@@ -480,43 +481,46 @@ internal class LauncherCameraBridge(
             if (sawBytes) publish()
         }
 
-        private fun cleanupRuntimeDirectory(
+        internal fun cleanupRuntimeDirectory(
             path: Path,
             log: Boolean,
+            reportFailure: (Throwable) -> Unit = { error ->
+                Log.w(TAG, "Could not remove camera runtime directory", error)
+            },
         ) {
             if (
                 !isRuntimeDirectoryName(path.fileName.toString()) ||
-                Files.isSymbolicLink(path) ||
-                !Files.isDirectory(path)
+                !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
             ) {
                 return
             }
-            var visited = 0
-            fun deleteChildren(
-                directory: Path,
-                depth: Int,
-            ) {
-                check(depth <= MAX_RUNTIME_DEPTH) { "Camera runtime nesting exceeds its bound" }
-                Files.newDirectoryStream(directory).use { entries ->
-                    for (entry in entries) {
+            runCatching {
+                val postorder = ArrayList<Path>(MAX_RUNTIME_ENTRIES + 1)
+                var visited = 0
+                fun collect(
+                    entry: Path,
+                    depth: Int,
+                ) {
+                    check(depth <= MAX_RUNTIME_DEPTH) {
+                        "Camera runtime nesting exceeds its bound"
+                    }
+                    if (depth > 0) {
                         check(++visited <= MAX_RUNTIME_ENTRIES) {
                             "Camera runtime entry count exceeds its bound"
                         }
-                        if (Files.isDirectory(entry) && !Files.isSymbolicLink(entry)) {
-                            deleteChildren(entry, depth + 1)
-                        } else {
-                            Files.deleteIfExists(entry)
+                    }
+                    if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) {
+                        Files.newDirectoryStream(entry).use { entries ->
+                            for (child in entries) collect(child, depth + 1)
                         }
                     }
+                    postorder.add(entry)
                 }
-                Files.deleteIfExists(directory)
-            }
-            runCatching { deleteChildren(path, 0) }
-                .onSuccess {
-                    if (log) Log.i(TAG, "Removed stale camera runtime directory")
-                }.onFailure { error ->
-                    Log.w(TAG, "Could not remove camera runtime directory", error)
-                }
+                collect(path, 0)
+                postorder.forEach(Files::deleteIfExists)
+            }.onSuccess {
+                if (log) Log.i(TAG, "Removed stale camera runtime directory")
+            }.onFailure(reportFailure)
         }
 
         private fun randomToken(): String {

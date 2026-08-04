@@ -9,6 +9,40 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import javax.net.ssl.SSLException
 
+internal fun boundedPackageJobMessage(message: String): String {
+    val output = StringBuilder(minOf(message.length, 192))
+    var bytes = 0
+    var index = 0
+    while (index < message.length && output.length < 192) {
+        val character = message[index]
+        if (
+            Character.isHighSurrogate(character) &&
+            (index + 1 >= message.length || !Character.isLowSurrogate(message[index + 1]))
+        ) {
+            return "Package operation"
+        }
+        if (Character.isLowSurrogate(character)) return "Package operation"
+        val codePoint =
+            when (character) {
+                '\t', '\r', '\n' -> ' '.code
+                else -> Character.codePointAt(message, index)
+            }
+        val characterCount = Character.charCount(codePoint)
+        val encodedBytes =
+            when {
+                codePoint <= 0x7f -> 1
+                codePoint <= 0x7ff -> 2
+                codePoint <= 0xffff -> 3
+                else -> 4
+            }
+        if (bytes + encodedBytes > 192 || output.length + characterCount > 192) break
+        output.appendCodePoint(codePoint)
+        bytes += encodedBytes
+        index += characterCount
+    }
+    return output.toString().ifEmpty { "Package operation" }
+}
+
 internal class InsufficientPackageStorageException(
     val requiredBytes: Long,
     val availableBytes: Long,
@@ -53,9 +87,9 @@ internal object PendingPackageMutationCodec {
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(bytes))
                 .toString()
-        val fields = text.split('\t')
+        val fields = splitMutationFields(text)
         require(
-            fields.size in 3..4 &&
+            fields != null &&
                 packageName.matches(fields[0]) &&
                 fields[2].length in 1..128 &&
                 fields[2].none { character ->
@@ -76,9 +110,24 @@ internal object PendingPackageMutationCodec {
             }
         return PendingPackageMutation(
             packageName = fields[0],
-            status = fields.drop(1).joinToString("\t"),
+            status = text.substring(fields[0].length + 1),
             install = install,
         )
+    }
+
+    private fun splitMutationFields(value: String): List<String>? {
+        val fields = ArrayList<String>(4)
+        var start = 0
+        while (true) {
+            val delimiter = value.indexOf('\t', start)
+            if (delimiter < 0) {
+                fields.add(value.substring(start))
+                return fields.takeIf { it.size in 3..4 }
+            }
+            if (fields.size == 3) return null
+            fields.add(value.substring(start, delimiter))
+            start = delimiter + 1
+        }
     }
 }
 
@@ -161,20 +210,24 @@ private object PackageRemovalListCodec {
                 .decode(ByteBuffer.wrap(bytes))
                 .toString()
         require(text.endsWith('\n'))
-        val lines = text.dropLast(1).split('\n')
-        require(lines.firstOrNull() == expectedHeader)
-        val summary = lines.getOrNull(1)?.split('\t').orEmpty()
+        var offset = 0
+        fun nextLine(): String? {
+            val end = text.indexOf('\n', offset)
+            if (end < 0) return null
+            return text.substring(offset, end).also { offset = end + 1 }
+        }
+        require(nextLine() == expectedHeader)
+        val summary = nextLine()?.let { splitExactFields(it, 2) }.orEmpty()
         val count = summary.getOrNull(1)?.toIntOrNull()
         require(
             summary.size == 2 &&
                 summary[0] == "removals" &&
                 count != null &&
-                count in 0..48 &&
-                lines.size == count + 2,
+                count in 0..48,
         )
         val removals = ArrayList<PlannedPackageRemoval>(count)
-        lines.drop(2).forEach { line ->
-            val fields = line.split('\t')
+        repeat(count) {
+            val fields = nextLine()?.let { splitExactFields(it, 3) }.orEmpty()
             require(
                 fields.size == 3 &&
                     fields[0] == "remove" &&
@@ -187,7 +240,26 @@ private object PackageRemovalListCodec {
             )
             removals += PlannedPackageRemoval(fields[1], fields[2])
         }
+        require(offset == text.length)
         return removals
+    }
+
+    private fun splitExactFields(
+        value: String,
+        expectedFields: Int,
+    ): List<String>? {
+        val fields = ArrayList<String>(expectedFields)
+        var start = 0
+        while (fields.size < expectedFields) {
+            val delimiter = value.indexOf('\t', start)
+            if (delimiter < 0) {
+                fields.add(value.substring(start))
+                return fields.takeIf { it.size == expectedFields }
+            }
+            fields.add(value.substring(start, delimiter))
+            start = delimiter + 1
+        }
+        return null
     }
 }
 

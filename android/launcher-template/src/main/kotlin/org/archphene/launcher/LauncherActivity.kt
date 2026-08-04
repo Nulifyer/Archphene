@@ -72,7 +72,6 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicBoolean
@@ -578,11 +577,7 @@ class LauncherActivity :
                                 title.length > MAX_DOCUMENT_TITLE_UTF16 ||
                                 suggestedName == null ||
                                 (operation == DOCUMENT_OPERATION_SAVE &&
-                                    (suggestedName.isBlank() ||
-                                        suggestedName.length > MAX_DOCUMENT_NAME_UTF16 ||
-                                        suggestedName.indexOf('/') >= 0 ||
-                                        suggestedName.indexOf('\\') >= 0 ||
-                                        suggestedName.indexOf('\u0000') >= 0)) ||
+                                    !LauncherDocumentNamePolicy.valid(suggestedName)) ||
                                 (operation != DOCUMENT_OPERATION_SAVE &&
                                     suggestedName.isNotEmpty()) ||
                                 mimeType == null ||
@@ -682,7 +677,7 @@ class LauncherActivity :
                             val uri = data.readString()
                             if (
                                 uri == null ||
-                                !validBrowserUri(uri) ||
+                                !LauncherBrowserUriPolicy.valid(uri) ||
                                 data.dataAvail() != 0
                             ) {
                                 return@runCatching false
@@ -2414,8 +2409,7 @@ class LauncherActivity :
             (internalRefresh && text.isNotEmpty()) ||
             action !in ACCESSIBILITY_ACTIONS ||
             text.length > MAX_ACCESSIBILITY_TEXT_UTF16 ||
-            text.toByteArray(StandardCharsets.UTF_8).size >
-            MAX_ACCESSIBILITY_TEXT_BYTES ||
+            !LauncherUtf8Policy.lengthAtMost(text, MAX_ACCESSIBILITY_TEXT_BYTES) ||
             (action != "set-text" && text.isNotEmpty())
         ) {
             return false
@@ -4261,7 +4255,7 @@ class LauncherActivity :
     }
 
     private fun safePortalFolderName(name: String): Boolean =
-        safeDocumentName(name) &&
+        LauncherDocumentNamePolicy.valid(name) &&
             name.none { character ->
                 character == '\u061c' ||
                     character == '\u200e' ||
@@ -4290,7 +4284,7 @@ class LauncherActivity :
             operation !in DOCUMENT_OPERATION_OPEN..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
             documents.size !in 1..MAX_OPEN_DOCUMENTS ||
             (operation == DOCUMENT_OPERATION_OPEN && documents.size != 1) ||
-            documents.any { document -> !safeDocumentName(document.displayName) }
+            documents.any { document -> !LauncherDocumentNamePolicy.valid(document.displayName) }
         ) {
             return false
         }
@@ -4339,22 +4333,9 @@ class LauncherActivity :
                 if (!cursor.moveToFirst()) return@use null
                 val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (index < 0) return@use null
-                cursor.getString(index)?.takeIf(::safeDocumentName)
+                cursor.getString(index)?.takeIf(LauncherDocumentNamePolicy::valid)
             }
         }.getOrNull()
-
-    private fun safeDocumentName(name: String): Boolean =
-        name.length in 1..MAX_DOCUMENT_NAME_UTF16 &&
-            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_DOCUMENT_NAME_BYTES &&
-            name != "." &&
-            name != ".." &&
-            name.none { character ->
-                character == '/' ||
-                    character == '\\' ||
-                    character == '\u0000' ||
-                    character.code < 32 ||
-                    character.code == 127
-            }
 
     private fun sendDocumentResult(
         requestId: Int,
@@ -4376,13 +4357,13 @@ class LauncherActivity :
                 result == DOCUMENT_RESULT_SUCCESS) ||
             (operation == DOCUMENT_OPERATION_OPEN &&
                 result == DOCUMENT_RESULT_SUCCESS &&
-                !safeDocumentName(displayName)) ||
+                !LauncherDocumentNamePolicy.valid(displayName)) ||
             (operation == DOCUMENT_OPERATION_SAVE &&
                 result == DOCUMENT_RESULT_SUCCESS &&
-                !safeDocumentName(displayName)) ||
+                !LauncherDocumentNamePolicy.valid(displayName)) ||
             (operation == DOCUMENT_OPERATION_DIRECTORY &&
                 result == DOCUMENT_RESULT_SUCCESS &&
-                !safeDocumentName(displayName))
+                !LauncherDocumentNamePolicy.valid(displayName))
         ) {
             return false
         }
@@ -4504,7 +4485,7 @@ class LauncherActivity :
     }
 
     private fun openAndroidUri(value: String) {
-        if (!validBrowserUri(value) || isFinishing || isDestroyed) {
+        if (!LauncherBrowserUriPolicy.valid(value) || isFinishing || isDestroyed) {
             return
         }
         try {
@@ -4692,7 +4673,7 @@ class LauncherActivity :
             isDestroyed ||
             title.isBlank() ||
             title.length > MAX_PRINT_TITLE_UTF16 ||
-            title.toByteArray(StandardCharsets.UTF_8).size > MAX_PRINT_TITLE_BYTES ||
+            !LauncherUtf8Policy.lengthAtMost(title, MAX_PRINT_TITLE_BYTES) ||
             title.any { character -> character.isISOControl() } ||
             !packageManager.hasSystemFeature(PackageManager.FEATURE_PRINTING)
         ) {
@@ -4896,26 +4877,6 @@ class LauncherActivity :
         if (document.exists() && !document.delete()) {
             Log.w(TAG, "Could not delete private print document")
         }
-    }
-
-    private fun validBrowserUri(value: String): Boolean {
-        if (
-            value.isBlank() ||
-            value.toByteArray(StandardCharsets.UTF_8).size > MAX_BROWSER_URI_BYTES ||
-            value.any { character -> character.isISOControl() }
-        ) {
-            return false
-        }
-        val uri = runCatching { URI(value) }.getOrNull() ?: return false
-        val scheme = uri.scheme ?: return false
-        return !uri.isOpaque &&
-            (
-                scheme.equals("http", ignoreCase = true) ||
-                    scheme.equals("https", ignoreCase = true)
-            ) &&
-            !uri.host.isNullOrBlank() &&
-            uri.rawUserInfo == null &&
-            (uri.port == -1 || uri.port in 1..65_535)
     }
 
     private fun applicationMetadata(): Bundle =
@@ -5127,7 +5088,6 @@ class LauncherActivity :
         private const val NOTIFICATION_PERMISSION_REQUESTED = "permission-requested"
         private const val LINUX_NOTIFICATION_CHANNEL = "linux-app"
         private const val LINUX_NOTIFICATION_ID = 1
-        private const val MAX_BROWSER_URI_BYTES = 4_096
         private const val MAX_PRINT_TITLE_UTF16 = 256
         private const val MAX_PRINT_TITLE_BYTES = 512
         private const val PRINT_DIRECTORY = "print"
@@ -5205,8 +5165,6 @@ class LauncherActivity :
         private const val DOCUMENT_RESULT_FAILED = 3
         private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_DOCUMENT_TITLE_UTF16 = 128
-        private const val MAX_DOCUMENT_NAME_UTF16 = 255
-        private const val MAX_DOCUMENT_NAME_BYTES = 255
         private const val MAX_DIRECTORY_ENTRIES = 10_000L
         private const val MAX_DIRECTORY_DEPTH = 64
         private const val MAX_DIRECTORY_PATH_BYTES = 4 * 1024

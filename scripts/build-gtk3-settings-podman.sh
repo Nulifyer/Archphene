@@ -28,12 +28,12 @@ readelf -h "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settin
 podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace "$image" bash -lc '
 set -euo pipefail
 source_file=/workspace/native/archphene-gtk3-settings/archphene_gtk3_settings.c
-glib_archive=/tmp/glib2-2.88.2-1-aarch64.pkg.tar.xz
+glib_archive=/tmp/glib2-2.88.3-1-aarch64.pkg.tar.xz
 glib_root=/tmp/archphene-aarch64-glib
 curl -fsSL \
-  https://ca.us.mirror.archlinuxarm.org/aarch64/core/glib2-2.88.2-1-aarch64.pkg.tar.xz \
+  https://ca.us.mirror.archlinuxarm.org/aarch64/core/glib2-2.88.3-1-aarch64.pkg.tar.xz \
   -o "$glib_archive"
-echo "662ee8c1c9546b10e394cac1d25205417b76580fab5d51524c5377e10024b34c  $glib_archive" |
+echo "a1498d94c3ff5e52ea157a09bb55bceaa7f94e47ded7c74ac5611d0e0b9b5ec8  $glib_archive" |
   sha256sum -c -
 mkdir -p "$glib_root"
 bsdtar -xf "$glib_archive" -C "$glib_root" \

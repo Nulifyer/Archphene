@@ -80,6 +80,25 @@ class ProjectSyncJournalCodecTest {
         }
     }
 
+    @Test
+    fun maximumAggregateFieldsRemainWithinEncodedLimit() {
+        val maximumField = "a".repeat(NativeRuntime.PROJECT_SYNC_BUFFER_SIZE)
+        val maximumJournal =
+            journal.copy(
+                treeUri = maximumField,
+                parentUri = maximumField,
+                path = maximumField,
+                targetName = maximumField,
+                stagingName = maximumField,
+                backupName = maximumField,
+                expected = maximumField,
+            )
+        assertEquals(
+            maximumJournal,
+            ProjectSyncJournalCodec.decode(ProjectSyncJournalCodec.encode(maximumJournal)),
+        )
+    }
+
     private fun refreshChecksum(encoded: ByteArray) {
         val bodyLength = encoded.size - 8
         val checksum = CRC32().apply { update(encoded, 0, bodyLength) }.value

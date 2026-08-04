@@ -10,15 +10,29 @@ internal data class NativeStorageUsage(
 )
 
 internal fun decodeNativeStorageUsage(value: String): NativeStorageUsage {
-    val fields = value.removeSuffix("\n").split('\t')
-    require(fields.size == 9 && fields[0] == "S1") {
+    require(value.length >= 3 && value[0] == 'S' && value[1] == '1' && value[2] == '\t') {
         "Storage inventory returned an invalid summary"
     }
-    val numbers =
-        LongArray(8) { index ->
-            fields[index + 1].toLongOrNull()
-                ?: throw IllegalArgumentException("Storage inventory returned an invalid value")
+    val numbers = LongArray(8)
+    var fieldStart = 3
+    for (index in numbers.indices) {
+        var fieldEnd = fieldStart
+        while (fieldEnd < value.length && value[fieldEnd] != '\t' && value[fieldEnd] != '\n') {
+            fieldEnd++
         }
+        if (index < numbers.lastIndex) {
+            require(fieldEnd < value.length && value[fieldEnd] == '\t') {
+                "Storage inventory returned an invalid summary"
+            }
+        } else {
+            require(fieldEnd == value.length || (fieldEnd == value.lastIndex && value[fieldEnd] == '\n')) {
+                "Storage inventory returned an invalid summary"
+            }
+        }
+        numbers[index] = value.substring(fieldStart, fieldEnd).toLongOrNull()
+            ?: throw IllegalArgumentException("Storage inventory returned an invalid value")
+        fieldStart = fieldEnd + 1
+    }
     require(numbers.all { number -> number >= 0L }) {
         "Storage inventory returned a negative value"
     }

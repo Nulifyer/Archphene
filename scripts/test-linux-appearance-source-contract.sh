@@ -139,6 +139,31 @@ if ! grep -Fq 'g_file_monitor_directory(' "$gtk_live" &&
 fi
 ! grep -Fq 'g_timeout_add(' "$gtk_live" \
   || archphene_die 'GTK live settings still poll and allocate continuously'
+for forbidden_api in 'g_key_file_load_from_file(' 'g_file_get_contents(' \
+    'gtk_css_provider_load_from_path'; do
+  ! grep -Fq "$forbidden_api" "$gtk_live" \
+    || archphene_die "GTK live settings still use unbounded path API $forbidden_api"
+done
+for bounded_contract in 'O_RDONLY | O_CLOEXEC | O_NOFOLLOW' \
+    'g_try_malloc(ARCHPHENE_APPEARANCE_FILE_LIMIT + 1)' \
+    'g_key_file_load_from_data(' 'gtk_css_provider_load_from_data'; do
+  grep -Fq "$bounded_contract" "$gtk_live" \
+    || archphene_die "GTK live settings are missing bounded read contract $bounded_contract"
+done
+gtk_reader_tmp="$(mktemp -d)"
+trap 'rm -rf "$gtk_reader_tmp"' EXIT
+gtk_reader_test="$gtk_reader_tmp/bounded-reader-test"
+read -r -a gtk_reader_flags <<< \
+  "$(pkg-config --cflags --libs gio-2.0 gmodule-2.0 glib-2.0)"
+cc -DARCHPHENE_BOUNDED_READER_TEST -o "$gtk_reader_test" "$gtk_live" \
+  "${gtk_reader_flags[@]}"
+dd if=/dev/zero of="$gtk_reader_tmp/exact" bs=65536 count=1 status=none
+cp "$gtk_reader_tmp/exact" "$gtk_reader_tmp/overflow"
+printf x >> "$gtk_reader_tmp/overflow"
+ln -s exact "$gtk_reader_tmp/symlink"
+"$gtk_reader_test" "$gtk_reader_tmp/exact" accept
+"$gtk_reader_test" "$gtk_reader_tmp/overflow" reject
+"$gtk_reader_test" "$gtk_reader_tmp/symlink" reject
 for toolkit_contract in RTLD_NOLOAD '"libgtk-4.so.1"' '"libgtk-3.so.0"' \
     '"libadwaita-1.so.0"'; do
   grep -Fq "$toolkit_contract" "$gtk_live" \
@@ -147,7 +172,7 @@ for toolkit_contract in RTLD_NOLOAD '"libgtk-4.so.1"' '"libgtk-3.so.0"' \
 done
 ! grep -Fq -- '--allow-shlib-undefined' "$gtk_build" \
   || archphene_die 'GTK settings bridge must not defer its GLib symbols to an arbitrary target process'
-grep -Fq '662ee8c1c9546b10e394cac1d25205417b76580fab5d51524c5377e10024b34c' "$gtk_build" \
+grep -Fq 'a1498d94c3ff5e52ea157a09bb55bceaa7f94e47ded7c74ac5611d0e0b9b5ec8' "$gtk_build" \
   || archphene_die 'GTK settings bridge is missing its pinned AArch64 GLib sysroot digest'
 for architecture in x86_64 aarch64; do
   settings_module="$ARCHPHENE_ROOT/prebuilt/gtk3-compat/$architecture/libarchphene_gtk3_settings.so"

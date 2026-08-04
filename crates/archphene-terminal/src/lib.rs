@@ -1552,10 +1552,7 @@ impl Terminal {
         let mut colors = [0_u32; MAX_OSC_COLOR_OPERATIONS];
         let mut queries = [false; MAX_OSC_COLOR_OPERATIONS];
         let mut count = 0;
-        loop {
-            let Some(index_field) = fields.next() else {
-                break;
-            };
+        while let Some(index_field) = fields.next() {
             let Some(color_field) = fields.next() else {
                 return;
             };
@@ -3228,7 +3225,7 @@ const fn parse_hex_digit(byte: u8) -> Option<u8> {
 
 fn decode_base64(input: &[u8], output: &mut [u8]) -> Option<usize> {
     let padding = input.iter().rev().take_while(|byte| **byte == b'=').count();
-    if padding > 2 || (padding != 0 && input.len() % 4 != 0) {
+    if padding > 2 || (padding != 0 && !input.len().is_multiple_of(4)) {
         return None;
     }
     let encoded = &input[..input.len().checked_sub(padding)?];

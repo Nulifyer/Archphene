@@ -69,5 +69,17 @@ class PackageCompatibilityStateTest {
         }
     }
 
+    @Test
+    fun rejectsExcessFieldsAndExact16KiBTabFlood() {
+        for (wire in listOf(
+            "bridge-eligible\t3\t12\t47\t2\tnone\t-\textra\n",
+            "\t".repeat(16 * 1024 - 1) + "\n",
+        )) {
+            assertThrows(IllegalStateException::class.java) {
+                decodePackageCompatibility(wire.ascii())
+            }
+        }
+    }
+
     private fun String.ascii(): ByteArray = toByteArray(StandardCharsets.US_ASCII)
 }

@@ -32,10 +32,15 @@ internal class ProjectSyncAndroidTreeScanner(
         publishProgress(0, 0)
         val result = LinkedHashMap<String, ProjectSyncRemoteEntry>()
         val progress = Progress()
+        val rootDocumentId =
+            DocumentsContract
+                .getTreeDocumentId(treeUri)
+                .takeIf(::safeProjectSyncDocumentId)
+                ?: throw SecurityException("Android provider returned an unsafe root document ID")
         scanChildren(
             activeHandle = activeHandle,
             treeUri = treeUri,
-            parentDocumentId = DocumentsContract.getTreeDocumentId(treeUri),
+            parentDocumentId = rootDocumentId,
             prefix = "",
             depth = 0,
             projection =
@@ -79,8 +84,8 @@ internal class ProjectSyncAndroidTreeScanner(
                 checkCancellation()
                 val documentId =
                     cursor.getString(0)
-                        ?.takeIf(String::isNotEmpty)
-                        ?: throw SecurityException("Android provider returned no document ID")
+                        ?.takeIf(::safeProjectSyncDocumentId)
+                        ?: throw SecurityException("Android provider returned an unsafe document ID")
                 if (documentId in ignoredDocumentIds) {
                     continue
                 }
@@ -96,7 +101,10 @@ internal class ProjectSyncAndroidTreeScanner(
                 if (projectSyncUtf8Length(relativePath) > MAX_PATH_BYTES) {
                     throw SecurityException("Android project path is too long")
                 }
-                val mime = cursor.getString(2) ?: "application/octet-stream"
+                val mime =
+                    (cursor.getString(2) ?: "application/octet-stream")
+                        .takeIf(::safeProjectSyncMime)
+                        ?: throw SecurityException("Android provider returned an unsafe MIME type")
                 val directory = mime == DocumentsContract.Document.MIME_TYPE_DIR
                 val documentUri =
                     DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)

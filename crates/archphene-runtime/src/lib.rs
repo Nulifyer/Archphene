@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -1922,36 +1921,29 @@ impl RuntimeHost {
         reviews.push(root.clone());
         reviews.extend(self.aur_dependency_reviews.iter().cloned());
         let targets = aur_build_environment_targets(&reviews)?;
-        let borrowed: Vec<&str> = targets.iter().map(String::as_str).collect();
+        let mut borrowed = Vec::with_capacity(targets.len());
+        borrowed.extend(targets.iter().map(String::as_str));
         let package_runtime = self
             .package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?;
         let initial = package_runtime.partition_targets_for_fresh_root(&borrowed)?;
-        let official: BTreeSet<String> = initial.official_targets().iter().cloned().collect();
-        let graph = match plan_reviewed_aur_graph(&reviews, &root.package_name, &official) {
-            Ok(graph) => graph,
-            Err(AurBuildGraphError::MissingProvider(_))
-                if !initial.unresolved_targets().is_empty() =>
+        let graph =
+            match plan_reviewed_aur_graph(&reviews, &root.package_name, initial.official_targets())
             {
-                self.aur_build_graph = None;
-                self.aur_build_resolution = None;
-                self.aur_build_closure = None;
-                return Ok(initial);
-            }
-            Err(_) => return Err(PackageRuntimeError::InvalidPayload),
-        };
-        let aur_dependencies: BTreeSet<&str> = graph
-            .edges
-            .iter()
-            .map(|edge| edge.dependency.as_str())
-            .collect();
-        let final_targets: Vec<&str> = targets
-            .iter()
-            .map(String::as_str)
-            .filter(|target| !aur_dependencies.contains(target))
-            .collect();
-        let partition = package_runtime.partition_targets_for_fresh_root(&final_targets)?;
+                Ok(graph) => graph,
+                Err(AurBuildGraphError::MissingProvider(_))
+                    if !initial.unresolved_targets().is_empty() =>
+                {
+                    self.aur_build_graph = None;
+                    self.aur_build_resolution = None;
+                    self.aur_build_closure = None;
+                    return Ok(initial);
+                }
+                Err(_) => return Err(PackageRuntimeError::InvalidPayload),
+            };
+        borrowed.retain(|target| !graph.edges.iter().any(|edge| edge.dependency == *target));
+        let partition = package_runtime.partition_targets_for_fresh_root(&borrowed)?;
         if !partition.unresolved_targets().is_empty() {
             return Err(PackageRuntimeError::InvalidPayload);
         }
@@ -2297,10 +2289,10 @@ impl RuntimeHost {
         self.pty_sessions
             .close(handle)
             .map_err(PackageRuntimeError::from)?;
-        if self.pty_sessions.is_empty() {
-            if let Some(marker) = self.session_marker.as_ref() {
-                remove_session_marker(marker)?;
-            }
+        if self.pty_sessions.is_empty()
+            && let Some(marker) = self.session_marker.as_ref()
+        {
+            remove_session_marker(marker)?;
         }
         Ok(())
     }
@@ -2384,7 +2376,7 @@ fn aur_dependency_name(value: &str) -> Result<&str, PackageRuntimeError> {
 
 fn aur_build_environment_targets(
     reviews: &[AurReview],
-) -> Result<BTreeSet<String>, PackageRuntimeError> {
+) -> Result<Vec<String>, PackageRuntimeError> {
     if reviews.is_empty() || reviews.len() > 32 {
         return Err(PackageRuntimeError::InvalidPayload);
     }
@@ -2392,13 +2384,10 @@ fn aur_build_environment_targets(
     // already exists. Resolve both so the same verified closure can provision
     // the isolated builder and later install every runtime dependency into a
     // new shared Archphene root without a second, implicit download set.
-    let mut targets = BTreeSet::from(["base".to_owned(), "base-devel".to_owned()]);
+    let mut targets = Vec::with_capacity(256);
+    targets.push("base".to_owned());
+    targets.push("base-devel".to_owned());
     for review in reviews {
-        let required_packages: BTreeSet<&str> = review
-            .required_packages
-            .iter()
-            .map(String::as_str)
-            .collect();
         for dependency in review
             .dependencies
             .iter()
@@ -2406,15 +2395,21 @@ fn aur_build_environment_targets(
             .chain(review.check_dependencies.iter())
         {
             let name = aur_dependency_name(dependency)?;
-            if required_packages.contains(name) {
+            if review
+                .required_packages
+                .iter()
+                .any(|package| package == name)
+                || targets.iter().any(|target| target == name)
+            {
                 continue;
             }
-            targets.insert(name.to_owned());
-            if targets.len() > 256 {
+            if targets.len() >= 256 {
                 return Err(PackageRuntimeError::OutputLimit);
             }
+            targets.push(name.to_owned());
         }
     }
+    targets.sort_unstable();
     Ok(targets)
 }
 
@@ -2561,12 +2556,30 @@ mod tests {
             &["cmake", "glibc"],
         );
         assert_eq!(
-            aur_build_environment_targets(&[root, helper])
-                .expect("aggregate build targets")
-                .into_iter()
-                .collect::<Vec<_>>(),
+            aur_build_environment_targets(&[root, helper]).expect("aggregate build targets"),
             ["aur-helper", "base", "base-devel", "cmake", "glibc"]
         );
+    }
+
+    #[test]
+    fn aur_build_targets_enforce_the_unique_target_limit_before_allocation() {
+        let dependencies: Vec<String> = (0..255)
+            .map(|index| format!("dependency-{index}"))
+            .collect();
+        let borrowed: Vec<&str> = dependencies.iter().map(String::as_str).collect();
+        let accepted = test_aur_review("root", "root", &["root"], &borrowed[..254]);
+        assert_eq!(
+            aur_build_environment_targets(&[accepted])
+                .expect("256 aggregate targets")
+                .len(),
+            256
+        );
+
+        let rejected = test_aur_review("root", "root", &["root"], &borrowed);
+        assert!(matches!(
+            aur_build_environment_targets(&[rejected]),
+            Err(PackageRuntimeError::OutputLimit)
+        ));
     }
 
     #[test]

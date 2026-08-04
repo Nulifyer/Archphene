@@ -7,12 +7,23 @@ internal object LauncherIntentMimePolicy {
     fun parseSpec(spec: String): List<String>? {
         if (spec.length > MAX_SPEC_UTF16) return null
         if (spec.isEmpty()) return emptyList()
-        val types = spec.split(';')
-        return types.takeIf {
-            it.size <= MAX_TYPES &&
-                it.distinct().size == it.size &&
-                it.all(::valid)
+        val types = ArrayList<String>(MAX_TYPES)
+        val seen = HashSet<String>(MAX_TYPES * 4 / 3 + 1)
+        var start = 0
+        while (types.size < MAX_TYPES) {
+            val delimiter = spec.indexOf(';', start)
+            val type =
+                if (delimiter < 0) {
+                    spec.substring(start)
+                } else {
+                    spec.substring(start, delimiter)
+                }
+            if (!valid(type) || !seen.add(type)) return null
+            types.add(type)
+            if (delimiter < 0) return types
+            start = delimiter + 1
         }
+        return null
     }
 
     fun matches(

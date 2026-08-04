@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
 
-readonly required_java=26.0.1
+readonly required_java=26.0.2
 readonly required_gradle=9.6.1
 readonly required_wrapper_sha=497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7
 readonly required_distribution_sha=9c0f7faeeb306cb14e4279a3e084ca6b596894089a0638e68a07c945a32c9e14

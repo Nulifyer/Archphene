@@ -35,4 +35,38 @@ class PackageRemovalPlanCodecTest {
             )
         }
     }
+
+    @Test
+    fun exact_removal_limit_decodes_without_collecting_all_lines() {
+        val plan =
+            buildString {
+                append("org.archphene.package-removal-plan.v1\nremovals\t48\n")
+                repeat(48) { index -> append("remove\tpackage-$index\t1.0-$index\n") }
+            }
+        assertEquals(48, PackageRemovalPlanCodec.decode(plan.toByteArray()).size)
+    }
+
+    @Test
+    fun excess_lines_and_fields_are_rejected_during_parsing() {
+        val excessLines =
+            buildString(16 * 1024) {
+                append("org.archphene.package-removal-plan.v1\nremovals\t0\n")
+                while (length < 16 * 1024) append('\n')
+            }
+        assertEquals(16 * 1024, excessLines.toByteArray().size)
+        assertThrows(IllegalArgumentException::class.java) {
+            PackageRemovalPlanCodec.decode(excessLines.toByteArray())
+        }
+
+        val excessFields =
+            buildString(16 * 1024) {
+                append("org.archphene.package-removal-plan.v1\nremovals\t1\n")
+                while (length < 16 * 1024 - 1) append(if (length % 2 == 0) 'x' else '\t')
+                append('\n')
+            }
+        assertEquals(16 * 1024, excessFields.toByteArray().size)
+        assertThrows(IllegalArgumentException::class.java) {
+            PackageRemovalPlanCodec.decode(excessFields.toByteArray())
+        }
+    }
 }

@@ -7,7 +7,6 @@ import android.security.keystore.KeyProperties
 import android.system.Os
 import android.system.OsConstants
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -27,7 +26,6 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -44,6 +42,49 @@ internal class LauncherSecretStore(filesDirectory: File) {
         val contentType: String,
         val secretBytes: Int,
     )
+
+    internal class BoundedIndexBuffer(maximumBytes: Int) {
+        internal val bytes = ByteArray(maximumBytes)
+        internal var size: Int = 0
+            private set
+
+        internal fun append(value: Int) {
+            requireCapacity(1)
+            bytes[size++] = value.toByte()
+        }
+
+        internal fun append(value: String) {
+            val encoded = value.toByteArray(StandardCharsets.UTF_8)
+            append(encoded)
+        }
+
+        internal fun append(value: ByteArray) {
+            requireCapacity(value.size)
+            value.copyInto(bytes, size)
+            size += value.size
+        }
+
+        internal fun appendUnsignedShort(value: Int) {
+            if (value !in 0..0xffff) throw IOException("Secret index value is out of range")
+            requireCapacity(2)
+            bytes[size++] = (value ushr 8).toByte()
+            bytes[size++] = value.toByte()
+        }
+
+        internal fun appendInt(value: Int) {
+            requireCapacity(4)
+            bytes[size++] = (value ushr 24).toByte()
+            bytes[size++] = (value ushr 16).toByte()
+            bytes[size++] = (value ushr 8).toByte()
+            bytes[size++] = value.toByte()
+        }
+
+        internal fun requireCapacity(additionalBytes: Int) {
+            if (additionalBytes < 0 || additionalBytes > bytes.size - size) {
+                throw IOException("Secret index is too large")
+            }
+        }
+    }
 
     private data class Record(
         val id: String,
@@ -146,61 +187,60 @@ internal class LauncherSecretStore(filesDirectory: File) {
     @Synchronized
     fun list(outputDescriptor: FileDescriptor): Int {
         ensureDirectory()
-        val result = JSONArray()
+        val result = BoundedIndexBuffer(MAX_INDEX_BYTES)
+        result.append('['.code)
+        var count = 0
         for (file in recordFiles()) {
             val record = decrypt(file)
             try {
-                result.put(
-                    JSONObject()
-                        .put("id", record.id)
-                        .put("label", record.label)
-                        .put("attributes", JSONObject(record.attributes))
-                        .put("contentType", record.contentType),
-                )
+                count =
+                    appendIndexRecord(
+                        result,
+                        count,
+                        record.id,
+                        record.label,
+                        record.attributes,
+                        record.contentType,
+                    )
             } finally {
                 Arrays.fill(record.secret, 0)
             }
         }
-        val encoded = result.toString().toByteArray(StandardCharsets.UTF_8)
-        if (encoded.size > MAX_INDEX_BYTES) throw IOException("Secret index is too large")
-        writeOutput(outputDescriptor, encoded)
-        return result.length()
+        result.append(']'.code)
+        writeOutput(outputDescriptor, result.bytes, result.size)
+        return count
     }
 
     @Synchronized
     fun catalog(outputDescriptor: FileDescriptor): Int {
         ensureDirectory()
         val files = recordFiles()
-        val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { output ->
-            output.writeInt(CATALOG_MAGIC)
-            output.writeByte(CATALOG_VERSION)
-            output.writeShort(files.size)
-            for (file in files) {
-                val record = decrypt(file)
-                try {
-                    writeCatalogString(output, record.id)
-                    writeCatalogString(output, record.label)
-                    writeCatalogString(output, record.contentType)
-                    val attributes = JSONObject(record.attributes)
-                    val keys = ArrayList<String>(attributes.length())
-                    val iterator = attributes.keys()
-                    while (iterator.hasNext()) keys.add(iterator.next())
-                    keys.sort()
-                    output.writeByte(keys.size)
-                    for (key in keys) {
-                        writeCatalogString(output, key)
-                        writeCatalogString(output, attributes.getString(key))
-                    }
-                    output.writeInt(record.secret.size)
-                } finally {
-                    Arrays.fill(record.secret, 0)
+        val output = BoundedIndexBuffer(MAX_INDEX_BYTES)
+        output.appendInt(CATALOG_MAGIC)
+        output.append(CATALOG_VERSION)
+        output.appendUnsignedShort(files.size)
+        for (file in files) {
+            val record = decrypt(file)
+            try {
+                writeCatalogString(output, record.id)
+                writeCatalogString(output, record.label)
+                writeCatalogString(output, record.contentType)
+                val attributes = JSONObject(record.attributes)
+                val keys = ArrayList<String>(attributes.length())
+                val iterator = attributes.keys()
+                while (iterator.hasNext()) keys.add(iterator.next())
+                keys.sort()
+                output.append(keys.size)
+                for (key in keys) {
+                    writeCatalogString(output, key)
+                    writeCatalogString(output, attributes.getString(key))
                 }
+                output.appendInt(record.secret.size)
+            } finally {
+                Arrays.fill(record.secret, 0)
             }
         }
-        val encoded = bytes.toByteArray()
-        if (encoded.size > MAX_INDEX_BYTES) throw IOException("Secret catalog is too large")
-        writeOutput(outputDescriptor, encoded)
+        writeOutput(outputDescriptor, output.bytes, output.size)
         return files.size
     }
 
@@ -318,7 +358,7 @@ internal class LauncherSecretStore(filesDirectory: File) {
         }
     }
 
-    private companion object {
+    internal companion object {
         private const val STORE_DIRECTORY = "secret-store"
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         private const val KEY_ALIAS = "archphene-secret-store-v1"
@@ -350,6 +390,47 @@ internal class LauncherSecretStore(filesDirectory: File) {
             Regex("[0-9a-f]{64}\\.secret\\.tmp-[0-9a-f]{1,16}")
         private val STORE_ENTRY_NAME =
             Regex("(?:${RECORD_NAME.pattern})|(?:${TEMPORARY_NAME.pattern})")
+
+        internal fun appendIndexRecord(
+            output: BoundedIndexBuffer,
+            count: Int,
+            id: String,
+            label: String,
+            attributes: String,
+            contentType: String,
+        ): Int {
+            if (count != 0) output.append(','.code)
+            output.append(
+                "{\"id\":${jsonString(id)},\"label\":${jsonString(label)}," +
+                    "\"attributes\":$attributes,\"contentType\":${jsonString(contentType)}}",
+            )
+            return Math.addExact(count, 1)
+        }
+
+        private fun jsonString(value: String): String =
+            buildString(value.length + 2) {
+                append('"')
+                for (character in value) {
+                    when (character) {
+                        '"' -> append("\\\"")
+                        '\\' -> append("\\\\")
+                        '\b' -> append("\\b")
+                        '\u000C' -> append("\\f")
+                        '\n' -> append("\\n")
+                        '\r' -> append("\\r")
+                        '\t' -> append("\\t")
+                        else -> {
+                            if (character.code < 0x20) {
+                                append("\\u")
+                                append(character.code.toString(16).padStart(4, '0'))
+                            } else {
+                                append(character)
+                            }
+                        }
+                    }
+                }
+                append('"')
+            }
 
         private fun encodeRecord(record: Record): ByteArray {
             val id = record.id.toByteArray(StandardCharsets.UTF_8)
@@ -460,7 +541,9 @@ internal class LauncherSecretStore(filesDirectory: File) {
         private fun writeOutput(
             descriptor: FileDescriptor,
             value: ByteArray,
+            length: Int = value.size,
         ) {
+            if (length !in 0..value.size) throw IllegalArgumentException("Invalid output length")
             val stat = Os.fstat(descriptor)
             if (stat.st_mode and OsConstants.S_IFMT != OsConstants.S_IFREG) {
                 throw IllegalArgumentException("Secret output must be a regular file")
@@ -470,7 +553,7 @@ internal class LauncherSecretStore(filesDirectory: File) {
                 Os.ftruncate(duplicate.fileDescriptor, 0)
                 Os.lseek(duplicate.fileDescriptor, 0, OsConstants.SEEK_SET)
                 ParcelFileDescriptor.AutoCloseOutputStream(duplicate).use { output ->
-                    output.write(value)
+                    output.write(value, 0, length)
                     output.flush()
                 }
             } catch (error: Exception) {
@@ -510,14 +593,15 @@ internal class LauncherSecretStore(filesDirectory: File) {
             return result.toString()
         }
 
-        private fun writeCatalogString(
-            output: DataOutputStream,
+        internal fun writeCatalogString(
+            output: BoundedIndexBuffer,
             value: String,
         ) {
             val encoded = value.toByteArray(StandardCharsets.UTF_8)
             if (encoded.size > 0xffff) throw IOException("Secret catalog string is too large")
-            output.writeShort(encoded.size)
-            output.write(encoded)
+            output.requireCapacity(2 + encoded.size)
+            output.appendUnsignedShort(encoded.size)
+            output.append(encoded)
         }
 
         private fun readString(

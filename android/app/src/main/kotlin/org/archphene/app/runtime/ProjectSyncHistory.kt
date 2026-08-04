@@ -2,7 +2,6 @@ package org.archphene.app.runtime
 
 import android.util.AtomicFile
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -35,8 +34,10 @@ internal object ProjectSyncHistoryCodec {
         check(entries.size <= MAX_ENTRIES) {
             "Project synchronization history has too many entries"
         }
-        val body = ByteArrayOutputStream()
-        DataOutputStream(body).use { output ->
+        return encodeCrc32Bounded(
+            MAX_HISTORY_ENCODED_BYTES,
+            "Project synchronization history is oversized",
+        ) { output ->
             output.write(MAGIC)
             output.writeInt(entries.size)
             entries.forEach { entry ->
@@ -51,18 +52,6 @@ internal object ProjectSyncHistoryCodec {
                 output.writeField(entry.message, MAX_MESSAGE_BYTES)
                 output.writeInt(entry.conflictPaths.size)
                 entry.conflictPaths.forEach { output.writeField(it, MAX_PATH_BYTES) }
-            }
-        }
-        val bodyBytes = body.toByteArray()
-        val checksum = CRC32().apply { update(bodyBytes) }.value
-        val encoded = ByteArrayOutputStream(bodyBytes.size + CHECKSUM_BYTES)
-        DataOutputStream(encoded).use { output ->
-            output.write(bodyBytes)
-            output.writeLong(checksum)
-        }
-        return encoded.toByteArray().also {
-            check(it.size <= MAX_HISTORY_ENCODED_BYTES) {
-                "Project synchronization history is oversized"
             }
         }
     }
@@ -168,7 +157,7 @@ internal object ProjectSyncHistoryCodec {
         entry.conflictPaths.forEach { path ->
             check(
                 encodedLength(path) <= MAX_PATH_BYTES &&
-                    path.split('/').all(::safeProjectSyncName),
+                    safeProjectSyncPath(path),
             ) {
                 "Project synchronization history path is unsafe"
             }
@@ -202,7 +191,7 @@ internal object ProjectSyncHistoryCodec {
             .toString()
     }
 
-    private fun encodedLength(value: String): Int = value.toByteArray(StandardCharsets.UTF_8).size
+    private fun encodedLength(value: String): Int = projectSyncUtf8Length(value)
 
     private fun safeDisplayText(
         value: String,

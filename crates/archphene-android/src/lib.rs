@@ -8,6 +8,12 @@ use archphene_runtime::RuntimeHost;
 const MAX_RUNTIME_HANDLES: usize = 4;
 
 #[cfg(any(target_os = "android", test))]
+const MAX_PACKAGE_CACHE_SELECTION_ITEMS: usize = 256;
+
+#[cfg(any(target_os = "android", test))]
+const MAX_STORAGE_REQUEST_FIELDS: usize = 3;
+
+#[cfg(any(target_os = "android", test))]
 #[derive(Default)]
 struct RuntimeSlot {
     generation: u32,
@@ -129,6 +135,33 @@ fn completed_aur_graph_base_count(
     completed_base_count
 }
 
+#[cfg(any(target_os = "android", test))]
+fn parse_package_cache_selection(request: &str) -> Option<Vec<&str>> {
+    let mut packages = Vec::with_capacity(MAX_PACKAGE_CACHE_SELECTION_ITEMS);
+    for package in request.split('\n') {
+        if package.is_empty() || packages.len() == MAX_PACKAGE_CACHE_SELECTION_ITEMS {
+            return None;
+        }
+        packages.push(package);
+    }
+    Some(packages)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn parse_storage_request_fields(request: &str, field_count: usize) -> Option<Vec<String>> {
+    if field_count == 0 || field_count > MAX_STORAGE_REQUEST_FIELDS {
+        return None;
+    }
+    let mut fields = Vec::with_capacity(field_count);
+    for field in request.split('\t') {
+        if field.is_empty() || fields.len() == field_count {
+            return None;
+        }
+        fields.push(field.to_owned());
+    }
+    (fields.len() == field_count).then_some(fields)
+}
+
 #[cfg(target_os = "android")]
 mod android {
     #![allow(unsafe_code)]
@@ -175,7 +208,10 @@ mod android {
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
     use sha2::{Digest, Sha256};
 
-    use super::{MAX_RUNTIME_HANDLES, RuntimeRegistry, completed_aur_graph_base_count};
+    use super::{
+        MAX_RUNTIME_HANDLES, RuntimeRegistry, completed_aur_graph_base_count,
+        parse_package_cache_selection, parse_storage_request_fields,
+    };
 
     const ERROR_INVALID_HANDLE: jint = -1;
     const ERROR_INVALID_ARGUMENT: jint = -2;
@@ -1040,11 +1076,7 @@ mod android {
             // Java buffer remains live for this native call.
             unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
         let request = str::from_utf8(request).map_err(|_| ERROR_INVALID_ARGUMENT)?;
-        let fields: Vec<String> = request.split('\t').map(str::to_owned).collect();
-        if fields.len() != field_count || fields.iter().any(String::is_empty) {
-            return Err(ERROR_INVALID_ARGUMENT);
-        }
-        Ok(fields)
+        parse_storage_request_fields(request, field_count).ok_or(ERROR_INVALID_ARGUMENT)
     }
 
     fn parse_mapping_id(value: &str) -> Result<[u8; 16], jint> {
@@ -3719,8 +3751,7 @@ mod android {
             Ok(report) => report,
             Err(error) => return copy_package_error(&error, output),
         };
-        let dependency_names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
-        if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+        if let Err(error) = package_runtime.install_dependencies(&dependencies) {
             return copy_package_error(&error, output);
         }
         let mut install_input = VerifiedAurArchive {
@@ -3917,8 +3948,7 @@ mod android {
                 output,
             )
         } else {
-            let dependency_names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
-            if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+            if let Err(error) = package_runtime.install_dependencies(&dependencies) {
                 return copy_package_error(&error, output);
             }
             copy_aur_install_result(
@@ -4076,9 +4106,7 @@ mod android {
                 output,
             )
         } else {
-            let dependency_names: Vec<&str> =
-                runtime_dependencies.iter().map(String::as_str).collect();
-            if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+            if let Err(error) = package_runtime.install_dependencies(&runtime_dependencies) {
                 return copy_package_error(&error, output);
             }
             copy_aur_install_result(
@@ -6753,13 +6781,9 @@ mod android {
         let Ok(request) = str::from_utf8(request) else {
             return i64::from(ERROR_INVALID_ARGUMENT);
         };
-        let packages: Vec<&str> = request.split('\n').collect();
-        if packages.is_empty()
-            || packages.len() > 256
-            || packages.iter().any(|item| item.is_empty())
-        {
+        let Some(packages) = parse_package_cache_selection(request) else {
             return i64::from(ERROR_INVALID_ARGUMENT);
-        }
+        };
         let Ok(mut registry) = registry().lock() else {
             return i64::from(ERROR_INTERNAL);
         };
@@ -7305,6 +7329,43 @@ mod tests {
             assert!(registry.create().is_some());
         }
         assert!(registry.create().is_none());
+    }
+
+    #[test]
+    fn package_cache_selection_is_bounded_before_collection() {
+        let maximum = std::iter::repeat_n("pkg", MAX_PACKAGE_CACHE_SELECTION_ITEMS)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            parse_package_cache_selection(&maximum).map(|packages| packages.len()),
+            Some(MAX_PACKAGE_CACHE_SELECTION_ITEMS),
+        );
+
+        let overflow = format!("{maximum}\npkg");
+        assert!(parse_package_cache_selection(&overflow).is_none());
+        assert!(parse_package_cache_selection("").is_none());
+        assert!(parse_package_cache_selection("pkg\n").is_none());
+    }
+
+    #[test]
+    fn storage_request_fields_are_bounded_before_cloning() {
+        assert_eq!(
+            parse_storage_request_fields("root\tdocument\tfingerprint", 3),
+            Some(vec![
+                "root".to_owned(),
+                "document".to_owned(),
+                "fingerprint".to_owned(),
+            ]),
+        );
+        assert!(parse_storage_request_fields("root\tdocument\textra", 2).is_none());
+        assert!(parse_storage_request_fields("root\t\tdocument", 3).is_none());
+        assert!(parse_storage_request_fields("root", 0).is_none());
+        assert!(parse_storage_request_fields("root\tdocument\tfingerprint\textra", 4).is_none());
+
+        let overflow = std::iter::repeat_n("x", 4_096)
+            .collect::<Vec<_>>()
+            .join("\t");
+        assert!(parse_storage_request_fields(&overflow, 3).is_none());
     }
 
     #[test]

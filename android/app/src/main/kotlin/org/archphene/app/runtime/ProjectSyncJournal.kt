@@ -2,7 +2,6 @@ package org.archphene.app.runtime
 
 import android.util.AtomicFile
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -40,30 +39,22 @@ internal data class ProjectSyncJournal(
 internal object ProjectSyncJournalCodec {
     fun encode(journal: ProjectSyncJournal): ByteArray {
         validate(journal)
-        val body = ByteArrayOutputStream()
-        DataOutputStream(body).use { output ->
-            output.write(JOURNAL_MAGIC)
-            output.writeInt(journal.operation)
-            output.writeInt(journal.phase)
-            output.writeBoolean(journal.hadOriginal)
-            output.writeField(journal.treeUri)
-            output.writeField(journal.parentUri)
-            output.writeField(journal.path)
-            output.writeField(journal.targetName)
-            output.writeField(journal.stagingName)
-            output.writeField(journal.backupName)
-            output.writeField(journal.expected)
-        }
-        val bodyBytes = body.toByteArray()
-        val checksum = CRC32().apply { update(bodyBytes) }.value
-        val encoded = ByteArrayOutputStream(bodyBytes.size + 8)
-        DataOutputStream(encoded).use { output ->
-            output.write(bodyBytes)
-            output.writeLong(checksum)
-        }
-        return encoded.toByteArray().also {
-            check(it.size <= MAX_JOURNAL_BYTES) {
-                "Project synchronization journal is oversized"
+        return encodeCrc32Bounded(
+            MAX_JOURNAL_BYTES,
+            "Project synchronization journal is oversized",
+        ) { output ->
+            with(output) {
+                write(JOURNAL_MAGIC)
+                writeInt(journal.operation)
+                writeInt(journal.phase)
+                writeBoolean(journal.hadOriginal)
+                writeField(journal.treeUri)
+                writeField(journal.parentUri)
+                writeField(journal.path)
+                writeField(journal.targetName)
+                writeField(journal.stagingName)
+                writeField(journal.backupName)
+                writeField(journal.expected)
             }
         }
     }

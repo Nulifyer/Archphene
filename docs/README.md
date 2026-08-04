@@ -22,6 +22,7 @@ This directory contains current documentation for using, building, and developin
 ## Developers
 
 - [Architecture](architecture.md)
+- [Detailed project plan](../todo.md)
 - [Development and testing](development.md)
 - [Package and wrapper repositories](package-repositories.md)
 - [Contributing](../CONTRIBUTING.md)
@@ -29,6 +30,10 @@ This directory contains current documentation for using, building, and developin
 
 ## Documentation policy
 
-Documents in `docs/` describe the current intended product and development model. They should be updated when behavior or supported workflows change.
+Documents in `docs/` describe the current intended product and development
+model. The roadmap is the public direction, `todo.md` is the detailed forward
+plan, `project-status.md` is the implementation evidence ledger, and
+`compatibility-matrix.md` records supported application claims. They should be
+updated when behavior or supported workflows change.
 
 Documents in `research/` preserve dated evidence, rejected approaches, feasibility work, and source reviews. Research is useful context, but it is not a promise that the current application implements every described capability.

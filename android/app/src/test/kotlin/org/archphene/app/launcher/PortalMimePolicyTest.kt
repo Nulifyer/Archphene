@@ -22,11 +22,24 @@ class PortalMimePolicyTest {
         assertNull(PortalMimePolicy.parse("image/p*"))
         assertNull(PortalMimePolicy.parse("*/png"))
         assertNull(PortalMimePolicy.parse("image/png;"))
+        assertEquals(
+            (0 until PortalMimePolicy.MAX_TYPES).map { index -> "application/x-$index" },
+            PortalMimePolicy.parse(
+                (0 until PortalMimePolicy.MAX_TYPES).joinToString(";") { index ->
+                    "application/x-$index"
+                },
+            ),
+        )
         assertNull(
             PortalMimePolicy.parse(
                 (0..PortalMimePolicy.MAX_TYPES).joinToString(";") { index ->
                     "application/x-$index"
                 },
+            ),
+        )
+        assertNull(
+            PortalMimePolicy.parse(
+                "TEXT/" + "A".repeat(PortalMimePolicy.MAX_SPEC_UTF16 - "TEXT/".length),
             ),
         )
     }

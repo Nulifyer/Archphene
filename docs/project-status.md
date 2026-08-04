@@ -1,8 +1,12 @@
 # Project status
 
-Updated: 2026-08-01
+Updated: 2026-08-04
 
-This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
+This page is the evidence ledger for implemented and validated behavior.
+Package search does not imply package compatibility. Chronological checkpoints
+record their state at the time of validation. The authoritative forward plan is
+[`todo.md`](../todo.md); supported application claims are maintained in the
+[compatibility matrix](compatibility-matrix.md).
 
 ## SuperTux checkpoint
 
@@ -76,7 +80,7 @@ The unrelated user-owned modification to
 ## Greenfield Rust + Kotlin replacement
 
 The new `android/app` shell and root Rust workspace now build with Gradle 9.6.1,
-AGP 9.3, its built-in Kotlin 2.2.10 plugin, JDK 26.0.1, SDK/Build Tools 36.0.0,
+AGP 9.3, its built-in Kotlin 2.2.10 plugin, JDK 26.0.2, SDK/Build Tools 36.0.0,
 NDK 29.0.14206865, and Rust/Cargo 1.88.0. The committed Gradle wrapper and
 distribution have official SHA-256 checksums, resolved Gradle artifacts are
 hash-verified, Cargo is locked, and the native container base is immutable.
@@ -190,6 +194,37 @@ preference state/restoration, helper diagnostics, stable processes, camera
 pause/resume while Settings is foreground, fatal logs, and measured
 full-device status/navigation-bar luminance.
 
+Generated-launcher framework accessibility search now validates the caller's
+query before case normalization. At most 1,024 UTF-16 code units are admitted;
+limit-plus-one returns no matches without allocating a lowercase copy, while
+null and blank queries retain their prior empty result. Three direct JVM tests
+cover exact admission, overflow, null, and blank input. Launcher-template unit
+tests and lint pass with zero errors, as do both exact-ABI manager builds that
+package the release template. After installing the rebuilt AArch64 manager,
+the physical Samsung retained a stable Foot process pair and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/accessibility-search-bound-foot-20260804`.
+
+The live GTK bridge no longer reads mutable shared-home `settings.ini` and
+`gtk.css` through GLib allocate-to-EOF path APIs. One 64 KiB-plus-one reader
+opens with `O_NOFOLLOW|O_CLOEXEC`, requires a regular file, and binds device,
+inode, mode, size, modification time, and change time across the completed
+read. Settings parsing and GTK 3/4 CSS loading consume those bounded snapshots;
+the toolkit does not reopen the CSS path. The host contract accepts exact
+64 KiB and rejects limit-plus-one and symbolic-link fixtures. Warning-denied
+x86_64/AArch64 helper builds, regenerated prebuilt hashes, and exact manager APK
+builds pass; the AArch64 sysroot pin moved to available GLib 2.88.3 with its
+verified SHA-256 after the retired 2.88.2 URL returned 404. The rebuilt Samsung
+manager staged the byte-exact helper
+`ff138b4b426394cae6eb70c61c60d66bd662f46a6e59f03bc98c886aa26f8c60`.
+Runtime/hash evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/gtk-bounded-config-20260804`, and the
+clean full-device package-runtime regression is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/gtk-bounded-config-foot-20260804`.
+Direct GTK visual runtime evidence is not claimed in this checkpoint: both
+installed Mousepad and Seahorse wrappers are rejected by launcher trust before
+registry lookup and require explicit wrapper repair.
+
 The Qt 6 platform-theme module likewise watches `kdeglobals` through an
 event-driven exact-file watcher created after Qt's event dispatcher is ready;
 it re-arms after atomic replacement, uses a directory fallback only if the file
@@ -200,6 +235,21 @@ manager APKs installed on the emulator and Samsung. Current shared-root,
 unmodified KCalc opens Android DocumentsUI for single-file Open and Save/create
 on both devices; cancellation returns to the same live dialog without changing
 a file.
+
+Appearance publication now reopens the mutable shared-root `kdeglobals` file
+with `O_NOFOLLOW|O_CLOEXEC`, reads through a fixed 64 KiB-plus-one buffer, and
+requires stable device, inode, mode, length, modification time, and change time
+across the path, opened descriptor, completed read, and final path. Concurrent
+growth can no longer make the prior `fs::read` allocate past the policy ceiling,
+and a link, replacement, shrink, growth, or permission change fails closed
+before Archphene replaces user state. Exact-limit, limit-plus-one, static
+overflow, and symbolic-link tests bring the pinned process suite to 31 passing
+tests; warning-denied Clippy and both exact-ABI manager builds pass. The rebuilt
+manager on the physical Samsung reopened its 1,394-byte managed KDE config,
+started a stable Foot session, rendered exact command output in a 1080×2202
+frame, and emitted clean scoped logs. The full-device screenshot and hashed
+config evidence are under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/kde-config-bounded-read-foot-20260804`.
 
 The dense single-screen manager scaffold has been split into focused Packages,
 Files, and Terminal sections with a persistent bottom navigation surface. The
@@ -235,6 +285,21 @@ changes and restores App scale, verifies the restored value after process
 death, and resolves a real pacman package on each architecture. It reports zero
 Archphene-owned violations or fatal events on the x86_64 emulator and physical
 AArch64 Samsung and records visually inspected full-device screenshots.
+
+Bootstrap stale-AUR-output cleanup now bounds every matching directory entry,
+not only successfully deleted regular files. It processes at most 64 matches
+and visits only match 65 to report truncation; admitted non-regular entries stay
+untouched and their warning paths remain bounded. A direct JVM regression uses
+65 matching directories and proves exactly 64 unsafe results, one truncation,
+zero removals, and no cleanup error. The complete JDK 26 app unit/lint gate and
+exact x86_64/AArch64 manager builds pass. On physical Samsung, rebuilt manager
+startup produced the same 64-plus-one boundary against 65 test-owned cache
+directories, retained all of them, and removed the fixture afterward. Runtime
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/stale-aur-output-bound-20260804`;
+the subsequent stable 1080×2202 Foot full-device gate is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/stale-aur-output-bound-foot-20260804`.
+
 Samsung `IdsController` lifecycle events are retained with their count as
 explicitly reported framework-only evidence rather than hidden or attributed
 to Archphene. Preferred-shell and storage-onboarding writes now use the same
@@ -312,6 +377,30 @@ Acquire fences transfer to Android, previous-buffer release fences are polled
 without blocking the compositor and explicitly closed, and resize generations
 remain bounded. Exact reruns hold Foot flat at 157 Samsung and 133 emulator
 descriptors while preserving visually inspected output.
+
+The CPU-upload buffer allocator now checks the complete usage combination with
+`AHardwareBuffer_isSupported` before requiring `GPU_COLOR_OUTPUT`. If that
+preferred allocation fails, it retries the established CPU-write and
+GPU-sampled baseline instead of rejecting Surface attachment on a device with a
+narrower usage matrix. Both exact-ABI compositor builds, the pinned compositor
+tests, and warning-denied Clippy pass. A standalone physical Samsung `SM-S908U`
+probe reports `supported=1 allocate=0` for both combinations. The rebuilt
+arm64-v8a manager then passes the Foot visual gate at 2316×978 with stable
+processes, visible command output, bounded geometry, clean scoped logs, and
+inspected full-device evidence under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/hardware-buffer-usage-fallback-20260804`.
+
+The retained-frame-to-Android RGBA conversion now has a host-testable bounded
+slice boundary shared with the locked `AHardwareBuffer` path. Its warmed test
+copies one clipped two-row damage region into a padded preallocated destination
+1,000 times with zero measured allocations, verifies exact channel conversion,
+and proves that undamaged pixels and stride padding remain byte-identical. The
+pinned compositor suite now has 107 passing tests; warning-denied Clippy and
+both exact-ABI release builds pass. After installing the rebuilt arm64-v8a
+manager, the physical Samsung Foot gate retained stable processes and a
+1080×2202 output, rendered the exact command result without clipping, and
+produced clean scoped logs. The inspected full-device evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/hardware-buffer-zero-allocation-20260804`.
 
 At 840 dp and wider, the same stateful controls are composed once into a
 persistent navigation rail, a two-column package workspace, side-by-side file
@@ -547,8 +636,9 @@ Android confirmation; the system installer and full-device app drawer showed
 the package Foot icon, a cold restart settled at three current launchers, and
 Foot still produced a real Wayland frame. The run also fixed stale-template
 reconciliation for a wrapper already awaiting removal and removed the two
-debug desktop fixtures without touching Linux user data. Capability
-declaration derivation and per-launcher compatibility diagnostics remain open.
+debug desktop fixtures without touching Linux user data. Capability declaration
+derivation and per-launcher compatibility diagnostics are now implemented; the
+remaining launcher gaps are listed in `Pending`.
 
 The manager now builds minimized launcher wrappers from one staged template,
 patches bounded manifest identity fields, signs each APK with a persistent
@@ -888,6 +978,18 @@ complete prior cache listing afterward. Both real populated caches and the
 259/248-package databases remain unchanged; full-device captures verify the
 phone inventory and confirmation layouts.
 
+The native selected-cache cleanup boundary now enforces its 256-package limit
+during request decoding rather than collecting every newline-delimited item and
+checking the count afterward. Its parser preallocates exactly 256 borrowed
+entries, admits the exact limit, and rejects item 257, empty input, and trailing
+empty entries before cache cleanup or runtime-registry access. The crate's five
+direct Rust tests pass; the new boundary test includes exact-limit and
+limit-plus-one cases. App unit tests and lint plus both exact-ABI builds pass.
+The subsequent Foot regression on the physical Samsung passed with a 34 px
+font, 126 px controls, stable Android and Linux processes, and visible command
+output. Full-device evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-cache-selection-bound-foot-20260804`.
+
 All user-started manager work now shares one Service-retention predicate:
 bootstrap, catalog refresh, search/resolution, package mutation/cache cleanup,
 bounded commands, storage import/mirroring, and the interactive shell cannot be
@@ -901,7 +1003,8 @@ real operation without slowing release code: both Pixel Launcher and Samsung
 One UI Recents gestures prove foreground promotion, active task-removal
 retention, cache completion, shutdown ordering, empty cache, exact cold-restart
 result restoration, scoped fatal logs, and visually inspected full-device
-screenshots. Verified partial-transaction repair and rollback remain pending.
+screenshots. Verified partial-transaction repair and rollback subsequently
+passed on both exact ABIs; remaining package work is listed in `Pending`.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
@@ -920,6 +1023,33 @@ relationships, rename collision preservation, delete and cleanup; directly
 attacks dotfiles, `..`, and a live symlink; then browses the retained visible
 fixture through Android DocumentsUI and captures a full-device screenshot.
 
+DocumentsProvider child enumeration now counts every physical directory entry
+before filtering hidden names and symbolic links. A query admits exactly 4,096
+physical entries and rejects entry 4,097 while preserving the independent
+visible-child ceiling and deterministic sorting. Three direct JVM tests cover
+the exact hidden-entry boundary including a symbolic link, physical
+limit-plus-one, and visible limit-plus-one; the complete app unit/lint gate and
+both exact-ABI manager builds pass. The rebuilt physical Samsung then passed
+the normal provider and shell-startup DocumentsUI gate with inspected
+1080×2202 full-device captures. The captures and hashes are under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/documents-provider-physical-bound-visual-20260804`;
+the physical overflow boundary is established by the JVM tests rather than a
+direct shell provider query because Android requires a granted DocumentsUI
+capability for that Binder route.
+
+Exported DocumentsProvider IDs now enforce their 1,024-byte UTF-8 and
+32-segment policies before allocating a complete encoded copy or splitting all
+slash-delimited components. The code-point walker rejects malformed surrogates
+and returns immediately on byte overflow. The path parser retains at most 32
+validated visible segments and rejects segment 33 before creating it. Direct
+JVM tests cover Home, exact depth, depth overflow, an exact 1,024-character
+510-segment flood, byte overflow, and malformed high/low surrogates. The
+complete app unit/lint gate and both exact-ABI builds pass. The subsequent
+physical-Samsung Foot regression retained stable Android and Linux processes,
+a 34 px font, 126 px controls, and visible command output in inspected
+full-device frames. Evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/document-id-segments-bound-foot-20260804`.
+
 The manager now owns exactly one persisted Android tree capability selected
 through DocumentsUI. Its Service validates the real persisted read/write flags
 off the main thread after restart, reports read-only and revoked states,
@@ -937,9 +1067,75 @@ atomically publishes a non-replacing project. Exact recursive content, empty
 files, `.git/config`, stale-stage recovery, chunk-level cancellation with
 complete cleanup and retry, process-restart persistence, grant removal with
 retained Linux content, scoped logs, cleanup, and full-device visuals pass on
-both exact-ABI targets. It is not yet a live or conflict-safe synchronizer:
-subsequent pull/push, change manifests, conflict copies, deletion policy,
-sync-plan cancellation, and export/share remain open.
+both exact-ABI targets. It subsequently evolved into a conflict-safe,
+crash-recoverable synchronized mirror with pull, push, deletion, conflict
+copies, cancellation, and history. It remains an explicit mirror rather than
+a live SAF mount.
+
+Project synchronization now bounds mutable SAF provider metadata before it is
+retained or copied into additional objects. Root and child document IDs admit
+at most 4 KiB of UTF-8, MIME types and display names at most 255 bytes, and
+control, bidirectional-spoof, or malformed-surrogate fields fail before URI
+construction, directory-queue insertion, or result-map retention. The bounded
+UTF-8 predicate exits as soon as a field crosses its limit instead of scanning
+the remainder. Android's Cursor necessarily materializes the provider's one
+field value first, but Archphene no longer retains or duplicates an unbounded
+ID/MIME value across its 10,000-entry tree. Five direct protocol tests cover
+exact ASCII and multibyte boundaries, limit-plus-one, spoofing, controls, and
+malformed Unicode; app unit tests and lint plus both exact-ABI builds pass.
+After installing the rebuilt AArch64 manager, physical Samsung retained a
+stable Foot process pair and exact visible output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-provider-field-bound-foot-20260804`.
+
+The initial Android project-mirror traversal now applies that same 4 KiB safe
+document-ID predicate to the tree root before its first query and immediately
+after each child Cursor value is materialized. The root was formerly unchecked,
+and children required only nonempty text before URI construction and directory
+queue retention. Oversized, control/bidirectional, and malformed-surrogate IDs
+now fail at the same boundary as later synchronization. Existing protocol tests
+cover exact ASCII/multibyte limits, limit-plus-one, spoofing, and malformed
+Unicode; app unit/lint and both exact-ABI builds pass. The subsequent Samsung
+Foot full-device regression passed with stable processes and visible output.
+Evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/initial-mirror-root-id-bound-foot-20260804`.
+
+Project-sync recovery document access now applies the same provider-field
+policy to queried display names, its parent ID before constructing a child
+query URI, and a matching child ID and MIME type before constructing or
+retaining the result. Document IDs admit at most 4 KiB and names/MIME types 255
+bytes; unsafe path names, controls, bidi spoofing, and malformed Unicode fail
+closed. Existing protocol tests cover each exact and overflow
+boundary. App unit/lint and both exact-ABI builds pass. The subsequent Samsung
+Foot full-device regression passed with stable processes and visible output;
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-recovery-all-fields-foot-20260804`.
+
+Activity document handoffs and persisted-tree selection now reuse one
+allocation-free UTF-8 admission helper. Manager-owned document and external
+tree URIs admit at most 4 KiB, exported document IDs 1 KiB, and derived display
+names 255 bytes without first constructing complete encoded copies. The walker
+exits on the first byte above policy and rejects malformed surrogate pairs
+before MIME derivation, chooser handoff, or tree-capability retention. Direct
+JVM tests cover exact ASCII and multibyte limits, overflow, empty text, and
+malformed high/low surrogates. The complete app unit/lint gate and both
+exact-ABI builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/activity-document-fields-bound-foot-20260804`.
+
+Conflict-path aggregation is now bounded across every deferred-delete and
+rescan pass, rather than only when history is eventually persisted. One sync
+retains at most 64 distinct paths in first-seen order. A 65th unique path marks
+the user-visible count as `64+`, stops scanning the remainder of that pass's
+conflicts, and prevents later passes from growing or rescanning the aggregate;
+duplicates do not consume capacity. Persisted history continues to receive the
+same 64-path sample. Four direct JVM tests cover exact admission,
+limit-plus-one, duplicate capacity, and duplicate-versus-new input against a
+full aggregate. App unit tests and lint plus both exact-ABI builds pass. The
+rebuilt physical-Samsung manager then retained stable Foot processes and exact
+visible output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-conflict-aggregate-bound-foot-20260804`.
 
 The private Linux home now includes Documents, Downloads, Media, Pictures, and
 Shared. Root bootstrap publishes only exact managed aliases for those
@@ -973,6 +1169,49 @@ become bounded ` (2)` variants, interrupted staging is recovered on the next
 attempt, and invalid/spoofing display names receive a safe fallback. A failed
 provider item does not discard later selections; durable status reports
 partial success honestly. The Activity consumes each incoming batch once.
+
+Incoming Activity collection now applies the 32-document policy to the complete
+aggregate before copying clip or stream entries. A data URI, all `ClipData`
+items, and `ACTION_SEND_MULTIPLE` streams share one overflow-safe count check;
+an aggregate limit-plus-one is rejected before `addAll`, and every accepted
+append leaves the Activity-owned list bounded. The framework still owns initial
+Intent unparceling, but Archphene no longer makes a second unbounded copy.
+Direct JVM coverage proves exact admission, each aggregate overflow shape, and
+invalid counts; app unit tests and lint plus both exact-ABI builds pass. The
+rebuilt manager on physical Samsung imported a normal ordered two-item stream
+batch with no third item or fatal event. Runtime evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/document-import-aggregate-bound-20260804`;
+the subsequent clean full-device Foot regression is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/document-import-aggregate-bound-foot-20260804`.
+
+Per-document URI validation now enforces its 4 KiB UTF-8 ceiling without first
+allocating a complete `toByteArray()` copy of caller-controlled text. The
+code-point walker returns immediately on limit-plus-one and rejects unpaired
+UTF-16 surrogates before Java `URI` parsing, while exact-limit multibyte content
+remains valid. Six direct policy tests now include an exact 4,096-byte URI,
+one-byte overflow, empty input, and malformed high/low surrogates. App unit
+tests and lint plus both exact-ABI builds pass. The rebuilt manager on physical
+Samsung passed the subsequent clean Foot full-device regression under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/document-import-uri-text-bound-foot-20260804`.
+No fresh import-runtime claim is made for this checkpoint: the device's
+pre-existing noncancelable pending-launcher dialog prevented the new incoming
+Intent from reaching the Activity, and that unrelated queue was left intact.
+The prior aggregate-bound checkpoint retains normal two-item physical import
+evidence.
+
+The shared native storage-request decoder now enforces each JNI operation's
+one-to-three-field schema while parsing. It previously cloned every
+tab-delimited field from the admitted 8 KiB request and checked the count only
+afterward. The parser now preallocates only the expected bounded field vector,
+rejects an extra or empty field before cloning it, and rejects expected counts
+outside the production schema. The crate's six Rust tests pass; the new
+boundary test covers valid three-field input, extra and empty fields, invalid
+counts, and 4,096 one-byte fields in an exact 8,191-byte request. Formatting,
+warning-denied Clippy, app unit tests and lint, and both exact-ABI builds pass.
+The subsequent physical-Samsung Foot regression retained stable Android and
+Linux processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/storage-request-field-bound-foot-20260804`.
 
 Exact ACTION_VIEW, ACTION_SEND, and deduplicated ACTION_SEND_MULTIPLE byte
 content, collision, restart-status, system-picker cancellation, cleanup,
@@ -1116,6 +1355,20 @@ records before replaying the same plan forward. Successful completion proves
 the requested version and every consented removal, then clears the intent and
 bounded snapshots.
 
+Kotlin package install, AUR install, and removal-plan decoding now parses the
+bounded 16 KiB UTF-8 response incrementally. The previous path copied the text
+with `dropLast`, allocated every newline-delimited record, and then allocated
+every tab-delimited field before validating the declared removal count. The
+decoder now reads only the version header, exact two-field summary, and the
+declared zero-to-48 exact three-field removal records. It rejects a first extra
+line or field immediately and retains only the bounded result. Direct JVM tests
+cover exact 48-removal admission and exact 16 KiB newline and tab floods. The
+complete app unit/lint gate and both exact-ABI builds pass. The subsequent
+physical-Samsung Foot regression retained stable Android and Linux processes,
+a 34 px font, 126 px controls, and visible command output in inspected
+full-device frames. Evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-removal-plan-bound-foot-20260804`.
+
 A controlled exact-ABI device gate establishes `wcurl 0.0-1` as an installed
 conflict baseline, then installs current signed official `curl 8.21.0-1`
 through the ordinary manager path. The emulator and physical Samsung both show
@@ -1225,9 +1478,9 @@ command path. The signed `fontconfig` reinstall/repair gate verifies native
 `post_upgrade`, including `vercmp` and the font-cache rebuild, without a
 missing-command or arithmetic failure while preserving exact package version
 and install reason. Native rollback selection comes from libalpm using the
-restored signed archive and the installed forward package record. The remaining
-coverage item is a rollback using a signed older/newer exact-ABI pair whose
-`.INSTALL` supplies observable reverse upgrade/removal behavior.
+restored signed archive and the installed forward package record. Signed
+`zsh` older/newer exact-ABI rollback now covers observable reverse
+upgrade/removal behavior.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -1300,6 +1553,336 @@ signed rollback on both ABIs, including removal of AArch64's newly introduced
 The signed script-bearing reverse-scriptlet gate and whole-operation AUR
 recovery remain open, so this is not yet a complete production transaction
 engine.
+
+Package-compatibility cache pruning now counts every directory entry rather
+than deleting an unlimited prefix of temporary files before applying the
+1,024-record limit. It admits the complete record set plus one interrupted-
+publication temporary file, validates all 1,025 entries before cleanup, and
+rejects entry 1,026 without deleting any fixture. The direct overflow regression
+brings the pinned package crate to 129 passing tests; warning-denied all-target
+Clippy and exact x86_64/AArch64 manager builds pass. The rebuilt manager on the
+physical Samsung then started a stable Foot session with a 34 px font, 126 px
+controls, exact visible command output, clean scoped logs, and an inspected
+1080×2202 full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-compatibility-cache-bound-foot-20260804`.
+
+The shared package-runtime exact-file reader now allocates and initializes one
+array at the metadata-admitted size, fills it with `read_exact`, and probes one
+trailing byte. The former `Vec::with_capacity` plus `read_to_end` path could
+reallocate while consuming malformed growth before rejecting it. This boundary
+is used by no-follow bounded package state reads and local pacman-description
+validation; their descriptor/path metadata stability checks remain unchanged.
+Existing direct tests cover exact input, truncation, growth, and an unbounded
+source. All 130 package tests, the locked Rust workspace test suite, the
+complete Android source unit/lint gate, and both exact-ABI manager/Builder builds
+pass. Package-only warning-denied Clippy is currently blocked by unrelated
+pre-existing Rust 1.97 style lints in package parsing code. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font, 126
+px controls, and visible command output in inspected full-device frames. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-exact-read-allocation-foot-20260804`.
+
+Desktop-entry loading now reuses that shared exact-file reader after its
+existing no-follow open and stable metadata checks. It allocates one initialized
+buffer at the admitted file size, fills it exactly, and probes for concurrent
+growth instead of using `Vec::with_capacity` plus a bounded `read_to_end` that
+could reallocate before rejecting changed input. All 17 desktop-entry tests, the
+locked Rust workspace suite, the complete Android source unit/lint gate, and
+both exact-ABI manager/Builder builds pass. The physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/desktop-entry-exact-read-foot-20260804`.
+
+Package-compatibility cache records and persisted AUR build/graph capabilities
+now also reuse the shared exact-file reader after their existing no-follow,
+type, mode, and stable metadata checks. Each path allocates one initialized
+buffer at the admitted metadata size, fills it exactly, and probes one trailing
+byte instead of allowing bounded `read_to_end` growth before reporting a size
+or manifest mismatch. Direct cache-corruption, capability-tampering, and exact
+read size-change tests pass with all 130 package tests, the locked Rust workspace
+suite, the complete Android source unit/lint gate, and both exact-ABI
+manager/Builder builds. The physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and exact visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-cache-capability-exact-read-foot-20260804`.
+
+AUR snapshot provenance headers and ordinary tar entries now allocate one
+initialized array at the header-declared size and fill it with `read_exact`
+through a shared snapshot helper. The former `Vec::with_capacity` plus bounded
+`read_to_end` paths could grow their backing allocation before size validation;
+the helper now also probes one trailing byte and rejects truncation or growth.
+Direct exact/truncated/grown reader coverage and all 18 AUR tests pass with all
+131 package tests, the locked Rust workspace suite, the complete Android source
+unit/lint gate, and both exact-ABI manager/Builder builds. The physical-Samsung
+Foot regression retained stable processes, a 34 px font, 126 px controls, and
+exact visible command output in inspected full-device frames. Hashed evidence
+is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-snapshot-exact-read-foot-20260804`.
+
+Persisted AUR lifecycle-capability manifests now reuse the shared exact-file
+reader after their no-follow, mode, type, and stable metadata checks. Package
+archive analysis also initializes one array at each admitted desktop entry's
+declared size, copies the already-read fixed header into it, fills the exact
+remainder with `read_exact`, and probes one trailing byte. These paths no longer
+depend on `Vec::with_capacity` plus `read_to_end` before reporting a manifest or
+archive size mismatch. Lifecycle reconciliation, terminal desktop-entry, and
+runtime-blocker regressions pass with all 131 package tests, the locked Rust
+workspace suite, the complete Android source unit/lint gate, and both exact-ABI
+manager/Builder builds. The physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and exact visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-lifecycle-desktop-exact-read-foot-20260804`.
+
+The command-line AUR review example now reads its bounded RPC and snapshot
+inputs into one initialized array at the metadata-declared size, fills it with
+`read_exact`, probes one trailing byte, and rechecks path metadata. The former
+`Vec::with_capacity` plus limit-based `read_to_end` path could reallocate while
+consuming changed input before rejecting it. A direct example test covers empty,
+exact, truncated, grown, and over-limit inputs. The example test, all 131 package
+tests, the locked Rust workspace suite, the complete Android source unit/lint
+gate, and both exact-ABI manager/Builder builds pass. Warning-denied example
+Clippy remains blocked by unrelated existing Rust 1.97 style lints in the
+package library. The physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and exact visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-review-example-exact-read-foot-20260804`.
+
+One-shot local pacman-description reads used for installed-origin lookup and
+desktop-entry package ownership now reuse the shared exact-file reader after
+their existing no-follow and stable metadata checks. Each path allocates one
+initialized metadata-sized byte vector, fills it with `read_exact`, probes one
+trailing byte, and parses UTF-8 directly from that backing storage instead of
+growing a small `String` through `read_to_string`. Existing invalid-UTF-8 error
+behavior remains unchanged. Origin, malformed-description, and desktop-owner
+regressions pass with all 131 package tests, the locked Rust workspace suite,
+the complete Android source unit/lint gate, and both exact-ABI manager/Builder
+builds. The physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and exact visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-description-exact-read-foot-20260804`.
+
+Repeated local pacman-description scans now resize and reuse one byte buffer to
+the current metadata-admitted length, fill that exact slice with `read_exact`,
+and probe one trailing byte. Installed-package catalog construction and install-
+reason preservation no longer stream each record into a reusable `String` whose
+capacity could grow from bytes beyond the observed file size. The helper clears
+partial state on truncation or growth and retains capacity only from admitted
+metadata. Direct reusable-buffer exact/truncated/grown tests, installed-package
+page coverage, and update-reason regressions pass with all 131 package tests,
+the locked Rust workspace suite, the complete Android source unit/lint gate, and
+both exact-ABI manager/Builder builds. The physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-description-reusable-exact-foot-20260804`.
+
+ELF dependency profiling now reads each bounded dynamic-string-table name into
+one retained fixed-size stack buffer with a single `read_exact`, validates its
+terminating NUL and UTF-8, and allocates only the accepted final `String`. The
+former byte-at-a-time reads and per-name temporary vectors are removed while
+the existing name and dependency-count ceilings remain unchanged. ELF profile
+regressions, all 131 package tests, the locked Rust workspace suite, the
+complete Android source unit/lint gate, and both exact-ABI manager/Builder
+builds pass. The physical-Samsung Foot regression retained stable processes, a
+34 px font, 126 px controls, and exact visible command output in inspected
+full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/elf-needed-fixed-scratch-foot-20260804`.
+
+Local pacman `files` ownership scans now retain each streamed line in a fixed
+4 KiB stack buffer rather than a heap vector that could grow from its initial
+256-byte capacity. This covers both foreign-file conflict preflight and desktop
+entry source/executable ownership discovery while preserving exact size,
+section, path, ambiguity, and overlong-line handling. A direct regression proves
+the exact 4 KiB boundary and rejects its next byte. All 131 package tests, the
+locked Rust workspace suite, the complete Android source unit/lint gate, and
+both exact-ABI manager/Builder builds pass. The physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-local-files-fixed-scratch-foot-20260804`.
+
+Bounded package-command output now restores a wrapped retained tail by rotating
+its existing byte vector in place. The former conversion allocated a second
+tail-sized vector and copied both ring segments before returning ordered output.
+Exact-tail and truncation-notice regressions pass with all 131 package tests,
+the locked Rust workspace suite, the complete Android source unit/lint gate,
+and both exact-ABI manager/Builder builds. The physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-command-tail-in-place-foot-20260804`.
+
+Process-tree discovery and identity revalidation now parse each bounded
+`/proc/<pid>/stat` record directly from the existing 4 KiB stack buffer and
+retain only the optional parent PID and start time with descriptor identity.
+The former path allocated a `String` for every root, candidate, parent, and
+revalidation read before immediately parsing and dropping it. Malformed-record
+skip/error behavior, no-follow opens, exact descriptor/path identity checks,
+and process reuse defenses remain unchanged. All 31 process tests, scoped
+all-target warning-denied Clippy, the locked Rust workspace suite, the complete
+Android source unit/lint gate, and both exact-ABI manager/Builder builds pass.
+The physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and exact visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/process-stat-stack-parse-foot-20260804`.
+
+Managed `kdeglobals` admission now allocates one initialized buffer at the
+opened descriptor's admitted metadata length plus a single growth-probe byte,
+rather than allocating the complete 64 KiB policy ceiling for every ordinary
+configuration. The read must return exactly the admitted length; truncation or
+the first growth byte fails before marker inspection, and the existing
+no-follow and descriptor/path metadata-stability checks remain unchanged. All
+31 process tests, scoped all-target warning-denied Clippy, the locked Rust
+workspace suite, the complete Android source unit/lint gate, and both exact-ABI
+manager/Builder builds pass. The physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and exact visible command
+output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/kde-config-exact-allocation-foot-20260804`.
+
+Process launch-plan ELF parsing now reuses one fixed 2,049-byte stack buffer for
+the bounded dynamic `RUNPATH`/`RPATH` and every needed-library name. The former
+helper allocated a temporary byte vector for each string before allocating the
+final retained needed-library `String`; search paths still allocate only their
+accepted normalized records, and needed names now allocate only their final
+retained strings. String-table bounds, NUL termination, UTF-8, path, name, and
+dependency-count validation remain unchanged. All 31 process tests, scoped
+all-target warning-denied Clippy, the locked Rust workspace suite, the complete
+Android source unit/lint gate, and both exact-ABI manager/Builder builds pass.
+The physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and exact visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/process-elf-string-scratch-foot-20260804`.
+
+The same process launch-plan ELF parser now records up to 256 dynamic
+needed-library string-table offsets in a fixed stack array with an explicit
+count. The former temporary `Vec<u64>` could allocate and grow while walking
+the bounded dynamic table before the final needed-library collection was
+created. Exact dependency order and the existing first-overflow rejection are
+preserved. All 31 process tests, scoped all-target warning-denied Clippy, the
+locked Rust workspace suite, the complete Android source unit/lint gate, and
+both exact-ABI manager/Builder builds pass. The physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/process-elf-needed-offsets-fixed-foot-20260804`.
+
+Package compatibility ELF profiling now also records its up-to-256 dynamic
+needed-library string-table offsets in a fixed stack array with an explicit
+count. The temporary growing `Vec<u64>` is removed while exact encounter order,
+first-overflow rejection, and the final exact-capacity retained dependency list
+remain unchanged. All ten ELF profile tests, all 131 package tests, the locked
+Rust workspace suite, the complete Android source unit/lint gate, and both
+exact-ABI manager/Builder builds pass. Package warning-denied Clippy remains
+blocked only by three unrelated existing Rust 1.97 style lints after the
+changed local-file scanner's warning was resolved. The physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and exact
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-elf-needed-offsets-fixed-foot-20260804`.
+
+Package compatibility ELF profiling now also records up to 256 admitted load
+segments in a fixed stack array with an explicit count. The former temporary
+`Vec<LoadSegment>` allocation and growth are removed; virtual-address mapping
+receives only the populated prefix, while program-header, file-region, dynamic
+segment, and string-table validation remain unchanged. All ten ELF profile
+tests, all 131 package tests, the locked Rust workspace suite, the complete
+Android source unit/lint gate, and both exact-ABI manager/Builder builds pass.
+Package warning-denied Clippy remains blocked by the same three unrelated Rust
+1.97 style lints. The physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and exact visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-elf-load-segments-fixed-foot-20260804`.
+
+Process launch-plan ELF parsing now rejects every load segment whose file range
+exceeds the opened object or whose virtual range overflows, requires dynamic
+segment sizes to contain complete 16-byte records, and requires an explicit
+`DT_NULL` terminator. Virtual-to-file translation also uses checked address and
+offset arithmetic. A direct regression covers an out-of-file load segment, a
+misaligned dynamic segment, and a dynamic table without a terminator. All 32
+process tests, scoped warning-denied Clippy, the locked Rust workspace suite,
+the complete Android source unit/lint gate, and both exact-ABI manager/Builder
+builds pass. The physical-Samsung Foot regression retained stable processes, a
+34 px font, 126 px controls, and exact visible command output in inspected
+full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/process-elf-segment-bounds-foot-20260804`.
+
+Process launch-plan ELF parsing now also rejects a second `PT_DYNAMIC` segment
+and requires the complete declared dynamic string table to remain inside one
+validated file-backed load segment. Virtual-to-file mapping returns the exact
+remaining segment extent, so a string-table start near a load boundary cannot
+authorize later bytes merely because they exist elsewhere in the file. The
+malformed-ELF regression now also covers duplicate dynamic segments and a
+partially mapped string table. All 32 process tests, scoped warning-denied
+Clippy, the locked Rust workspace suite, the complete Android source unit/lint
+gate, and both exact-ABI manager/Builder builds pass. The physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and exact
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/process-elf-string-containment-foot-20260804`.
+
+Process launch-plan ELF dependency resolution now streams its two conventional
+library candidates and the bounded private search-path candidates in lookup
+order. The former path first allocated and populated a temporary vector for
+every candidate, including all private-path joins even when `/usr/lib` or
+`/lib` resolved the dependency immediately. Resolution order, canonical root
+containment, file-type, and world-writable rejection remain unchanged. All 32
+process tests, scoped warning-denied Clippy, the locked Rust workspace suite,
+the complete Android source unit/lint gate, and both exact-ABI manager/Builder
+builds pass. The physical-Samsung Foot regression retained stable processes, a
+34 px font, 126 px controls, and exact visible command output in inspected
+full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/process-elf-lazy-dependency-candidates-foot-20260804`.
+
+Package compatibility ELF graph traversal now also constructs library
+candidates lazily in source-directory, `/usr/lib`, then `/lib` order. The
+former fixed candidate array allocated all three `PathBuf` values before
+testing the first, even when the source-local object resolved immediately.
+Root-contained regular-file resolution and candidate priority remain
+unchanged. All ten ELF profile tests, all 131 package tests, the locked Rust
+workspace suite, the complete Android source unit/lint gate, and both exact-ABI
+manager/Builder builds pass. Package warning-denied Clippy remains blocked only
+by the same three unrelated Rust 1.97 style lints in package parsing code. The
+physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and exact visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-elf-lazy-library-candidates-foot-20260804`.
+
+Package and Terminal warning-denied Clippy gates are current with Rust 1.97.
+Package assumed-dependency parsing now uses `?` for its final exact-version
+alternative, and final search-result publication uses one equivalent let-chain.
+Terminal palette operations use a `while let` iteration, while bounded Base64
+padding validation uses the standard multiple-of predicate. All 131 package
+tests, all 46 Terminal tests plus its warmed allocation gate, scoped all-target
+warning-denied Clippy for both crates, the locked Rust workspace suite, the
+complete Android source unit/lint gate, and both exact-ABI manager/Builder
+builds pass. The full warning-denied workspace Clippy audit now proceeds past
+both crates and is blocked by 19 pre-existing Rust 1.97 style findings in the
+compositor (`manual_is_multiple_of`, `collapsible_if`, and
+`unnecessary_unwrap`). The physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and exact visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-terminal-rust197-clippy-foot-20260804`.
+
+The compositor's first low-risk Rust 1.97 warning slice is resolved. Wayland
+pixel conversion now uses the standard multiple-of predicate for its four-byte
+pixel boundary, and the host drag-source probe consumes its optional received
+descriptor through a let-chain rather than checking and then unwrapping it.
+The 107 compositor tests, the locked Rust workspace suite, the complete Android
+source unit/lint gate, and both exact-ABI manager/Builder builds pass. Scoped
+warning-denied compositor Clippy confirms those two findings are gone and now
+reports only 17 pre-existing `collapsible_if` findings. The physical-Samsung
+Foot regression retained stable processes, a 34 px font, 126 px controls, and
+exact visible command output in inspected full-device frames. Hashed evidence
+is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/compositor-rust197-low-risk-clippy-foot-20260804`.
+
+Local-package database repair cleanup now reapplies its five-file limit when it
+reopens a record after validation. The second enumeration can fill only the
+pre-sized five-path vector and rejects a concurrent sixth entry before deleting
+any file. A deterministic post-open growth regression proves all six files and
+the record directory remain after `OutputLimit`. The pinned package crate now
+passes 130 tests together with warning-denied all-target Clippy and formatting;
+exact x86_64/AArch64 manager builds also pass. The rebuilt AArch64 manager then
+retained a stable Samsung Foot session with exact visible command output, clean
+scoped logs, and an inspected 1080×2202 frame. Hashed full-device evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/database-repair-rescan-bound-foot-20260804`.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16
@@ -2419,6 +3002,47 @@ CMake, and a verified Ninja wrapper. The physical Samsung selected
 an exact `ninja -j4` wrapper, started current `libpamac-aur` through the new
 protocol, and cancelled/reaped the build normally.
 
+Isolated Builder stale-process cleanup now bounds the complete `/proc` scan,
+not only same-UID matches. Each cleanup round visits at most 4,096 entries,
+including nonnumeric and foreign-UID entries, retains at most 1,024 same-UID
+process identities, and fails with `OutputLimit` before signaling on either
+overflow. Host tests prove both exact admission boundaries and that target
+1,025 is not appended. The pinned Builder crate passes 24 tests together with
+warning-denied all-target Clippy and formatting. Exact x86_64/AArch64 manager
+and Builder APK builds pass; the rebuilt AArch64 pair was installed on the
+physical Samsung before a stable Foot run with exact command output, clean
+scoped logs, and an inspected 1080×2202 frame. Hashed full-device evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-proc-scan-bound-foot-20260804`.
+
+Builder package-archive metadata extraction now allocates exactly each tar
+header's admitted `.PKGINFO`, `.BUILDINFO`, or `.INSTALL` size, fills that
+buffer with `read_exact`, and probes one trailing byte. The former
+`Vec::with_capacity` plus `read_to_end` paths could grow beyond the declared
+entry size before rejecting malformed input, and the package-runtime metadata
+reader duplicated that behavior into caller buffers. The shared reader rejects
+empty, oversized, truncated, or grown entries without retaining partial state.
+Direct tests cover exact input and both size changes; all 25 Builder tests, the
+locked Rust workspace test suite, warning-denied Builder Clippy without
+dependency linting, the complete Android source unit/lint gate, and both
+exact-ABI manager/Builder builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-archive-metadata-exact-read-foot-20260804`.
+
+Builder stale-process identity reads now consume Android `/proc/*/status` and
+`stat` through one initialized 16 KiB vector rather than growing a 4 KiB
+`Vec::with_capacity` through `read_to_end`. The shared bounded stream reader
+retries interrupted reads, truncates the one allocation to the observed logical
+length, accepts an exact-limit file only at EOF, and rejects the first overflow
+byte. Direct tests cover short, exact, overflowing, and invalid zero limits; all
+26 Builder tests, warning-denied Builder Clippy without dependency linting, the
+locked Rust workspace suite, the complete Android source unit/lint gate, and
+both exact-ABI manager/Builder builds pass. The physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-proc-fixed-read-foot-20260804`.
+
 Prepared Builder roots deliberately are not reused between untrusted recipes.
 Every recipe currently executes as the same Builder application UID, and a
 physical Samsung probe confirmed that this identity can mutate the prepared
@@ -2528,6 +3152,33 @@ flash churn, default-network callbacks refresh the file, and a missing active
 network retains the last usable configuration instead of installing a public
 resolver. Host tests cover malformed input, canonicalization, replacement,
 mode repair, unchanged inode retention, and hostile destination/staging links.
+
+Android DNS selection now bounds every examined `LinkProperties` candidate,
+not only the retained unique addresses. One refresh examines at most 32
+candidates while selecting at most four distinct nonempty servers. Candidate
+33 before four usable results fails closed and retains the prior resolver;
+finding four unique servers early stops immediately even if the framework list
+is much larger. Four direct JVM tests cover exact 32-candidate admission,
+limit-plus-one rejection before reading the extra value, early completion,
+null/empty entries, and duplicates. App unit tests and lint plus both exact-ABI
+builds pass. The rebuilt physical-Samsung manager published its one normal
+Android DNS server without a fatal event. Runtime evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/android-dns-candidate-bound-20260804`;
+the subsequent clean Foot full-device regression is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/android-dns-candidate-bound-foot-20260804`.
+
+Managed `resolv.conf` equality checks now stream through one fixed 128-byte
+stack buffer instead of allocating and growing a complete file-sized `Vec`
+before comparison. Metadata still requires the exact expected size and mode;
+the streamed check independently rejects the first differing chunk, a short
+read, or one trailing byte. Direct Rust tests cover a multi-chunk exact match,
+middle mismatch, truncation, and growth. All 12 root tests, the locked Rust
+workspace test suite, warning-denied root Clippy without dependency linting, the
+complete Android source unit/lint gate, and both exact-ABI manager/Builder builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/resolver-stream-compare-foot-20260804`.
 
 A direct glibc runtime probe exposed the remaining boundary: resolver loading
 uses an internal libc `fopen` that cannot be interposed by the preload bridge.
@@ -2738,6 +3389,22 @@ captured before the server and exact test tree were removed. Only the
 user-approved C# debugger-extension, breakpoint, and debug-control portion
 remains open.
 
+On 2026-08-04, the current Samsung `SM_S908U` launcher was independently
+reopened through ADB as Visual Studio Code. Its Archphene-owned VS Code profile
+contains no extensions, while the available host C# extension is
+`ms-dotnettools.csharp-2.140.9-linux-x64` and cannot execute in the phone's
+AArch64 root. The remaining debugger gate therefore requires an explicitly
+approved AArch64 C# extension and its .NET runtime dependency before it can
+prove a breakpoint, variable inspection, continue, and restart on the device.
+
+With explicit device approval, the physical Samsung VS Code terminal installed
+`ms-dotnettools.csharp` 2.140.9 and its
+`ms-dotnettools.vscode-dotnet-runtime` 3.1.0 dependency on 2026-08-04. The
+terminal's extension listing names both extensions, and a newly created stock
+.NET 10 MVC project restored and built successfully. The workspace/debugger
+acceptance remains open until the project is opened through the production
+folder flow and a breakpoint is paused, inspected, continued, and restarted.
+
 With user approval, the normal Archphene package UI has now installed stock Git
 2.55.0 into both shared roots. The executable is immediately visible from the
 manager Terminal and each existing Code integrated Bash. A bounded device gate
@@ -2927,6 +3594,19 @@ return to a clean Mousepad frame, and emit no fatal logs. The pre-existing
 single-open, multi-open, Save As, and folder suites also pass unchanged on
 both devices after the shared parser change.
 
+Generated launchers and the manager-side launcher policy now parse signed
+incoming-document MIME declarations incrementally. Their previous `split(';')`
+paths allocated every entry from the admitted 2,080-UTF-16-unit metadata string
+before checking the 16-type limit. Both parsers now use pre-sized bounded result
+and duplicate sets, validate each type as it is admitted, preserve case-sensitive
+duplicate semantics, and reject type 17 before creating its substring. Direct
+JVM coverage proves exact 16-type admission, type 17 rejection, and an exact
+2,080-unit delimiter flood. Launcher-template and app unit tests and lint plus
+both exact-ABI builds pass. The subsequent physical-Samsung Foot regression
+retained stable Android and Linux processes, a 34 px font, 126 px controls, and
+visible command output in inspected full-device frames. Latest evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/app-launcher-mime-parser-bound-foot-20260804`.
+
 Manager document imports now expose the current document and live copied-byte
 count without routing file bytes through Kotlin or JNI. The Files-page Import
 action becomes Cancel import while Rust is streaming, and a separate native
@@ -3061,6 +3741,21 @@ Android runtime permission. Unmodified `pavucontrol`, bounded 48 kHz stereo
 playback, an active non-audio denial, cleanup, scoped fatal logs, and inspected
 full-device output pass on the x86_64 emulator and AArch64 Samsung. Microphone
 input remains a separate unported capability and permission boundary.
+
+Generated-launcher secret catalog publication now encodes directly into one
+fixed 1 MiB buffer. The previous `ByteArrayOutputStream` could grow beyond that
+policy and then allocate a second complete `toByteArray()` copy before checking
+the limit. Byte, unsigned-short, big-endian integer, and length-prefixed UTF-8
+writes now reserve their complete capacity before mutating the buffer; overflow
+therefore fails before truncating or writing the caller's output descriptor.
+Eight direct JVM tests cover the shared JSON index buffer plus exact binary
+string capacity, pre-prefix overflow rejection, and byte-identical legacy
+integer encoding. Launcher-template unit tests and lint pass with zero errors,
+and both exact-ABI manager builds package the updated release template. After
+installing the rebuilt AArch64 manager, physical Samsung retained stable Foot
+processes and exact visible command output in inspected full-device frames.
+Hashed visual evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/secret-catalog-bounded-buffer-foot-20260804`.
 
 ## Validated
 
@@ -3609,6 +4304,20 @@ Gradle APKs also pass the manager-owned 48 kHz stereo output gate with
 Samsung, including private-runtime teardown within the 15-second gate. The
 emulator then passes a separate non-audio launcher denial probe.
 
+Audio-runtime cleanup now streams at most 32 matching cache roots instead of
+allocating an uncapped `listFiles()` array. Before deleting one runtime, it
+collects a no-follow postorder bounded to 160 descendants and depth 3. Entry
+161 or depth 4 rejects the complete tree before mutation; a valid nested tree
+still deletes normally. Direct JVM tests prove both overflow cases retain every
+path and byte, plus successful bounded cleanup. The complete JDK 26 app
+unit/lint gate and exact x86_64/AArch64 manager builds pass. On physical
+Samsung, explicit launcher-service startup encountered an exact test-owned
+161-file audio runtime, logged the entry-limit rejection, retained all 161
+files, and allowed exact fixture cleanup afterward. Runtime evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/audio-runtime-cleanup-bound-20260804`;
+the subsequent stable 1080×2202 Foot full-device gate is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/audio-runtime-cleanup-bound-foot-20260804`.
+
 Long-lived Pulse server stdout and stderr now use fixed 1 KiB read and 512-byte
 line buffers instead of `BufferedReader.readLine()`. Overlong lines are consumed
 completely while retaining one prefix. Truncation is explicit, and truncated
@@ -3617,6 +4326,20 @@ LF, CR, CRLF, blank, and final unterminated line behavior remains intact. JVM
 tests cover a 64 KiB hostile line, following valid input, complete consumption,
 truncation state, and mixed delimiters. JDK 26 app unit/lint and exact
 x86_64/AArch64 manager builds pass.
+
+Camera-runtime cleanup now validates its complete no-follow postorder before
+deleting anything. The existing 160-descendant and depth-3 ceilings therefore
+reject entry 161 or depth 4 without partially deleting earlier paths; valid
+nested runtimes still delete normally, and owned live paths remain excluded.
+Direct JVM regressions prove valid removal plus byte/path-exact retention for
+both overflow classes. The complete JDK 26 app unit/lint gate and exact
+x86_64/AArch64 manager builds pass. On physical Samsung, explicit launcher-
+service startup encountered an exact test-owned 161-file camera runtime, logged
+the entry-limit rejection, retained all files, and allowed exact fixture cleanup
+afterward. Runtime evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/camera-runtime-atomic-cleanup-20260804`;
+the subsequent stable 1080×2202 Foot full-device gate is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/camera-runtime-atomic-cleanup-foot-20260804`.
 
 Camera-runtime diagnostics now use fixed 1 KiB read and 512-byte line buffers.
 An overlong helper line is drained completely while only its bounded prefix is
@@ -3639,6 +4362,937 @@ deterministic JVM test drains a 64 KiB hostile line, publishes only its bounded
 prefix, and preserves following mixed-delimiter lines. The JDK 26 app unit/lint
 gate and current exact-APK private portal startup within the Snapshot camera
 gate pass on the x86_64 emulator and AArch64 Samsung.
+
+Private portal broker request parsing now enforces the protocol's six-field
+maximum while splitting. The prior `String.split` created every tab-delimited
+substring in the admitted 16 KiB ASCII line before operation handlers checked
+their exact field counts. The replacement preallocates six slots, admits the
+largest current six-field secret request, and rejects field seven without
+retaining the remaining request as fields. A direct JVM regression covers the
+exact limit, field seven, and an exact 16,383-character hostile line containing
+8,192 one-character fields. The complete app unit/lint gate and both exact-ABI
+builds pass. The subsequent physical-Samsung Foot regression retained stable
+Android and Linux processes, a 34 px font, 126 px controls, and visible command
+output in inspected full-device frames. Evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/portal-request-field-bound-foot-20260804`.
+
+Authenticated launcher callback responses now use the same bounded splitter.
+Secret read responses admit four fields, secret list/catalog responses admit
+two, and camera capture responses admit four; each path preallocates only that
+schema and rejects the first extra field. This removes the second unbounded
+substring/list allocation after Binder has materialized the framework-owned
+response string under the existing 16 KiB secret or 128-character camera
+ceiling. A direct JVM regression covers valid four-field input, extra fields
+against both schema sizes, and an exact 16,384-character tab flood. The complete
+app unit/lint gate and both exact-ABI builds pass. The subsequent physical
+Samsung Foot regression retained stable Android and Linux processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/portal-response-field-bound-foot-20260804`.
+
+HTTP(S) portal URI and logical-home file-path validation now enforces the 4 KiB
+UTF-8 policy before allocating a complete encoded copy. The allocation-free
+code-point scan stops at byte 4,097 and rejects malformed surrogate pairs.
+Logical paths likewise inspect slash boundaries directly instead of splitting
+every component before rejecting exact `.` or `..` traversal. Direct JVM tests
+cover exact ASCII and multibyte byte limits, overflow, malformed high/low
+surrogates, a delimiter-heavy safe path, and nested traversal. The complete app
+unit/lint gate and both exact-ABI builds pass. The subsequent physical-Samsung
+Foot regression retained stable Android and Linux processes, a 34 px font,
+126 px controls, and visible command output in an inspected 1080×2202 frame.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/portal-uri-allocation-bound-foot-20260804`.
+
+Generated-launcher browser dispatch now applies the same allocation-free 4 KiB
+UTF-8 boundary to portal callbacks and direct manager requests. The policy was
+extracted from the Activity so direct JVM tests can prove exact ASCII and
+multibyte admission, one-code-point overflow, malformed high/low surrogate
+rejection, and the existing host-bearing HTTP(S)-only, no-userinfo, valid-port
+rules. Rejected text fails before URI parsing or Android `ACTION_VIEW`, without
+creating a complete encoded copy. The complete manager, launcher-template, and
+Builder source unit/lint gate plus both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in an inspected full-device
+frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/generated-browser-uri-bound-foot-20260804`.
+
+Generated-launcher Android document names now share one directly tested,
+incremental policy. Provider display names, multi-document results, Save As
+suggestions, and manager result transfer admit at most 255 UTF-16 units and 255
+UTF-8 bytes, reject exact `.`/`..`, separators, controls, and malformed
+surrogates, and stop at byte 256 instead of constructing a complete encoded
+copy. Direct launcher-template JVM tests cover exact ASCII and multibyte
+boundaries, overflow, unsafe names, and malformed high/low surrogates. The
+complete manager, launcher-template, and Builder source unit/lint gate plus both
+exact-ABI manager builds pass. The subsequent physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and visible command
+output in an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/generated-document-name-bound-foot-20260804`.
+
+Generated-launcher accessibility action text and print titles now use a shared
+allocation-free UTF-8 length policy before Binder transfer or print staging.
+Accessibility payloads retain their 4,096-UTF-16-unit and 16 KiB byte limits;
+print titles retain 256 UTF-16 units and 512 bytes. The walker admits an empty
+accessibility payload, exits on the first overflowing code point, and rejects
+malformed surrogate pairs instead of allowing encoder replacement. Direct
+launcher-template JVM tests cover empty text, exact ASCII/two-byte/four-byte
+boundaries, overflow, negative limits, and malformed high/low surrogates. The
+complete manager, launcher-template, and Builder source unit/lint gate plus both
+exact-ABI manager builds pass. The subsequent physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and visible command
+output in an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/generated-accessibility-print-text-bound-foot-20260804`.
+
+The generated launcher's Android accessibility provider now applies that same
+allocation-free policy at framework `ACTION_SET_TEXT` ingress. Oversized or
+malformed text therefore fails before reaching the Activity callback and its
+independent second validation boundary; the provider no longer creates a
+complete encoded copy while checking the admitted text. Shared JVM coverage now
+includes exact and overflowing 16 KiB ASCII and four-byte inputs alongside the
+malformed-surrogate cases. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/generated-accessibility-provider-text-bound-foot-20260804`.
+
+Manager-side launcher callbacks now reuse an allocation-free UTF-8 policy for
+production and debug print titles, HTML-derived clipboard text, and Android
+document result names. Their existing 512-byte, 64 KiB, and 255-byte ceilings
+are enforced while walking code points instead of after complete encoded-copy
+allocation; malformed surrogates fail before callback transfer or retention.
+The shared app JVM tests distinguish nonempty URI/name admission from
+empty-permitted generic text and cover exact multibyte limits, overflow,
+negative limits, and malformed Unicode. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and visible
+command output in an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/manager-launcher-text-bound-foot-20260804`.
+
+Manager Binder ingress for generated-launcher accessibility actions now applies
+the same allocation-free policy before queuing text. Its independent
+4,096-UTF-16-unit and 16 KiB ceilings reject overflow and malformed surrogates
+without constructing a complete encoded copy after Parcel materialization.
+App JVM coverage includes exact and overflowing 16 KiB ASCII and four-byte
+shapes. The complete source unit/lint gate and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in an
+inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/manager-accessibility-text-bound-foot-20260804`.
+
+The remaining manager-side Android document-name boundaries now reuse
+allocation-free 255-byte UTF-8 admission. Portal open/save/directory result
+names and exported DocumentsProvider visible entries reject overflow and
+malformed surrogates before retention or publication without creating complete
+encoded copies. Provider policy continues to exclude hidden, traversal,
+separator, control, and bidirectional-spoof names. Direct JVM tests cover exact
+ASCII and multibyte limits, overflow, hidden/separator names, and malformed
+high/low surrogates. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/provider-portal-document-name-bound-foot-20260804`.
+
+Runtime-visible Android folder labels, imported-file names, and launcher-registry
+display names now use allocation-free UTF-8 admission at their 128-byte,
+255-byte, and 256-byte ceilings. Overflow and malformed surrogates fail before
+status or registry retention without complete encoded copies, while existing
+hidden, traversal, separator, control, and bidirectional-spoof rules remain.
+App JVM tests add exact and overflowing 128-byte ASCII and multibyte labels to
+the shared boundary coverage. The complete source unit/lint gate and both
+exact-ABI manager builds pass. The subsequent physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and visible command
+output in an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/runtime-visible-label-bound-foot-20260804`.
+
+Project-synchronization history validation now uses the existing
+allocation-free protocol UTF-8 length walker instead of encoding complete
+temporary copies for project, message, and conflict-path limit checks. The
+actual serializer creates its one required persisted field byte array only
+after the complete entry passes validation. Direct history JVM tests cover an
+exact 128-byte multibyte project name, overflow, malformed Unicode, round-trip,
+corruption, trailing data, and unsafe conflict paths. The complete source
+unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and visible command output in an inspected full-device frame.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-history-length-bound-foot-20260804`.
+
+Generated Android launcher labels now enforce their 128-UTF-16-unit and
+512-byte policy without first allocating a complete encoded copy. The
+incremental check rejects malformed surrogates before APK metadata construction
+while preserving blank, control, and bidirectional-spoof rejection. Direct app
+JVM tests cover exact ASCII and three-byte 128-unit labels, UTF-16 overflow,
+blank text, bidi controls, and malformed high/low surrogates. The complete
+source unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and visible command output in an inspected full-device frame.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-label-bound-foot-20260804`.
+
+Package-job messages are now sanitized and truncated in one bounded pass. The
+former path replaced the complete input three times, then repeatedly allocated
+and UTF-8-encoded shrinking prefixes. The replacement retains at most 192
+UTF-16 units and UTF-8 bytes in one bounded builder, translates tab/CR/LF to
+spaces, stops reading after the retained prefix, and falls back to the existing
+generic message on malformed Unicode. Direct JVM tests cover empty/control
+input, 10,000-character ASCII, exact three-byte and four-byte limits, and
+malformed high/low surrogates. The complete source unit/lint gate and both
+exact-ABI manager builds pass. The subsequent physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and visible command
+output in an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-job-message-bound-foot-20260804`.
+
+The latest native package-job record now decodes into exactly nine preallocated
+fields instead of trimming and limit-splitting the complete 16 KiB response.
+Field ten fails before retention, terminal LF runs are skipped by index,
+embedded CR/LF is rejected, and empty fields remain available for the existing
+identifier, operation, state, progress, repository, package, and message
+validation. Direct JVM tests cover ordinary and empty-field records, terminal
+newlines, field underflow and overflow, internal line breaks, and an exact
+16 KiB tab flood. The complete source unit/lint gate and both exact-ABI manager
+builds pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-job-record-parser-bound-foot-20260804`.
+
+Native package-runtime probe output now scans by line indexes instead of
+creating and trimming one string per line before locating the first pacman
+version. LF, CRLF, CR, and a final unterminated line remain supported; only the
+selected `Pacman v` line is constructed and trimmed. Direct JVM tests cover
+first-match selection, every delimiter, missing and cross-line markers, and an
+exact 16 KiB line flood. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-runtime-probe-parser-bound-foot-20260804`.
+
+The visible AUR build phase now comes from one reverse line scan instead of
+creating and trimming every line in the bounded Builder log. The scanner
+supports LF, CRLF, CR, blank tails, and an unterminated final line, then
+constructs only the last nonempty phase and truncates it to 160 UTF-16 units.
+Direct JVM tests cover every delimiter, trimming, blank input, truncation,
+invalid limits, and an exact 8 KiB line flood. The complete source unit/lint
+gate and both exact-ABI manager builds pass. The subsequent physical-Samsung
+Foot regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-build-phase-parser-bound-foot-20260804`.
+
+Native launcher removal and publication claims now decode into exactly three
+and nine preallocated fields instead of trimming and splitting their complete
+4 KiB outputs. Fields four and ten fail before retention, terminal LF runs are
+skipped by index, embedded CR/LF is rejected, and the existing package,
+descriptor, generation, capability, digest, and MIME validation remains
+unchanged. Direct JVM tests cover both exact schemas, terminal newlines, empty
+fields, underflow and overflow, internal line breaks, and exact 4 KiB tab
+floods. The complete source unit/lint gate and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-claim-parser-bound-foot-20260804`.
+
+Native portal-folder import, project-mirror completion, and document-import
+reports now decode into their exact three- or two-field schemas instead of
+splitting complete 8 KiB storage outputs before checking field count. The next
+field fails before retention, CR/LF is rejected, and the existing safe-name,
+entry-count, byte-count, and progress reconciliation remains at the service
+boundary. Direct JVM tests cover every schema, empty fields, underflow and
+overflow, line breaks, and exact 8 KiB tab floods. The complete source
+unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/storage-report-parser-bound-foot-20260804`.
+
+Native launcher authorization now decodes into exactly six preallocated fields
+instead of copying away its optional terminal LF and limit-splitting the
+complete 3 KiB response. Field seven fails before retention, embedded or
+repeated line breaks are rejected, and the existing authorization version,
+visibility, generation, capability, label, and MIME checks remain unchanged.
+Direct JVM tests cover valid terminated and unterminated responses, empty
+fields, underflow and overflow, line breaks, and an exact 3 KiB tab flood. The
+complete source unit/lint gate and both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-authorization-parser-bound-foot-20260804`.
+
+Native package-compatibility state now decodes into exactly seven preallocated
+fields instead of counting newlines, copying away the required terminal LF,
+and limit-splitting the complete 16 KiB response. Field eight fails before
+retention, embedded CR/LF is rejected, and the existing canonical count,
+capability, status, diagnostic, package-name, and consistency validation
+remains unchanged. Direct JVM tests cover valid and contradictory states,
+required termination, canonical numbers, unsafe names, field overflow, and an
+exact 16 KiB tab flood. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-compatibility-parser-bound-foot-20260804`.
+
+Reviewed AUR candidate state now decodes into exactly two fields by delimiter
+indexes instead of limit-splitting the complete 16 KiB response. A third field
+fails before retention, CR/LF is rejected, and the empty installed-version
+field remains available only for the existing `available` state while
+installed/update/different consistency checks remain unchanged. Direct JVM
+tests cover populated and empty-version states, missing and excess fields, line
+breaks, and an exact 16 KiB tab flood. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-candidate-state-parser-bound-foot-20260804`.
+
+Durable pending-package mutation decoding now retains at most four parsed
+fields instead of splitting the complete 16 KiB record and then joining its
+status fields into another copy. Install recovery still accepts only three
+fields or an exact fourth `rollback` field, removal accepts exactly three, and
+a fifth delimiter fails before another field is retained. The persisted status
+is constructed once from the validated record suffix. Direct JVM tests cover
+exact rollback admission, removal, malformed records, limit-plus-one input, and
+an exact 16 KiB tab flood. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/pending-package-mutation-parser-bound-foot-20260804`.
+
+Native package-launcher review decoding now preallocates and retains exactly the
+protocol's 19 fields instead of copying away its terminal newline and splitting
+the complete 16 KiB output before validating field count. A twentieth field is
+rejected before its substring is retained. Existing launcher count, topology,
+capability, observation, and state consistency rules are unchanged. Direct JVM
+tests cover valid ready, pending, and bridge records; contradictory and
+over-limit values; and an exact 16 KiB tab flood. The complete source unit/lint
+gate and both exact-ABI manager builds pass. The subsequent physical-Samsung
+Foot regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in an inspected full-device frame. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-launcher-review-parser-bound-foot-20260804`.
+
+Native package-cache pages now parse directly into at most 32 rows of exactly
+five preallocated fields. The previous path copied away terminal newlines,
+created a string for every row, split every row into fields, and enforced the
+32-row bound only afterward. Row 33 and field six now fail before retention;
+the existing service still validates field meaning, ordering, byte totals,
+aggregation, and summary consistency. Direct JVM tests cover normal and
+terminal-newline pages, exact row admission, row and field overflow, empty
+input, and an exact 16 KiB tab flood. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in an inspected full-device frame. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-cache-page-parser-bound-foot-20260804`.
+
+Native package-cache summaries now decode directly into their exact entry-count
+and byte-count values instead of trimming and splitting the complete 16 KiB
+output before enforcing the three-field schema. A fourth field fails before
+construction, optional terminal LF runs are skipped by index, and the existing
+zero-to-1,024 entry and nonnegative-byte checks remain at the service boundary.
+Direct JVM tests cover valid limits, field underflow and overflow, empty,
+malformed, and overflowing values, internal newlines, and an exact 16 KiB tab
+flood. The complete source unit/lint gate and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-cache-summary-parser-bound-foot-20260804`.
+
+Package-cache pagination now passes the summary's remaining declared-entry
+count into every page parse. Previously, a final page could retain and
+aggregate up to 31 records past the zero-to-1,024 summary count before offset
+reconciliation rejected it. The parser now preallocates to the smaller of 32
+and the remaining count and rejects its next row before parsing or retention;
+the complete snapshot collections preallocate to the validated total. Direct
+JVM tests cover exact custom admission, the next row, invalid custom bounds,
+default 32-row behavior, malformed fields, and hostile input. The complete
+source unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and visible command output in an inspected full-device frame.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-cache-remaining-page-bound-foot-20260804`.
+
+Native desktop-entry pages now parse directly into one six-field header and at
+most 256 rows of exactly ten fields. The previous path copied away the terminal
+newline, split the complete 16 KiB page into lines, copied its row tail, and
+split each row before enforcing the desktop-entry count. Header field seven,
+row 257, row field 11, blank internal rows, and unterminated pages now fail
+before excess retention. Existing identity, ordering, argument, MIME, package,
+pagination, and scan-summary validation remains in the service. Direct JVM
+tests cover header-only and populated pages, exact row admission, header/row
+field and row-count overflow, missing termination, blank rows, and exact 16 KiB
+newline and tab floods. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/desktop-entry-page-parser-bound-foot-20260804`.
+
+Desktop-entry Exec arguments and MIME declarations now use allocation-free
+bounded scans instead of splitting every unit-separator token and copying then
+splitting the semicolon payload before applying grammar. Argument token 33 and
+MIME type 17 fail immediately, mirroring the package runtime's 32-argument and
+16-MIME producer bounds. Empty tokens, malformed literals, missing MIME
+termination, and types without `/` still fail. Direct JVM tests cover every
+fixed argument, literals, exact count boundaries, malformed and empty tokens,
+exact MIME boundaries, and exact 16 KiB delimiter floods. The complete source
+unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and visible command output in an inspected full-device frame.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/desktop-entry-spec-bound-foot-20260804`.
+
+Native project-synchronization plan paths now validate incrementally instead of
+splitting the complete decoded path before enforcing its 64-segment depth
+limit. The parser retains no segment list, constructs and validates at most 64
+component substrings, and rejects segment 65 before constructing it. Empty,
+leading, trailing, traversal, unsafe-name, UTF-8, control, bidirectional-spoof,
+and malformed-Unicode rules remain unchanged. Direct JVM tests cover exact 64-
+and 65-segment paths, empty and traversal components, unsafe Unicode, and a
+4,095-character delimiter-heavy input. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-path-bound-foot-20260804`.
+
+Persisted project-synchronization history conflict paths now reuse the bounded
+protocol path validator instead of splitting every slash-delimited component
+before checking safety. Validation retains no segment list, accepts exactly 64
+safe components, and rejects component 65 or a 4 KiB delimiter flood without
+unbounded component retention. Existing UTF-8, traversal, empty-component,
+control, bidirectional-spoof, and malformed-Unicode rules remain unchanged.
+Direct JVM tests cover exact 64- and 65-component paths, the delimiter flood,
+round-trip, corruption, and traversal. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-history-path-bound-foot-20260804`.
+
+AUR install-script paths now validate in one allocation-free character scan
+instead of splitting the caller-bounded 4 KiB path and regex-matching every
+component. Relative-path, nonempty-component, traversal, 240-character
+component, and ASCII filename-grammar rules remain unchanged. Valid
+delimiter-heavy input does not retain component substrings. Direct JVM tests
+cover safe nested paths, exact and overflowing component lengths, traversal,
+separators, invalid characters, and a 4,095-character path. The complete source
+unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font, 126
+px controls, and visible command output in inspected full-device frames. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-install-script-path-bound-foot-20260804`.
+
+Native launcher-icon logical paths now validate in one allocation-free scan
+instead of splitting every slash-delimited component before opening the icon.
+The same predicate enforces the existing root-relative, 240-character,
+nonempty-component, and traversal rules at publication admission and file
+loading. Canonical root containment, no-follow opening, digest verification,
+and decoded-image bounds remain unchanged. Direct JVM tests cover nested and
+Unicode paths, exact and overflowing total lengths, relative paths, repeated
+and trailing separators, and traversal. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-icon-path-bound-foot-20260804`.
+
+Generated-launcher template and signed-APK ZIP entry names now validate in one
+allocation-free scan instead of splitting every slash-delimited component. The
+scanner preserves the 240-character ceiling plus relative, nonempty-component,
+traversal, and backslash rejection before extraction or signed-output
+acceptance. Direct JVM tests cover ordinary nested and Unicode names, exact and
+overflowing lengths, absolute and trailing paths, repeated separators,
+traversal, and backslashes. The complete source unit/lint gate and both
+exact-ABI manager builds pass. The subsequent physical-Samsung Foot regression
+retained stable processes, a 34 px font, 126 px controls, and visible command
+output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-entry-path-bound-foot-20260804`.
+
+Generated-launcher accessibility action responses now use the shared bounded
+portal field parser instead of limit-splitting the complete response. The
+parser retains exactly four preallocated fields, preserves the required empty
+encoded field for internal refresh, and rejects field five before retention.
+Direct JVM tests cover ordinary and trailing-empty four-field responses,
+excess fields, invalid schema limits, and an exact 16 KiB tab flood. The
+complete source unit/lint gate and both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/accessibility-response-parser-bound-foot-20260804`.
+
+Package-detail status lines now scan and update by delimiter indexes instead of
+materializing a line sequence and mutable list for launcher-review and
+installed-version refreshes. Prefix detection allocates no line strings; a
+successful replacement builds only the final LF-normalized text, while a
+missing target returns the original string. Direct JVM tests cover LF, CRLF,
+CR, mixed delimiters, exact prefix boundaries, first-match replacement, empty
+target lines, trailing delimiters, and unchanged missing targets. The complete
+source unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font, 126
+px controls, and visible command output in inspected full-device frames. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-status-line-scan-foot-20260804`.
+
+Installed-shell and direct-command null-separated UTF-8 requests now encode
+into one exact bounded byte array instead of creating a sublist, one byte array
+per argument, and an encoded-argument list before constructing the final
+request. The preflight counts ASCII, multibyte, supplementary, separator, and
+malformed-surrogate replacement bytes against the 16 KiB native ceiling before
+allocation. Direct JVM tests prove byte-exact UTF-8 parity, skipped metadata
+fields, malformed-surrogate parity with the JVM encoder, exact-limit admission,
+overflow rejection, empty fields, and invalid caller bounds. The complete
+source unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font, 126
+px controls, and visible command output in inspected full-device frames. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/command-request-utf8-bound-foot-20260804`.
+
+Generated-launcher native clipboard reads now validate a successful length
+against both direct-buffer capacity and the independent 64 KiB clipboard
+policy before allocating a Java byte array or copying from the buffer. An
+invalid successful length becomes rejected clipboard content while the tracked
+transfer still completes instead of allocating from the native result. Shared
+JVM boundary tests cover exact policy admission, policy-plus-one with spare
+capacity, negative limits, limits above capacity, and invalid capacities. The
+complete source unit/lint gate and both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/clipboard-native-length-bound-foot-20260804`.
+
+The remaining manager-native positive-length copies now use the shared output
+admission before Java allocation and direct-buffer reads. Package-runtime
+probes, AUR provider candidates, installed-shell catalogs, and generic
+package-cache or status UTF-8 results use the same tested capacity boundary
+instead of ad hoc constant or buffer checks. A source audit confirms every
+`outputLength`-sized manager byte array is admitted through
+`checkedNativeOutputLength`. Shared tests cover zero, exact capacity,
+capacity-plus-one, negative lengths, and invalid capacities. The complete
+source unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font, 126
+px controls, and visible command output in inspected full-device frames. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/remaining-native-length-admission-foot-20260804`.
+
+Generated-launcher camera, audio, GPU, and private D-Bus Unix socket paths now
+use allocation-free bounded UTF-8 admission instead of encoding complete
+temporary byte arrays only to check length. The shared policy reserves the
+native terminator byte, stops at the first overflow, and rejects malformed
+Unicode. Direct JVM tests cover exact ASCII and multibyte admission, one-byte
+overflow, malformed surrogates, and invalid native path limits. The complete
+source unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font, 126
+px controls, and visible command output in inspected full-device frames. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-socket-path-utf8-foot-20260804`.
+
+Generated-launcher file portal URI output now validates the
+`toASCIIString()` character count directly instead of allocating a redundant
+US-ASCII byte array only to check the 4 KiB protocol ceiling. Because every
+output character is ASCII, the character and encoded-byte counts are exact.
+HTTP and logical-home path admission also reuse the shared allocation-free
+UTF-8 walker instead of a duplicate implementation. Direct JVM tests cover
+exact and overflowing ASCII URI expansion, percent-encoded Unicode and spaces,
+traversal, exact ASCII and multibyte HTTP limits, controls, and malformed
+surrogates. The complete source unit/lint gate and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/portal-file-uri-ascii-bound-foot-20260804`.
+
+Signed generated-launcher verification now streams each non-signature ZIP entry
+through SHA-256 under the existing 4 MiB per-entry ceiling instead of first
+retaining a complete entry byte array solely for hashing. The bounded digest
+reader uses a fixed 16 KiB buffer, probes one byte beyond the ceiling, and
+handles legal zero-progress streams without spinning. Direct JVM tests cover
+empty and exact-limit inputs, limit-plus-one rejection, chunked and
+zero-progress reads, and invalid limits. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/signed-entry-streaming-foot-20260804`.
+
+Generated-launcher template ZIP entry extraction now reuses the shared bounded
+input reader instead of a separate `ByteArrayOutputStream` loop. The former loop
+could spin indefinitely when an input stream legally returned zero from a bulk
+read. The shared reader falls back to one bounded byte on zero progress, probes
+one byte beyond the 4 MiB entry ceiling, and retains no oversized byte. Direct
+JVM tests cover empty and exact input, limit-plus-one rejection, chunked reads,
+and repeated zero-progress bulk reads; launcher assembly regressions also pass.
+The complete source unit/lint gate and both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-entry-bounded-input-foot-20260804`.
+
+Generated-launcher binary Android-manifest string replacement now writes each
+UTF-8 or UTF-16 string-pool record into one exactly sized output array. The
+former path grew a `ByteArrayOutputStream` around the already encoded bytes and
+then allocated a second complete output copy. Length-prefix sizing uses checked
+arithmetic, preserves Android's one- or two-unit length formats, and leaves the
+required terminator bytes in the exact result. Direct JVM tests prove byte-exact
+ASCII, multibyte, supplementary, UTF-16LE, and two-byte UTF-8 length-prefix
+encoding. The complete source unit/lint gate and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/binary-xml-exact-string-foot-20260804`.
+
+Project-synchronization journal and history CRC32 encoding now computes the
+checksum while writing through a bounded stream, appends it to the same backing
+buffer, and creates only the final persisted copy. The former path retained a
+complete body copy, rescanned it for CRC32, copied it into a second output
+stream, and then copied that stream again; aggregate history overflow was
+checked only after those allocations. Body writes now reserve the eight-byte
+checksum trailer and reject the first byte beyond the 64 KiB journal or 128 KiB
+history ceiling. Direct JVM tests cover exact-limit output, limit-plus-one,
+single and bulk writes, invalid limits, maximum journal fields, oversized
+aggregate conflict history, round-trip compatibility, and corruption. The
+complete source unit/lint gate and both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-checksum-output-bound-foot-20260804`.
+
+Native project-synchronization requests now preflight and write tab-separated
+UTF-8 directly into the caller's reusable `ByteBuffer`. The former path first
+joined every field into another complete string and then allocated its complete
+encoded byte array before checking the 8 KiB protocol ceiling. The encoder now
+counts separators and code points against both the native ceiling and actual
+destination capacity, rejects malformed surrogates before clearing the buffer,
+and emits ASCII, two-, three-, and four-byte sequences without intermediate
+payload allocation. Direct JVM tests prove byte-exact parity with the standard
+UTF-8 encoder, exact ASCII and supplementary limits, limit-plus-one rejection,
+smaller destination rejection without mutation, and empty, tabbed, or malformed
+field rejection. The complete source unit/lint gate and both exact-ABI manager
+builds pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-request-utf8-bound-foot-20260804`.
+
+Exact UTF-8 length checks no longer allocate complete encoded copies solely to
+measure them. The shared malformed-Unicode-safe walker now returns the exact
+byte count under an optional ceiling and remains the implementation behind the
+existing boolean admission policy. Generated-launcher stored-entry alignment
+uses it for ZIP name length, while document-import and folder-import native
+response checks compare the reported length without re-encoding the complete
+response. A source audit finds no remaining production
+`toByteArray(StandardCharsets.UTF_8).size` checks in the manager package.
+Direct JVM tests cover empty, ASCII, two-, three-, and four-byte text, exact and
+overflowing ceilings, negative limits, and malformed high and low surrogates;
+launcher assembly regressions also pass. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/exact-utf8-length-foot-20260804`.
+
+The manager DocumentsProvider now sends home and shell-startup open, create,
+rename, and delete requests through the same bounded tab-separated UTF-8
+encoder as project synchronization. It preflights the complete request against
+the 4 KiB storage ceiling, allocates the exact direct JNI buffer, and writes
+fields into it without first allocating a joined string and complete encoded
+byte array. Empty fields, tabs, malformed Unicode, aggregate overflow, and a
+smaller destination fail before buffer mutation. Direct JVM tests prove
+byte-exact standard UTF-8 output into a direct buffer plus all rejection cases;
+project-sync request regressions prove the shared encoder's 8 KiB use. The
+complete source unit/lint gate and both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/provider-request-utf8-bound-foot-20260804`.
+
+Selected package-cache cleanup requests now use the shared bounded delimiter
+encoder with LF instead of sorting into another collection, joining the full
+selection string, and allocating its complete UTF-8 byte array before creating
+the direct JNI buffer. The caller thread copies and sorts the bounded selection
+once, checks strict uniqueness and membership, and performs only an
+allocation-free length preflight. The package worker allocates the exact direct
+buffer and emits the request immediately before native cleanup; the synchronous
+recovery path uses the same encoding. The shared encoder now supports any
+non-NUL ASCII delimiter while rejecting delimiter-bearing fields, malformed
+Unicode, invalid delimiters, and aggregate overflow before mutation. Direct JVM
+tests prove LF byte parity, exact capacity, capacity-minus-one, embedded-LF,
+multibyte, and invalid-delimiter behavior. The complete source unit/lint gate
+and both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-cache-request-utf8-bound-foot-20260804`.
+
+Manager package-command requests now encode directly into their exact or
+reusable direct JNI buffers instead of first allocating complete UTF-8 byte
+arrays and then copying them. This covers resolution, compatibility analysis,
+launcher review, installed and available version state, installation size,
+installed origin, durable job enqueue, ordinary package commands, install and
+removal plans, pending-mutation inspection, and reviewed AUR candidate state.
+Single-field requests use the new bounded direct `putUtf8`; two-field requests
+reuse the tab-delimited encoder. Both preflight malformed Unicode and capacity
+before clearing a destination. A source audit finds no remaining
+`packageName.toByteArray(StandardCharsets.UTF_8)` request staging in the runtime
+service. Direct JVM tests prove exact standard UTF-8 parity for ASCII,
+multibyte, and supplementary text plus capacity-minus-one and malformed-input
+rejection. The complete source unit/lint gate and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-command-direct-utf8-foot-20260804`.
+
+The remaining audited runtime JNI request paths now preflight and encode UTF-8
+directly into exact or reusable direct buffers. This covers package search,
+package-job messages, download filenames, package verification and cache
+validation, document-import fields, bootstrap root paths, and the packaged
+native-library path. URI admission also uses the shared allocation-free UTF-8
+walker instead of creating temporary encoded arrays solely to measure them. The
+three remaining runtime-service `toByteArray(StandardCharsets.UTF_8)` calls
+retain encoded bytes as actual diagnostic launch-configuration or queued shell
+command data rather than staging a native request or length check. Targeted
+document-import, direct UTF-8, and project-sync JVM tests pass, as do the complete
+source unit/lint gate and both exact-ABI manager builds. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font, 126 px
+controls, and visible command output in inspected full-device frames. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/remaining-runtime-request-utf8-foot-20260804`.
+
+Rust DocumentsProvider IDs and project-mirror paths now validate and retain
+segments incrementally. The former parsers collected every slash-delimited
+segment from the admitted 1 KiB or 4 KiB input before enforcing their 32- and
+64-segment depth limits. The shared parser now validates each segment before
+retention and rejects segment 33 or 65 without adding it. Direct storage tests
+cover both exact depth limits and their first overflow; all 34 storage tests,
+the locked Rust workspace test suite, targeted warning-denied storage Clippy,
+the complete Android source unit/lint gate, and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/storage-path-segment-bound-foot-20260804`.
+
+Project-sync manifest loading now allocates exactly the metadata-admitted file
+length, fills that buffer with `read_exact`, and probes one trailing byte for
+concurrent growth. The former `Vec::with_capacity` plus `read_to_end` path could
+grow and reallocate beyond the expected size before rejecting a changed file.
+Short reads and first-byte growth now fail without returning partial state.
+Direct tests cover exact input, truncation, and growth; all 35 storage tests,
+the locked Rust workspace test suite, targeted warning-denied storage Clippy,
+the complete Android source unit/lint gate, and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/sync-manifest-exact-read-foot-20260804`.
+
+Project-synchronization journal fingerprints now decode by delimiter indexes
+instead of splitting the complete bounded history field before checking its
+exact three-field schema. A third colon fails without constructing field
+substrings. The one numeric field remains bounded, and all 32 digest bytes are
+decoded directly from lowercase hexadecimal nibbles without two-character
+temporary strings. Direct JVM tests cover valid file and directory records,
+missing and extra fields, an 8 KiB colon flood, uppercase and nonhexadecimal
+digests, digest-length boundaries, and negative or oversized file sizes. The
+complete source unit/lint gate and both exact-ABI manager builds pass. The
+subsequent physical-Samsung Foot regression retained stable processes, a 34 px
+font, 126 px controls, and visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-fingerprint-bound-foot-20260804`.
+
+Native storage-usage summaries now parse directly into their eight numeric
+values instead of copying away a terminal newline and splitting the complete
+fixed 16 KiB output into an arbitrary field list before enforcing the exact
+nine-field schema. The parser accepts no newline or exactly one terminal LF,
+rejects field ten before constructing it, and preserves nonnegative,
+arithmetic-overflow, two-million-entry, and category-byte validation. Direct
+JVM tests cover both valid terminators, field underflow and overflow, an extra
+terminal newline, malformed, negative, and overflowing numbers, and a near-16
+KiB field flood. The complete source unit/lint gate and both exact-ABI manager
+builds pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/storage-usage-parser-bound-foot-20260804`.
+
+Native AUR provider candidates now parse directly into at most 32 validated,
+unique package names instead of creating a line string for every record,
+filtering those strings into a list, and allocating a second distinct list
+before enforcing the producer bound. The returned native length is checked
+against the fixed 16 KiB direct buffer before the required byte copy, and
+candidate 33 fails before substring construction. The parser preserves
+LF/CRLF/CR handling, blank-line skipping, package-name grammar, and source
+order. Direct JVM tests cover every delimiter form, exact 32-candidate
+admission, candidate 33, duplicates, invalid and overlong names, and an exact
+16 KiB blank-line flood. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-provider-parser-bound-foot-20260804`.
+
+Native launcher-registry summaries now decode directly into a fixed ten-number
+array instead of copying away terminal newlines and splitting the complete
+fixed 16 KiB status before enforcing its exact 11-field schema. Terminal LF
+runs are skipped by index, and field 12 fails before the final numeric
+substring is constructed. Existing generation, total, per-state range, and
+state-sum validation remains at the service boundary. Direct JVM tests cover
+valid summaries with and without terminal LF runs, invalid headers, field
+underflow and overflow, malformed and overflowing numbers, and an exact 16 KiB
+tab flood. The complete source unit/lint gate and both exact-ABI manager builds
+pass. The subsequent physical-Samsung Foot regression retained stable
+processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-summary-parser-bound-foot-20260804`.
+
+Native project-synchronization plan summaries now decode directly into a fixed
+seven-count array instead of splitting the complete fixed 8 KiB output,
+copying its action-count tail, and mapping every count before enforcing the
+schema. Field eight fails before its substring is constructed. Every count
+retains the zero-to-10,000 project-entry bound, and observed plan actions now
+compare directly against the fixed array rather than another boxed list.
+Direct JVM tests cover exact admission, field underflow and overflow, empty,
+negative, malformed, and over-limit values, an invalid caller limit, and an
+exact 8 KiB tab flood. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-summary-parser-bound-foot-20260804`.
+
+Native official-package search output now parses directly into at most 100
+rows of exactly six fields instead of copying away terminal newlines, creating
+a line string for every result, and splitting each row before applying the
+result bound. Row 101 and field seven fail before excess substring retention.
+LF, CRLF, CR, and terminal LF runs remain supported, while blank internal rows
+still fail closed. The six published result collections now preallocate to the
+protocol maximum; existing repository, package, version, description, install
+state, installed-version, duplicate, and capability validation remains at the
+service boundary. Direct JVM tests cover delimiter forms, exact row admission,
+row and field overflow, blank rows, invalid caller limits, and exact 16 KiB
+newline and tab floods. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-search-page-parser-bound-foot-20260804`.
+
+Resolved official and AUR package payloads now parse directly into the
+caller-bounded one-to-512 six-field records instead of creating a line string
+and split list for every row before checking the closure limit. The next
+package and field seven fail before excess retention. Empty lines and
+LF/CRLF/CR remain supported, positive archive-size validation occurs during
+record construction, and the result preallocates to the requested maximum.
+Direct JVM tests cover delimiter forms, exact 512/513 boundaries, empty input,
+field underflow and overflow, invalid sizes and caller limits, and 320 KiB
+newline and tab floods. The complete source unit/lint gate and both exact-ABI
+manager builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/resolved-payload-parser-bound-foot-20260804`.
+
+Installed-package version and reviewed-AUR-candidate decoding now validate JNI
+success lengths against their fixed 16 KiB direct-buffer capacities before
+allocating result byte arrays or copying native output. The shared admission policy accepts zero through
+exact capacity and rejects negative, capacity-plus-one, and invalid-capacity
+inputs. Direct JVM tests cover every boundary. The complete source unit/lint
+gate and both exact-ABI manager builds pass. The subsequent physical-Samsung
+Foot regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in inspected full-device frames. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-candidate-output-length-bound-foot-20260804`.
+
+The same admission now protects the remaining audited native result copies for
+package search and resolution, AUR environment/graph/closure verification,
+package compatibility and launcher review, available-version state,
+installation size, installed origin, install/removal plans, pending mutation,
+direct command output, and the latest package job. Every successful JNI length
+is checked against its associated direct-buffer capacity before byte-array
+allocation or copy. The shared boundary tests, complete source unit/lint gate,
+and both exact-ABI manager builds pass. The physical-Samsung Foot regression
+also passed with stable processes, a 34 px font, 126 px controls, and visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/jni-output-length-audit-foot-20260804`.
+
+Native installed-shell catalogs now parse directly into at most eight rows of
+three-to-seven fields. The previous path created a line string per record,
+split all fields, and only then enforced row count, field count, 64-unit,
+printable-ASCII, and argument-space limits. The parser supports LF, CRLF, CR,
+and a final unterminated row; ignores blank lines; rejects row nine and field
+eight before excess retention; and rejects an overlong field before substring
+construction. Direct JVM tests cover exact row, field, and length admission and
+overflow; every delimiter form; blank input; invalid characters and arguments;
+and exact 16 KiB newline and tab floods. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in an inspected full-device frame. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/shell-catalog-parser-bound-foot-20260804`.
+
+Native verified-build closures now parse directly into the declared zero-to-512
+nine-field package rows and one three-field summary. The previous path split
+the complete 512 KiB manifest into lines, copied and filtered its row tail,
+split the summary, copied the package-row prefix, and then split every package.
+The bounded parser supports LF, CRLF, CR, and an unterminated summary; ignores
+blank body lines; and rejects an extra row or field before excess retention.
+Existing resolved-package identity, hash, byte, signature, and summary checks
+remain unchanged. Direct JVM tests cover zero, ordinary, and exact-512
+closures; mixed delimiters; row and field underflow/overflow; invalid counts
+and sizes; and exact-limit newline and tab floods. The complete source unit/lint
+gate and both exact-ABI manager builds pass. The subsequent physical-Samsung
+Foot regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in an inspected full-device frame. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/verified-build-closure-parser-bound-foot-20260804`.
+
+Restored persisted AUR output manifests now parse directly into the declared
+zero-to-256 seven-field rows. The previous path copied away terminal newlines,
+split the complete 512 KiB text, split its header, copied the row tail, mapped
+split rows into an intermediate list, and copied that list into an array.
+Terminal LF runs are now skipped by index; an extra row, internal blank row, or
+eighth field fails before excess retention. Existing package identity, metrics,
+hash, canonical cache path, file size, and restored-log validation remains
+unchanged. Direct JVM tests cover zero, ordinary, and exact-256 manifests;
+optional terminal newlines; row/header underflow and overflow; count and size
+bounds; and exact-limit newline and tab floods. The complete source unit/lint
+gate and both exact-ABI manager builds pass. The subsequent physical-Samsung
+Foot regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in an inspected full-device frame. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/persisted-aur-output-parser-bound-foot-20260804`.
+
+Restored persisted AUR graph-output manifests now parse directly into the
+producer-bounded one-to-256 eight-field rows. The previous path copied away
+terminal newlines, split the complete 512 KiB text and header, then copied,
+mapped, split, and recopied every row before checking the native output count.
+Terminal LF runs are skipped by index; count 257, an extra or blank row, and
+field nine fail before excess retention. Existing graph-boundary completion,
+expected package order, identity, metrics, hash, canonical cache path, file
+size, and restored-log validation remains unchanged. Direct JVM tests cover
+ordinary and exact-256 manifests, optional terminal newlines, count, header,
+row, and field bounds, and exact-limit newline and tab floods. The complete source
+unit/lint gate and both exact-ABI manager builds pass. The subsequent
+physical-Samsung Foot regression retained stable processes, a 34 px font,
+126 px controls, and visible command output in an inspected full-device frame.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/persisted-aur-graph-output-parser-bound-foot-20260804`.
+
+Native launcher-registry pages now parse directly into one three-field header
+and at most 256 eight-field rows. The previous path copied away terminal
+newlines, split the complete 8 KiB page and header, copied the row tail, and
+split every row before applying the total-entry bound. Terminal LF runs are
+skipped by index; row 257, an internal blank row, or field nine fails before
+excess retention. The service preallocates its bounded aggregate and now
+rejects a nonfinal page that makes no offset progress instead of looping
+indefinitely. Existing pagination totals, package and descriptor identity,
+generation and status, visible label, and source-package validation remains
+unchanged. Direct JVM tests cover header-only, ordinary, and exact-256 pages;
+optional terminal newlines; row and header field bounds; blank pages and rows;
+and exact-limit newline and tab floods. The complete source unit/lint gate and
+both exact-ABI manager builds pass. The subsequent physical-Samsung Foot
+regression retained stable processes, a 34 px font, 126 px controls, and
+visible command output in an inspected full-device frame. Hashed evidence is
+under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-registry-page-parser-bound-foot-20260804`.
+
+Portal MIME-filter parsing is now incremental as well. The previous bounded
+`split` still constructed up to 17 substrings before applying the 16-type
+schema, and lowercased each raw field before rejecting its 127-unit field
+limit. The parser now preallocates its 16-entry normalized result and duplicate
+set, validates raw field shape before lowercase allocation, preserves
+case-insensitive duplicate rejection, and rejects type 17 before constructing
+it. Direct JVM tests cover exact 16-type admission, type 17 rejection, and an
+exact 2,048-unit overlong field. The complete app unit/lint gate and both
+exact-ABI builds pass. The subsequent physical-Samsung Foot regression retained
+stable processes, a 34 px font, 126 px controls, and visible command output in
+an inspected full-device frame. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/portal-mime-parser-bound-foot-20260804`.
 
 Private D-Bus and XDG portal teardown now has process-wide ownership and bounded
 waits. Graceful and forced helper waits each stop after two seconds. Helper
@@ -3663,6 +5317,22 @@ capacity rejection, and stale slot recovery. The JDK 26 app unit/lint gate
 passes. Current direct Gradle APKs pass the Snapshot portal/camera gate on the
 x86_64 emulator and AArch64 Samsung. After wrapper force-stop, neither device
 retains a portal helper process or `cache/p*` runtime directory.
+
+Portal runtime and save cleanup no longer calls `listFiles()` before enforcing
+its limits. The shared directory-stream walker now bounds an active save at
+eight entries, a staging slot at one file, stale save recovery at 128 session
+directories, each stale runtime at four entries, and the manager cache scan at
+4,096 entries while retaining at most 128 matching runtimes. Save recovery
+validates its complete bounded entry set before moving data and reuses each
+validated staging file rather than enumerating the slot again. Direct JVM tests
+cover current and legacy recovery plus slot, per-session save, stale-directory,
+cache-scan, and runtime-entry overflow without partial mutation. The complete
+JDK 26 app unit/lint gate and exact x86_64/AArch64 manager builds pass. On the
+physical Samsung, manager startup removed an exact test-owned four-entry stale
+runtime, then retained stable manager/wrapper/Linux processes while Foot
+rendered exact command output in a clean 1080×2202 full-device frame. The
+inspected screenshot, scoped logs, and hashed recovery result are under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/portal-runtime-recovery-20260804`.
 
 Preference persistence now uses one keyed coalescing worker bounded by ten task
 domains—startup loading and nine persistent preference keys—instead of an
@@ -3789,38 +5459,647 @@ Manager, Builder, and launcher-template Kotlin source now has a separate JDK 26
 CI lane for debug unit tests and Android lint. That lane uses an explicit
 source-validation mode which omits native/runtime assembly and rejects any APK
 assembly request, so only complete normal builds can emit installable artifacts.
-The release workflow also provisions JDK 26; the prior JDK 17 setup could not
-pass the repository's current build contract.
+The release workflow also provisions JDK 26.0.2; the prior JDK 17 setup could
+not pass the repository's current build contract. The current 2026-08-04
+source-validation gate passes debug unit tests and lint for `android:app`,
+`android:launcher-template`, and `android:builder` under that pinned JDK.
 
-1. **Architecture support**
-   - maintain the validated exact-ABI release workflow and production self-update regressions;
-   - use official Arch Linux packages only for x86_64 and Arch Linux ARM packages/trust roots for AArch64;
-   - accept repository packages marked any, but require exact CPU ABI for native ELF files;
-   - do not silently emulate x86_64 on ARM.
+Five more equivalent compositor conditionals now use Rust let-chains: retained
+SHM damage reuse, root pointer-coordinate scaling, pointer-confinement surface
+bounds, selection-source cancellation, and Linux drag-source cancellation. All
+107 compositor tests and the locked Rust workspace suite pass, as do the
+complete Android source unit/lint gate and exact x86_64/AArch64 manager builds.
+Scoped warning-denied compositor Clippy confirms these findings are gone and now
+reports 12 remaining `collapsible_if` findings. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/compositor-rust197-letchains-foot-20260804`.
 
+The Rust 1.97 warning-denied workspace gate is clean. The compositor's remaining
+12 nested conditionals now use equivalent let-chains across popup lifecycle,
+subsurface state, toplevel activation/restoration, popup composition and
+dismissal, and pointer-coordinate handling. Runtime PTY teardown likewise joins
+its empty-registry and session-marker checks without changing marker-removal
+errors. All 107 compositor tests, all 10 runtime tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/rust197-workspace-clippy-clean-foot-20260804`.
 
-## Pending
+Builder AUR dependency manifests now parse their package and summary records
+incrementally instead of collecting every tab-delimited field before enforcing
+the exact 11- or four-field schema. Package storage is preallocated to the
+existing bounded maximum, and the first excess field fails before any record is
+retained. A regression rejects a tab flood at the exact 256 KiB manifest limit.
+All 27 Builder tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate, and
+exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate retained
+stable processes, a 34 px font, 126 px controls, and exact visible command output
+in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-aur-dependency-field-bound-foot-20260804`.
 
-- Broaden printing, audio, accessibility, and keyring compatibility beyond the validated applications and devices.
-- Zero-copy Android HardwareBuffer/dmabuf presentation, Vulkan, and broader physical-device GL application coverage; the current validated x86_64 and AArch64 OpenGL ES virpipe path presents through SHM, replaces a failed helper once, and retains a bounded llvmpipe fallback only if replacement recovery fails.
-- Rich notification actions, non-HTTP URI policies, and remaining desktop portals.
-- Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
-- GrapheneOS Pixel and sustained desktop-mode validation.
-- Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending.
-- Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
-- Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild. The GTK settings bridge now has a clean checksum-pinned AArch64 GLib link sysroot.
-- Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.
-- A stronger Builder isolation primitive—a distinct UID, mount namespace, or
-  kernel-enforced immutable lower root—is required before prepared roots may
-  be shared between untrusted recipes. Production intentionally reprovisions
-  each root today while reusing signed archives and independently verified
-  outputs.
+Package removal mutation-intent headers now consume only the package, optional
+legacy version, and optional legacy database digest through the delimiter
+iterator instead of collecting every tab-delimited field before enforcing the
+one-to-three-field schema. Field four fails before temporary field retention,
+while current multi-record removal intents and both legacy forms retain their
+existing validation and recovery semantics. The round-trip suite now also
+rejects a tab flood at the exact intent-size ceiling. All 131 package tests, the
+locked Rust workspace suite, full all-target warning-denied workspace Clippy,
+the complete Android source unit/lint gate, and exact x86_64/AArch64 manager
+builds pass. The physical-Samsung Foot gate retained stable processes, a 34 px
+font, 126 px controls, and exact visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-removal-intent-field-bound-foot-20260804`.
 
-## Package-manager efficiency rules
+Official and AUR rollback removal preflights now validate Pacman's unordered
+package-name output with a fixed four-word bitset instead of collecting and
+sorting every output line plus a cloned expected vector. The validator accepts
+each of at most 256 expected names exactly once and rejects unknown, duplicate,
+missing, blank, or over-limit results without output-sized allocation. Direct
+tests cover reverse-order exact admission, every mismatch class, and the full
+256-name boundary. All 132 package tests, the locked Rust workspace suite, full
+all-target warning-denied workspace Clippy, the complete Android source
+unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/rollback-plan-fixed-set-foot-20260804`.
 
-- Cache repository databases, verified package archives, dependency graphs, extracted immutable modules, and wrapper templates by content hash.
-- Download once and reuse only after signature/hash verification.
-- Bound downloads by package-declared and global size limits.
-- Keep Android confirmation serialized so users always know which app is being installed.
-- Continue unrelated jobs after one package fails.
-- Persist state before every phase transition so process death or reboot can resume or report a precise failure.
+AUR lifecycle-capability identity validation now checks the required-package
+list's uniqueness directly within the existing 256-package bound instead of
+allocating a temporary `BTreeSet` of every package reference. The validation
+still rejects empty, oversized, malformed, duplicate, and target-omitting
+lists. A direct regression covers 256 unique names, a duplicate at that limit,
+and a 257th-name overflow. All 133 package tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-capability-identity-uniqueness-foot-20260804`.
+
+Replacement-repair snapshot validation now records matched removals in one
+fixed `u64` bitset plus a count instead of cloning up to 48 package names into a
+temporary vector. The validator explicitly rejects replacement inputs above
+that policy bound and continues to reject repeated package names, unmatched
+snapshot entries, missing entries, invalid identities, and digest mismatches.
+The restoration regression now also exercises a missing replacement record and
+an over-limit record list. All 133 package tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/replacement-repair-fixed-set-foot-20260804`.
+
+Desktop discovery now allocates a desktop ID and path only when the bounded
+1,024-candidate heap admits that entry; once full, lexicographically later
+entries are compared by their borrowed ID and discarded without constructing a
+temporary owned candidate. AUR provider search likewise validates every RPC
+record but clones a package name only on first admission instead of cloning all
+records and deduplicating afterward. Existing candidate-prefix coverage passes,
+and the provider regression now proves duplicate valid records collapse while a
+malformed duplicate still fails closed. All 133 package tests, the locked Rust
+workspace suite, full all-target warning-denied workspace Clippy, the complete
+Android source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/desktop-aur-admission-allocation-foot-20260804`.
+
+Desktop executable discovery now probes absolute paths directly and constructs
+relative `/usr/local/bin`, `/usr/bin`, and `/bin` candidates one at a time,
+stopping at the first safe root-contained executable instead of eagerly
+allocating a temporary vector with all three paths. A direct regression proves
+the conventional `/usr/local/bin` precedence remains intact when the same
+program is also installed under `/usr/bin`; escape, normalized-link, and
+root-absolute-link coverage remains green. All 134 package tests, the locked
+Rust workspace suite, full all-target warning-denied workspace Clippy, the
+complete Android source unit/lint gate, and exact x86_64/AArch64 manager builds
+pass. The physical-Samsung Foot gate retained stable processes, a 34 px font,
+126 px controls, and exact visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/desktop-lazy-executable-resolution-foot-20260804`.
+
+Shell discovery rows and desktop-catalog page headers now format directly into
+their fixed `ToolOutput` storage through its bounded `fmt::Write`
+implementation. This removes one temporary heap `String` per admitted shell and
+one per catalog page while preserving exact wire bytes and output-limit errors.
+The exact four-shell catalog and desktop page protocol regressions pass. All 134
+package tests, the locked Rust workspace suite, full all-target warning-denied
+workspace Clippy, the complete Android source unit/lint gate, and exact
+x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate retained
+stable processes, a 34 px font, 126 px controls, and exact visible command
+output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/direct-tool-output-formatting-foot-20260804`.
+
+AUR `.SRCINFO` parsing now recognizes architecture-qualified dependency,
+provider, source, and checksum keys by comparing each borrowed key suffix with
+the requested architecture. It no longer allocates seven formatted key strings
+for every parse. Exact architecture matching remains mandatory; the source
+selection regression now also proves `source_x86_64_extra` and
+`sha256sums_x86_64_extra` are ignored rather than treated as x86_64 records.
+All 134 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate, and
+exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate retained
+stable processes, a 34 px font, 126 px controls, and exact visible command output
+in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/srcinfo-borrowed-architecture-keys-foot-20260804`.
+
+SHA-512 AUR source cache keys now allocate their exact 135-character output
+once, append the `sha512-` domain prefix, and encode digest nibbles directly
+into that string. This replaces the temporary 128-character hexadecimal string
+previously copied by `format!`; established SHA-256 cache paths remain
+unchanged. The SHA-512 source staging/reopen regression now also checks the
+exact key prefix and length. All 134 package tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/sha512-cache-key-single-allocation-foot-20260804`.
+
+Pacman's missing-package diagnostic classifier now extracts the package name
+between the fixed borrowed prefix and suffix instead of allocating a formatted
+expected diagnostic for every query. It still accepts only one exact line; the
+installed-query regression now explicitly rejects a different package name and
+otherwise-correct output followed by a second line. All 134 package tests, the
+locked Rust workspace suite, full all-target warning-denied workspace Clippy,
+the complete Android source unit/lint gate, and exact x86_64/AArch64 manager
+builds pass. The physical-Samsung Foot gate retained stable processes, a 34 px
+font, 126 px controls, and exact visible command output in inspected full-device
+frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/missing-package-borrowed-match-foot-20260804`.
+
+AUR RPC package and provider validation now recognizes canonical snapshot paths
+by comparing the borrowed package-name segment between the fixed
+`/cgit/aur.git/snapshot/` prefix and `.tar.gz` suffix. This removes one
+temporary formatted path per validated result while retaining exact matching;
+the RPC identity regression now explicitly rejects a `.tar.gz.extra` suffix.
+All 134 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/rpc-snapshot-borrowed-match-foot-20260804`.
+
+Pacman's missing-repository-target classifier now removes at most one terminal
+newline and compares the borrowed text after the fixed
+`error: target not found: ` prefix. This replaces two formatted expected
+diagnostics per singleton repository probe while retaining exact package and
+whole-output matching. Direct regressions cover the accepted unterminated form
+and reject a different package, a second newline, and a package-name suffix.
+All 134 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/repository-target-borrowed-match-foot-20260804`.
+
+AUR archive admission, recovery, and rollback-cache discovery now compare the
+borrowed filename remainder after an existing hexadecimal digest with the
+required `-` boundary. This removes temporary formatted digest-prefix strings
+from all three paths; initial intent publication also computes its retained
+digest text once instead of encoding it again after validation. A direct
+regression covers exact admission and missing, substituted, prepended, or
+punctuation-only digest boundaries. All 135 package tests, the locked Rust
+workspace suite, full all-target warning-denied workspace Clippy, the complete
+Android source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-digest-prefix-borrowed-foot-20260804`.
+
+Pacman local-database directory validation now compares each borrowed entry
+name with its parsed package name, one required `-`, and its complete version.
+Transaction preview copying, installed-package inventory, replacement-snapshot
+validation, and replacement-snapshot cleanup no longer allocate a formatted
+`name-version` string for every entry. A direct regression covers hyphens in
+both identity components and rejects missing separators, suffixes, prefixes,
+and different package names. All 136 package tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/local-database-borrowed-identity-foot-20260804`.
+
+Replacement repair now recognizes every already-authorized local database
+entry by applying the borrowed identity-component matcher directly to the
+directory entry name. The bounded nested scan no longer formats a
+`name-version` string and joins a temporary path for each replacement
+candidate examined against every local entry. Existing exact replacement
+snapshot and restoration coverage passes, including complete cleanup and
+digest validation. All 136 package tests, the locked Rust workspace suite,
+full all-target warning-denied workspace Clippy, the complete Android source
+unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/replacement-scan-borrowed-identity-foot-20260804`.
+
+AUR PKGBUILD step discovery now recognizes package functions directly from the
+borrowed parsed function name. It accepts either the exact
+`package_<package-name>` spelling or the conventional form with every package
+name hyphen replaced by an underscore, without allocating two expected
+function strings or an intermediate normalized package name for each review.
+A direct regression covers both accepted forms and rejects mixed, prefixed,
+suffixed, and truncated near-matches. All 137 package tests, the locked Rust
+workspace suite, full all-target warning-denied workspace Clippy, the complete
+Android source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-package-function-borrowed-match-foot-20260804`.
+
+AUR provided-package derivation now retains unique package and virtual-provider
+names directly in one pre-sized vector, then sorts that retained result. This
+removes the temporary node-allocating `BTreeSet` and enforces the existing
+256-name aggregate ceiling before retaining name 257 instead of after building
+the oversized set. Duplicate declarations remain accepted even at exact
+capacity. Direct boundary coverage and the existing sorted VS Code provider
+review pass. All 138 package tests, the locked Rust workspace suite, full
+all-target warning-denied workspace Clippy, the complete Android source
+unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-provided-vector-bound-foot-20260804`.
+
+AUR split-package dependency traversal now retains its unique reachable
+package frontier in one pre-sized vector instead of a node-allocating
+`BTreeSet`. Providers already retained or pending are not enqueued again, and
+the existing 256-package ceiling is enforced before retaining or enqueuing
+package 257. The final package list remains sorted. Direct regression coverage
+accepts an exact 256-package chain and rejects the next package before growth.
+All 139 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass.
+
+Concurrent publication of the same root-managed file no longer reports a
+valid atomic replacement as `InvalidEntry`. The descriptor/path identity check
+still rejects a non-regular final path, but an intervening regular-file
+replacement now proceeds through publication of the current managed content.
+The previously reproducible
+`managed_file_publication_owns_unique_temporary_files` regression passed three
+consecutive focused runs, and scoped root Clippy passes. The subsequent
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 7339 and Linux PID 7416. Hashed
+evidence for both changes is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-split-frontier-root-publication-foot-20260804`.
+
+Reviewed AUR graph topology now represents dependency-base relationships as 32
+fixed `u32` rows and reachability as one fixed boolean array. This replaces the
+temporary `BTreeSet` values for dependency pairs and reachable bases. Kahn
+ordering uses one pre-sized ready vector with a bounded lexicographic minimum
+scan instead of allocating ordered-set nodes, while preserving dependency-first
+and package-base tie ordering. Multiple dependency requirements from one base
+to the same provider contribute one indegree relationship as before. The graph
+regression now proves this deduplication and deterministic ordering across two
+simultaneously ready providers. All 139 package tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 7964 and Linux PID 8072. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-graph-fixed-topology-foot-20260804`.
+
+Package ELF integration profiling now tracks its at-most-256 visited object
+paths in one pre-sized vector instead of a node-allocating `BTreeSet`. The
+bounded traversal compares queued paths against that retained vector, rejects
+object 257 before retaining it, and moves each newly admitted queue string into
+the visited collection instead of cloning it. Existing duplicate suppression,
+root-object handling, dependency resolution, completeness reporting, and the
+4,096-edge ceiling remain unchanged. The exact dependency-graph profile
+regression passes. All 139 package tests, the locked Rust workspace suite, full
+all-target warning-denied workspace Clippy, the complete Android source
+unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 8366 and Linux PID 8467. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-elf-visited-vector-foot-20260804`.
+
+Package ELF integration profiling now admits resolved libraries and script
+delegates into one unique bounded frontier. Paths already visited or pending
+are discarded without another queue entry, and the combined visited/pending
+set rejects distinct object 257 before retention. This prevents repeated ELF
+dependencies from occupying duplicate `VecDeque` storage while preserving the
+same breadth-first profile order and incomplete result for an oversized graph.
+A direct boundary regression proves duplicate admission at exact capacity and
+rejects a new path without growing the queue. All 140 package tests, the locked
+Rust workspace suite, full all-target warning-denied workspace Clippy, the
+complete Android source unit/lint gate, and exact x86_64/AArch64 manager builds
+pass. The physical-Samsung Foot gate retained stable processes, a 34 px font,
+126 px controls, and exact visible command output in inspected full-device
+frames. The signed manifest records Android PID 8688 and Linux PID 8780. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-elf-unique-frontier-foot-20260804`.
+
+Package-search update annotation now retains Pacman's validated quiet-update
+names in one pre-sized vector instead of a node-allocating `BTreeSet`. Each
+name is checked against the at-most-100 differing search candidates and prior
+retained names before ownership allocation; annotation performs the same
+bounded borrowed membership scan. Unknown or duplicate output still fails
+closed, and search-row order and update labels remain unchanged. The package
+search state regression now explicitly rejects duplicate quiet-update output.
+All 140 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. The signed manifest records
+Android PID 9054 and Linux PID 9152. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-update-vector-match-foot-20260804`.
+
+Selective package-cache cleanup now validates the caller's borrowed at-most-256
+package slice directly instead of constructing a temporary `BTreeSet<&str>`.
+Each name is checked against only its prior bounded slice for duplicates, and
+scanned cache artifacts use borrowed slice membership before deletion. Empty,
+oversized, malformed, and duplicate selections still fail before the cache is
+scanned or mutated. Existing cache inventory coverage proves duplicate
+rejection, mutation-intent exclusion, exact selected-byte reclamation, and
+retention of unselected artifacts. All 140 package tests, the locked Rust
+workspace suite, full all-target warning-denied workspace Clippy, the complete
+Android source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 9472 and Linux PID 9548. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-cache-borrowed-selection-foot-20260804`.
+
+Incoming-package foreign-owner preflight now validates transaction and allowed
+replacement identities directly within their existing bounded slices. This
+removes two temporary `BTreeSet<&str>` collections while still rejecting a
+duplicate transaction package, a duplicate replacement, or any identity in
+both sets before archive listing or local-database scanning. Each installed
+package identity is compared against the borrowed transaction/replacement
+slices before its ownership record is inspected; canonical incoming file paths
+remain in their separately bounded ordered set. Existing preflight coverage
+continues to distinguish foreign-owned conflicts from unrelated installed
+files. All 140 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. The signed manifest records
+Android PID 9745 and Linux PID 9845. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-preflight-borrowed-identities-foot-20260804`.
+
+Libalpm hook suppression now retains unique validated hook names in one bounded
+vector and sorts once before creating deterministic `/dev/null` overrides. This
+replaces the temporary node-allocating `BTreeSet` while preserving the 1,024
+directory-entry ceiling, path/type/size validation, stale-override cleanup, and
+one override for a same-named system and local hook. The hook regression now
+includes an exact custom hook that shadows a system hook and proves one safe
+override is published. All 140 package tests, the locked Rust workspace suite,
+full all-target warning-denied workspace Clippy, the complete Android source
+unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 10086 and Linux PID 10166. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/package-hook-vector-dedup-foot-20260804`.
+
+Reviewed AUR graph planning now checks official provider identities directly in
+the package runtime's existing bounded official-target slice. The runtime no
+longer clones those targets into a temporary `BTreeSet<String>` before graph
+planning, and the package planner accepts the borrowed slice while retaining
+its 256-provider bound, name validation, official-provider preference, and
+missing/ambiguous provider behavior. Focused package graph and runtime
+build-target regressions pass. All 140 package tests, all 10 runtime tests, the
+locked Rust workspace suite, full all-target warning-denied workspace Clippy,
+the complete Android source unit/lint gate, and exact x86_64/AArch64 manager
+builds pass. The physical-Samsung Foot gate retained stable processes, a 34 px
+font, 126 px controls, and exact visible command output in inspected
+full-device frames. The signed manifest records Android PID 10375 and Linux PID
+10455. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-official-provider-borrowed-slice-foot-20260804`.
+
+AUR builder-environment target derivation now retains unique official
+dependencies directly in one pre-sized vector and sorts only the final bounded
+result. Per-review split outputs and reviewed graph dependencies are matched
+against their existing bounded slices instead of constructing three temporary
+`BTreeSet` values. The 256-target ceiling is enforced before retaining target
+257, and a boundary regression proves exact-256 acceptance and 257 rejection.
+All 11 runtime tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. The signed manifest records
+Android PID 10716 and Linux PID 10797. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-target-vector-dedup-foot-20260804`.
+
+Process launch-time ELF dependency traversal now retains visited objects in one
+pre-sized vector and admits only dependencies absent from both that vector and
+the pending `VecDeque`. This replaces the node-allocating `BTreeSet`, prevents
+duplicate pending paths from inflating the frontier, and rejects unique object
+257 before queue retention. A boundary regression proves exact-256 admission,
+visited and queued deduplication, and pre-retention overflow rejection. All 33
+process tests, the locked Rust workspace suite, full all-target warning-denied
+workspace Clippy, the complete Android source unit/lint gate, and exact
+x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate retained
+stable processes, a 34 px font, 126 px controls, and exact visible command
+output in inspected full-device frames. The signed manifest records Android
+PID 11908 and Linux PID 12028. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/process-elf-frontier-vector-foot-20260804`.
+
+Reviewed AUR transaction planning now passes its existing bounded owned
+runtime-assumption vector directly through both Pacman plan simulations. The
+planner and preview accept `&[String]` and borrow each argument only while
+building the command, eliminating the temporary parallel `Vec<&str>` without
+changing the 255-assumption ceiling, expression validation, ordering, or
+Pacman `--assume-installed` arguments. All 140 package tests, the locked Rust
+workspace suite, full all-target warning-denied workspace Clippy, the complete
+Android source unit/lint gate, and exact x86_64/AArch64 manager builds pass.
+The physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 12504 and Linux PID 12582. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-assumption-owned-slice-foot-20260804`.
+
+Durable install-mutation recovery now validates its existing bounded owned
+explicit-target vector directly against the persisted package resolution.
+`parse_resolution_output` and its mode variant accept any bounded string-like
+slice through `AsRef<str>`, so ordinary borrowed command targets and recovered
+owned targets share the same validation without constructing a temporary
+`Vec<&str>`. Exact target-presence, name, architecture, duplicate, closure, and
+256-target checks remain unchanged. The focused mutation-intent round-trip, all
+140 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. The signed manifest records
+Android PID 12792 and Linux PID 12871. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/mutation-intent-owned-targets-foot-20260804`.
+
+All three Android AUR install paths now pass their existing bounded owned
+runtime-dependency vectors directly into the package engine. Generic
+`install_dependencies` accepts any `AsRef<str>` slice, borrows each dependency
+while constructing the single required Base-prefixed Pacman target vector, and
+removes three temporary parallel `Vec<&str>` allocations at the JNI boundary.
+The 255-dependency ceiling, Base deduplication, provider-aware resolution,
+durable recovery target, and signed dependency transaction remain unchanged.
+All 140 package tests, all six Android adapter tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 13111 and Linux PID 13187. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-dependency-owned-slice-foot-20260804`.
+
+Builder dependency provisioning now passes its existing owned Pacman install
+and dependency-check argument vectors directly into the process environment.
+The bounded process command validator, root/non-root runners, and command
+builder accept `AsRef<str>` slices and borrow arguments through process spawn,
+eliminating two temporary parallel `Vec<&str>` allocations without changing
+command-name, argument-count, per-argument, NUL, or total-request validation.
+All 27 Builder tests, 33 process tests, and 140 package tests pass alongside the
+locked Rust workspace suite, full all-target warning-denied workspace Clippy,
+the complete Android source unit/lint gate, and exact x86_64/AArch64 manager
+builds. The physical-Samsung Foot gate retained stable processes, a 34 px font,
+126 px controls, and exact visible command output in inspected full-device
+frames. The signed manifest records Android PID 13553 and Linux PID 13645.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-owned-command-arguments-foot-20260804`.
+
+Copied-database install preview now derives its authorized removals into one
+pre-sized 48-entry vector and rejects removal 49 before cloning or retaining
+it. This replaces filter/clone/collect growth and moves the existing removal
+ceiling into `derive_install_transaction_plan` itself, so direct callers cannot
+temporarily construct an oversized plan before a later check. The regression
+covers a valid replacement, a changed-dependency update, and 49-removal
+pre-retention rejection. All 140 package tests, the locked Rust workspace
+suite, full all-target warning-denied workspace Clippy, the complete Android
+source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames.
+The signed manifest records Android PID 13842 and Linux PID 13922. Hashed
+evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/preview-removal-preallocation-foot-20260804`.
+
+Official install repair now passes its persisted bounded owned explicit-target
+vector directly through archive reason derivation. Generic `install_resolution`
+and mutation-intent publication accept `AsRef<str>` slices, so live borrowed
+targets and recovered owned targets share the same path without constructing a
+temporary parallel `Vec<&str>`. Exact explicit-target matching, durable intent
+serialization, replacement restoration, signed installation, and repair
+verification remain unchanged. The focused retained-archive repair regression,
+all 140 package tests, the locked Rust workspace suite, full all-target
+warning-denied workspace Clippy, the complete Android source unit/lint gate,
+and exact x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate
+retained stable processes, a 34 px font, 126 px controls, and exact visible
+command output in inspected full-device frames. The signed manifest records
+Android PID 14182 and Linux PID 14260. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/repair-owned-target-slice-foot-20260804`.
+
+Reviewed AUR build-environment partitioning now reuses its one pre-sized
+borrowed target vector for both repository probes. After graph planning, the
+runtime retains only targets not supplied by a same-review split output in that
+vector instead of collecting a second parallel `Vec<&str>`. Target order,
+official/provider classification, missing-target handling, split-output
+exclusion, and the 256-target ceiling remain unchanged. All 11 runtime tests,
+the locked Rust workspace suite, full all-target warning-denied workspace
+Clippy, the complete Android source unit/lint gate, and exact x86_64/AArch64
+manager builds pass. The physical-Samsung Foot gate retained stable processes,
+a 34 px font, 126 px controls, and exact visible command output in inspected
+full-device frames. The signed manifest records Android PID 14554 and Linux PID
+14635. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/aur-partition-vector-reuse-foot-20260804`.
+
+Official and AUR rollback now derive currently installed forward additions
+directly into one exactly pre-sized Pacman argument vector. Each path validates
+the non-cascading print plan against that vector's bounded package tail, then
+rewrites and compacts the fixed command prefix in place for execution. This
+removes the separate selected-addition vector and second execution-argument
+vector while preserving exact set validation, `-R` non-cascading removal,
+database-lock recovery, and final absence checks. All 140 package tests, the
+locked Rust workspace suite, full all-target warning-denied workspace Clippy,
+the complete Android source unit/lint gate, and exact x86_64/AArch64 manager
+builds pass. The physical-Samsung Foot gate retained stable processes, a 34 px
+font, 126 px controls, and exact visible command output in inspected
+full-device frames. The signed manifest records Android PID 14833 and Linux PID
+14915. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/rollback-command-vector-reuse-foot-20260804`.
+
+Removal repair now derives its canonical bounded package-name tail directly in
+one exactly pre-sized Pacman argument vector. After exact name/version plan
+validation and scriptlet authorization, it rewrites that vector's fixed prefix
+in place for the final non-cascading removal, retaining or deleting the existing
+slot according to `--noscriptlet` policy. This removes the temporary parallel
+name vector and second execution-argument vector while preserving requested
+package precedence, sorted dependency cleanup, exact plan comparison, scriptlet
+authorization, and database-lock recovery. All 140 package tests, the locked
+Rust workspace suite, full all-target warning-denied workspace Clippy, the
+complete Android source unit/lint gate, and exact x86_64/AArch64 manager builds
+pass. The physical-Samsung Foot gate retained stable processes, a 34 px font,
+126 px controls, and exact visible command output in inspected full-device
+frames. The signed manifest records Android PID 15109 and Linux PID 15187.
+Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/removal-repair-command-vector-reuse-foot-20260804`.
+
+Persisted explicit-install reason recovery now parses package names directly
+into its required owned bounded vector. A shared generic parser retains the
+existing borrowed representation for publication validation but selects owned
+strings during file recovery, eliminating the temporary parallel `Vec<&str>`
+and subsequent collect pass. Header, trailing-newline, logical-name, duplicate,
+256-package, and encoded-size validation remain unchanged. The focused intent
+and retained-archive repair regressions, all 140 package tests, the locked Rust
+workspace suite, full all-target warning-denied workspace Clippy, the complete
+Android source unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames. The
+signed manifest records Android PID 15409 and Linux PID 15491. Hashed evidence
+is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/install-reason-direct-owned-foot-20260804`.
+
+Builder AUR dependency installation now parses the direct-buffer requirement
+manifest into borrowed bounded strings. The parser rejects requirement 257
+before retention, validates the 128 KiB envelope, terminal newline, package
+expression, uniqueness, and strict ordering, and passes the same borrowed slice
+through generic dependency installation. Pacman's final `-T` check likewise
+borrows those names in one pre-sized argument vector instead of cloning every
+requirement into owned strings twice. Direct coverage proves exact-256
+admission plus overflow, missing-newline, unsorted, duplicate, and unsafe-name
+rejection. All 28 Builder tests, the locked Rust workspace suite, full
+all-target warning-denied workspace Clippy, the complete Android source
+unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames. The
+signed manifest records Android PID 15824 and Linux PID 15908. Hashed evidence
+is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-aur-requirement-borrowed-foot-20260804`.
+
+Builder AUR dependency installation now constructs its Pacman `-U` command in
+one exactly pre-sized `Cow<str>` vector. Seventeen fixed arguments and the two
+shared generated runtime paths remain borrowed; only per-package staged archive
+paths are owned. The same generated configuration path is reused by the later
+borrowed `-T` check, and archive argument storage is released before that check.
+This removes fixed-argument String allocation and duplicate path formatting
+without changing isolated root, cache, hook, scriptlet, dependency, or install
+reason flags. All 28 Builder tests, the locked Rust workspace suite, full
+all-target warning-denied workspace Clippy, the complete Android source
+unit/lint gate, and exact x86_64/AArch64 manager builds pass. The
+physical-Samsung Foot gate retained stable processes, a 34 px font, 126 px
+controls, and exact visible command output in inspected full-device frames. The
+signed manifest records Android PID 16108 and Linux PID 16185. Hashed evidence
+is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-pacman-cow-arguments-foot-20260804`.
+
+Builder dependency-install verification now reuses its existing generated
+Pacman configuration path for every installed-package query. Exact `pacman -Q`
+output is checked by borrowed prefix, separator, version, and terminal-newline
+components instead of allocating one formatted expected line per package. A
+direct regression accepts the exact package/version record and rejects missing
+or repeated newlines, extra separators, and package/version suffixes. All 29
+Builder tests, the locked Rust workspace suite, full all-target warning-denied
+workspace Clippy, the complete Android source unit/lint gate, and exact
+x86_64/AArch64 manager builds pass. The physical-Samsung Foot gate retained
+stable processes, a 34 px font, 126 px controls, and exact visible command
+output in inspected full-device frames. The signed manifest records Android
+PID 16545 and Linux PID 16622. Hashed evidence is under
+`tooling/artifacts/visual-audit/RFCT90AEEFA/builder-pacman-query-borrowed-foot-20260804`.

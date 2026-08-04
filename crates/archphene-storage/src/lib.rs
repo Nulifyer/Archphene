@@ -864,7 +864,7 @@ pub fn load_sync_manifest(
     }
     let directory = open_directory(arch_root, SYNC_STATE_DIRECTORY)?;
     let (final_name, _) = manifest_file_names(mapping_id)?;
-    let file = match sys::open_at(
+    let mut file = match sys::open_at(
         directory.as_raw_fd(),
         &final_name,
         sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
@@ -882,17 +882,31 @@ pub fn load_sync_manifest(
         return Err(StorageError::InvalidManifest);
     }
     let length = usize::try_from(metadata.len()).map_err(|_| StorageError::ManifestTooLarge)?;
-    let mut encoded = Vec::with_capacity(length);
-    file.take((MAX_SYNC_MANIFEST_BYTES + 1) as u64)
-        .read_to_end(&mut encoded)?;
-    if encoded.len() != length {
-        return Err(StorageError::InvalidManifest);
-    }
+    let encoded = read_exact_manifest_bytes(&mut file, length)?;
     let manifest = SyncManifest::decode(&encoded)?;
     if manifest.mapping_id != mapping_id {
         return Err(StorageError::InvalidManifest);
     }
     Ok(Some(manifest))
+}
+
+fn read_exact_manifest_bytes(
+    input: &mut impl Read,
+    expected_length: usize,
+) -> Result<Vec<u8>, StorageError> {
+    let mut encoded = vec![0_u8; expected_length];
+    if let Err(error) = input.read_exact(&mut encoded) {
+        return if error.kind() == io::ErrorKind::UnexpectedEof {
+            Err(StorageError::InvalidManifest)
+        } else {
+            Err(StorageError::Io(error))
+        };
+    }
+    let mut trailing = [0_u8; 1];
+    if input.read(&mut trailing)? != 0 {
+        return Err(StorageError::InvalidManifest);
+    }
+    Ok(encoded)
 }
 
 pub fn decide_sync_action(
@@ -2612,26 +2626,31 @@ fn parse_document_id(document_id: &str) -> Result<Vec<&str>, StorageError> {
     let Some(relative) = document_id.strip_prefix("home/") else {
         return Err(StorageError::InvalidDocument);
     };
-    let segments: Vec<&str> = relative.split('/').collect();
-    if segments.is_empty() || segments.len() > MAX_DOCUMENT_DEPTH {
-        return Err(StorageError::InvalidDocument);
-    }
-    for segment in &segments {
-        validate_visible_name(segment)?;
-    }
-    Ok(segments)
+    parse_bounded_segments(relative, MAX_DOCUMENT_DEPTH, validate_visible_name)
 }
 
 fn parse_mirror_path(relative_path: &str) -> Result<Vec<&str>, StorageError> {
     if relative_path.is_empty() || relative_path.len() > MAX_MIRROR_PATH_BYTES {
         return Err(StorageError::InvalidDocument);
     }
-    let segments: Vec<&str> = relative_path.split('/').collect();
-    if segments.is_empty() || segments.len() > MAX_MIRROR_DEPTH {
-        return Err(StorageError::InvalidDocument);
+    parse_bounded_segments(relative_path, MAX_MIRROR_DEPTH, validate_project_name)
+}
+
+fn parse_bounded_segments(
+    value: &str,
+    maximum_depth: usize,
+    validate: impl Fn(&str) -> Result<(), StorageError>,
+) -> Result<Vec<&str>, StorageError> {
+    let mut segments = Vec::with_capacity(maximum_depth.min(8));
+    for segment in value.split('/') {
+        if segments.len() == maximum_depth {
+            return Err(StorageError::InvalidDocument);
+        }
+        validate(segment)?;
+        segments.push(segment);
     }
-    for segment in &segments {
-        validate_project_name(segment)?;
+    if segments.is_empty() {
+        return Err(StorageError::InvalidDocument);
     }
     Ok(segments)
 }
@@ -3587,6 +3606,28 @@ mod tests {
     }
 
     #[test]
+    fn document_and_mirror_paths_bound_segments_while_parsing() {
+        let document_limit = vec!["document"; MAX_DOCUMENT_DEPTH].join("/");
+        assert_eq!(
+            parse_document_id(&format!("home/{document_limit}"))
+                .expect("exact document depth")
+                .len(),
+            MAX_DOCUMENT_DEPTH,
+        );
+        let document_overflow = format!("home/{document_limit}/overflow");
+        assert!(parse_document_id(&document_overflow).is_err());
+
+        let mirror_limit = vec!["project"; MAX_MIRROR_DEPTH].join("/");
+        assert_eq!(
+            parse_mirror_path(&mirror_limit)
+                .expect("exact mirror depth")
+                .len(),
+            MAX_MIRROR_DEPTH,
+        );
+        assert!(parse_mirror_path(&format!("{mirror_limit}/overflow")).is_err());
+    }
+
+    #[test]
     fn sync_decisions_preserve_every_two_sided_change() {
         const ORIGINAL: SyncFingerprint = SyncFingerprint::file(1, [1; 32]);
         const LINUX_EDIT: SyncFingerprint = SyncFingerprint::file(2, [2; 32]);
@@ -3991,6 +4032,23 @@ mod tests {
             Some(second),
         );
         assert!(!state.join(format!(".{identifier}.tmp")).exists());
+    }
+
+    #[test]
+    fn sync_manifest_read_allocates_exactly_and_rejects_size_changes() {
+        let expected = b"bounded manifest";
+        assert_eq!(
+            read_exact_manifest_bytes(&mut &expected[..], expected.len()).expect("exact manifest"),
+            expected,
+        );
+        assert!(matches!(
+            read_exact_manifest_bytes(&mut &expected[..expected.len() - 1], expected.len()),
+            Err(StorageError::InvalidManifest),
+        ));
+        assert!(matches!(
+            read_exact_manifest_bytes(&mut &expected[..], expected.len() - 1),
+            Err(StorageError::InvalidManifest),
+        ));
     }
 
     #[test]

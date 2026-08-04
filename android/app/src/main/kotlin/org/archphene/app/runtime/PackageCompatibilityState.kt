@@ -14,10 +14,9 @@ internal data class PackageCompatibility(
 
 internal fun decodePackageCompatibility(bytes: ByteArray): PackageCompatibility {
     val text = String(bytes, StandardCharsets.US_ASCII)
-    if (!text.endsWith('\n') || text.count { character -> character == '\n' } != 1) {
-        throw IllegalStateException("Rust returned invalid package compatibility")
-    }
-    val fields = text.dropLast(1).split('\t', limit = 7)
+    val fields =
+        parsePackageCompatibilityFields(text)
+            ?: throw IllegalStateException("Rust returned invalid package compatibility")
     val status = fields.getOrNull(0)
     val capabilityCharacter = fields.getOrNull(1)?.singleOrNull()
     val capabilities =
@@ -98,6 +97,27 @@ internal fun decodePackageCompatibility(bytes: ByteArray): PackageCompatibility 
         diagnostic = decodedDiagnostic,
         diagnosticPackage = diagnosticPackage,
     )
+}
+
+private fun parsePackageCompatibilityFields(text: String): List<String>? {
+    if (!text.endsWith('\n')) return null
+    val end = text.length - 1
+    if (end == 0 || text.indexOf('\n') in 0 until end || text.indexOf('\r') in 0 until end) {
+        return null
+    }
+
+    val fields = ArrayList<String>(7)
+    var fieldStart = 0
+    repeat(6) {
+        val fieldEnd = text.indexOf('\t', fieldStart)
+        if (fieldEnd < fieldStart || fieldEnd >= end) return null
+        fields.add(text.substring(fieldStart, fieldEnd))
+        fieldStart = fieldEnd + 1
+    }
+    val extraField = text.indexOf('\t', fieldStart)
+    if (extraField >= fieldStart && extraField < end) return null
+    fields.add(text.substring(fieldStart, end))
+    return fields
 }
 
 private fun canonicalNonNegativeInt(value: String?): Int? {

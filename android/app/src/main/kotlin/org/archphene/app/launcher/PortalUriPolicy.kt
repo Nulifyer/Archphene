@@ -1,7 +1,7 @@
 package org.archphene.app.launcher
 
 import java.net.URI
-import java.nio.charset.StandardCharsets
+import org.archphene.app.utf8LengthAtMost
 
 internal object PortalUriPolicy {
     const val MAX_URI_BYTES = 4_096
@@ -9,7 +9,7 @@ internal object PortalUriPolicy {
     fun valid(value: String): Boolean {
         if (
             value.isBlank() ||
-            value.toByteArray(StandardCharsets.UTF_8).size > MAX_URI_BYTES ||
+            !utf8LengthAtMost(value, MAX_URI_BYTES) ||
             value.any { character -> character.isISOControl() }
         ) {
             return false
@@ -35,19 +35,35 @@ internal object PortalFileUri {
     fun fromLogicalPath(path: String): String {
         require(
             path.startsWith(LINUX_HOME_PREFIX) &&
-                path.toByteArray(StandardCharsets.UTF_8).size <= PortalUriPolicy.MAX_URI_BYTES &&
+                utf8LengthAtMost(path, PortalUriPolicy.MAX_URI_BYTES) &&
                 path.none { character -> character.isISOControl() } &&
-                path
-                    .removePrefix(LINUX_HOME_PREFIX)
-                    .split('/')
-                    .none { component -> component == "." || component == ".." },
+                !hasTraversalComponent(path, LINUX_HOME_PREFIX.length),
         ) {
             "File portal path is not a bounded logical Archphene home path"
         }
         return URI("file", "", path, null).toASCIIString().also { uri ->
-            require(uri.toByteArray(StandardCharsets.US_ASCII).size <= PortalUriPolicy.MAX_URI_BYTES) {
+            require(uri.length <= PortalUriPolicy.MAX_URI_BYTES) {
                 "File portal URI exceeds the protocol limit"
             }
         }
     }
+}
+
+private fun hasTraversalComponent(path: String, startIndex: Int): Boolean {
+    var componentStart = startIndex
+    var index = startIndex
+    while (index <= path.length) {
+        if (index == path.length || path[index] == '/') {
+            val componentLength = index - componentStart
+            if (
+                componentLength == 1 && path[componentStart] == '.' ||
+                componentLength == 2 && path[componentStart] == '.' && path[componentStart + 1] == '.'
+            ) {
+                return true
+            }
+            componentStart = index + 1
+        }
+        index++
+    }
+    return false
 }

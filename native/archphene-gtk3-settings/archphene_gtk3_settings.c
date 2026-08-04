@@ -2,12 +2,14 @@
 
 #include <errno.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <gio/gio.h>
 #include <glib-object.h>
 #include <glib-unix.h>
 #include <glib.h>
 #include <gmodule.h>
 #include <sys/inotify.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 typedef gpointer (*GtkSettingsGetDefault)(void);
@@ -15,9 +17,10 @@ typedef gpointer (*GdkScreenGetDefault)(void);
 typedef gpointer (*GdkDisplayGetDefault)(void);
 typedef void (*GtkStyleContextResetWidgets)(gpointer screen);
 typedef gpointer (*GtkCssProviderNew)(void);
-typedef gboolean (*Gtk3CssProviderLoadFromPath)(gpointer provider,
-        const gchar *path, GError **error);
-typedef void (*Gtk4CssProviderLoadFromPath)(gpointer provider, const gchar *path);
+typedef gboolean (*Gtk3CssProviderLoadFromData)(gpointer provider,
+        const gchar *data, gssize length, GError **error);
+typedef void (*Gtk4CssProviderLoadFromData)(
+        gpointer provider, const gchar *data, gssize length);
 typedef void (*GtkStyleContextAddProviderForScreen)(gpointer screen,
         gpointer provider, guint priority);
 typedef void (*GtkStyleContextRemoveProviderForScreen)(gpointer screen,
@@ -68,6 +71,8 @@ static guint settings_bus_watch;
 static gpointer portal_file_chooser;
 static GSList *portal_files;
 
+#define ARCHPHENE_APPEARANCE_FILE_LIMIT (64 * 1024)
+
 enum {
     ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN = 0,
     ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE = 1,
@@ -85,6 +90,67 @@ static void write_diagnostic(const gchar *status)
     gchar *path = g_build_filename(cache, "archphene-gtk-settings.log", NULL);
     g_file_set_contents(path, status, -1, NULL);
     g_free(path);
+}
+
+static gboolean same_file_snapshot(
+        const struct stat *before, const struct stat *after)
+{
+    return before->st_dev == after->st_dev
+            && before->st_ino == after->st_ino
+            && before->st_mode == after->st_mode
+            && before->st_size == after->st_size
+            && before->st_mtim.tv_sec == after->st_mtim.tv_sec
+            && before->st_mtim.tv_nsec == after->st_mtim.tv_nsec
+            && before->st_ctim.tv_sec == after->st_ctim.tv_sec
+            && before->st_ctim.tv_nsec == after->st_ctim.tv_nsec;
+}
+
+static gchar *read_bounded_regular_file(const gchar *path, gsize *length)
+{
+    gint descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) return NULL;
+
+    struct stat before;
+    if (fstat(descriptor, &before) < 0 || !S_ISREG(before.st_mode)
+            || before.st_size < 0) {
+        close(descriptor);
+        return NULL;
+    }
+    gchar *data = g_try_malloc(ARCHPHENE_APPEARANCE_FILE_LIMIT + 1);
+    if (data == NULL) {
+        close(descriptor);
+        return NULL;
+    }
+
+    gsize count = 0;
+    while (count <= ARCHPHENE_APPEARANCE_FILE_LIMIT) {
+        ssize_t result = read(
+                descriptor, data + count,
+                ARCHPHENE_APPEARANCE_FILE_LIMIT + 1 - count);
+        if (result < 0 && errno == EINTR) continue;
+        if (result < 0) {
+            g_free(data);
+            close(descriptor);
+            return NULL;
+        }
+        if (result == 0) break;
+        count += (gsize)result;
+    }
+
+    struct stat after;
+    gboolean valid = fstat(descriptor, &after) == 0
+            && same_file_snapshot(&before, &after)
+            && count <= ARCHPHENE_APPEARANCE_FILE_LIMIT
+            && count == (gsize)before.st_size
+            && count == (gsize)after.st_size;
+    close(descriptor);
+    if (!valid) {
+        g_free(data);
+        return NULL;
+    }
+    data[count] = '\0';
+    if (length != NULL) *length = count;
+    return data;
 }
 
 /*
@@ -234,9 +300,10 @@ static gpointer default_screen(void)
     return screen_symbol.function == NULL ? NULL : screen_symbol.function();
 }
 
-static void reload_css_provider(gpointer screen, const gchar *css_path)
+static void reload_css_provider(
+        gpointer screen, const gchar *css, gsize css_length)
 {
-    if (css_path == NULL) return;
+    if (css == NULL) return;
     union {
         gpointer object;
         GtkCssProviderNew function;
@@ -267,20 +334,20 @@ static void reload_css_provider(gpointer screen, const gchar *css_path)
         active_css_provider = new_symbol.function();
         union {
             gpointer object;
-            Gtk4CssProviderLoadFromPath function;
+            Gtk4CssProviderLoadFromData function;
         } load_symbol = {
-                resolve_toolkit_symbol("gtk_css_provider_load_from_path")};
+                resolve_toolkit_symbol("gtk_css_provider_load_from_data")};
         if (load_symbol.function == NULL) return;
-        load_symbol.function(active_css_provider, css_path);
+        load_symbol.function(active_css_provider, css, (gssize)css_length);
         add_display_symbol.function(display, active_css_provider, 801);
         return;
     }
     if (screen == NULL) return;
     union {
         gpointer object;
-        Gtk3CssProviderLoadFromPath function;
+        Gtk3CssProviderLoadFromData function;
     } load_symbol = {
-            resolve_toolkit_symbol("gtk_css_provider_load_from_path")};
+            resolve_toolkit_symbol("gtk_css_provider_load_from_data")};
     union {
         gpointer object;
         GtkStyleContextAddProviderForScreen function;
@@ -301,7 +368,9 @@ static void reload_css_provider(gpointer screen, const gchar *css_path)
     active_css_provider = new_symbol.function();
     GError *error = NULL;
     add_symbol.function(screen, active_css_provider, 801);
-    if (!load_symbol.function(active_css_provider, css_path, &error) && error != NULL) {
+    if (!load_symbol.function(
+            active_css_provider, css, (gssize)css_length, &error)
+            && error != NULL) {
         gchar *status = g_strdup_printf("CSS reload failed: %s\n", error->message);
         write_diagnostic(status);
         g_free(status);
@@ -342,11 +411,18 @@ static gboolean refresh_settings(gpointer unused)
     refresh_source = 0;
     if (settings_path == NULL) return G_SOURCE_REMOVE;
 
+    gsize settings_length = 0;
+    gchar *settings_data = read_bounded_regular_file(
+            settings_path, &settings_length);
+    if (settings_data == NULL) return G_SOURCE_REMOVE;
     GKeyFile *file = g_key_file_new();
-    if (!g_key_file_load_from_file(file, settings_path, G_KEY_FILE_NONE, NULL)) {
+    if (!g_key_file_load_from_data(
+            file, settings_data, settings_length, G_KEY_FILE_NONE, NULL)) {
+        g_free(settings_data);
         g_key_file_unref(file);
         return G_SOURCE_REMOVE;
     }
+    g_free(settings_data);
     gchar *theme = g_key_file_get_string(file, "Settings", "gtk-theme-name", NULL);
     gchar *font = g_key_file_get_string(file, "Settings", "gtk-font-name", NULL);
     gboolean dark = g_key_file_get_boolean(
@@ -359,8 +435,9 @@ static gboolean refresh_settings(gpointer unused)
     }
     gchar *directory = g_path_get_dirname(settings_path);
     gchar *css_path = g_build_filename(directory, "gtk.css", NULL);
-    gchar *css = NULL;
-    if (!g_file_get_contents(css_path, &css, NULL, NULL)) {
+    gsize css_length = 0;
+    gchar *css = read_bounded_regular_file(css_path, &css_length);
+    if (css == NULL) {
         g_free(theme);
         g_free(font);
         g_free(css_path);
@@ -399,7 +476,7 @@ static gboolean refresh_settings(gpointer unused)
             NULL);
     update_libadwaita(dark);
     gpointer screen = default_screen();
-    reload_css_provider(screen, css_path);
+    reload_css_provider(screen, css, css_length);
     reset_widgets(screen);
     g_free(active_theme);
     g_free(active_font);
@@ -859,3 +936,16 @@ G_MODULE_EXPORT void gtk_module_init(gint *argc, gchar ***argv)
     (void)argv;
     start_refresh();
 }
+
+#ifdef ARCHPHENE_BOUNDED_READER_TEST
+int main(int argc, char **argv)
+{
+    if (argc != 3) return 2;
+    gchar *data = read_bounded_regular_file(argv[1], NULL);
+    gboolean accepted = data != NULL;
+    g_free(data);
+    if (g_strcmp0(argv[2], "accept") == 0) return accepted ? 0 : 1;
+    if (g_strcmp0(argv[2], "reject") == 0) return accepted ? 1 : 0;
+    return 2;
+}
+#endif
