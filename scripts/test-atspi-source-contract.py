@@ -618,7 +618,7 @@ def main() -> None:
          "manager fitted content geometry"),
         (manager_session_source, "session.presentationComponent(32)",
          "manager compositor presentation canvas"),
-        (compositor_source, "const COMPONENTS: usize = 34",
+        (compositor_source, "const COMPONENTS: usize = 35",
          "native presentation canvas snapshot"),
         (launcher_activity_source, "TRANSACTION_ACCESSIBILITY_ACTION",
          "launcher accessibility action transaction"),
