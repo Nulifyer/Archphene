@@ -111,7 +111,7 @@ its Linux environment.
     root-task close, and wrapper force-stop behavior.
   - [ ] Validate wrapper removal and manager absence without altering retained
     user sessions on the maintained physical target.
-- [ ] Prototype manager-hosted **Quick launch** for trying a graphical package
+- [x] Prototype manager-hosted **Quick launch** for trying a graphical package
   without another PackageInstaller confirmation. Keep **Add to Android** as the
   explicit action that publishes the real app shell.
 - [ ] Investigate replacing `QUERY_ALL_PACKAGES` with a narrow marker intent

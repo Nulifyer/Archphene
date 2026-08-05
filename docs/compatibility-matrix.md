@@ -67,7 +67,9 @@ All listed names resolved in official Arch repositories on July 19, 2026. Reposi
 
 The manager classifies the resolved closure, not the search query alone:
 
-- a package with a valid graphical `.desktop` entry becomes a generated Android launcher app;
+- a package with one valid graphical `.desktop` entry can be tried through the
+  manager's basic Quick launch surface; explicitly adding it to Android creates
+  the generated launcher app;
 - an executable package without a graphical desktop entry remains Terminal/CLI managed;
 - libraries, services, data, and dependencies remain managed closure members and never appear in the app drawer;
 - packages for another CPU ABI are hidden or rejected; Archphene does not silently emulate them;

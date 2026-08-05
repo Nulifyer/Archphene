@@ -211,6 +211,16 @@ ABIs. They contain Android metadata and the generic client only; every shell
 still binds to the one manager-owned Arch root and manager-owned process
 registry.
 
+The manager also has a non-exported Quick launch Activity for an installed
+package with exactly one current graphical descriptor. This path reauthorizes
+the exact registry package, descriptor digest, and generation on every session
+transaction, then attaches a manager-owned Surface to the same compositor and
+process boundary. It does not mark the descriptor as published, generate an
+APK, or start PackageInstaller. Quick launch is currently a basic trial surface
+with touch, pointer, hardware-key, frame, and close handling; generated app
+shells remain the production path for document intents, Android capability
+brokers, independent tasks, launcher identity, and lifecycle restoration.
+
 The manager assembles app shells from a reproducible precompiled template, signs
 them with one persistent non-exportable Android Keystore identity, verifies the
 generated APK, and hands it to PackageInstaller. Android confirmation remains

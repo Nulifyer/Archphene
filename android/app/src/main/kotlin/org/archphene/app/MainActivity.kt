@@ -45,6 +45,7 @@ import android.widget.TextView
 import android.widget.Toast
 import android.webkit.MimeTypeMap
 import org.archphene.app.appearance.LinuxAppearanceSettingsView
+import org.archphene.app.launcher.QuickLaunchActivity
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.AvailablePackageSnapshot
 import org.archphene.app.runtime.InstalledPackageSnapshot
@@ -107,6 +108,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var settingsNavigationButton: Button
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
+    private lateinit var quickLaunchButton: Button
     private lateinit var aurReviewButton: Button
     private lateinit var cancelButton: Button
     private lateinit var rollbackButton: Button
@@ -400,6 +402,26 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     }
                 }
             }
+        quickLaunchButton =
+            Button(this).apply {
+                setText(R.string.quick_launch)
+                contentDescription = getString(R.string.quick_launch_description)
+                isEnabled = false
+                setOnClickListener {
+                    hideKeyboard(searchInput)
+                    val packageName = searchInput.text.toString().trim()
+                    val candidate = runtimeBinder?.quickLaunchCandidate(packageName)
+                    if (candidate == null) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            R.string.quick_launch_unavailable,
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    } else {
+                        startActivity(QuickLaunchActivity.createIntent(this@MainActivity, candidate))
+                    }
+                }
+            }
         val packageActionButtons =
             arrayOf(
                 searchButton,
@@ -407,6 +429,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 aurReviewButton,
                 installButton,
                 removeButton,
+                quickLaunchButton,
             )
         packageActionButtons.forEach { button ->
             button.maxLines = 1
@@ -497,6 +520,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         )
                         addView(
                             removeButton,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            quickLaunchButton,
                             LinearLayout.LayoutParams(
                                 0,
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3495,6 +3526,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         if (binder == null) {
             installButton.isEnabled = false
             removeButton.isEnabled = false
+            quickLaunchButton.isEnabled = false
             aurReviewButton.isEnabled = false
             packageCacheButton.isEnabled = false
             cancelButton.isEnabled = false
@@ -3608,6 +3640,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         if (binder == null) {
             installButton.isEnabled = false
             removeButton.isEnabled = false
+            quickLaunchButton.isEnabled = false
             aurReviewButton.isEnabled = false
             return
         }
@@ -3615,6 +3648,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             packageSearchInput.text.toString().trim() == binder.resolvedPackageName
         installButton.isEnabled = exactSelection && binder.packagePrimaryActionAvailable
         removeButton.isEnabled = exactSelection && binder.packageRemoveAvailable
+        quickLaunchButton.isEnabled =
+            exactSelection &&
+                binder.quickLaunchCandidate(packageSearchInput.text.toString().trim()) != null
         val aurPackage = packageSearchInput.text.toString().trim()
         val sourcesAvailable =
             binder.aurSourcesAvailable && binder.aurReviewedPackage == aurPackage

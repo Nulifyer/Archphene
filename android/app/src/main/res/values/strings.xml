@@ -105,6 +105,13 @@
     <string name="built_aur_description">The verified AUR package is ready to install</string>
     <string name="install">Install</string>
     <string name="remove">Remove</string>
+    <string name="quick_launch">Quick launch</string>
+    <string name="quick_launch_description">Try the selected graphical package inside Archphene without adding an Android app shell.</string>
+    <string name="quick_launch_title">Quick launch: %1$s</string>
+    <string name="quick_launch_starting">Starting Quick launch…</string>
+    <string name="quick_launch_connected">Starting %1$s…</string>
+    <string name="quick_launch_unavailable">Quick launch is unavailable for this package.</string>
+    <string name="quick_launch_rejected">This package is no longer eligible for Quick launch.</string>
     <string name="cancel">Cancel</string>
     <string name="documents_root_title">Archphene Home</string>
     <string name="documents_root_summary">Linux home files</string>

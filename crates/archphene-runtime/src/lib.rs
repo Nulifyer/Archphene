@@ -1167,6 +1167,26 @@ impl RuntimeHost {
         })
     }
 
+    pub fn authorize_quick_launcher(
+        &self,
+        android_package: &str,
+        descriptor_id_hex: &str,
+        generation: u64,
+    ) -> Option<LauncherAuthorization> {
+        let descriptor = self.launcher_registry.as_ref()?.authorize_quick_launch(
+            android_package,
+            descriptor_id_hex,
+            generation,
+        )?;
+        Some(LauncherAuthorization {
+            label: descriptor.name.clone(),
+            terminal: descriptor.terminal,
+            integration_topology: self.launcher_integration_topology(descriptor),
+            bridge_capabilities: descriptor.bridge_capabilities,
+            mime_types: launcher_mime_types(descriptor).to_vec(),
+        })
+    }
+
     fn launcher_integration_topology(&self, descriptor: &LauncherDescriptor) -> u16 {
         let static_topology = self
             .desktop_entries
@@ -1199,12 +1219,62 @@ impl RuntimeHost {
         appearance: GuiAppearance,
         options: LauncherProcessOptions<'_>,
     ) -> Result<u64, LauncherProcessError> {
+        self.open_launcher_process_with_mode(
+            android_package,
+            descriptor_id_hex,
+            generation,
+            wayland_display,
+            appearance,
+            options,
+            false,
+        )
+    }
+
+    pub fn open_quick_launcher_process(
+        &mut self,
+        android_package: &str,
+        descriptor_id_hex: &str,
+        generation: u64,
+        wayland_display: &str,
+        appearance: GuiAppearance,
+        options: LauncherProcessOptions<'_>,
+    ) -> Result<u64, LauncherProcessError> {
+        self.open_launcher_process_with_mode(
+            android_package,
+            descriptor_id_hex,
+            generation,
+            wayland_display,
+            appearance,
+            options,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_launcher_process_with_mode(
+        &mut self,
+        android_package: &str,
+        descriptor_id_hex: &str,
+        generation: u64,
+        wayland_display: &str,
+        appearance: GuiAppearance,
+        options: LauncherProcessOptions<'_>,
+        quick_launch: bool,
+    ) -> Result<u64, LauncherProcessError> {
         let (command, mut arguments, descriptor_id, integration_topology, bridge_capabilities) = {
             let descriptor = self
                 .launcher_registry
                 .as_ref()
                 .and_then(|registry| {
-                    registry.authorize_published(android_package, descriptor_id_hex, generation)
+                    if quick_launch {
+                        registry.authorize_quick_launch(
+                            android_package,
+                            descriptor_id_hex,
+                            generation,
+                        )
+                    } else {
+                        registry.authorize_published(android_package, descriptor_id_hex, generation)
+                    }
                 })
                 .ok_or(LauncherProcessError::Unauthorized)?;
             if descriptor.terminal {

@@ -89,7 +89,7 @@ fn parse_launcher_reduced_isolation(
     version: &str,
     fields: &mut std::str::Split<'_, char>,
 ) -> Result<bool, ()> {
-    if version != "G4" && version != "G5" && version != "G6" && version != "G7" {
+    if version != "G4" && version != "G5" && version != "G6" && version != "G7" && version != "G8" {
         return Ok(false);
     }
     match fields.next() {
@@ -5141,7 +5141,7 @@ mod android {
         };
         let mut fields = request.split('\t');
         let (
-            Some(version @ ("A1" | "A2" | "A3" | "A4")),
+            Some(version @ ("A1" | "A2" | "A3" | "A4" | "Q1")),
             Some(android_package),
             Some(descriptor_id),
             Some(generation),
@@ -5179,7 +5179,11 @@ mod android {
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return ERROR_INVALID_HANDLE;
             };
-            runtime.authorize_launcher(android_package, descriptor_id, generation)
+            if version == "Q1" {
+                runtime.authorize_quick_launcher(android_package, descriptor_id, generation)
+            } else {
+                runtime.authorize_launcher(android_package, descriptor_id, generation)
+            }
         };
         let Some(authorization) = authorization else {
             return ERROR_LAUNCHER;
@@ -5187,7 +5191,7 @@ mod android {
         if authorization.label.contains(['\t', '\n', '\r', '\0']) {
             return ERROR_INTERNAL;
         }
-        let encoded = if version == "A4" {
+        let encoded = if matches!(version, "A4" | "Q1") {
             format!(
                 "A4\t{}\t{}\t{:x}\t{}\t{}\n",
                 u8::from(authorization.terminal),
@@ -5291,7 +5295,7 @@ mod android {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             }
             (GuiAppearance::default(), None, false, None, None, None)
-        } else if matches!(version, "G2" | "G3" | "G4" | "G5" | "G6" | "G7") {
+        } else if matches!(version, "G2" | "G3" | "G4" | "G5" | "G6" | "G7" | "G8") {
             let (
                 Some(dark),
                 Some(font_percent),
@@ -5312,7 +5316,7 @@ mod android {
             else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
-            let portal_bus_address = if matches!(version, "G3" | "G4" | "G5" | "G6" | "G7") {
+            let portal_bus_address = if matches!(version, "G3" | "G4" | "G5" | "G6" | "G7" | "G8") {
                 let Some(address) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5333,7 +5337,7 @@ mod android {
             else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
-            let virgl_socket_path = if matches!(version, "G5" | "G6" | "G7") {
+            let virgl_socket_path = if matches!(version, "G5" | "G6" | "G7" | "G8") {
                 let Some(socket) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5352,7 +5356,7 @@ mod android {
             } else {
                 None
             };
-            let launch_document_path = if matches!(version, "G6" | "G7") {
+            let launch_document_path = if matches!(version, "G6" | "G7" | "G8") {
                 let Some(encoded_path) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5367,7 +5371,7 @@ mod android {
             } else {
                 None
             };
-            let pulse_server_address = if version == "G7" {
+            let pulse_server_address = if matches!(version, "G7" | "G8") {
                 let Some(encoded_address) = fields.next() else {
                     return i64::from(ERROR_INVALID_ARGUMENT);
                 };
@@ -5462,20 +5466,32 @@ mod android {
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return i64::from(ERROR_INVALID_HANDLE);
             };
-            runtime.open_launcher_process(
-                android_package,
-                descriptor_id,
-                generation,
-                wayland_display,
-                appearance,
-                LauncherProcessOptions {
-                    portal_bus_address,
-                    reduced_isolation_electron,
-                    virgl_socket_path: virgl_socket_path.map(Path::new),
-                    launch_document_path: launch_document_path.as_deref(),
-                    pulse_server_address: pulse_server_address.as_deref(),
-                },
-            )
+            let options = LauncherProcessOptions {
+                portal_bus_address,
+                reduced_isolation_electron,
+                virgl_socket_path: virgl_socket_path.map(Path::new),
+                launch_document_path: launch_document_path.as_deref(),
+                pulse_server_address: pulse_server_address.as_deref(),
+            };
+            if version == "G8" {
+                runtime.open_quick_launcher_process(
+                    android_package,
+                    descriptor_id,
+                    generation,
+                    wayland_display,
+                    appearance,
+                    options,
+                )
+            } else {
+                runtime.open_launcher_process(
+                    android_package,
+                    descriptor_id,
+                    generation,
+                    wayland_display,
+                    appearance,
+                    options,
+                )
+            }
         };
         match result {
             Ok(launcher_handle) => {

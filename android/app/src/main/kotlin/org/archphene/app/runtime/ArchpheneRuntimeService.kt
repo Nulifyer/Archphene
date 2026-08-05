@@ -103,6 +103,13 @@ internal class LauncherReviewSnapshot(
     val revision: Int,
 )
 
+internal data class QuickLaunchCandidate(
+    val androidPackage: String,
+    val descriptorIdHex: String,
+    val generation: Long,
+    val label: String,
+)
+
 internal class AvailablePackageSnapshot(
     val repositories: Array<String>,
     val names: Array<String>,
@@ -385,6 +392,31 @@ class ArchpheneRuntimeService : Service() {
         internal val availablePackages: AvailablePackageSnapshot
             get() = availablePackageSnapshot
 
+        internal fun quickLaunchCandidate(packageName: String): QuickLaunchCandidate? {
+            if (
+                readyHandle == 0L ||
+                packageMutationStatus.isNotEmpty() ||
+                packageOperationActive ||
+                commandActive ||
+                !AUR_PACKAGE_NAME.matches(packageName)
+            ) {
+                return null
+            }
+            var candidate: LauncherRegistryRow? = null
+            for (row in launcherRegistryRows) {
+                if (row.sourcePackage != packageName || row.desiredGeneration <= 0) continue
+                if (candidate != null) return null
+                candidate = row
+            }
+            val selected = candidate ?: return null
+            return QuickLaunchCandidate(
+                selected.androidPackage,
+                selected.descriptorIdHex,
+                selected.desiredGeneration,
+                selected.name,
+            )
+        }
+
         val packageJobStatus: String
             get() = jobStatus
 
@@ -459,6 +491,18 @@ class ArchpheneRuntimeService : Service() {
                 generation,
             )
 
+        internal fun authorizeQuickLauncher(
+            androidPackage: String,
+            descriptorIdHex: String,
+            generation: Long,
+        ): LauncherAuthorization? =
+            this@ArchpheneRuntimeService.authorizeLauncher(
+                androidPackage,
+                descriptorIdHex,
+                generation,
+                quickLaunch = true,
+            )
+
         internal fun openLauncherProcess(
             androidPackage: String,
             descriptorIdHex: String,
@@ -494,6 +538,44 @@ class ArchpheneRuntimeService : Service() {
                 virglSocketPath,
                 launchDocumentPath,
                 pulseServerAddress,
+                quickLaunch = false,
+            )
+
+        internal fun openQuickLauncherProcess(
+            androidPackage: String,
+            descriptorIdHex: String,
+            generation: Long,
+            waylandDisplay: String,
+            dark: Boolean,
+            fontPercent: Int,
+            controlVisualDp: Int,
+            controlTargetDp: Int,
+            accent: Int,
+            background: Int,
+            foreground: Int,
+            portalBusAddress: String,
+            reducedIsolationElectron: Boolean,
+            virglSocketPath: String?,
+            pulseServerAddress: String?,
+        ): Long =
+            this@ArchpheneRuntimeService.openLauncherProcess(
+                androidPackage,
+                descriptorIdHex,
+                generation,
+                waylandDisplay,
+                dark,
+                fontPercent,
+                controlVisualDp,
+                controlTargetDp,
+                accent,
+                background,
+                foreground,
+                portalBusAddress,
+                reducedIsolationElectron,
+                virglSocketPath,
+                launchDocumentPath = null,
+                pulseServerAddress,
+                quickLaunch = true,
             )
 
         internal fun updateGuiColors(
@@ -1312,6 +1394,7 @@ class ArchpheneRuntimeService : Service() {
             0,
             0,
         )
+    @Volatile private var launcherRegistryRows = emptyList<LauncherRegistryRow>()
     @Volatile
     private var availablePackageSnapshot =
         AvailablePackageSnapshot(
@@ -1934,6 +2017,7 @@ class ArchpheneRuntimeService : Service() {
         androidPackage: String,
         descriptorIdHex: String,
         generation: Long,
+        quickLaunch: Boolean = false,
     ): LauncherAuthorization? {
         val activeHandle = readyHandle
         if (
@@ -1944,7 +2028,8 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return null
         }
-        val request = "A4\t$androidPackage\t$descriptorIdHex\t$generation\n"
+        val request =
+            "${if (quickLaunch) "Q1" else "A4"}\t$androidPackage\t$descriptorIdHex\t$generation\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return null
@@ -2012,6 +2097,7 @@ class ArchpheneRuntimeService : Service() {
         virglSocketPath: String?,
         launchDocumentPath: String?,
         pulseServerAddress: String?,
+        quickLaunch: Boolean,
     ): Long {
         val activeHandle = readyHandle
         if (
@@ -2083,7 +2169,8 @@ class ArchpheneRuntimeService : Service() {
         val encodedPulseServerAddress =
             pulseServerAddress?.toByteArray(StandardCharsets.UTF_8)?.let(::encodeHex) ?: "-"
         val request =
-            "G7\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
+            "${if (quickLaunch) "G8" else "G7"}\t$androidPackage\t$descriptorIdHex\t" +
+                "$generation\t$waylandDisplay\t" +
                 "${if (dark) 1 else 0}\t$fontPercent\t$controlVisualDp\t$controlTargetDp\t" +
                 "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\t" +
                 "$portalBusAddress\t${if (reducedIsolationElectron) 1 else 0}\t" +
@@ -6032,18 +6119,12 @@ class ArchpheneRuntimeService : Service() {
                 } == true
             launcherCancelledCount = launcherSummary?.cancelled ?: 0
             val launcherRows =
-                if (
-                    launcherSummary != null &&
-                    (
-                        launcherSummary.needsReview > 0 ||
-                            launcherSummary.dismissed > 0 ||
-                            launcherSummary.failed > 0
-                    )
-                ) {
+                if (launcherSummary != null) {
                     readLauncherRegistryRows(activeHandle)
                 } else {
                     emptyList()
                 }
+            launcherRegistryRows = launcherRows
             updateLauncherReviewSnapshot(launcherRows)
             val status =
                 buildString {
@@ -6160,6 +6241,7 @@ class ArchpheneRuntimeService : Service() {
             return true
         } catch (error: Exception) {
             launcherPublicationPending = false
+            launcherRegistryRows = emptyList()
             val previous = desktopEntrySnapshot
             desktopEntrySnapshot =
                 DesktopEntrySnapshot(

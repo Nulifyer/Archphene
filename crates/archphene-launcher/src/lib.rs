@@ -586,6 +586,23 @@ impl LauncherRegistry {
         Some(descriptor)
     }
 
+    pub fn authorize_quick_launch(
+        &self,
+        android_package: &str,
+        descriptor_id_hex: &str,
+        generation: u64,
+    ) -> Option<&LauncherDescriptor> {
+        let descriptor = self.descriptor_for_package(android_package)?;
+        let expected_id = descriptor.descriptor_id_hex();
+        if !descriptor.desired_present
+            || descriptor.desired_generation != generation
+            || descriptor_id_hex.as_bytes() != expected_id
+        {
+            return None;
+        }
+        Some(descriptor)
+    }
+
     pub fn record_integration_observation(
         &mut self,
         arch_root: &Path,
@@ -2814,6 +2831,19 @@ mod tests {
         let (mut registry, _) =
             LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
         let package = registry.descriptors[0].android_package.clone();
+        let initial_descriptor_id = registry.descriptors[0].descriptor_id_hex();
+        let initial_descriptor_id =
+            std::str::from_utf8(&initial_descriptor_id).expect("descriptor hex");
+        assert!(
+            registry
+                .authorize_published(&package, initial_descriptor_id, 1)
+                .is_none()
+        );
+        assert!(
+            registry
+                .authorize_quick_launch(&package, initial_descriptor_id, 1)
+                .is_some()
+        );
         registry
             .mark_building(&root.path, &package, 1)
             .expect("building");
@@ -2871,6 +2901,14 @@ mod tests {
         assert_eq!(report.removed, 1);
         assert!(!registry.descriptors[0].desired_present);
         assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+        let removed_descriptor_id = registry.descriptors[0].descriptor_id_hex();
+        let removed_descriptor_id =
+            std::str::from_utf8(&removed_descriptor_id).expect("descriptor hex");
+        assert!(
+            registry
+                .authorize_quick_launch(&package, removed_descriptor_id, 2)
+                .is_none()
+        );
         registry
             .mark_awaiting_removal(&root.path, &package)
             .expect("awaiting removal");

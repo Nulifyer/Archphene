@@ -23,6 +23,9 @@ The next release milestones are:
    task/window model now that physical AArch64 evidence proves compact switching,
    live compact/adaptive transitions, independent document tasks, and
    Activity-process restoration without duplicating the Linux root or process.
+   A manager-hosted Quick launch prototype can now try one-descriptor graphical
+   packages without publishing an app shell; generated shells remain the full
+   Android integration path.
 2. **Graphics without readback** — GPU-compose SHM clients and let virpipe render
    into Android HardwareBuffers while preserving tested CPU and software
    fallbacks.

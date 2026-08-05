@@ -138,6 +138,7 @@ class LauncherSessionService : Service() {
         val authorization: LauncherAuthorization,
         val appearanceOverrides: LinuxAppearanceOverrides,
         val reducedIsolationElectron: Boolean,
+        val quickLaunch: Boolean,
         val compositorSocketName: String,
         val rootSessionId: Int,
         val toplevelId: Int,
@@ -671,6 +672,10 @@ class LauncherSessionService : Service() {
                     transactCloseApplication(data, reply)
                     true
                 }
+                TRANSACTION_OPEN_QUICK -> {
+                    transactOpenQuick(data, reply)
+                    true
+                }
                 else -> super.onTransact(code, data, reply, flags)
             }
         }
@@ -753,6 +758,62 @@ class LauncherSessionService : Service() {
                     )
                 }.getOrElse { error ->
                     Log.w(TAG, "Rejected malformed launcher open", error)
+                    OpenResult(RESULT_INVALID, 0, null)
+                }
+            reply.writeNoException()
+            reply.writeInt(result.result)
+            reply.writeInt(result.sessionId)
+            reply.writeString(result.authorization?.label)
+            reply.writeInt(if (result.authorization?.terminal == true) 1 else 0)
+            reply.writeInt(
+                if (result.authorization?.prefersPhoneLandscape == true) {
+                    ORIENTATION_POLICY_SDL_PHONE
+                } else {
+                    ORIENTATION_POLICY_DEFAULT
+                },
+            )
+        }
+
+        private fun transactOpenQuick(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            val result =
+                runCatching {
+                    data.enforceInterface(INTERFACE)
+                    val version = data.readInt()
+                    val token = data.readStrongBinder()
+                    val androidPackage = data.readString().orEmpty()
+                    val descriptorIdHex = data.readString().orEmpty()
+                    val generation = data.readLong()
+                    if (
+                        !supportedProtocolVersion(version) ||
+                        token == null ||
+                        androidPackage.length != 53 ||
+                        !androidPackage.startsWith(LAUNCHER_PACKAGE_PREFIX) ||
+                        !androidPackage.drop(LAUNCHER_PACKAGE_PREFIX.length).all { character ->
+                            character.isDigit() || character in 'a'..'f'
+                        } ||
+                        descriptorIdHex.length != 64 ||
+                        !descriptorIdHex.all { character ->
+                            character.isDigit() || character in 'a'..'f'
+                        } ||
+                        generation !in 1..Int.MAX_VALUE.toLong() ||
+                        data.dataAvail() != 0
+                    ) {
+                        return@runCatching OpenResult(RESULT_INVALID, 0, null)
+                    }
+                    openSession(
+                        Binder.getCallingUid(),
+                        version,
+                        token,
+                        pendingDocument = null,
+                        requestedToplevelId = 0,
+                        quickLaunchRequest =
+                            QuickLaunchRequest(androidPackage, descriptorIdHex, generation),
+                    )
+                }.getOrElse { error ->
+                    Log.w(TAG, "Rejected malformed Quick launch open", error)
                     OpenResult(RESULT_INVALID, 0, null)
                 }
             reply.writeNoException()
@@ -1348,6 +1409,12 @@ class LauncherSessionService : Service() {
         val writable: Boolean,
     )
 
+    private data class QuickLaunchRequest(
+        val androidPackage: String,
+        val descriptorIdHex: String,
+        val generation: Long,
+    )
+
     @Synchronized
     private fun openSession(
         callingUid: Int,
@@ -1355,17 +1422,12 @@ class LauncherSessionService : Service() {
         clientToken: IBinder,
         pendingDocument: PendingLaunchDocument?,
         requestedToplevelId: Int,
+        quickLaunchRequest: QuickLaunchRequest? = null,
     ): OpenResult {
         fun reject(result: Int): OpenResult {
             pendingDocument?.document?.descriptor?.close()
             return OpenResult(result, 0, null)
         }
-        val identity =
-            LauncherIdentityVerifier.verify(this, callingUid)
-                ?: run {
-                    Log.w(TAG, "Rejected launcher UID=$callingUid before registry lookup")
-                    return reject(RESULT_UNAUTHORIZED)
-                }
         val runtime = runtimeBinder ?: return reject(RESULT_NOT_READY)
         if (runtime.runtimeHandle == 0L) {
             return reject(RESULT_NOT_READY)
@@ -1373,19 +1435,50 @@ class LauncherSessionService : Service() {
         if (!ArchphenePreferences.isReady()) {
             return reject(RESULT_NOT_READY)
         }
-        val authorization =
-            runtime.authorizeLauncher(
-                identity.androidPackage,
-                identity.descriptorIdHex,
-                identity.generation,
-            ) ?: run {
-                Log.w(
-                    TAG,
-                    "Rejected non-current registry descriptor package=${identity.androidPackage} " +
-                        "generation=${identity.generation}",
-                )
+        val identity: VerifiedLauncherIdentity
+        val authorization: LauncherAuthorization
+        if (quickLaunchRequest != null) {
+            if (
+                callingUid != applicationInfo.uid ||
+                pendingDocument != null ||
+                requestedToplevelId != 0
+            ) {
                 return reject(RESULT_UNAUTHORIZED)
             }
+            authorization =
+                runtime.authorizeQuickLauncher(
+                    quickLaunchRequest.androidPackage,
+                    quickLaunchRequest.descriptorIdHex,
+                    quickLaunchRequest.generation,
+                ) ?: return reject(RESULT_UNAUTHORIZED)
+            identity =
+                VerifiedLauncherIdentity(
+                    quickLaunchRequest.androidPackage,
+                    quickLaunchRequest.descriptorIdHex,
+                    quickLaunchRequest.generation,
+                    authorization.mimeTypes,
+                )
+        } else {
+            identity =
+                LauncherIdentityVerifier.verify(this, callingUid)
+                    ?: run {
+                        Log.w(TAG, "Rejected launcher UID=$callingUid before registry lookup")
+                        return reject(RESULT_UNAUTHORIZED)
+                    }
+            authorization =
+                runtime.authorizeLauncher(
+                    identity.androidPackage,
+                    identity.descriptorIdHex,
+                    identity.generation,
+                ) ?: run {
+                    Log.w(
+                        TAG,
+                        "Rejected non-current registry descriptor package=${identity.androidPackage} " +
+                            "generation=${identity.generation}",
+                    )
+                    return reject(RESULT_UNAUTHORIZED)
+                }
+        }
         if (identity.mimeTypes != authorization.mimeTypes) {
             Log.w(TAG, "Rejected launcher whose signed MIME declaration is stale")
             return reject(RESULT_UNAUTHORIZED)
@@ -1474,6 +1567,7 @@ class LauncherSessionService : Service() {
                 authorization,
                 preferences.appearance,
                 preferences.reducedIsolationElectron,
+                quickLaunchRequest != null,
                 root?.compositorSocketName ?: newCompositorSocketName(sessionId),
                 root?.id ?: sessionId,
                 requestedToplevelId,
@@ -1666,8 +1760,23 @@ class LauncherSessionService : Service() {
         sessionId: Int,
     ): Session? {
         val session = sessions[sessionId] ?: return null
-        val current = LauncherIdentityVerifier.verify(this, callingUid) ?: return null
         val runtime = runtimeBinder ?: return null
+        if (session.quickLaunch) {
+            if (
+                !session.clientActive ||
+                callingUid != applicationInfo.uid ||
+                callingUid != session.uid ||
+                runtime.authorizeQuickLauncher(
+                    session.identity.androidPackage,
+                    session.identity.descriptorIdHex,
+                    session.identity.generation,
+                ) == null
+            ) {
+                return null
+            }
+            return session
+        }
+        val current = LauncherIdentityVerifier.verify(this, callingUid) ?: return null
         if (
             !session.clientActive ||
             callingUid != session.uid ||
@@ -2769,24 +2878,44 @@ class LauncherSessionService : Service() {
                 null
             }
         val linuxHandle =
-            runtime.openLauncherProcess(
-                session.identity.androidPackage,
-                session.identity.descriptorIdHex,
-                session.identity.generation,
-                socket.name,
-                appearance.dark,
-                appearance.fontPercent,
-                appearance.controlVisualDp,
-                appearance.controlTargetDp,
-                appearance.accent,
-                appearance.background,
-                appearance.foreground,
-                portalBridge.busAddress,
-                session.reducedIsolationElectron,
-                gpuSocket?.absolutePath,
-                session.launchDocumentPath,
-                session.audioBridge?.takeIf { it.isReady() }?.serverAddress,
-            )
+            if (session.quickLaunch) {
+                runtime.openQuickLauncherProcess(
+                    session.identity.androidPackage,
+                    session.identity.descriptorIdHex,
+                    session.identity.generation,
+                    socket.name,
+                    appearance.dark,
+                    appearance.fontPercent,
+                    appearance.controlVisualDp,
+                    appearance.controlTargetDp,
+                    appearance.accent,
+                    appearance.background,
+                    appearance.foreground,
+                    portalBridge.busAddress,
+                    session.reducedIsolationElectron,
+                    gpuSocket?.absolutePath,
+                    session.audioBridge?.takeIf { it.isReady() }?.serverAddress,
+                )
+            } else {
+                runtime.openLauncherProcess(
+                    session.identity.androidPackage,
+                    session.identity.descriptorIdHex,
+                    session.identity.generation,
+                    socket.name,
+                    appearance.dark,
+                    appearance.fontPercent,
+                    appearance.controlVisualDp,
+                    appearance.controlTargetDp,
+                    appearance.accent,
+                    appearance.background,
+                    appearance.foreground,
+                    portalBridge.busAddress,
+                    session.reducedIsolationElectron,
+                    gpuSocket?.absolutePath,
+                    session.launchDocumentPath,
+                    session.audioBridge?.takeIf { it.isReady() }?.serverAddress,
+                )
+            }
         if (linuxHandle == 0L) {
             session.portalBridge?.close()
             session.portalBridge = null
@@ -5170,6 +5299,7 @@ class LauncherSessionService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 10
         private const val TRANSACTION_CLOSE_APPLICATION =
             IBinder.FIRST_CALL_TRANSACTION + 11
+        private const val TRANSACTION_OPEN_QUICK = IBinder.FIRST_CALL_TRANSACTION + 12
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1

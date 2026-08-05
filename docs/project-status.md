@@ -8,6 +8,31 @@ record their state at the time of validation. The authoritative forward plan is
 [`todo.md`](../todo.md); supported application claims are maintained in the
 [compatibility matrix](compatibility-matrix.md).
 
+## Manager-hosted Quick launch checkpoint
+
+The Packages page now offers **Quick launch** when the exact resolved package
+has one current graphical launcher descriptor. The manager passes the cached
+package identity, full descriptor digest, and desired generation to a
+non-exported manager Activity. The launcher Service accepts the separate Binder
+transaction only from the manager UID and reauthorizes the unpublished
+descriptor before open, Surface attachment, input, close, and process start.
+The native registry requires the descriptor to remain desired and generation-
+current but does not require a published Android wrapper. This path does not
+mutate launcher publication state or call PackageInstaller; **Add selected**
+remains the explicit app-shell publication action.
+
+On the Samsung SM-S908U at 420 dpi, the current manager Quick-launched
+unmodified Mousepad descriptor generation 1877 into a 1080×2316 Android Surface
+with a 432×926 logical output. The manager-owned Linux process connected,
+published one toplevel, presented repeated frames, accepted a bounded touch
+record, and exited after Back closed the session. The installed Mousepad app
+shell was not used for this launch, and no new PackageInstaller confirmation was
+accepted. This is a prototype claim: the manager surface does not yet provide
+the generated app shell's complete document, notification, chooser, camera,
+printing, secret, accessibility, multi-task, or restoration contract. Packages
+with several graphical descriptors still require a chooser before Quick launch
+can be offered.
+
 ## Android app-shell intent and lifecycle checkpoint
 
 Binder protocol v21 preserves Android document actions when an app shell already
