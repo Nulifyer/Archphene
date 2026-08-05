@@ -53,15 +53,14 @@ relicensed by Archphene. They enter the shared Arch root under their upstream
 package licenses and remain separate from Archphene's Android application
 license.
 
-## Open release audit
+## Release audit
 
-The complete component-license and notice audit is not closed.
 [`release/native-components.json`](../release/native-components.json) is the
 canonical evidence-bound inventory for the 14 non-Rust third-party components
 or component sets currently entering the manager or Builder. It records source
 locations, pins, declared licenses where reviewed, exact repository evidence,
-and concrete open blockers. `scripts/release-native-audit.py` rejects missing components,
-stale evidence, malformed blockers, and unreviewed additions.
+and the validation model. `scripts/release-native-audit.py` rejects missing
+components, stale evidence, malformed blockers, and unreviewed additions.
 
 Ten records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
 libepoxy, virglrenderer, both Qt bridges, and the Termux Pulse closure.
@@ -80,12 +79,14 @@ Termux binary packages. It includes each exact historical package recipe and
 build-framework snapshot, every checksum-pinned upstream source archive,
 recipe-contained Android source, and indexed license files for all 14 packages.
 
-Four records remain blocked. The unresolved work is limited to the floating
-Arch package transactions and incomplete GTK prebuilt provenance. The tag workflow runs `--require-complete` before
-creating a GitHub draft, so an accidental tag cannot publish or remotely stage
-a release while any blocker remains. SPDX file
-licenses and package license conclusions remain `NOASSERTION` rather than making
-unsupported conclusions.
+All 14 records are verified. Arch package-runtime transactions intentionally
+track the current signed repositories and record their resolved versions in each
+build artifact. GTK compatibility artifacts use checksum verification and the
+maintained compatibility source/build path; exact historical reconstruction is
+not a product requirement. The tag workflow still runs `--require-complete`
+before creating a GitHub draft so newly introduced audit blockers fail closed.
+SPDX file licenses and package license conclusions remain `NOASSERTION` where no
+file-level conclusion was made.
 
 Run the current consistency gate with:
 

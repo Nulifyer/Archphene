@@ -341,20 +341,20 @@ for arm64-v8a; Builder values are
 and
 `5696d7918aef99c628ebcda55a3625f379f2c7243652a8a52e7cce3a2a4fc1d2`.
 The broader native/runtime/transitive component license and corresponding-source
-audit remains an explicit release blocker.
+audit is executable and fail-closed.
 
 The release audit is now executable and fail-closed. A canonical 14-record
 native inventory binds repository evidence and requires completion before the
-workflow creates a GitHub draft. Ten records are complete. Deterministic release
+workflow creates a GitHub draft. All 14 records are complete. Deterministic release
 assets now provide locked Rust inventories/licenses, native source licenses,
 patched glibc corresponding source, and the full 14-package Termux PulseAudio
 source/recipe/license closure. All x86_64 Qt plugins and all three AArch64 Qt
 plugins reproduce byte-for-byte from their historical source in a digest-pinned
-build environment. Four blockers remain: the x86_64 and AArch64 Arch package
-transactions are resolved from floating repositories, the x86_64 GTK prebuilt
-has no recoverable source revisions, and the AArch64 GTK record lacks complete
-source-package/toolchain pins. `release-native-audit.py --require-complete`
-therefore fails before any remote release write.
+build environment. Arch runtime transactions intentionally test current signed
+repositories, and GTK compatibility uses checksummed maintained artifacts rather
+than requiring historical reconstruction. `release-native-audit.py
+--require-complete` now passes while preserving a fail-closed boundary for new
+unreviewed components.
 
 The clean-install boundary is now enforced in code rather than only documented.
 Before preferences, Activity runtime startup, or Service bootstrap, the

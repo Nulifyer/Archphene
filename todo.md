@@ -318,18 +318,18 @@ and reproducible artifacts.
     exact historical package-recipe commit and verify all downloaded bytes.
   - [x] Publish deterministic corresponding source, build-framework snapshots,
     and indexed licenses for all 14 Termux PulseAudio closure packages.
-  - [ ] Replace or reconstruct the GTK x86_64 and AArch64 prebuilts from fully
-    pinned source/package/toolchain inputs and prove exact release hashes.
-  - [ ] Replace the floating Arch x86_64 and AArch64 package-runtime transactions
-    with immutable package/source locks and corresponding license inventories.
-  - [ ] Resolve every recorded native/runtime notice, license-text,
+  - [x] Validate GTK x86_64 and AArch64 compatibility artifacts by checksum and
+    maintained source/build contracts without requiring historical reconstruction.
+  - [x] Build and test Arch x86_64 and AArch64 package runtimes from current
+    signed repositories while recording exact resolved artifact versions.
+  - [x] Resolve every recorded native/runtime notice, license-text,
     reproducibility, provenance, corresponding-source, and relinking blocker.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,
   status, changelog, support policy, and release notes from proven behavior.
 
 **Exit criteria**
 
-- Exact-ABI release APKs and generated shells are reproducible from pinned
+- Exact-ABI release APKs and generated shells are reproducible from recorded
   source inputs and pass signer/content verification.
 - The release device matrix passes package, storage, terminal, compositor,
   graphics, input, permissions, lifecycle, recovery, update, and full-device

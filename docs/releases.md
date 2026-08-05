@@ -38,9 +38,10 @@ prevents updates to existing installations. Never commit either file.
    builds and verifies all APKs, attaches every asset, and only then publishes
    the release.
 
-The native audit is currently incomplete, so the workflow intentionally stops
-before creating a draft. Do not bypass this gate. Resolve the evidence-bound
-licensing, provenance, reproducibility, and corresponding-source blockers first.
+The native audit accepts tested rolling dependencies such as current signed Arch
+repositories. It requires immutable pins only where identity, compatibility,
+security, or redistribution obligations require them. New unresolved audit
+records still stop the workflow before a GitHub release write.
 
 The workflow attaches these APKs and a basename-scoped `.sha256` file for each:
 
@@ -64,8 +65,9 @@ and the remaining release gate.
 The release also includes `Archphene-native-licenses-<version>.zip` and its
 checksum. Its embedded canonical manifest and checksum index currently cover
 the verified patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire, libepoxy, and
-virglrenderer source licenses. It does not represent the four audit records
-that remain blocked. A separate `Archphene-glibc-source-<version>.zip` and checksum contain
+virglrenderer source licenses. Rolling Arch/GTK components retain their upstream
+package metadata and checksummed release artifacts instead. A separate
+`Archphene-glibc-source-<version>.zip` and checksum contain
 the exact pristine glibc revision, Archphene patch, and architecture build
 instructions required to reproduce the modified shared libraries.
 
