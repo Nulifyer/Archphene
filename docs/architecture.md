@@ -1,6 +1,6 @@
 # Architecture
 
-Updated: 2026-07-28
+Updated: 2026-08-05
 
 Archphene is one user-owned Arch Linux environment inside one ordinary Android
 application. Pacman and AUR packages intentionally share one filesystem, home,
@@ -11,7 +11,7 @@ system UI, permissions, and access to files outside Archphene.
 ## Production model
 
 ```text
-thin launcher Activity (separate APK/UID)
+thin app-shell Activity (separate APK/UID)
           │ authenticated, versioned Binder session
           │ Surface + batched input + Android capability results
           ▼
@@ -27,27 +27,27 @@ hidden Archphene Builder companion (separate Android UID)
           └── returned package is re-verified before shared-root installation
 ```
 
-The launcher APK is an Android entry point, not a Linux container. The manager
+The app-shell APK is an Android entry point, not a Linux container. The manager
 starts and supervises the Linux process under its own UID, inside the same
 private Arch root used by Terminal and every other Linux application. Removing
-a launcher must not remove a pacman package or Linux user data. Removing a
-package must reconcile every launcher whose desktop entry or executable it
+a shell must not remove a pacman package or Linux user data. Removing a
+package must reconcile every shell whose desktop entry or executable it
 owned.
 
-Every generated launcher also carries a versioned capability declaration.
+Every generated app shell also carries a versioned capability declaration.
 Rust supplies the exact bounded contract to deterministic APK assembly; Kotlin
-embeds and independently verifies it, and both the wrapper and manager require
+embeds and independently verifies it, and both the shell and manager require
 the same value before opening an authenticated Binder session. The V4
 production contract contains the implemented Wayland, input, IME, plain-text
-clipboard, document, bounded HTTP(S) OpenURI, and wrapper-owned notification
-paths. Android 13+ notification consent remains a first-use wrapper decision.
+clipboard, document, bounded HTTP(S) OpenURI, and shell-owned notification
+paths. Android 13+ notification consent remains a first-use shell decision.
 A separate signed metadata field carries only registry-derived desktop MIME
 types whose `Exec` accepts files or URLs. Binder protocol v10 reauthorizes that
 exact set before one matching Android `content://` descriptor can be copied
 into the shared Arch home and supplied to the stock desktop process.
 A correctly signed
-wrapper with an older contract is stale and can be updated through Android
-confirmation; a wrapper with untrusted identity or signer remains quarantined.
+shell with an older contract is stale and can be updated through Android
+confirmation; a shell with untrusted identity or signer remains quarantined.
 Optional or dangerous capabilities must not be advertised until their complete
 broker, evidence derivation, and user-review path exist.
 
@@ -185,12 +185,12 @@ maintenance adapters run afterward. The physical Samsung
 gate completed current `visual-studio-code-bin` install, process-death
 reattachment, authorized removal, and capability pruning.
 
-### Thin launcher application
+### Thin app-shell application
 
 Each graphical desktop entry can receive one deterministic Android package
-identity and launcher Activity. A wrapper contains only:
+identity and app-shell Activity. An app shell contains only:
 
-- the generic Archphene launcher client;
+- the generic Archphene launch client;
 - a stable descriptor identifier and generation;
 - label, icon, MIME intents, and declared Android capabilities;
 - no Arch package closure, Linux home, package database, or executable.
@@ -205,17 +205,17 @@ applications in the app drawer. Archphene may later offer shortcuts or widgets
 that route to an installed wrapper, but they are convenience surfaces for the
 same descriptor and never own a Linux process or package state.
 
-The wrapper cost is deliberately bounded. Current production Mousepad and btop
-wrappers are approximately 91 KiB and 87 KiB respectively on both maintained
-ABIs. They contain Android metadata and the generic client only; every launcher
+The app-shell cost is deliberately bounded. Current production Mousepad and btop
+shells are approximately 91 KiB and 87 KiB respectively on both maintained
+ABIs. They contain Android metadata and the generic client only; every shell
 still binds to the one manager-owned Arch root and manager-owned process
 registry.
 
-The manager assembles wrappers from a reproducible precompiled template, signs
+The manager assembles app shells from a reproducible precompiled template, signs
 them with one persistent non-exportable Android Keystore identity, verifies the
 generated APK, and hands it to PackageInstaller. Android confirmation remains
 mandatory. Updates retain package name and signer; a desktop-entry identity
-change is explicit rather than silently retargeting an installed launcher.
+change is explicit rather than silently retargeting an installed shell.
 The current implementation uses a minimized release template and patches only
 bounded binary-manifest placeholders. It strips template signatures, preserves
 the reviewed entry set and content digests, signs with one RSA-3072 APK v3
@@ -226,9 +226,9 @@ APK only while its streamed SHA-256 still matches the verified output.
 Because generated package names are dynamic, they cannot be declared through a
 finite Android `<queries>` list. The manager therefore declares
 `QUERY_ALL_PACKAGES` for its app-store role and uses the visibility only to
-reconcile its registry identities. It asks the user to allow launcher
+reconcile its registry identities. It asks the user to allow app-shell
 installation before claiming publication work, then retains Android's
-per-launcher install and uninstall confirmations. Interrupted installer
+per-shell install and uninstall confirmations. Interrupted installer
 sessions are abandoned and requeued on manager restart; installed packages are
 adopted only after signer and embedded metadata verification. A conflicting or
 untrusted package is quarantined rather than replaced or silently removed.
@@ -239,11 +239,11 @@ identity is vacant. If registry state is lost but the installed wrapper still
 has the trusted signer and a higher Android version, reconciliation advances
 the desired generation above it rather than attempting a downgrade.
 
-The wrapper signing certificate is intentionally different from the manager's
+The app-shell signing certificate is intentionally different from the manager's
 release certificate. The exported launcher Service therefore cannot rely on a
 static signature permission. During every Binder transaction it resolves the
 calling UID, requires exactly the registered generated package, verifies the
-installed signer against the manager's wrapper-signing certificate, and checks
+installed signer against the manager's app-shell signing certificate, and checks
 the bounded launcher descriptor. Package-name strings supplied by callers are
 never authentication.
 
@@ -257,10 +257,10 @@ PackageInstaller, and removal transitions are persisted before handoff; after
 process death, Kotlin verifies the installed package signer and embedded
 generation through PackageManager before Rust adopts, retries, or removes it.
 
-### Cross-process launcher session
+### Cross-process app-shell session
 
 The internal manager Activity continues to use a non-exported local Binder.
-Generated wrappers use a separate exported, versioned Binder protocol with a
+Generated app shells use a separate exported, versioned Binder protocol with a
 small fixed transaction surface:
 
 1. authenticate caller UID, package signer, descriptor, and protocol version;
@@ -270,14 +270,38 @@ small fixed transaction surface:
 5. broker explicit Android capability requests and results;
 6. stop or detach the session.
 
+Protocol v20 separates the manager-owned Linux application session from its
+Android task attachments. One root session owns the private Wayland socket,
+Linux process group, brokers, and compositor. Up to eight authenticated Android
+window sessions each own one bounded token and `Surface`; the compositor caps
+the retained aggregate at 33,554,432 pixels. The primary task uses the compact
+composited output. On an adaptive window, an external display, or a sufficiently
+large pointer-driven window, independent unparented toplevels receive internal
+document Activities. Parent-owned popups and transient surfaces remain composed
+with their toplevel. Recents are bounded to eight window tasks, and stable
+component-plus-data document intents reuse an existing task after Activity
+process death.
+
+The identities and lifetimes are:
+
+| Identity | Stable key | Lifetime |
+|---|---|---|
+| Linux application | Signed descriptor ID, generated Android package, signer, and generation | Survives Activity recreation, Home, and display movement. Package removal or a changed descriptor identity ends the shell identity. |
+| Linux session | Manager root-session ID, private Wayland socket, and process handle | Survives Surface replacement, Home, and a 15-second app-shell process reconnect grace. Manager death, Linux process exit, or final explicit close ends it. |
+| Android task | Main app-shell intent, or `archphene-window://<package>/<toplevel>` for an independent window | Survives Activity process death and remains in bounded Recents. Force-stop prevents reconnect until the user launches the shell again; shell removal removes its tasks. |
+| Linux toplevel | Wayland protocol object ID within one Linux session | Survives Activity and Surface replacement while the Linux session remains alive. It is never reused as authority outside that session. |
+| Imported document | Validated `content://` request plus the manager-owned imported path | The imported file remains in the shared Arch home. Its launch association belongs to the Linux session and does not authorize another task or package. |
+| Surface attachment | Authenticated Binder session ID used as the native window token | Belongs to one Activity instance. Configuration replacement, Home, Activity death, or task close detaches it without transferring Linux process ownership. |
+
 The manager converts the supplied `Surface` to an `ANativeWindow`; the Linux
-process never crosses into the wrapper UID. Binder death, wrapper force-stop,
-or an explicit close detaches the surface and applies the documented
-background/termination policy to the manager-owned process group.
+process never crosses into the app-shell UID. Binder death starts the bounded
+reconnect grace; an explicit close or an expired grace applies the documented
+termination policy. App-shell force-stop prevents automatic reconnection; when
+the grace expires, the manager closes the Linux process group.
 
 The current implementation proves caller rejection, real cross-process
-Surface ownership, cold-runtime retry, wrapper-template invalidation,
-full-device light/dark presentation, and wrapper-death cleanup on the physical
+Surface ownership, cold-runtime retry, app-shell-template invalidation,
+full-device light/dark presentation, and app-shell process reconnection on the physical
 AArch64 target. Behind that Surface, the manager now owns a private Rust
 Wayland compositor, direct `ANativeWindow` SHM presentation, a bounded
 generation-checked GUI process registry, process groups, and fixed touch,
@@ -286,15 +310,16 @@ batches. Key records carry press, release, repeat, and Android modifier state.
 The fixed six-integer records are checked independently at the Binder and
 native boundaries; touch identifiers and coordinates, buttons, axis distance,
 key codes, and active touches all have explicit limits. Window focus loss,
-HOME, detach, and close cancel touches, release held pointer buttons and keys,
-clear modifiers, and remove keyboard focus. HOME detaches presentation while
-retaining the session; resume reattaches it; Back and Binder death reap and
-remove the private endpoint. Process exit polling is kept outside the frame hot
+Home, detach, and close cancel touches, release held pointer buttons and keys,
+clear modifiers, and remove keyboard focus. Home detaches presentation while
+retaining the session; resume reattaches it. Back closes its authenticated
+window session, while Binder death detaches presentation and starts the bounded
+reconnect grace. Process exit polling is kept outside the frame hot
 path, drains stdout/stderr into a fixed 16 KiB tail ring, and addresses
 remaining descendants before showing a bounded status.
 
-Android text clipboard access stays in the visible wrapper rather than the
-background manager. The focused wrapper reads or writes Android
+Android text clipboard access stays in the visible app shell rather than the
+background manager. The focused shell reads or writes Android
 `ClipboardManager` state and sends only a generation-checked, authenticated
 text message. The manager accepts at most 16,384 UTF-16 units and 64 KiB of
 UTF-8, while Rust exposes standard `wl_data_device` selections and caps pending
@@ -303,30 +328,26 @@ dedicated manager worker, are switched to nonblocking mode, and have a
 two-second poll deadline. Invalid UTF-8, overflow, stalled peers, stale
 revisions, and echoed Android notifications fail without blocking Binder or
 the compositor. Linux clipboard changes received during focus loss are held
-until the wrapper is visible again; detach disables the bridge and closes
+until the shell is visible again; detach disables the bridge and closes
 pending descriptors.
 Status does not compete with native rendering for the same `Surface`: the
-manager sends authenticated one-way state callbacks and the wrapper renders an
+manager sends authenticated one-way state callbacks and the shell renders an
 opaque Android overlay until the first Linux frame, or again after a stop.
-Portrait/landscape replacement and HOME/resume reattachment have been proven
+Portrait/landscape replacement and Home/resume reattachment have been proven
 on the physical Samsung without a retained stretched buffer.
 
-The connected-device gate currently uses deliberately non-runnable discovery
-fixtures. It proves wrapper input validation and focus/lifecycle stability
-through HOME/resume and rotation, but cannot prove delivery to a Linux client.
-The native Samsung probe separately proves both text clipboard directions
-against real Wayland data sources/offers, and the production wrapper proves the
-authenticated Android-to-manager transaction, but those two gates do not
-replace a real package-installed client in the manager session. That client,
-transformed input, live rotation/resize, IME, and repeated emulator coverage
-remain required before this session is a production Linux application host.
+The physical Samsung gate uses current generated app shells and unmodified
+package-installed clients. Mousepad proves compact and adaptive multi-task
+ownership, process-death restoration, input, IME, accessibility, and lifecycle;
+the maintained package matrix covers the other broker and rendering contracts.
+Physical external-display and repeated x86_64 multi-task coverage remain open.
 
 ### Wayland and graphics bridge
 
 Each launched Linux application receives a private Wayland socket and a
 manager-owned compositor session. The bridge maps Wayland surfaces, popups,
 dialogs, input, clipboard, IME, output changes, and Android window geometry to
-the attached launcher Surface.
+the attached app-shell Surface.
 
 OpenGL ES acceleration uses a manager-owned virglrenderer helper and Android
 EGL/GLES, with bounded software fallback. The current final Wayland

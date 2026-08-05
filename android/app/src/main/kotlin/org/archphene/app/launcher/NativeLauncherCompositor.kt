@@ -68,6 +68,51 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun attachWindow(
+        windowToken: Int,
+        toplevelId: Int,
+        surface: Surface,
+        width: Int,
+        height: Int,
+        densityDpi: Int,
+        geometryPercent: Int,
+    ): Boolean {
+        require(windowToken >= 0)
+        require(toplevelId >= 0)
+        val current = ownerHandle()
+        val result =
+            nativeAttachWindowSurface(
+                current,
+                windowToken,
+                toplevelId,
+                surface,
+                width,
+                height,
+                densityDpi,
+                geometryPercent,
+            )
+        PerformanceMetrics.recordCompositorJni()
+        return result == 0
+    }
+
+    fun detachWindow(windowToken: Int) {
+        require(windowToken >= 0)
+        val current = ownerHandle()
+        if (current != 0L) {
+            nativeDetachWindowSurface(current, windowToken)
+            PerformanceMetrics.recordCompositorJni()
+        }
+    }
+
+    fun activateWindow(windowToken: Int): Boolean {
+        require(windowToken >= 0)
+        val current = ownerHandle()
+        if (current == 0L) return false
+        val result = nativeActivateWindow(current, windowToken)
+        PerformanceMetrics.recordCompositorJni()
+        return result == 0
+    }
+
     fun requestClose(): Int {
         val current = ownerHandle()
         return if (current == 0L) {
@@ -368,6 +413,40 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun windowCount(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeWindowCount(current).also { PerformanceMetrics.recordCompositorJni() }
+        }
+    }
+
+    fun windowComponent(
+        index: Int,
+        component: Int,
+    ): Int {
+        require(index >= 0)
+        require(component >= 0)
+        val current = ownerHandle()
+        return if (current == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeWindowComponent(current, index, component).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
+        }
+    }
+
+    fun closeWindow(toplevelId: Int): Boolean {
+        require(toplevelId > 0)
+        val current = ownerHandle()
+        if (current == 0L) return false
+        return nativeCloseWindow(current, toplevelId).also {
+            PerformanceMetrics.recordCompositorJni()
+        } == 0
+    }
+
     fun copyPresentationSnapshot(output: ByteBuffer): Boolean {
         val current = ownerHandle()
         if (current == 0L) {
@@ -438,6 +517,27 @@ internal class NativeLauncherCompositor(
     ): Int
 
     private external fun nativeDetachSurface(handle: Long)
+
+    private external fun nativeAttachWindowSurface(
+        handle: Long,
+        windowToken: Int,
+        toplevelId: Int,
+        surface: Surface,
+        width: Int,
+        height: Int,
+        densityDpi: Int,
+        geometryPercent: Int,
+    ): Int
+
+    private external fun nativeDetachWindowSurface(
+        handle: Long,
+        windowToken: Int,
+    )
+
+    private external fun nativeActivateWindow(
+        handle: Long,
+        windowToken: Int,
+    ): Int
 
     private external fun nativeRequestClose(handle: Long): Int
 
@@ -539,6 +639,19 @@ internal class NativeLauncherCompositor(
         timeMillis: Int,
     ): Int
 
+    private external fun nativeWindowCount(handle: Long): Int
+
+    private external fun nativeWindowComponent(
+        handle: Long,
+        index: Int,
+        component: Int,
+    ): Int
+
+    private external fun nativeCloseWindow(
+        handle: Long,
+        toplevelId: Int,
+    ): Int
+
     private external fun nativeCopyPresentationSnapshot(
         handle: Long,
         output: ByteBuffer,
@@ -567,6 +680,7 @@ internal class NativeLauncherCompositor(
         const val FLAG_IME_CHANGED = 1 shl 6
         const val FLAG_POINTER_CAPTURE_CHANGED = 1 shl 7
         const val FLAG_CURSOR_CHANGED = 1 shl 8
+        const val FLAG_WINDOWS_CHANGED = 1 shl 9
         private const val CURSOR_WIDTH = 0
         private const val CURSOR_HEIGHT = 1
         private const val CURSOR_HOTSPOT_X = 2

@@ -335,7 +335,7 @@ wait_file "$composition_file" "$composition_value"
 capture_png ime-complex-commit
 
 # Put the manager in front before its debug receiver seeds Android's real
-# ClipboardManager. Returning to the singleTask launcher makes its normal focus
+# ClipboardManager. Returning to the existing app-shell task makes its normal focus
 # callback submit the clipboard over authenticated Binder. This avoids relying
 # on OEM delivery of a clipboard-listener callback to a background writer.
 # The existing wrapper and Linux process must survive the round trip.

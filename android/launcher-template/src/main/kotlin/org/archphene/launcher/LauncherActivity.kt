@@ -2,6 +2,7 @@ package org.archphene.launcher
 
 import android.Manifest
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.ActivityOptions
 import android.app.Notification
 import android.app.NotificationChannel
@@ -20,6 +21,7 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
+import android.hardware.input.InputManager
 import android.net.Uri
 import android.os.Build
 import android.os.Binder
@@ -78,7 +80,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
-class LauncherActivity :
+open class LauncherActivity :
     Activity(),
     SurfaceHolder.Callback {
     private data class ImeState(
@@ -187,6 +189,8 @@ class LauncherActivity :
     private val documentHandler = Handler(documentThread.looper)
     private var remote: IBinder? = null
     private var sessionId = 0
+    private var requestedToplevelId = 0
+    private var latestIndependentToplevelIds = IntArray(0)
     private var attempts = 0
     private var binding = false
     @Volatile private var activityResumed = false
@@ -431,6 +435,14 @@ class LauncherActivity :
                 submitAndroidClipboard()
             }
         }
+    private val inputDeviceListener =
+        object : InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(deviceId: Int) = reconcileWindowTaskPolicy()
+
+            override fun onInputDeviceRemoved(deviceId: Int) = reconcileWindowTaskPolicy()
+
+            override fun onInputDeviceChanged(deviceId: Int) = reconcileWindowTaskPolicy()
+        }
     private val clipboardRetry =
         Runnable {
             if (hasWindowFocus()) {
@@ -446,7 +458,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_ACCESSIBILITY_VIEWPORT ||
+                    code !in CALLBACK_STATUS..CALLBACK_WINDOWS ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -995,6 +1007,24 @@ class LauncherActivity :
                                 true
                             }
                         }
+                        CALLBACK_WINDOWS -> {
+                            val count = data.readInt()
+                            if (count !in 0..MAX_INDEPENDENT_WINDOWS) {
+                                return@runCatching false
+                            }
+                            val ids = IntArray(count)
+                            val unique = HashSet<Int>(count)
+                            repeat(count) { index ->
+                                val id = data.readInt()
+                                if (id <= 0 || !unique.add(id)) {
+                                    return@runCatching false
+                                }
+                                ids[index] = id
+                            }
+                            if (data.dataAvail() != 0) return@runCatching false
+                            handler.post { reconcileIndependentWindows(ids) }
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -1074,6 +1104,13 @@ class LauncherActivity :
                 }.getOrDefault(false)
         testInputDebug =
             managerIsDebuggable && intent.getBooleanExtra(TEST_INPUT_DEBUG_EXTRA, false)
+        requestedToplevelId =
+            intent.getIntExtra(EXTRA_TOPLEVEL_ID, 0).takeIf { id -> id > 0 } ?: 0
+        if (requestedToplevelId > 0) {
+            synchronized(ACTIVE_TOPLEVELS) {
+                ACTIVE_TOPLEVELS.add(requestedToplevelId)
+            }
+        }
         inputCoordinateLogsRemaining = if (testInputDebug) 16 else 0
         inputKeyLogsRemaining = if (testInputDebug) 64 else 0
         desktopTouchSlop = ViewConfiguration.get(this).scaledTouchSlop
@@ -1199,6 +1236,9 @@ class LauncherActivity :
 
     override fun onStart() {
         super.onStart()
+        getSystemService(InputManager::class.java)
+            ?.registerInputDeviceListener(inputDeviceListener, handler)
+        reconcileWindowTaskPolicy()
         pendingActions.resume()
         if (remote != null) {
             if (sessionId > 0) {
@@ -1443,6 +1483,7 @@ class LauncherActivity :
     }
 
     override fun onStop() {
+        getSystemService(InputManager::class.java)?.unregisterInputDeviceListener(inputDeviceListener)
         configurationSurfaceAttachFrames = 0
         surfaceView.removeCallbacks(attachSurfaceAfterConfigurationChange)
         handler.removeCallbacksAndMessages(null)
@@ -1509,6 +1550,11 @@ class LauncherActivity :
         }
         documentThread.quitSafely()
         customCursorPointerIcon = null
+        if (requestedToplevelId > 0) {
+            synchronized(ACTIVE_TOPLEVELS) {
+                ACTIVE_TOPLEVELS.remove(requestedToplevelId)
+            }
+        }
         super.onDestroy()
     }
 
@@ -1627,6 +1673,7 @@ class LauncherActivity :
         configurationSurfaceAttachFrames = CONFIGURATION_SURFACE_ATTACH_FRAMES
         surfaceView.removeCallbacks(attachSurfaceAfterConfigurationChange)
         surfaceView.postOnAnimation(attachSurfaceAfterConfigurationChange)
+        reconcileWindowTaskPolicy()
     }
 
     private fun applyLauncherOrientationPolicy(configuration: Configuration) {
@@ -2734,6 +2781,7 @@ class LauncherActivity :
                 data.writeString(incoming.mimeType)
                 incoming.descriptor.writeToParcel(data, 0)
             }
+            data.writeInt(requestedToplevelId)
             if (!service.transact(TRANSACTION_OPEN, data, reply, 0)) {
                 showUnavailable()
                 return
@@ -4879,6 +4927,102 @@ class LauncherActivity :
         }
     }
 
+    private fun reconcileIndependentWindows(ids: IntArray) {
+        if (isFinishing || isDestroyed) return
+        if (requestedToplevelId > 0) {
+            if (ids.none { id -> id == requestedToplevelId }) {
+                finishAndRemoveTask()
+            }
+            return
+        }
+        latestIndependentToplevelIds = ids.copyOf()
+        val taskPolicyEnabled = desktopWindowTasksEnabled()
+        Log.i(
+            TAG,
+            "Independent Linux windows=${ids.size} Android tasks=$taskPolicyEnabled " +
+                "smallestWidthDp=${resources.configuration.smallestScreenWidthDp}",
+        )
+        if (!taskPolicyEnabled) return
+        for (id in ids) {
+            val launch =
+                synchronized(ACTIVE_TOPLEVELS) {
+                    ACTIVE_TOPLEVELS.add(id)
+                }
+            if (!launch) continue
+            if (hasExistingIndependentTask(id)) {
+                Log.i(TAG, "Retained existing Android task for Linux window=$id")
+                continue
+            }
+            val intent =
+                Intent(this, LauncherWindowActivity::class.java)
+                    .setAction(ACTION_OPEN_TOPLEVEL)
+                    .setData(Uri.parse("archphene-window://$packageName/$id"))
+                    .putExtra(EXTRA_TOPLEVEL_ID, id)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+            runCatching { startActivity(intent) }
+                .onSuccess { Log.i(TAG, "Opened Android task for Linux window=$id") }
+                .onFailure { error ->
+                    synchronized(ACTIVE_TOPLEVELS) {
+                        ACTIVE_TOPLEVELS.remove(id)
+                    }
+                    Log.w(TAG, "Could not open Android task for Linux window=$id", error)
+                }
+        }
+    }
+
+    private fun hasExistingIndependentTask(id: Int): Boolean {
+        val expectedData = Uri.parse("archphene-window://$packageName/$id")
+        val activityManager = getSystemService(ActivityManager::class.java) ?: return false
+        return activityManager.appTasks
+            .asSequence()
+            .take(MAX_APP_TASK_INSPECTION)
+            .any { task ->
+                val info = task.taskInfo
+                val base = info.baseIntent
+                info.numActivities > 0 &&
+                    base.component?.className == LauncherWindowActivity::class.java.name &&
+                    base.data == expectedData
+            }
+    }
+
+    private fun reconcileWindowTaskPolicy() {
+        if (requestedToplevelId == 0 && latestIndependentToplevelIds.isNotEmpty()) {
+            reconcileIndependentWindows(latestIndependentToplevelIds)
+        }
+    }
+
+    private fun desktopWindowTasksEnabled(): Boolean {
+        val configuration = resources.configuration
+        val displayId =
+            if (Build.VERSION.SDK_INT >= 30) {
+                display?.displayId
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.displayId
+            }
+        val density = resources.displayMetrics.density.coerceAtLeast(1f)
+        val (widthPixels, heightPixels) =
+            if (Build.VERSION.SDK_INT >= 30) {
+                val bounds = windowManager.currentWindowMetrics.bounds
+                bounds.width() to bounds.height()
+            } else {
+                resources.displayMetrics.widthPixels to resources.displayMetrics.heightPixels
+            }
+        val precisePointer =
+            InputDevice.getDeviceIds().any { id ->
+                ((InputDevice.getDevice(id)?.sources ?: 0) and InputDevice.SOURCE_MOUSE) != 0
+            }
+        return LauncherWindowTaskPolicy.useIndependentTasks(
+            smallestWidthDp = configuration.smallestScreenWidthDp,
+            displayId = displayId ?: android.view.Display.DEFAULT_DISPLAY,
+            defaultDisplayId = android.view.Display.DEFAULT_DISPLAY,
+            precisePointer = precisePointer,
+            widthPixels = widthPixels,
+            heightPixels = heightPixels,
+            density = density,
+        )
+    }
+
     private fun applicationMetadata(): Bundle =
         packageManager
             .getApplicationInfo(packageName, PackageManager.GET_META_DATA)
@@ -5013,8 +5157,10 @@ class LauncherActivity :
             )
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 19
+        private const val PROTOCOL_VERSION = 20
         private const val TEST_INPUT_DEBUG_EXTRA = "archphene_test_input_debug"
+        private const val ACTION_OPEN_TOPLEVEL = "org.archphene.action.OPEN_TOPLEVEL"
+        private const val EXTRA_TOPLEVEL_ID = "org.archphene.extra.TOPLEVEL_ID"
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -5043,6 +5189,9 @@ class LauncherActivity :
         private const val CALLBACK_ACCESSIBILITY = IBinder.FIRST_CALL_TRANSACTION + 13
         private const val CALLBACK_ACCESSIBILITY_VIEWPORT =
             IBinder.FIRST_CALL_TRANSACTION + 14
+        private const val CALLBACK_WINDOWS = IBinder.FIRST_CALL_TRANSACTION + 15
+        private const val MAX_INDEPENDENT_WINDOWS = 8
+        private const val MAX_APP_TASK_INSPECTION = MAX_INDEPENDENT_WINDOWS + 1
         private const val ACCESSIBILITY_CALLBACK_TREE = 1
         private const val ACCESSIBILITY_CALLBACK_EVENT = 2
         private const val ACCESSIBILITY_CALLBACK_MENU = 3
@@ -5130,6 +5279,7 @@ class LauncherActivity :
                 '-'.code.toByte(),
             )
         private val ACTIVE_PRINT_FILES = HashSet<File>(MAX_PENDING_PRINTS)
+        private val ACTIVE_TOPLEVELS = HashSet<Int>(MAX_INDEPENDENT_WINDOWS)
         private const val INPUT_TOUCH_DOWN = 1
         private const val INPUT_TOUCH_MOTION = 2
         private const val INPUT_TOUCH_UP = 3

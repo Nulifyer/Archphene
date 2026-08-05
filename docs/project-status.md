@@ -1,12 +1,52 @@
 # Project status
 
-Updated: 2026-08-04
+Updated: 2026-08-05
 
 This page is the evidence ledger for implemented and validated behavior.
 Package search does not imply package compatibility. Chronological checkpoints
 record their state at the time of validation. The authoritative forward plan is
 [`todo.md`](../todo.md); supported application claims are maintained in the
 [compatibility matrix](compatibility-matrix.md).
+
+## Android app-shell multi-task checkpoint
+
+Binder protocol v20 now keeps one manager-owned Linux application session while
+up to eight authenticated app-shell Activities attach independent window tokens
+and Surfaces. The native compositor retains a bounded aggregate of 33,554,432
+attached pixels, presents each independent toplevel into its Activity Surface,
+keeps popups with their parent, and routes focus, input, IME, clipboard, cursor,
+accessibility, documents, notifications, and other brokers through the active
+authenticated task. A 15-second reconnect grace preserves the Linux process and
+toplevels across app-shell process death while document-task identities reuse
+their stable component and `archphene-window://` data.
+
+On the Samsung SM-S908U, unmodified Mousepad opened `Untitled 2` from
+`Ctrl+Shift+N`. At the normal 420 density override, the callback reported one
+independent toplevel while Android retained one compact task. A temporary 240
+density override changed the live capability policy to a 720 dp adaptive window;
+the same package then held task 5714 for `LauncherActivity` and task 5715 for
+the internal `LauncherWindowActivity`. Both shared wrapper PID 29186, manager
+PID 28708, and Linux Mousepad PID 29025. Home, task switching, child close, and
+root resume retained Linux PID 29025. Killing the background app-shell process
+and reopening the primary task recreated both authenticated sessions against
+root session 1, reused tasks 5714 and 5715, and retained Linux PID 29025. Closing
+the child removed only its task and toplevel; closing the final primary task
+removed Mousepad while the cached Android app-shell process could remain. The
+device density override was restored to 420.
+
+This is physical evidence for generic compact/adaptive task ownership, not a
+DeX or external-display claim. Physical DeX, the x86_64 emulator parity matrix,
+root-task close while another independent task remains, the compact in-app
+window switcher, and the complete single-window application regression remain
+open release gates.
+
+The final source state passes all locked Rust workspace tests, workspace Clippy
+with warnings denied, app/app-shell/Builder JVM tests and debug lint, every
+repository contract, and exact x86_64 and arm64-v8a manager APK builds. A fresh
+isolated `org.archphene.app.debug.p0window` install then passed the physical
+Samsung base regression with PID 30535 and runtime generation 4294967297 stable
+across recreation and Home/resume; the temporary package was removed and the
+device density remained restored to 420.
 
 ## SuperTux checkpoint
 

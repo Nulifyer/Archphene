@@ -139,10 +139,13 @@ class LauncherSessionService : Service() {
         val appearanceOverrides: LinuxAppearanceOverrides,
         val reducedIsolationElectron: Boolean,
         val compositorSocketName: String,
+        val rootSessionId: Int,
+        val toplevelId: Int,
     ) {
         var surface: Surface? = null
         var surfaceAttachments: LatestDispatchSlot<SurfaceAttachment>? = null
         @Volatile var active = true
+        @Volatile var clientActive = true
         var compositor: NativeLauncherCompositor? = null
         var compositorSocket: File? = null
         var linuxHandle = 0L
@@ -223,6 +226,9 @@ class LauncherSessionService : Service() {
         val accessibilityActions =
             ArrayBlockingQueue<AccessibilityAction>(MAX_ACCESSIBILITY_ACTIONS)
         var launchDocumentPath: String? = null
+        val availableToplevelIds = IntArray(MAX_PUBLISHED_WINDOWS)
+        var availableToplevelCount = 0
+        var reconnectGeneration = 0
     }
 
     private val sessions = HashMap<Int, Session>(MAX_SESSIONS)
@@ -239,6 +245,55 @@ class LauncherSessionService : Service() {
     private val microphoneForegroundSessions = HashSet<Int>()
     @Volatile private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
     private var runtimeBound = false
+
+    @Synchronized
+    private fun rootSession(session: Session): Session? =
+        sessions[session.rootSessionId]?.takeIf { root ->
+            root.rootSessionId == root.id && root.active
+        }
+
+    @Synchronized
+    private fun callbackSession(session: Session): Session? {
+        val root = rootSession(session) ?: return null
+        if (
+            session.clientActive &&
+            session.hostActive &&
+            session.clientToken.isBinderAlive
+        ) {
+            return session
+        }
+        return sessions.values
+            .asSequence()
+            .filter { candidate ->
+                candidate.rootSessionId == root.id &&
+                    candidate.clientActive &&
+                    candidate.clientToken.isBinderAlive
+            }.sortedWith(
+                compareByDescending<Session> { candidate -> candidate.hostActive }
+                    .thenBy { candidate -> candidate.toplevelId != 0 }
+                    .thenBy(Session::id),
+            ).firstOrNull()
+    }
+
+    @Synchronized
+    private fun activateSessionWindow(
+        session: Session,
+        compositor: NativeLauncherCompositor,
+    ): Boolean {
+        val token =
+            when {
+                session.toplevelId != 0 -> session.id
+                session.id != session.rootSessionId -> session.id
+                sessions.values.any { candidate ->
+                    candidate.rootSessionId == session.id &&
+                        candidate.toplevelId != 0 &&
+                        candidate.clientActive &&
+                        candidate.surface != null
+                } -> 0
+                else -> return true
+            }
+        return compositor.activateWindow(token)
+    }
     private val wallpaperColorsChanged =
         WallpaperManager.OnColorsChangedListener { _, _ ->
             requestAppearanceUpdate()
@@ -377,13 +432,98 @@ class LauncherSessionService : Service() {
     }
 
     @Synchronized
-    private fun removeSession(sessionId: Int) {
-        val session = sessions.remove(sessionId) ?: return
+    private fun removeSession(
+        sessionId: Int,
+        closeWindow: Boolean = true,
+    ) {
+        val session = sessions[sessionId] ?: return
+        if (!session.clientActive) return
         releaseMicrophoneForeground(session)
         session.clientToken.unlinkToDeath(sessionBinder, 0)
+        session.clientActive = false
+        val root = rootSession(session) ?: session
+        val otherClients =
+            sessions.values.any { candidate ->
+                candidate.id != session.id &&
+                    candidate.rootSessionId == root.id &&
+                    candidate.clientActive
+            }
+        if (session.rootSessionId == session.id && (otherClients || !closeWindow)) {
+            val surface = session.surface
+            session.surface = null
+            session.surfaceAttachments?.clear()
+            session.hostActive = false
+            val cleanup = Runnable {
+                root.compositor?.detach()
+                surface?.release()
+            }
+            if (!surfaceHandler.post(cleanup)) surface?.release()
+            if (!otherClients) scheduleRootFinalization(root)
+            Log.i(TAG, "Retained Linux application session=${root.id} for remaining windows")
+            return
+        }
+        if (session.rootSessionId != session.id) {
+            sessions.remove(session.id)
+            session.active = false
+            session.surfaceAttachments?.close()
+            session.androidClipboardUpdates?.close()
+            session.accessibilityActions.clear()
+            val surface = session.surface
+            session.surface = null
+            val cleanup = Runnable {
+                root.compositor?.detachWindow(session.id)
+                if (closeWindow && session.toplevelId > 0) {
+                    root.compositor?.closeWindow(session.toplevelId)
+                    root.compositor?.dispatchAndPresent(SystemClock.uptimeMillis().toInt())
+                }
+                surface?.release()
+            }
+            if (!surfaceHandler.post(cleanup)) surface?.release()
+            if (!root.clientActive) {
+                val remaining =
+                    sessions.values.any { candidate ->
+                        candidate.rootSessionId == root.id && candidate.clientActive
+                    }
+                if (!remaining) {
+                    if (closeWindow) finalizeRootSession(root) else scheduleRootFinalization(root)
+                }
+            }
+            return
+        }
+        finalizeRootSession(root)
+    }
+
+    @Synchronized
+    private fun finalizeRootSession(session: Session) {
+        session.reconnectGeneration++
+        sessions.remove(session.id)
         session.active = false
         releaseSessionResources(session, session.surface, closeCompositor = true)
         session.surface = null
+    }
+
+    @Synchronized
+    private fun scheduleRootFinalization(root: Session) {
+        root.reconnectGeneration++
+        val generation = root.reconnectGeneration
+        surfaceHandler.postDelayed(
+            {
+                synchronized(this) {
+                    if (
+                        sessions[root.id] === root &&
+                        root.active &&
+                        root.reconnectGeneration == generation &&
+                        sessions.values.none { candidate ->
+                            candidate.rootSessionId == root.id && candidate.clientActive
+                        }
+                    ) {
+                        Log.i(TAG, "Launcher reconnect grace expired root=${root.id}")
+                        finalizeRootSession(root)
+                    }
+                }
+            },
+            SESSION_RECONNECT_GRACE_MILLIS,
+        )
     }
 
     private fun releaseSessionResources(
@@ -526,11 +666,13 @@ class LauncherSessionService : Service() {
             synchronized(this@LauncherSessionService) {
                 val dead =
                     sessions.values
-                        .filter { session -> !session.clientToken.isBinderAlive }
+                        .filter { session ->
+                            session.clientActive && !session.clientToken.isBinderAlive
+                        }
                         .map(Session::id)
                 for (sessionId in dead) {
                     Log.i(TAG, "Client Binder died for launcher session=$sessionId")
-                    removeSession(sessionId)
+                    removeSession(sessionId, closeWindow = false)
                 }
             }
         }
@@ -566,15 +708,28 @@ class LauncherSessionService : Service() {
                         } else {
                             return@runCatching OpenResult(RESULT_INVALID, 0, null)
                         }
+                    val requestedToplevelId =
+                        if (version >= MULTI_WINDOW_PROTOCOL_VERSION) {
+                            data.readInt()
+                        } else {
+                            0
+                        }
                     if (
                         !supportedProtocolVersion(version) ||
                         token == null ||
+                        requestedToplevelId < 0 ||
                         data.dataAvail() != 0
                     ) {
                         document?.document?.descriptor?.close()
                         return@runCatching OpenResult(RESULT_INVALID, 0, null)
                     }
-                    openSession(Binder.getCallingUid(), version, token, document)
+                    openSession(
+                        Binder.getCallingUid(),
+                        version,
+                        token,
+                        document,
+                        requestedToplevelId,
+                    )
                 }.getOrElse { error ->
                     Log.w(TAG, "Rejected malformed launcher open", error)
                     OpenResult(RESULT_INVALID, 0, null)
@@ -1031,6 +1186,7 @@ class LauncherSessionService : Service() {
         protocolVersion: Int,
         clientToken: IBinder,
         pendingDocument: PendingLaunchDocument?,
+        requestedToplevelId: Int,
     ): OpenResult {
         fun reject(result: Int): OpenResult {
             pendingDocument?.document?.descriptor?.close()
@@ -1077,7 +1233,9 @@ class LauncherSessionService : Service() {
         }
         val existing =
             sessions.values.firstOrNull { session ->
-                session.uid == callingUid && session.clientToken === clientToken
+                session.clientActive &&
+                    session.uid == callingUid &&
+                    session.clientToken === clientToken
             }
         if (existing != null) {
             pendingDocument?.document?.descriptor?.close()
@@ -1086,6 +1244,45 @@ class LauncherSessionService : Service() {
             } else {
                 OpenResult(RESULT_INVALID, 0, null)
             }
+        }
+        val existingRoot =
+            sessions.values.firstOrNull { session ->
+                session.rootSessionId == session.id &&
+                    session.active &&
+                    session.uid == callingUid &&
+                    session.identity == identity
+            }
+        val root =
+            when {
+                requestedToplevelId == 0 && existingRoot == null -> null
+                requestedToplevelId == 0 -> {
+                    existingRoot?.takeIf { candidate ->
+                        pendingDocument == null &&
+                            sessions.values.none { active ->
+                                active.rootSessionId == candidate.id &&
+                                    active.toplevelId == 0 &&
+                                    active.clientActive
+                            }
+                    } ?: return reject(RESULT_BUSY)
+                }
+                else -> {
+                    existingRoot?.takeIf { candidate ->
+                        pendingDocument == null &&
+                            (0 until candidate.availableToplevelCount).any { index ->
+                                candidate.availableToplevelIds[index] == requestedToplevelId
+                            }
+                    } ?: return reject(RESULT_NOT_READY)
+                }
+            }
+        if (
+            root != null &&
+            sessions.values.any { candidate ->
+                candidate.rootSessionId == root.id &&
+                    candidate.toplevelId == requestedToplevelId &&
+                    candidate.clientActive
+            }
+        ) {
+            return reject(RESULT_BUSY)
         }
         if (sessions.size >= MAX_SESSIONS) {
             return reject(RESULT_BUSY)
@@ -1105,7 +1302,9 @@ class LauncherSessionService : Service() {
                 authorization,
                 preferences.appearance,
                 preferences.reducedIsolationElectron,
-                newCompositorSocketName(sessionId),
+                root?.compositorSocketName ?: newCompositorSocketName(sessionId),
+                root?.id ?: sessionId,
+                requestedToplevelId,
             )
         session.inputDrain = Runnable { drainInput(session) }
         session.imeDrain = Runnable { drainIme(session) }
@@ -1134,11 +1333,13 @@ class LauncherSessionService : Service() {
             return reject(RESULT_INVALID)
         }
         sessions[sessionId] = session
+        root?.let { owner -> owner.reconnectGeneration++ }
         session.pendingLaunchDocument = pendingDocument?.document
         Log.i(
             TAG,
             "Authorized launcher package=${identity.androidPackage} " +
-                "generation=${identity.generation} session=$sessionId",
+                "generation=${identity.generation} session=$sessionId " +
+                "root=${session.rootSessionId} toplevel=$requestedToplevelId",
         )
         return OpenResult(RESULT_OK, sessionId, authorization)
     }
@@ -1195,25 +1396,58 @@ class LauncherSessionService : Service() {
         session: Session,
         attachment: SurfaceAttachment,
     ) {
-        val current =
+        val root =
             synchronized(this) {
-                session.active &&
-                    sessions[session.id] === session &&
-                    session.surface === attachment.surface
+                if (
+                    !session.active ||
+                    sessions[session.id] !== session ||
+                    session.surface !== attachment.surface
+                ) {
+                    null
+                } else {
+                    rootSession(session)
+                }
             }
-        if (!current) {
+        if (root == null) {
             attachment.releaseBefore?.release()
             return
         }
-        session.portalBridge?.let { bridge ->
-            val appearance = resolvedAppearance(session)
+        root.portalBridge?.let { bridge ->
+            val appearance = resolvedAppearance(root)
             notifyAppearance(session, appearance)
             bridge.updateAppearance(appearance.dark, appearance.accent)
         }
-        session.compositor?.detach()
+        if (session.rootSessionId != session.id) {
+            val compositor = root.compositor
+            attachment.releaseBefore?.release()
+            if (
+                compositor == null ||
+                !compositor.attachWindow(
+                    session.id,
+                    session.toplevelId,
+                    attachment.surface,
+                    attachment.width,
+                    attachment.height,
+                    attachment.densityDpi,
+                    root.appearanceOverrides.geometryPercent,
+                )
+            ) {
+                notifyStatus(session, STATUS_STOPPED, "Could not attach this Linux window.")
+                return
+            }
+            session.hostActive = true
+            notifyStatus(session, STATUS_RUNNING, root.authorization.label)
+            Log.i(
+                TAG,
+                "Attached independent Linux window session=${session.id} " +
+                    "root=${root.id} toplevel=${session.toplevelId}",
+            )
+            return
+        }
+        root.compositor?.detach()
         attachment.releaseBefore?.release()
         attachCompositor(
-            session,
+            root,
             attachment.surface,
             attachment.width,
             attachment.height,
@@ -1235,6 +1469,19 @@ class LauncherSessionService : Service() {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
         val surface = session.surface
         session.surface = null
+        if (session.rootSessionId != session.id) {
+            session.surfaceAttachments?.clear()
+            val root = rootSession(session)
+            val cleanup = Runnable {
+                root?.compositor?.detachWindow(session.id)
+                surface?.release()
+            }
+            if (!surfaceHandler.post(cleanup)) {
+                surface?.release()
+            }
+            Log.i(TAG, "Detached independent Linux window session=$sessionId")
+            return RESULT_OK
+        }
         releaseSessionResources(session, surface, closeCompositor = false)
         Log.i(TAG, "Detached launcher Surface session=$sessionId")
         return RESULT_OK
@@ -1249,6 +1496,7 @@ class LauncherSessionService : Service() {
         val current = LauncherIdentityVerifier.verify(this, callingUid) ?: return null
         val runtime = runtimeBinder ?: return null
         if (
+            !session.clientActive ||
             callingUid != session.uid ||
             current != session.identity ||
             runtime.authorizeLauncher(
@@ -1271,8 +1519,9 @@ class LauncherSessionService : Service() {
         text: String,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        val root = rootSession(session) ?: return RESULT_NOT_READY
         return if (
-            session.accessibilityActions.offer(
+            root.accessibilityActions.offer(
                 AccessibilityAction(nodeId, action, text),
             )
         ) {
@@ -1401,14 +1650,16 @@ class LauncherSessionService : Service() {
         session: Session,
         update: AndroidClipboardUpdate,
     ) {
-        val compositor =
+        val root =
             synchronized(this) {
                 if (!session.active || session.surface == null) return
                 session.androidClipboard = update.payload
-                session.compositor ?: return
+                rootSession(session) ?: return
             }
-        session.clipboardRevision = session.clipboardRevision.inc().coerceAtLeast(1)
-        session.offeredAndroidClipboard = update.payload
+        val compositor = root.compositor ?: return
+        if (!activateSessionWindow(session, compositor)) return
+        root.clipboardRevision = root.clipboardRevision.inc().coerceAtLeast(1)
+        root.offeredAndroidClipboard = update.payload
         if (update.payload == null) {
             compositor.clearAndroidClipboard()
         } else {
@@ -1426,7 +1677,7 @@ class LauncherSessionService : Service() {
         b: Int,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
-        if (session.surface == null || session.compositor == null) {
+        if (session.surface == null || rootSession(session)?.compositor == null) {
             return RESULT_NOT_READY
         }
         synchronized(session) {
@@ -1462,7 +1713,8 @@ class LauncherSessionService : Service() {
                 session.imeHead = (index + 1) % MAX_IME_COMMANDS
                 session.imeSize--
             }
-            val compositor = session.compositor ?: return
+            val compositor = rootSession(session)?.compositor ?: return
+            if (!activateSessionWindow(session, compositor)) return
             val result =
                 when (operation) {
                     IME_COMMIT,
@@ -1576,7 +1828,11 @@ class LauncherSessionService : Service() {
         var session: Session? = null
         var matching = 0
         for (candidate in sessions.values) {
-            if (candidate.active && candidate.identity.androidPackage == androidPackage) {
+            if (
+                candidate.active &&
+                candidate.rootSessionId == candidate.id &&
+                candidate.identity.androidPackage == androidPackage
+            ) {
                 session = candidate
                 matching++
             }
@@ -1650,7 +1906,11 @@ class LauncherSessionService : Service() {
         var session: Session? = null
         var matching = 0
         for (candidate in sessions.values) {
-            if (candidate.active && candidate.identity.androidPackage == androidPackage) {
+            if (
+                candidate.active &&
+                candidate.rootSessionId == candidate.id &&
+                candidate.identity.androidPackage == androidPackage
+            ) {
                 session = candidate
                 matching++
             }
@@ -1716,7 +1976,11 @@ class LauncherSessionService : Service() {
         var session: Session? = null
         var matching = 0
         for (candidate in sessions.values) {
-            if (candidate.active && candidate.identity.androidPackage == androidPackage) {
+            if (
+                candidate.active &&
+                candidate.rootSessionId == candidate.id &&
+                candidate.identity.androidPackage == androidPackage
+            ) {
                 session = candidate
                 matching++
             }
@@ -1766,6 +2030,7 @@ class LauncherSessionService : Service() {
             synchronized(this) {
                 sessions.values.singleOrNull { session ->
                     session.active &&
+                        session.rootSessionId == session.id &&
                         session.identity.androidPackage == androidPackage
                 }
             } ?: return LauncherSessionDebugResult(false, 0, "audio-session-not-ready")
@@ -1798,6 +2063,7 @@ class LauncherSessionService : Service() {
             synchronized(this) {
                 sessions.values.singleOrNull { session ->
                     session.active &&
+                        session.rootSessionId == session.id &&
                         session.identity.androidPackage == androidPackage
                 }
             } ?: return LauncherSessionDebugResult(false, 0, "microphone-session-not-ready")
@@ -2026,10 +2292,15 @@ class LauncherSessionService : Service() {
         if (count == 0 || !session.active) {
             return
         }
-        val result = session.compositor?.submitInput(session.inputBuffer, count) ?: return
+        val root = rootSession(session) ?: return
+        val compositor = root.compositor ?: return
+        if ((userKinds != 0 || hostActive == true) && !activateSessionWindow(session, compositor)) {
+            return
+        }
+        val result = compositor.submitInput(session.inputBuffer, count)
         hostActive?.let { active ->
             session.hostActive = active
-            session.audioBridge?.setHostActive(active)
+            root.audioBridge?.setHostActive(active)
         }
         val newInputKinds = userKinds and session.inputKindsLogged.inv()
         if (newInputKinds != 0) {
@@ -2850,11 +3121,84 @@ class LauncherSessionService : Service() {
                     )
                 }
             }
+            if (result and NativeLauncherCompositor.FLAG_WINDOWS_CHANGED != 0) {
+                publishIndependentWindows(session, compositor)
+            }
             pollLinuxProcess(session)
             surfaceHandler.postDelayed(
                 this,
                 if (clientConnected) COMPOSITOR_ACTIVE_DELAY_MILLIS else COMPOSITOR_IDLE_DELAY_MILLIS,
             )
+        }
+    }
+
+    private fun publishIndependentWindows(
+        session: Session,
+        compositor: NativeLauncherCompositor,
+    ) {
+        val ids = IntArray(MAX_PUBLISHED_WINDOWS)
+        var count = 0
+        val nativeCount = compositor.windowCount().coerceIn(0, MAX_NATIVE_WINDOWS)
+        val diagnostics = StringBuilder(nativeCount.coerceAtMost(MAX_PUBLISHED_WINDOWS) * 24)
+        for (index in 0 until nativeCount) {
+            val id = compositor.windowComponent(index, WINDOW_COMPONENT_ID)
+            val parent = compositor.windowComponent(index, WINDOW_COMPONENT_PARENT)
+            val mapped = compositor.windowComponent(index, WINDOW_COMPONENT_MAPPED)
+            val primary = compositor.windowComponent(index, WINDOW_COMPONENT_PRIMARY)
+            if (index < MAX_PUBLISHED_WINDOWS) {
+                if (diagnostics.isNotEmpty()) diagnostics.append(';')
+                diagnostics.append(id).append(',').append(parent).append(',')
+                    .append(mapped).append(',').append(primary)
+            }
+            if (id <= 0 || parent != 0 || mapped != 1 || primary == 1) continue
+            if (count >= ids.size) break
+            ids[count++] = id
+        }
+        val targets =
+            synchronized(this) {
+                val root = rootSession(session) ?: return
+                root.availableToplevelIds.fill(0)
+                ids.copyInto(root.availableToplevelIds, endIndex = count)
+                root.availableToplevelCount = count
+                sessions.values.filter { candidate ->
+                    candidate.rootSessionId == root.id &&
+                        candidate.clientActive &&
+                        candidate.protocolVersion >= MULTI_WINDOW_PROTOCOL_VERSION
+                }
+            }
+        for (target in targets) {
+            notifyWindowList(target, ids, count)
+        }
+        Log.i(
+            TAG,
+            "Published Linux windows root=${session.rootSessionId} total=$nativeCount " +
+                "independent=$count clients=${targets.size} entries=$diagnostics",
+        )
+    }
+
+    private fun notifyWindowList(
+        session: Session,
+        ids: IntArray,
+        count: Int,
+    ) {
+        if (!session.active || !session.clientActive || count !in 0..ids.size) return
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(session.protocolVersion)
+            data.writeInt(session.id)
+            data.writeInt(count)
+            repeat(count) { index -> data.writeInt(ids[index]) }
+            session.clientToken.transact(
+                CALLBACK_WINDOWS,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not publish Linux windows session=${session.id}", error)
+        } finally {
+            data.recycle()
         }
     }
 
@@ -3418,14 +3762,15 @@ class LauncherSessionService : Service() {
         if (!session.active || state !in STATUS_STARTING..STATUS_STOPPED) {
             return
         }
+        val target = callbackSession(session) ?: return
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(state)
             data.writeString(message.take(256))
-            session.clientToken.transact(CALLBACK_STATUS, data, null, IBinder.FLAG_ONEWAY)
+            target.clientToken.transact(CALLBACK_STATUS, data, null, IBinder.FLAG_ONEWAY)
         } catch (error: RemoteException) {
             Log.w(TAG, "Could not deliver launcher status session=${session.id}", error)
         } finally {
@@ -3437,7 +3782,7 @@ class LauncherSessionService : Service() {
         session: Session,
         appearance: ResolvedAppearance,
     ) {
-        if (!session.active) return
+        if (!session.active || !session.clientActive) return
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
@@ -3476,11 +3821,12 @@ class LauncherSessionService : Service() {
         ) {
             return
         }
+        val target = callbackSession(session) ?: return
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(if (text == null) 0 else 1)
             if (text != null) {
                 data.writeString(text)
@@ -3489,7 +3835,7 @@ class LauncherSessionService : Service() {
                     data.writeString(html)
                 }
             }
-            session.clientToken.transact(CALLBACK_CLIPBOARD, data, null, IBinder.FLAG_ONEWAY)
+            target.clientToken.transact(CALLBACK_CLIPBOARD, data, null, IBinder.FLAG_ONEWAY)
         } catch (error: RemoteException) {
             Log.w(TAG, "Could not deliver Linux clipboard session=${session.id}", error)
         } finally {
@@ -3516,11 +3862,12 @@ class LauncherSessionService : Service() {
         ) {
             return
         }
+        val target = callbackSession(session) ?: return
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(if (text == null) 0 else 1)
             data.writeInt(revision)
             if (text != null) {
@@ -3529,13 +3876,13 @@ class LauncherSessionService : Service() {
                 data.writeInt(anchor)
                 data.writeInt(hint)
                 data.writeInt(purpose)
-                if (session.protocolVersion >= IME_EDITOR_EVIDENCE_LEVEL_PROTOCOL_VERSION) {
+                if (target.protocolVersion >= IME_EDITOR_EVIDENCE_LEVEL_PROTOCOL_VERSION) {
                     data.writeInt(editorEvidence)
-                } else if (session.protocolVersion >= IME_EDITOR_EVIDENCE_PROTOCOL_VERSION) {
+                } else if (target.protocolVersion >= IME_EDITOR_EVIDENCE_PROTOCOL_VERSION) {
                     data.writeInt(if (editorEvidence == LauncherImeEvidencePolicy.STRONG) 1 else 0)
                 }
             }
-            session.clientToken.transact(CALLBACK_IME_STATE, data, null, IBinder.FLAG_ONEWAY)
+            target.clientToken.transact(CALLBACK_IME_STATE, data, null, IBinder.FLAG_ONEWAY)
         } catch (error: RemoteException) {
             Log.w(TAG, "Could not deliver launcher IME state session=${session.id}", error)
         } finally {
@@ -3550,13 +3897,14 @@ class LauncherSessionService : Service() {
         if (!session.active) {
             return
         }
+        val target = callbackSession(session) ?: return
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(if (active) 1 else 0)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_POINTER_CAPTURE,
                 data,
                 null,
@@ -3576,11 +3924,12 @@ class LauncherSessionService : Service() {
         if (!session.active || !validCursorSystemIcon(systemIcon)) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         return try {
-            writeCursorCallbackHeader(data, session, CURSOR_KIND_SYSTEM)
+            writeCursorCallbackHeader(data, target, CURSOR_KIND_SYSTEM)
             data.writeInt(systemIcon)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_CURSOR,
                 data,
                 null,
@@ -3601,6 +3950,7 @@ class LauncherSessionService : Service() {
         if (!session.active) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val width = compositor.cursorWidth()
         val height = compositor.cursorHeight()
         if (
@@ -3622,13 +3972,13 @@ class LauncherSessionService : Service() {
         val hotspotY = compositor.cursorHotspot(1).coerceIn(0, height - 1)
         val data = Parcel.obtain()
         return try {
-            writeCursorCallbackHeader(data, session, CURSOR_KIND_BITMAP)
+            writeCursorCallbackHeader(data, target, CURSOR_KIND_BITMAP)
             data.writeInt(width)
             data.writeInt(height)
             data.writeInt(hotspotX)
             data.writeInt(hotspotY)
             bitmap.writeToParcel(data, 0)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_CURSOR,
                 data,
                 null,
@@ -3810,13 +4160,14 @@ class LauncherSessionService : Service() {
         ) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             permissionIntent.writeToParcel(data, 0)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_MICROPHONE_PERMISSION,
                 data,
                 null,
@@ -3858,13 +4209,14 @@ class LauncherSessionService : Service() {
         if (!session.active || !PortalUriPolicy.valid(uri)) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeString(uri)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_OPEN_URI,
                 data,
                 null,
@@ -3891,16 +4243,17 @@ class LauncherSessionService : Service() {
         ) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(operation)
             data.writeString(id)
             data.writeString(title)
             data.writeString(body)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_NOTIFICATION,
                 data,
                 null,
@@ -3929,16 +4282,17 @@ class LauncherSessionService : Service() {
         ) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeString(title)
             descriptor.writeToParcel(data, 0)
             if (
-                !session.clientToken.transact(
+                !target.clientToken.transact(
                     CALLBACK_PRINT_PDF,
                     data,
                     reply,
@@ -3971,6 +4325,7 @@ class LauncherSessionService : Service() {
         ) {
             return "ERROR\tFAILED"
         }
+        val target = callbackSession(session) ?: return "ERROR\tFAILED"
         val operationCode =
             when (operation) {
                 "STORE_SECRET" -> SECRET_OPERATION_STORE
@@ -3992,8 +4347,8 @@ class LauncherSessionService : Service() {
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(operationCode)
             data.writeInt(arguments.size)
             for (argument in arguments) data.writeString(argument)
@@ -4001,7 +4356,7 @@ class LauncherSessionService : Service() {
             descriptor?.writeToParcel(data, 0)
             if (
                 data.dataSize() > MAX_SECRET_CALLBACK_PARCEL_BYTES ||
-                !session.clientToken.transact(CALLBACK_SECRET, data, reply, 0)
+                !target.clientToken.transact(CALLBACK_SECRET, data, reply, 0)
             ) {
                 "ERROR\tFAILED"
             } else {
@@ -4045,6 +4400,7 @@ class LauncherSessionService : Service() {
         ) {
             return "ERROR\tFAILED"
         }
+        val target = callbackSession(session) ?: return "ERROR\tFAILED"
         val operationCode =
             when (operation) {
                 "REQUEST_CAMERA" -> CAMERA_OPERATION_REQUEST
@@ -4070,8 +4426,8 @@ class LauncherSessionService : Service() {
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(operationCode)
             data.writeInt(width)
             data.writeInt(height)
@@ -4080,7 +4436,7 @@ class LauncherSessionService : Service() {
             descriptor?.writeToParcel(data, 0)
             if (
                 data.dataSize() > MAX_CAMERA_CALLBACK_PARCEL_BYTES ||
-                !session.clientToken.transact(CALLBACK_CAMERA, data, reply, 0)
+                !target.clientToken.transact(CALLBACK_CAMERA, data, reply, 0)
             ) {
                 "ERROR\tFAILED"
             } else {
@@ -4115,17 +4471,18 @@ class LauncherSessionService : Service() {
         descriptor: ParcelFileDescriptor,
     ): Boolean {
         if (!session.active) return false
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(ACCESSIBILITY_CALLBACK_TREE)
             descriptor.writeToParcel(data, 0)
             if (
                 data.dataSize() > MAX_ACCESSIBILITY_CALLBACK_PARCEL_BYTES ||
-                !session.clientToken.transact(
+                !target.clientToken.transact(
                     CALLBACK_ACCESSIBILITY,
                     data,
                     reply,
@@ -4148,12 +4505,18 @@ class LauncherSessionService : Service() {
 
     private fun notifyAccessibilityViewport(session: Session) {
         if (!session.active) return
-        val presentationWidth = session.presentationComponent(32)
-        val presentationHeight = session.presentationComponent(33)
-        val destinationX = session.presentationComponent(28)
-        val destinationY = session.presentationComponent(29)
-        val destinationWidth = session.presentationComponent(30)
-        val destinationHeight = session.presentationComponent(31)
+        val target = callbackSession(session) ?: return
+        val independent = target.toplevelId != 0
+        val presentationWidth =
+            if (independent) target.logicalWidth else session.presentationComponent(32)
+        val presentationHeight =
+            if (independent) target.logicalHeight else session.presentationComponent(33)
+        val destinationX = if (independent) 0 else session.presentationComponent(28)
+        val destinationY = if (independent) 0 else session.presentationComponent(29)
+        val destinationWidth =
+            if (independent) target.logicalWidth else session.presentationComponent(30)
+        val destinationHeight =
+            if (independent) target.logicalHeight else session.presentationComponent(31)
         if (
             presentationWidth !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
             presentationHeight !in 1..MAX_ACCESSIBILITY_VIEWPORT ||
@@ -4167,15 +4530,15 @@ class LauncherSessionService : Service() {
         val data = Parcel.obtain()
         try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(presentationWidth)
             data.writeInt(presentationHeight)
             data.writeInt(destinationX)
             data.writeInt(destinationY)
             data.writeInt(destinationWidth)
             data.writeInt(destinationHeight)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_ACCESSIBILITY_VIEWPORT,
                 data,
                 null,
@@ -4233,19 +4596,20 @@ class LauncherSessionService : Service() {
         ) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(operation)
             data.writeInt(nodeId)
             data.writeString(type)
             data.writeInt(if (transition) 1 else 0)
             if (
                 data.dataSize() > MAX_ACCESSIBILITY_CALLBACK_PARCEL_BYTES ||
-                !session.clientToken.transact(
+                !target.clientToken.transact(
                     CALLBACK_ACCESSIBILITY,
                     data,
                     reply,
@@ -4326,17 +4690,18 @@ class LauncherSessionService : Service() {
         ) {
             return false
         }
+        val target = callbackSession(session) ?: return false
         val data = Parcel.obtain()
         return try {
             data.writeInterfaceToken(CALLBACK_INTERFACE)
-            data.writeInt(session.protocolVersion)
-            data.writeInt(session.id)
+            data.writeInt(target.protocolVersion)
+            data.writeInt(target.id)
             data.writeInt(request.id)
             data.writeInt(request.operation)
             data.writeString(request.title)
             data.writeString(request.suggestedName)
             data.writeString(request.mimeType)
-            session.clientToken.transact(
+            target.clientToken.transact(
                 CALLBACK_DOCUMENT_REQUEST,
                 data,
                 null,
@@ -4357,7 +4722,7 @@ class LauncherSessionService : Service() {
         requestId: Int,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return 0
-        val request = session.pendingDocumentRequest ?: return 0
+        val request = rootSession(session)?.pendingDocumentRequest ?: return 0
         return if (request.id == requestId) request.operation else 0
     }
 
@@ -4372,7 +4737,8 @@ class LauncherSessionService : Service() {
         displayName: String,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
-        val request = session.pendingDocumentRequest ?: return RESULT_INVALID
+        val root = rootSession(session) ?: return RESULT_NOT_READY
+        val request = root.pendingDocumentRequest ?: return RESULT_INVALID
         val openOperation =
             request.operation == DOCUMENT_OPERATION_OPEN ||
                 request.operation == DOCUMENT_OPERATION_OPEN_MULTIPLE
@@ -4404,7 +4770,7 @@ class LauncherSessionService : Service() {
         ) {
             return RESULT_INVALID
         }
-        session.pendingDocumentRequest = null
+        root.pendingDocumentRequest = null
         val portalCompletion = request.portalCompletion
         if (portalCompletion != null) {
             if (
@@ -4549,8 +4915,9 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 19
+        private const val PROTOCOL_VERSION = 20
         private const val MINIMUM_PROTOCOL_VERSION = 16
+        private const val MULTI_WINDOW_PROTOCOL_VERSION = 20
         private const val INPUT_LOGICAL_COORDINATE_PROTOCOL_VERSION = 18
         private const val IME_EDITOR_EVIDENCE_PROTOCOL_VERSION = 17
         private const val IME_EDITOR_EVIDENCE_LEVEL_PROTOCOL_VERSION = 19
@@ -4584,6 +4951,7 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_ACCESSIBILITY = IBinder.FIRST_CALL_TRANSACTION + 13
         private const val CALLBACK_ACCESSIBILITY_VIEWPORT =
             IBinder.FIRST_CALL_TRANSACTION + 14
+        private const val CALLBACK_WINDOWS = IBinder.FIRST_CALL_TRANSACTION + 15
         private const val ACCESSIBILITY_CALLBACK_TREE = 1
         private const val ACCESSIBILITY_CALLBACK_EVENT = 2
         private const val ACCESSIBILITY_CALLBACK_MENU = 3
@@ -4653,6 +5021,12 @@ class LauncherSessionService : Service() {
         private const val NOTIFICATION_OPERATION_POST = 1
         private const val NOTIFICATION_OPERATION_WITHDRAW = 2
         private const val MAX_SESSIONS = 16
+        private const val MAX_NATIVE_WINDOWS = 32
+        private const val MAX_PUBLISHED_WINDOWS = 8
+        private const val WINDOW_COMPONENT_ID = 0
+        private const val WINDOW_COMPONENT_PARENT = 1
+        private const val WINDOW_COMPONENT_MAPPED = 2
+        private const val WINDOW_COMPONENT_PRIMARY = 4
         private const val MAX_PRINT_TITLE_UTF16 = 256
         private const val MAX_PRINT_TITLE_BYTES = 512
         private const val MAX_SURFACE_DIMENSION = 8192
@@ -4665,6 +5039,7 @@ class LauncherSessionService : Service() {
         private const val MAX_FONT_SCALE_MILLIS = 3_000
         private const val COMPOSITOR_ACTIVE_DELAY_MILLIS = 8L
         private const val COMPOSITOR_IDLE_DELAY_MILLIS = 50L
+        private const val SESSION_RECONNECT_GRACE_MILLIS = 15_000L
         private const val PROCESS_STATUS_DELAY_MILLIS = 500L
         private const val PROCESS_LOGCAT_CHUNK_LENGTH = 1800
         private const val STATUS_STARTING = 1

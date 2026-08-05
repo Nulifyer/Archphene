@@ -2906,26 +2906,56 @@ mod android_graphics_ffi {
 #[cfg(target_os = "android")]
 struct LauncherSurfaceCompositor {
     core: CompositorCore,
-    window: Option<android_graphics_ffi::NativeWindow>,
-    surface_width: i32,
-    surface_height: i32,
-    buffer_width: i32,
-    buffer_height: i32,
-    last_presented_commit: u32,
+    windows: Vec<LauncherAttachedWindow>,
+    active_window_token: u32,
     last_presentation_signature: Option<[i32; 6]>,
     last_reported_ime_serial: Option<u32>,
     last_reported_pointer_capture_serial: Option<u32>,
     last_reported_cursor_serial: Option<u32>,
+    last_reported_window_serial: Option<u32>,
+}
+
+#[cfg(target_os = "android")]
+struct LauncherAttachedWindow {
+    token: u32,
+    toplevel_id: u32,
+    window: android_graphics_ffi::NativeWindow,
+    surface_width: i32,
+    surface_height: i32,
+    buffer_width: i32,
+    buffer_height: i32,
+    density_dpi: i32,
+    last_presented_commit: u32,
 }
 
 #[cfg(target_os = "android")]
 impl LauncherSurfaceCompositor {
     fn detach_surface(&mut self) {
-        self.window = None;
+        self.detach_window(0);
+    }
+
+    fn detach_window(&mut self, token: u32) {
+        self.windows.retain(|window| window.token != token);
+        if self.active_window_token == token {
+            self.active_window_token = self.windows.first().map_or(0, |window| window.token);
+        }
     }
 
     fn attach_surface(
         &mut self,
+        window: android_graphics_ffi::NativeWindow,
+        width: i32,
+        height: i32,
+        density_dpi: i32,
+        geometry_percent: i32,
+    ) -> i32 {
+        self.attach_window(0, 0, window, width, height, density_dpi, geometry_percent)
+    }
+
+    fn attach_window(
+        &mut self,
+        token: u32,
+        toplevel_id: u32,
         mut window: android_graphics_ffi::NativeWindow,
         width: i32,
         height: i32,
@@ -2941,19 +2971,45 @@ impl LauncherSurfaceCompositor {
         let density_dpi = launcher_density_dpi(width, height, density_dpi, geometry_percent);
         let logical_width = launcher_logical_extent(width, density_dpi);
         let logical_height = launcher_logical_extent(height, density_dpi);
+        if toplevel_id != 0 && self.core.window_frame_by_id(toplevel_id).is_none() {
+            return -7;
+        }
         if window
             .set_rgba_geometry(logical_width, logical_height, width, height)
             .is_err()
         {
             return -4;
         }
-        self.detach_surface();
-        self.window = Some(window);
-        self.surface_width = width;
-        self.surface_height = height;
-        self.buffer_width = logical_width;
-        self.buffer_height = logical_height;
-        self.last_presented_commit = u32::MAX;
+        let retained_pixels = self
+            .windows
+            .iter()
+            .filter(|attached| attached.token != token)
+            .try_fold(0_i64, |total, attached| {
+                total.checked_add(
+                    i64::from(attached.surface_width) * i64::from(attached.surface_height),
+                )
+            })
+            .and_then(|total| total.checked_add(i64::from(width) * i64::from(height)));
+        if retained_pixels.is_none_or(|pixels| pixels > MAX_ATTACHED_WINDOW_PIXELS) {
+            return -5;
+        }
+        if self.windows.iter().all(|attached| attached.token != token)
+            && self.windows.len() >= MAX_ATTACHED_WINDOWS
+        {
+            return -6;
+        }
+        self.detach_window(token);
+        self.windows.push(LauncherAttachedWindow {
+            token,
+            toplevel_id,
+            window,
+            surface_width: width,
+            surface_height: height,
+            buffer_width: logical_width,
+            buffer_height: logical_height,
+            density_dpi,
+            last_presented_commit: u32::MAX,
+        });
         self.last_presentation_signature = None;
         self.last_reported_ime_serial = None;
         self.last_reported_pointer_capture_serial = None;
@@ -2961,6 +3017,40 @@ impl LauncherSurfaceCompositor {
         // cursor. Report only subsequent client changes so attach does not
         // incorrectly replace that default with the protocol's null cursor.
         self.last_reported_cursor_serial = Some(self.core.cursor_change_serial());
+        if self.activate_window(token) != 0 {
+            self.detach_window(token);
+            return -7;
+        }
+        0
+    }
+
+    fn activate_window(&mut self, token: u32) -> i32 {
+        let Some((toplevel_id, width, height, density_dpi)) = self
+            .windows
+            .iter()
+            .find(|window| window.token == token)
+            .map(|window| {
+                (
+                    window.toplevel_id,
+                    window.surface_width,
+                    window.surface_height,
+                    window.density_dpi,
+                )
+            })
+        else {
+            return -1;
+        };
+        let toplevel_id = if toplevel_id == 0 {
+            self.core.primary_window_id()
+        } else {
+            Some(toplevel_id)
+        };
+        if let Some(toplevel_id) = toplevel_id
+            && self.core.activate_window(toplevel_id) == 0
+        {
+            return -2;
+        }
+        self.active_window_token = token;
         configure_launcher_output_resolved(&mut self.core, width, height, density_dpi);
         0
     }
@@ -2971,18 +3061,39 @@ impl LauncherSurfaceCompositor {
         }
         let mut flags = i32::from(self.core.accepted_client_count() != 0);
         let commit = self.core.surface_commit_count();
-        if commit != self.last_presented_commit
-            && let Some(window) = self.window.as_mut()
-            && copy_last_frame_to_native_window(
-                &self.core,
-                window,
-                &mut self.buffer_width,
-                &mut self.buffer_height,
-                self.surface_width,
-                self.surface_height,
+        let mut presented = false;
+        for attached in &mut self.windows {
+            if commit == attached.last_presented_commit {
+                continue;
+            }
+            let frame = if attached.toplevel_id == 0 {
+                launcher_presentation_frame(&self.core.state)
+            } else {
+                self.core.window_frame_by_id(attached.toplevel_id)
+            };
+            let Some(frame) = frame else {
+                continue;
+            };
+            let damage = if attached.toplevel_id == 0 {
+                presentation_copy_damage(&self.core.state, &frame)
+            } else {
+                PresentationCopyDamage::Full
+            };
+            if copy_frame_to_native_window(
+                &frame,
+                damage,
+                &mut attached.window,
+                &mut attached.buffer_width,
+                &mut attached.buffer_height,
+                attached.surface_width,
+                attached.surface_height,
             ) == 0
-        {
-            self.last_presented_commit = commit;
+            {
+                attached.last_presented_commit = commit;
+                presented = true;
+            }
+        }
+        if presented {
             self.core.present_frame(time);
             flags |= 1 << 1;
             let signature = launcher_presentation_signature(&self.core.state);
@@ -3015,6 +3126,11 @@ impl LauncherSurfaceCompositor {
             self.last_reported_cursor_serial = Some(cursor_serial);
             flags |= 1 << 8;
         }
+        let window_serial = self.core.window_change_serial();
+        if self.last_reported_window_serial != Some(window_serial) {
+            self.last_reported_window_serial = Some(window_serial);
+            flags |= 1 << 9;
+        }
         flags
     }
 }
@@ -3022,10 +3138,15 @@ impl LauncherSurfaceCompositor {
 #[cfg(target_os = "android")]
 impl Drop for LauncherSurfaceCompositor {
     fn drop(&mut self) {
-        self.detach_surface();
+        self.windows.clear();
         self.core.close_socket();
     }
 }
+
+#[cfg(target_os = "android")]
+const MAX_ATTACHED_WINDOWS: usize = 8;
+#[cfg(target_os = "android")]
+const MAX_ATTACHED_WINDOW_PIXELS: i64 = 33_554_432;
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn valid_launcher_surface_size(width: i32, height: i32) -> bool {
@@ -3398,18 +3519,15 @@ fn dispatch_launcher_input_record(core: &mut CompositorCore, record: [i32; 6]) -
 }
 
 #[cfg(target_os = "android")]
-fn copy_last_frame_to_native_window(
-    core: &CompositorCore,
+fn copy_frame_to_native_window(
+    frame: &CommittedFrame,
+    frame_damage: PresentationCopyDamage,
     window: &mut android_graphics_ffi::NativeWindow,
     buffer_width: &mut i32,
     buffer_height: &mut i32,
     surface_width: i32,
     surface_height: i32,
 ) -> i32 {
-    let Some(frame) = launcher_presentation_frame(&core.state) else {
-        return -1;
-    };
-    let frame_damage = presentation_copy_damage(&core.state, &frame);
     let (Ok(width), Ok(height)) = (i32::try_from(frame.width), i32::try_from(frame.height)) else {
         return -2;
     };
@@ -3424,7 +3542,7 @@ fn copy_last_frame_to_native_window(
         *buffer_height = height;
     }
     let (result, posted) = match window.with_locked_rgba(frame_damage, |buffer, copy_damage| {
-        copy_frame_to_native_window_buffer(&frame, buffer, copy_damage)
+        copy_frame_to_native_window_buffer(frame, buffer, copy_damage)
     }) {
         Ok(result) => result,
         Err(error) => return error,
@@ -12731,6 +12849,29 @@ impl CompositorCore {
         compose_toplevel_frame(&self.state, toplevel)
     }
 
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn window_frame_by_id(&self, id: u32) -> Option<Arc<CommittedFrame>> {
+        let toplevel = self
+            .state
+            .toplevels
+            .iter()
+            .find(|toplevel| toplevel.id().protocol_id() == id)?;
+        compose_toplevel_frame(&self.state, toplevel)
+    }
+
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn primary_window_id(&self) -> Option<u32> {
+        self.state
+            .primary_toplevel
+            .as_ref()
+            .filter(|toplevel| toplevel.is_alive())
+            .and_then(|toplevel| {
+                toplevel_surface(toplevel)
+                    .filter(|surface| surface_frame(surface).is_some())
+                    .map(|_| toplevel.id().protocol_id())
+            })
+    }
+
     pub fn activate_window(&mut self, id: u32) -> u32 {
         let Some(toplevel) = self
             .state
@@ -17320,16 +17461,13 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     let cursor_serial = core.cursor_change_serial();
     register_launcher_compositor(LauncherSurfaceCompositor {
         core,
-        window: None,
-        surface_width: width,
-        surface_height: height,
-        buffer_width: 0,
-        buffer_height: 0,
-        last_presented_commit: u32::MAX,
+        windows: Vec::with_capacity(MAX_ATTACHED_WINDOWS),
+        active_window_token: 0,
         last_presentation_signature: None,
         last_reported_ime_serial: None,
         last_reported_pointer_capture_serial: None,
         last_reported_cursor_serial: Some(cursor_serial),
+        last_reported_window_serial: None,
     })
 }
 
@@ -17361,6 +17499,47 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeAttachWindowSurface(
+    environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    window_token: i32,
+    toplevel_id: i32,
+    surface: *mut std::ffi::c_void,
+    width: i32,
+    height: i32,
+    density_dpi: i32,
+    geometry_percent: i32,
+) -> i32 {
+    let (Ok(window_token), Ok(toplevel_id)) =
+        (u32::try_from(window_token), u32::try_from(toplevel_id))
+    else {
+        return -2;
+    };
+    let Some(mut compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    // SAFETY: Android invokes this JNI method with the current JNIEnv and a
+    // live `android.view.Surface`; the native child SurfaceControl acquires
+    // the presentation lifetime independently.
+    let Some(window) = (unsafe {
+        android_graphics_ffi::NativeWindow::from_surface(environment, surface)
+    }) else {
+        return -3;
+    };
+    compositor.attach_window(
+        window_token,
+        toplevel_id,
+        window,
+        width,
+        height,
+        density_dpi,
+        geometry_percent,
+    )
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeDetachSurface(
     _environment: *mut std::ffi::c_void,
     _owner: *mut std::ffi::c_void,
@@ -17369,6 +17548,39 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     if let Some(mut compositor) = launcher_compositor(handle) {
         compositor.detach_surface();
     }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeDetachWindowSurface(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    window_token: i32,
+) {
+    let Ok(window_token) = u32::try_from(window_token) else {
+        return;
+    };
+    if let Some(mut compositor) = launcher_compositor(handle) {
+        compositor.detach_window(window_token);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeActivateWindow(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    window_token: i32,
+) -> i32 {
+    let Ok(window_token) = u32::try_from(window_token) else {
+        return -2;
+    };
+    let Some(mut compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    compositor.activate_window(window_token)
 }
 
 #[cfg(target_os = "android")]
@@ -17861,6 +18073,55 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return -1;
     };
     compositor.dispatch_and_present(time_millis as u32)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeWindowCount(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    launcher_compositor(handle).map_or(-1, |compositor| {
+        i32::try_from(compositor.core.window_count()).unwrap_or(i32::MAX)
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeWindowComponent(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    index: i32,
+    component: i32,
+) -> i32 {
+    let (Ok(index), Ok(component)) = (u32::try_from(index), u32::try_from(component)) else {
+        return -2;
+    };
+    launcher_compositor(handle).map_or(-1, |compositor| {
+        compositor.core.window_component(index, component)
+    })
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeCloseWindow(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    toplevel_id: i32,
+) -> i32 {
+    let Ok(toplevel_id) = u32::try_from(toplevel_id) else {
+        return -2;
+    };
+    launcher_compositor(handle).map_or(-1, |compositor| {
+        if compositor.core.close_window(toplevel_id) == 0 {
+            -3
+        } else {
+            0
+        }
+    })
 }
 
 #[cfg(target_os = "android")]

@@ -34,8 +34,9 @@ class LauncherSurfaceGeometryPolicyTest {
         assertEquals(true, LauncherSessionService.supportedProtocolVersion(17))
         assertEquals(true, LauncherSessionService.supportedProtocolVersion(18))
         assertEquals(true, LauncherSessionService.supportedProtocolVersion(19))
+        assertEquals(true, LauncherSessionService.supportedProtocolVersion(20))
         assertEquals(false, LauncherSessionService.supportedProtocolVersion(15))
-        assertEquals(false, LauncherSessionService.supportedProtocolVersion(20))
+        assertEquals(false, LauncherSessionService.supportedProtocolVersion(21))
     }
 
     @Test

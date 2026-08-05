@@ -1,6 +1,6 @@
 # Roadmap
 
-Updated: 2026-08-04
+Updated: 2026-08-05
 
 This is the public roadmap. The detailed ordered implementation plan is
 [`todo.md`](../todo.md), validated evidence is in
@@ -19,9 +19,10 @@ Terminal and storage integration, and exact-ABI x86_64/AArch64 device evidence.
 
 The next release milestones are:
 
-1. **Android app-shell windows** — evolve the current single-task shell into a
-   bounded phone and desktop task/window model without duplicating Linux roots
-   or process ownership.
+1. **Android app-shell windows** — complete the bounded phone and desktop
+   task/window model now that physical AArch64 evidence proves compact policy,
+   independent document tasks, and Activity-process restoration without
+   duplicating the Linux root or process.
 2. **Graphics without readback** — GPU-compose SHM clients and let virpipe render
    into Android HardwareBuffers while preserving tested CPU and software
    fallbacks.

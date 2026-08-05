@@ -17,25 +17,35 @@ require(
     '<action android:name="android.intent.action.VIEW" />',
     '<action android:name="android.intent.action.SEND" />',
     '<data android:scheme="content" />',
+    'android:name="org.archphene.launcher.LauncherWindowActivity"',
+    'android:documentLaunchMode="intoExisting"',
+    'android:exported="false"',
+    'android:maxRecents="8"',
 )
 require(
     ROOT
     / "android/launcher-template/src/main/kotlin/org/archphene/launcher"
     / "LauncherActivity.kt",
-    "private const val PROTOCOL_VERSION = 19",
+    "private const val PROTOCOL_VERSION = 20",
     'uri?.scheme != "content"',
     "LauncherIntentMimePolicy.matches(declared, mimeType)",
     'contentResolver.openFileDescriptor(request.uri, "r", cancellation)',
     "incoming.descriptor.writeToParcel(data, 0)",
+    "CALLBACK_WINDOWS",
+    "Intent.FLAG_ACTIVITY_NEW_DOCUMENT",
+    "LauncherWindowActivity::class.java",
+    "activityManager.appTasks",
 )
 require(
     ROOT
     / "android/app/src/main/kotlin/org/archphene/app/launcher"
     / "LauncherSessionService.kt",
-    "private const val PROTOCOL_VERSION = 19",
+    "private const val PROTOCOL_VERSION = 20",
     "identity.mimeTypes != authorization.mimeTypes",
     "portalBridge.importLaunchDocument(pendingLaunchDocument)",
     "session.launchDocumentPath",
+    "private const val MAX_PUBLISHED_WINDOWS = 8",
+    "private const val SESSION_RECONNECT_GRACE_MILLIS = 15_000L",
 )
 require(
     ROOT
@@ -60,5 +70,6 @@ require(
 
 print(
     "Launcher intent contract passed: signed MIME declarations, content-only "
-    "Android intake, SAF import, and desktop-entry argument delivery are enforced."
+    "Android intake, SAF import, bounded document tasks, reconnect grace, and "
+    "desktop-entry argument delivery are enforced."
 )

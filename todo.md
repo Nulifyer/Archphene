@@ -1,6 +1,6 @@
 # Archphene project plan
 
-Updated: 2026-08-04
+Updated: 2026-08-05
 
 This file is the authoritative forward plan. It contains only current decisions,
 open work, sequencing, and exit criteria. Completed implementation evidence
@@ -86,21 +86,21 @@ its Linux environment.
 
 - [ ] Use **app shell** consistently for the generated Android package; reserve
   **launcher** for Android launcher surfaces and launch actions.
-- [ ] Define stable identities for application, Linux session, Android task,
+- [x] Define stable identities for application, Linux session, Android task,
   Linux toplevel, imported document, and attached Surface. Document which state
   survives Activity recreation, Home, display movement, manager restart, and
   process exit.
-- [ ] Extend the authenticated Binder/session model from one Surface per Linux
+- [x] Extend the authenticated Binder/session model from one Surface per Linux
   session to a bounded set of window tokens and Surfaces. The manager must keep
   Linux process ownership while each Activity owns only its Android window and
   foreground capabilities.
 - [ ] Implement the compact policy: one task hosts the primary toplevel and
   composes popups, transients, and ordinary secondary windows. Provide a bounded
   in-app window switcher only when an application has independent windows.
-- [ ] Implement the desktop policy: primary and independent document/toplevel
+- [x] Implement the desktop policy: primary and independent document/toplevel
   windows may receive separate Activity/task instances; popups, menus, and
   tooltips stay with their parent.
-- [ ] Replace `singleTask` only after multi-window session ownership is ready.
+- [x] Replace `singleTask` only after multi-window session ownership is ready.
   Use a multi-instance-compatible Activity mode, bounded Recents, document
   intents, and explicit New Window behavior. Do not create one APK per window.
 - [ ] Drive compact/adaptive/desktop policy from the current window metrics,
