@@ -79,6 +79,7 @@ for value in required_client:
 
 for value in (
     'providers.gradleProperty("archpheneVersionCode")',
+    'providers.gradleProperty("archpheneApplicationId")',
     'providers.gradleProperty("archpheneVersionName")',
     'archpheneVersionCode.toLong() <= 2_100_000_000L',
     'versionCode = archpheneVersionCode?.toInt() ?: 1',
@@ -90,6 +91,7 @@ for value in (
 for value in (
     'flock "$build_lock_fd"',
     '"-ParchpheneAbi=$abi"',
+    '-ParchpheneApplicationId=org.archpheneos.manager',
     '"-ParchpheneVersionCode=$version_code"',
     '"-ParchpheneVersionName=$version_name"',
     ':android:app:assembleRelease',

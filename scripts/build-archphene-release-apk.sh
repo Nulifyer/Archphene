@@ -43,6 +43,7 @@ flock "$build_lock_fd"
   cd "$ARCHPHENE_ROOT"
   gradle --no-daemon --no-build-cache --stacktrace \
     "-ParchpheneAbi=$abi" \
+    -ParchpheneApplicationId=org.archpheneos.manager \
     "-ParchpheneVersionCode=$version_code" \
     "-ParchpheneVersionName=$version_name" \
     :android:app:assembleRelease
@@ -51,6 +52,8 @@ flock "$build_lock_fd"
 apk="$ARCHPHENE_ROOT/android/app/build/outputs/apk/release/app-release-unsigned.apk"
 archphene_require_file "$apk"
 badging="$("$aapt2" dump badging "$apk")"
+[[ "$badging" == "package: name='org.archpheneos.manager' "* ]] ||
+  archphene_die "release APK package identity is not org.archpheneos.manager"
 [[ "$badging" == *"versionCode='$version_code' versionName='$version_name'"* ]] ||
   archphene_die "release APK version does not match the request"
 [[ "$(grep '^native-code:' <<<"$badging")" == "native-code: '$abi'" ]] ||

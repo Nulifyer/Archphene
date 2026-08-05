@@ -281,7 +281,9 @@ panic-abort, and symbol stripping. Broad package, compositor, and Builder paths
 remain outside the baseline profiles and continue to be governed by the
 existing debug allocation, JNI, latency, memory, lifecycle, and soak gates.
 
-The greenfield manager is not ready for tag publication. Its local unsigned
+The production manager identity is now fixed as `org.archpheneos.manager`; the
+existing `org.archphene.app.debug` fixtures remain separate clean-development
+installs. The greenfield manager is not ready for tag publication. Its local unsigned
 release APK passes the optimization gate. The build now accepts bounded
 `archpheneVersionCode` and semantic `archpheneVersionName` Gradle properties
 and rejects invalid values before task execution. Exact-ABI release builds can
@@ -299,9 +301,8 @@ The current tag workflow and
 `verify-release-apk.sh` still build and validate
 `prototypes/linux-app-manager-stub` as `org.archpheneos.manager`. Publishing a
 new tag now would therefore release the legacy manager rather than the tested
-greenfield application. Release migration must still resolve the production
-package/update identity, pass the tag version into separate ABI builds, and
-teach the verifier the new package contract. Existing release-signing
+greenfield application. Release migration must still invoke the staged builder
+for both ABIs and teach the verifier the new package contract. Existing release-signing
 secrets are present, and the draft-first workflow source contract passes; no tag
 or remote release was created during this audit.
 

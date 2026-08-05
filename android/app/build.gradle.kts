@@ -3,6 +3,8 @@ plugins {
 }
 
 val archpheneAbi = providers.gradleProperty("archpheneAbi").orNull
+val archpheneApplicationId =
+    providers.gradleProperty("archpheneApplicationId").orNull ?: "org.archphene.app"
 val archpheneVersionCode = providers.gradleProperty("archpheneVersionCode").orNull
 val archpheneVersionName = providers.gradleProperty("archpheneVersionName").orNull
 val debugApplicationIdSuffix =
@@ -13,6 +15,9 @@ val sourceValidation =
         .orElse(false)
 require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
     "archpheneAbi must be x86_64 or arm64-v8a"
+}
+require(Regex("[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+").matches(archpheneApplicationId)) {
+    "archpheneApplicationId must be a valid lowercase Android package ID"
 }
 require(
     archpheneVersionCode == null ||
@@ -49,7 +54,7 @@ android {
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
-        applicationId = "org.archphene.app"
+        applicationId = archpheneApplicationId
         minSdk = 29
         targetSdk = 36
         versionCode = archpheneVersionCode?.toInt() ?: 1
