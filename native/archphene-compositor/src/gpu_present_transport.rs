@@ -80,6 +80,7 @@ impl SurfaceReleaseQueue {
         }
     }
 
+    #[cfg(any(target_os = "android", test))]
     pub(crate) fn push(&self, release: SurfaceRelease) -> io::Result<()> {
         let mut releases = self
             .releases
