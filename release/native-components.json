@@ -163,8 +163,8 @@
       "blockers": [],
       "declaredLicense": "NOASSERTION",
       "evidence": [
-        {"contains": "pulseaudio|aarch64|17.0-1|", "path": "native/archphene-audio/termux-pulse-packages.tsv"},
-        {"contains": "\"recipeCommit\": \"0ab554db227f55a6ce8144f6f1e071d650c8ddae\"", "path": "release/termux-pulse-recipes.json"},
+        {"contains": "pulseaudio|aarch64|17.0-3|", "path": "native/archphene-audio/termux-pulse-packages.tsv"},
+        {"contains": "\"recipeCommit\": \"d78bf58b5e1ab4269df3e760a5f3ce55d1351d37\"", "path": "release/termux-pulse-recipes.json"},
         {"contains": "Termux Pulse source audit passed", "path": "scripts/release-termux-pulse-audit.py"},
         {"contains": "org.archphene.termux-pulse-source-bundle.v1", "path": "scripts/release-termux-pulse-source.py"}
       ],
