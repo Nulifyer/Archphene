@@ -95,6 +95,7 @@ for value in (
     ':android:app:assembleRelease',
     'app-release-unsigned.apk',
     'Archphene-$abi-$version_name-unsigned.apk',
+    'sha256sum "$(basename "$artifact")" > "$(basename "$checksum")"',
 ):
     if value not in greenfield_release_builder:
         raise SystemExit(f"greenfield release builder contract missing: {value}")

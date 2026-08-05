@@ -27,7 +27,7 @@ archphene_validate_choice "$abi" "release ABI" x86_64 arm64-v8a
     "$version_name" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] ||
   archphene_die "release version must use MAJOR.MINOR.PATCH syntax"
 
-for command in flock gradle; do
+for command in flock gradle sha256sum; do
   archphene_require_command "$command"
 done
 export ANDROID_SDK_ROOT
@@ -58,4 +58,10 @@ badging="$("$aapt2" dump badging "$apk")"
 
 artifact="$ARCHPHENE_ROOT/tooling/build/apk/Archphene-$abi-$version_name-unsigned.apk"
 cp -- "$apk" "$artifact"
+checksum="$artifact.sha256"
+(
+  cd "$(dirname "$artifact")"
+  sha256sum "$(basename "$artifact")" > "$(basename "$checksum")"
+)
 archphene_note "Unsigned Archphene release APK: $artifact"
+archphene_note "SHA-256: $checksum"
