@@ -36,7 +36,7 @@ def fail(message: str) -> None:
 def validate(path: Path) -> tuple[int, int]:
     document = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict) or set(document) != {
-        "components", "format", "licenseSources"
+        "components", "format", "licenseSources", "projectLicenseComponents"
     }:
         fail("native release audit document is invalid")
     if document["format"] != "org.archphene.native-release-audit.v1":
@@ -132,8 +132,17 @@ def validate(path: Path) -> tuple[int, int]:
         source_ids.append(component_id)
     if source_ids != sorted(set(source_ids)):
         fail("native release license sources are not uniquely sorted")
+    project_license_components = document["projectLicenseComponents"]
+    if (
+        not isinstance(project_license_components, list)
+        or project_license_components != sorted(set(project_license_components))
+        or not all(component_id in by_id for component_id in project_license_components)
+    ):
+        fail("project-license native components are invalid")
     verified = {component["id"] for component in components if component["reviewState"] == "verified"}
-    if set(source_ids) != verified:
+    if set(source_ids) | set(project_license_components) != verified or (
+        set(source_ids) & set(project_license_components)
+    ):
         fail("verified native components do not match packaged license sources")
     return len(components), blocked
 

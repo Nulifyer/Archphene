@@ -63,9 +63,10 @@ locations, pins, declared licenses where reviewed, exact repository evidence,
 and concrete open blockers. `scripts/release-native-audit.py` rejects missing components,
 stale evidence, malformed blockers, and unreviewed additions.
 
-Seven records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
-libepoxy, and virglrenderer. Release CI checks each source archive SHA-256 or
-Git commit and publishes every discovered license, notice, and copyright file in
+Eight records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
+libepoxy, virglrenderer, and the x86_64 Qt bridge. Release CI checks each source
+archive SHA-256 or Git commit and publishes every discovered license, notice,
+and copyright file in
 `Archphene-native-licenses-<version>.zip`. The deterministic archive embeds the
 canonical manifest and a per-file checksum index.
 
@@ -74,11 +75,11 @@ deterministic archive of the exact pristine glibc Git tree, the applied
 Archphene patch, both architecture build scripts, the AArch64 container recipe,
 and an indexed checksum for every build-control file.
 
-Seven records remain blocked. The unresolved work includes floating Arch
-package transactions, incomplete GTK and Qt prebuilt provenance, and PulseAudio
-closure source records. The tag workflow runs `--require-complete` before
-creating a GitHub draft, so an accidental tag cannot publish or remotely stage
-a release while any blocker remains. SPDX file
+Six records remain blocked. The unresolved work includes floating Arch
+package transactions, incomplete GTK prebuilt provenance, Qt historical binary
+reproduction on AArch64, and PulseAudio closure source records. The tag workflow
+runs `--require-complete` before creating a GitHub draft, so an accidental tag
+publish or remotely stage a release while any blocker remains. SPDX file
 licenses and package license conclusions remain `NOASSERTION` rather than making
 unsupported conclusions.
 
@@ -92,4 +93,6 @@ python3 scripts/test-release-sbom.py
 python3 scripts/test-release-native-audit.py
 python3 scripts/test-release-native-licenses.py
 python3 scripts/test-release-glibc-source.py
+python3 scripts/test-qt-prebuilt-provenance.py
+bash scripts/test-qt-prebuilt-reproducibility.sh
 ```

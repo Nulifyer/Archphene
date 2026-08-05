@@ -132,9 +132,13 @@
     },
     {
       "artifactScopes": ["manager"],
-      "blockers": [{"category": "provenance", "detail": "Two plugins are reproducible from a pinned Qt package, but the retained KF6Config fallback prebuilt lacks complete source provenance and license evidence."}],
-      "declaredLicense": "NOASSERTION",
-      "evidence": [{"contains": "kde_config_fallback_sha256=90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311", "path": "scripts/build-qt-platform-theme-arm64.sh"}],
+      "blockers": [{"category": "reproducibility", "detail": "Every plugin is bound to its historical project source, but the retained KF6Config fallback lacks a pinned historical KF6 link input and none of the three outputs has a byte-for-byte clean rebuild gate."}],
+      "declaredLicense": "MIT",
+      "evidence": [
+        {"contains": "kde_config_fallback_sha256=90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311", "path": "scripts/build-qt-platform-theme-arm64.sh"},
+        {"contains": "\"sourceCommit\": \"931ef9131f9e3f87b60430887b06d99449f80d9d\"", "path": "prebuilt/qt-bridge/manifest-arm64-v8a.json"},
+        {"contains": "Qt prebuilt provenance passed", "path": "scripts/test-qt-prebuilt-provenance.py"}
+      ],
       "id": "qt-bridge-aarch64",
       "kind": "mixed-source-prebuilt",
       "reviewState": "blocked",
@@ -144,12 +148,17 @@
     },
     {
       "artifactScopes": ["manager"],
-      "blockers": [{"category": "reproducibility", "detail": "The x86_64 Qt build image and package set are tag-named but not digest/checksum pinned; the prebuilt manifest has no source provenance or license evidence."}],
-      "declaredLicense": "NOASSERTION",
-      "evidence": [{"contains": "image=localhost/archphene-qt-platform-theme:qt6.11.1", "path": "scripts/build-qt-platform-theme-podman.sh"}],
+      "blockers": [],
+      "declaredLicense": "MIT",
+      "evidence": [
+        {"contains": "sha256:b21289eb1954872de0dc9f88976627e38611b1817be75e50946c83ab7b9c474d", "path": "containers/qt-platform-theme.Containerfile"},
+        {"contains": "\"sourceCommit\": \"ed5dd11ca1f94c2651121e3d131bea7917991035\"", "path": "prebuilt/qt-bridge/manifest.json"},
+        {"contains": "Qt prebuilt provenance passed", "path": "scripts/test-qt-prebuilt-provenance.py"},
+        {"contains": "rebuilt byte-for-byte", "path": "scripts/test-qt-prebuilt-reproducibility.sh"}
+      ],
       "id": "qt-bridge-x86_64",
       "kind": "prebuilt",
-      "reviewState": "blocked",
+      "reviewState": "verified",
       "sourcePin": {"type": "artifact-checksums", "value": "prebuilt/qt-bridge/SHA256SUMS"},
       "sourceUrl": "https://archlinux.org/packages/extra/x86_64/qt6-base/",
       "version": "6.11.1"
@@ -188,5 +197,6 @@
     {"componentId": "mesa", "path": "tooling/downloads/mesa-26.1.5.tar.xz", "type": "archive"},
     {"componentId": "pipewire", "path": "tooling/external/pipewire", "type": "git-tree"},
     {"componentId": "virglrenderer", "path": "tooling/downloads/virglrenderer-1.3.0.tar.gz", "type": "archive"}
-  ]
+  ],
+  "projectLicenseComponents": ["qt-bridge-x86_64"]
 }

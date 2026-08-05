@@ -306,6 +306,10 @@ and reproducible artifacts.
     D-Bus, Mbed TLS, Mesa, PipeWire, libepoxy, and virglrenderer.
   - [x] Publish the exact glibc source revision, Archphene patch, and x86_64 and
     AArch64 build-control files as a deterministic corresponding-source bundle.
+  - [x] Bind staged Qt plugin hashes to their historical project source paths and
+    commits, and pin the x86_64 build image and package-repository snapshot.
+  - [x] Rebuild all three x86_64 Qt bridge plugins from their historical commits
+    and require byte-for-byte equality before the release audit gate.
   - [ ] Resolve every recorded native/runtime notice, license-text,
     reproducibility, provenance, corresponding-source, and relinking blocker.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,

@@ -48,15 +48,38 @@ podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace "$image" \
   bash scripts/build-qt-platform-theme-arm64.sh
 
 python3 - "$ARCHPHENE_ROOT/prebuilt/qt-bridge" "$expected_qt" <<'PY'
-import hashlib, json, pathlib, sys
+import hashlib, json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 qt = sys.argv[2]
+repository = root.parents[1]
+commit = subprocess.check_output(
+    ["git", "-C", repository, "rev-parse", "HEAD"], text=True
+).strip()
+source_paths = {
+    "libarchphene_kde_config.so": [
+        "native/archphene-qt-platform-theme/archphene-kde-config.pro",
+        "native/archphene-qt-platform-theme/archphenekdeconfig.cpp",
+    ],
+    "libarchphene_qt_platform_theme.so": [
+        "native/archphene-qt-platform-theme/archphene-qt-platform-theme.pro",
+        "native/archphene-qt-platform-theme/archpheneplatformtheme.cpp",
+        "native/archphene-qt-platform-theme/archpheneplatformtheme.json",
+    ],
+    "libarchphene_qt_style.so": [
+        "native/archphene-qt-platform-theme/archphene-qt-style.pro",
+        "native/archphene-qt-platform-theme/archphenestyle.cpp",
+        "native/archphene-qt-platform-theme/archphenestyle.json",
+    ],
+}
 def entries(directory):
-    return [
-        {"name": path.name, "bytes": path.stat().st_size,
-         "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-        for path in sorted(directory.glob("*.so"))
-    ]
+    result = []
+    for path in sorted(directory.glob("*.so")):
+        entry = {"name": path.name, "bytes": path.stat().st_size,
+                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        if path.name in source_paths:
+            entry.update(sourceCommit=commit, sourcePaths=source_paths[path.name])
+        result.append(entry)
+    return result
 x86 = entries(root / "x86_64")
 arm = entries(root / "arm64-v8a")
 manifest = {

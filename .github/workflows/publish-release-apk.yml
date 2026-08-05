@@ -36,6 +36,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Resolve release version
         run: |
@@ -72,8 +73,12 @@ jobs:
           python3 scripts/test-release-native-audit.py
           python3 scripts/test-release-native-licenses.py
           python3 scripts/test-release-glibc-source.py
+          python3 scripts/test-qt-prebuilt-provenance.py
           python3 scripts/test-legacy-migration-contract.py
           python3 scripts/test-atspi-source-contract.py
+
+      - name: Verify Qt prebuilt reproducibility
+        run: CONTAINER_CLI=docker bash scripts/test-qt-prebuilt-reproducibility.sh
 
       - name: Require complete native release audit
         run: python3 scripts/release-native-audit.py --require-complete

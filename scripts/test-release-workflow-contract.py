@@ -20,6 +20,7 @@ greenfield_release_verifier = GREENFIELD_RELEASE_VERIFIER.read_text(encoding="ut
 
 required_workflow = (
     'push:\n    tags:\n      - "v*"',
+    "fetch-depth: 0",
     "Ensure release is a draft",
     "python3 scripts/test-atspi-source-contract.py",
     "--notes-file docs/release-notes.md",
@@ -38,6 +39,8 @@ required_workflow = (
     "python3 scripts/test-release-native-audit.py",
     "python3 scripts/test-release-native-licenses.py",
     "python3 scripts/test-release-glibc-source.py",
+    "python3 scripts/test-qt-prebuilt-provenance.py",
+    "CONTAINER_CLI=docker bash scripts/test-qt-prebuilt-reproducibility.sh",
     "python3 scripts/release-native-audit.py --require-complete",
     "python3 scripts/release-native-licenses.py generate",
     "python3 scripts/release-native-licenses.py verify",

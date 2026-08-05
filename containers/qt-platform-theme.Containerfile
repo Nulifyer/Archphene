@@ -1,4 +1,4 @@
-FROM docker.io/archlinux:base-devel-20260705.0.552420
+FROM docker.io/archlinux:base-devel-20260705.0.552420@sha256:b21289eb1954872de0dc9f88976627e38611b1817be75e50946c83ab7b9c474d
 
 RUN printf '%s\n' \
         '[options]' \
