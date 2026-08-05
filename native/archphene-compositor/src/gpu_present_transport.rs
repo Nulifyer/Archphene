@@ -7,7 +7,7 @@
 
 #![allow(unsafe_code)]
 
-#[cfg(any(target_os = "android", test))]
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::mem::{size_of, zeroed};
@@ -29,6 +29,8 @@ use crate::gpu_present_protocol::PresentResource;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
 #[cfg(any(target_os = "android", test))]
 const FENCE_PACKET_MARKER: u8 = 0x46;
+pub(crate) const RELEASE_PACKET_MARKER: u8 = 0x52;
+const MAX_PENDING_RELEASES: usize = 3;
 #[cfg(target_os = "android")]
 const PRESENT_RESOURCE_SLOTS: usize = 3;
 
@@ -51,6 +53,12 @@ struct SocketIdentity {
     inode: u64,
 }
 
+struct PendingRelease {
+    frame: [u8; GPU_PRESENT_FRAME_BYTES],
+    frame_offset: usize,
+    fence: Option<File>,
+}
+
 pub(crate) struct GpuPresentEndpoint {
     listener: UnixListener,
     stream: Option<UnixStream>,
@@ -59,6 +67,7 @@ pub(crate) struct GpuPresentEndpoint {
     expected_uid: u32,
     frame: [u8; GPU_PRESENT_FRAME_BYTES],
     frame_length: usize,
+    releases: VecDeque<PendingRelease>,
     #[cfg(target_os = "android")]
     resources: [Option<ReceivedResource>; PRESENT_RESOURCE_SLOTS],
 }
@@ -104,6 +113,7 @@ impl GpuPresentEndpoint {
             expected_uid,
             frame: [0; GPU_PRESENT_FRAME_BYTES],
             frame_length: 0,
+            releases: VecDeque::with_capacity(MAX_PENDING_RELEASES),
             #[cfg(target_os = "android")]
             resources: std::array::from_fn(|_| None),
         })
@@ -129,6 +139,7 @@ impl GpuPresentEndpoint {
                 Ok(0) => {
                     self.stream = None;
                     self.frame_length = 0;
+                    self.releases.clear();
                     return Ok(None);
                 }
                 Ok(count) => {
@@ -143,6 +154,93 @@ impl GpuPresentEndpoint {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    pub(crate) fn queue_release(
+        &mut self,
+        frame: [u8; GPU_PRESENT_FRAME_BYTES],
+        fence: Option<File>,
+    ) -> io::Result<()> {
+        if self.stream.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "GPU helper is not connected",
+            ));
+        }
+        if self.releases.len() == MAX_PENDING_RELEASES {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "GPU release queue is full",
+            ));
+        }
+        self.releases.push_back(PendingRelease {
+            frame,
+            frame_offset: 0,
+            fence,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn flush_releases(&mut self) -> io::Result<usize> {
+        let result = self.flush_releases_inner();
+        if result.is_err() {
+            self.stream = None;
+            self.releases.clear();
+        }
+        result
+    }
+
+    fn flush_releases_inner(&mut self) -> io::Result<usize> {
+        let Some(stream) = self.stream.as_ref() else {
+            return Ok(0);
+        };
+        let socket_fd = stream.as_raw_fd();
+        let mut completed = 0;
+        while let Some(release) = self.releases.front_mut() {
+            while release.frame_offset < release.frame.len() {
+                match crate::syscall_ffi::send_no_signal(
+                    socket_fd,
+                    &release.frame[release.frame_offset..],
+                ) {
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "GPU helper accepted zero release bytes",
+                        ));
+                    }
+                    Ok(count) => release.frame_offset += count,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        return Ok(completed);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let marker_result = if let Some(fence) = release.fence.as_ref() {
+                crate::syscall_ffi::send_with_fd(
+                    socket_fd,
+                    &[RELEASE_PACKET_MARKER],
+                    fence.as_raw_fd(),
+                )
+            } else {
+                crate::syscall_ffi::send_no_signal(socket_fd, &[RELEASE_PACKET_MARKER])
+            };
+            match marker_result {
+                Ok(1) => {}
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "GPU release marker was incomplete",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(completed),
+                Err(error) => return Err(error),
+            }
+            self.releases.pop_front();
+            completed += 1;
+        }
+        Ok(completed)
     }
 
     #[cfg(target_os = "android")]
@@ -552,5 +650,54 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn sends_bounded_release_frames_before_optional_fences() {
+        let path =
+            std::env::temp_dir().join(format!("archphene-gpu-release-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut endpoint = GpuPresentEndpoint::bind(&path, current_euid()).expect("endpoint");
+        let mut helper = UnixStream::connect(&path).expect("helper");
+        assert_eq!(endpoint.poll_frame().expect("accept helper"), None);
+
+        let first = [0x31; GPU_PRESENT_FRAME_BYTES];
+        endpoint
+            .queue_release(first, None)
+            .expect("queue completed release");
+        assert_eq!(
+            endpoint.flush_releases().expect("flush completed release"),
+            1
+        );
+        let mut received = [0; GPU_PRESENT_FRAME_BYTES];
+        helper
+            .read_exact(&mut received)
+            .expect("read first release");
+        assert_eq!(received, first);
+        let mut marker = [0];
+        helper
+            .read_exact(&mut marker)
+            .expect("read completed marker");
+        assert_eq!(marker, [RELEASE_PACKET_MARKER]);
+
+        let second = [0x72; GPU_PRESENT_FRAME_BYTES];
+        let (fence, _) = crate::syscall_ffi::cloexec_pipe().expect("release fence");
+        endpoint
+            .queue_release(second, Some(fence))
+            .expect("queue fenced release");
+        assert_eq!(endpoint.flush_releases().expect("flush fenced release"), 1);
+        helper
+            .read_exact(&mut received)
+            .expect("read second release");
+        assert_eq!(received, second);
+        let message = crate::syscall_ffi::receive_with_optional_fd(
+            helper.as_raw_fd(),
+            &mut marker,
+            libc::MSG_CMSG_CLOEXEC,
+        )
+        .expect("read fenced marker");
+        assert_eq!(message.length, 1);
+        assert_eq!(marker, [RELEASE_PACKET_MARKER]);
+        assert!(message.descriptor.is_some());
     }
 }

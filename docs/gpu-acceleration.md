@@ -242,6 +242,16 @@ cardinality closes the APHB channel. The Samsung probe completed sequences 1
 and 2 around one marker-only Release (`46,52,46`). The path remains disabled in
 production until Mesa/Wayland identity and SurfaceFlinger Release senders exist.
 
+The manager transport can now queue three Release responses without blocking
+the compositor. Registry release is prepared on cloned state and becomes
+visible only after bounded queue admission. Each response writes the complete
+64-byte scoped Release before marker `52`; marker-only records an already
+completed release, while `SCM_RIGHTS` carries one owned release-fence FD. Partial
+nonblocking frame writes resume before the marker, and queued FDs remain RAII
+owned until successful transfer or disconnect. Host socket tests cover both
+marker forms and exact ordering. SurfaceFlinger callback output is not connected
+to this queue yet.
+
 The compositor now has the matching dormant control endpoint. It binds only an
 absolute 103-byte-or-shorter path, replaces only a socket, authenticates the
 peer with `SO_PEERCRED` against the manager UID, reassembles one fixed 64-byte

@@ -4087,6 +4087,14 @@ one marker-only Release (`46,52,46`). Production does not pass the arguments or
 issue the commands; generic Mesa/Wayland production and SurfaceFlinger-backed
 release return remain open.
 
+The dormant manager endpoint also has a bounded outbound Release transport. It
+admits at most three responses, transactionally commits registry release only
+after queue admission, resumes partial nonblocking 64-byte frame writes before
+marker `52`, and transfers zero or one RAII-owned release-fence FD. Disconnect
+closes queued descriptors. Host tests prove exact frame/marker ordering for both
+marker-only and fenced responses. SurfaceFlinger callbacks do not feed this
+queue yet, so production reuse remains disabled.
+
 The manager-side dormant control endpoint now admits Hello and Android Resource
 handles. It binds only a bounded absolute path and accepts
 only the current UID through `SO_PEERCRED`, reassembles fixed 64-byte frames,

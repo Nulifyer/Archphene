@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "android")]
 use gpu_present_protocol::{GPU_PRESENT_FRAME_BYTES, PresentResource};
 use gpu_present_protocol::{
-    GpuPresentMessage, GpuPresentRegistry, GpuPresentScope, decode_gpu_present,
+    GpuPresentMessage, GpuPresentRegistry, GpuPresentScope, decode_gpu_present, encode_gpu_present,
 };
 use gpu_present_transport::{GpuPresentEndpoint, current_euid};
 use gpu_surface_identity::{
@@ -269,6 +269,24 @@ mod syscall_ffi {
         // SAFETY: the immutable slice provides a valid readable region for
         // exactly `source.len()` bytes for the duration of the call.
         let result = unsafe { libc::write(descriptor, source.as_ptr().cast(), source.len()) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result as usize)
+        }
+    }
+
+    pub(super) fn send_no_signal(descriptor: RawFd, source: &[u8]) -> io::Result<usize> {
+        // SAFETY: the immutable slice is a valid readable region for the
+        // synchronous send, and MSG_NOSIGNAL prevents process-wide SIGPIPE.
+        let result = unsafe {
+            libc::send(
+                descriptor,
+                source.as_ptr().cast(),
+                source.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
         if result < 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -13084,6 +13102,34 @@ impl CompositorCore {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn queue_gpu_present_release(
+        &mut self,
+        resource_id: u32,
+        fence_sequence: u64,
+        fence: Option<File>,
+    ) -> std::io::Result<()> {
+        let scope = self.gpu_present_scope.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "GPU present is disabled")
+        })?;
+        let frame = encode_gpu_present(
+            scope,
+            GpuPresentMessage::Release {
+                resource_id,
+                fence_sequence,
+            },
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))?;
+        let (present_registry, identity_registry, _) = self.prepare_gpu_present_frame(&frame)?;
+        self.gpu_present_endpoint
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU endpoint is disabled"))?
+            .queue_release(frame, fence)?;
+        self.state.gpu_present_registry = Some(present_registry);
+        self.state.gpu_surface_identity = Some(identity_registry);
+        Ok(())
+    }
+
     fn prepare_gpu_present_frame(
         &self,
         frame: &[u8],
@@ -13308,7 +13354,11 @@ impl CompositorCore {
         let Some(scope) = self.gpu_present_scope else {
             return Ok(0);
         };
-        let mut count = 0_usize;
+        let mut count = self
+            .gpu_present_endpoint
+            .as_mut()
+            .expect("endpoint checked by scope")
+            .flush_releases()?;
         #[cfg(target_os = "android")]
         if let Some((frame, resource)) = self.gpu_present_pending_resource.take() {
             let (present_registry, identity_registry, _) =
@@ -13327,7 +13377,7 @@ impl CompositorCore {
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     self.gpu_present_pending_resource = Some((frame, resource));
-                    return Ok(0);
+                    return Ok(count);
                 }
                 Err(error) => return Err(error),
             }
@@ -20079,6 +20129,8 @@ mod steady_state_allocations;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu_present_protocol::GPU_PRESENT_FRAME_BYTES;
+    use std::io::Read;
     use std::sync::atomic::AtomicU8;
     use wayland_client::globals::{GlobalListContents, registry_queue_init};
     use wayland_client::protocol::{
@@ -20373,6 +20425,73 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         drop(core);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn scoped_gpu_release_commits_only_after_bounded_queue_admission() {
+        let path = std::env::temp_dir().join(format!(
+            "archphene-gpu-release-core-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let scope = GpuPresentScope {
+            session_id: 81,
+            helper_generation: 3,
+            token: [0x5d; 16],
+        };
+        let mut core = CompositorCore::new().expect("Wayland display");
+        core.enable_gpu_present_endpoint(&path, scope)
+            .expect("enable release endpoint");
+        let error = core
+            .queue_gpu_present_release(7, 1, None)
+            .expect_err("disconnected release");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let mut helper = UnixStream::connect(&path).expect("connect helper");
+        let hello = encode_gpu_present(scope, GpuPresentMessage::Hello).expect("hello");
+        helper.write_all(&hello).expect("send hello");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while core.gpu_present_frame_count == 0 {
+            core.dispatch_once().expect("dispatch hello");
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let resource = gpu_present_protocol::PresentResource {
+            resource_id: 7,
+            slot: 0,
+            width: 64,
+            height: 64,
+            estimated_bytes: 64 * 64 * 4,
+        };
+        let resource_frame =
+            encode_gpu_present(scope, GpuPresentMessage::Resource(resource)).expect("resource");
+        core.apply_gpu_present_frame(&resource_frame)
+            .expect("register resource");
+        let present = encode_gpu_present(
+            scope,
+            GpuPresentMessage::Present {
+                resource_id: 7,
+                fence_sequence: 9,
+            },
+        )
+        .expect("present");
+        core.apply_gpu_present_frame(&present).expect("apply present");
+        core.queue_gpu_present_release(7, 9, None)
+            .expect("queue release");
+        core.dispatch_once().expect("flush release");
+
+        let mut frame = [0; GPU_PRESENT_FRAME_BYTES];
+        helper.read_exact(&mut frame).expect("read release");
+        assert_eq!(
+            decode_gpu_present(scope, &frame).expect("decode release"),
+            GpuPresentMessage::Release {
+                resource_id: 7,
+                fence_sequence: 9,
+            }
+        );
+        let mut marker = [0];
+        helper.read_exact(&mut marker).expect("read release marker");
+        assert_eq!(marker, [gpu_present_transport::RELEASE_PACKET_MARKER]);
     }
 
     #[test]

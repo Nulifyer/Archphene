@@ -168,6 +168,9 @@ copying.
   - [x] Receive the exact scoped manager Release through a blocking private
     vtest wait, consume its optional release fence, and permit reuse only after
     the matching 64-bit sequence completes.
+  - [x] Add a three-entry nonblocking manager Release queue that writes each
+    fixed frame before marker `52`, transfers zero or one release-fence FD, and
+    commits registry release only after queue admission.
   - [ ] Connect a generic Mesa virpipe winsys/Wayland sender and the manager's
     SurfaceFlinger-backed Release sender.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before

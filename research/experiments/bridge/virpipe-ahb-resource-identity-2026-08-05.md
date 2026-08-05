@@ -95,6 +95,13 @@ probe completed sequences 1 and 2 around marker-only Release (`46,52,46`).
 Generic Mesa/Wayland production and the manager's SurfaceFlinger-backed Release
 sender remain disabled.
 
+The manager now has the transport half of Release sending. A three-entry queue
+admits only an exact registry-valid sequence, writes the full scoped frame before
+marker `52`, and optionally transfers one RAII-owned fence FD. Partial
+nonblocking writes resume in order, and disconnect drops all queued ownership.
+Host tests cover marker-only and fenced forms. Connecting actual SurfaceFlinger
+callback results remains open.
+
 The compositor now has a dormant same-UID fixed-frame listener. It bounds path
 length and frames per dispatch, validates `SO_PEERCRED`, safely reassembles
 fragments, drops partial state on helper replacement, and preserves a socket
