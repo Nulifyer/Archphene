@@ -291,7 +291,11 @@ with version `1.1.0-rc.1` and version code `1000001234`; over-limit codes and an
 incomplete semantic version were rejected during configuration. Release
 migration can call `build-archphene-release-apk.sh`, which serializes the
 shared Gradle output, verifies exact version and ABI badging, and publishes a
-stable unsigned artifact for signing. The current tag workflow and
+stable unsigned artifact plus basename-scoped SHA-256 for signing. Two
+same-commit x86_64 rebuilds of version `1.1.0-rc.3` and code `1000001236` were
+byte-identical at
+`2967f73374276b04bcdae8b8b46a33402925296e6067fdd69ca117b2528c7be5`.
+The current tag workflow and
 `verify-release-apk.sh` still build and validate
 `prototypes/linux-app-manager-stub` as `org.archpheneos.manager`. Publishing a
 new tag now would therefore release the legacy manager rather than the tested
