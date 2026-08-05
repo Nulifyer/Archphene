@@ -168,6 +168,9 @@ require(
     "GPU_PRESENT_FRAME_BYTES",
     "ReceivedHardwareBuffer::receive",
     "AHardwareBuffer does not match the declared GPU resource",
+    "FENCE_PACKET_MARKER: u8 = 0x46",
+    "receive_fence_packet",
+    "receives_exactly_one_cloexec_fence_descriptor",
     "probe_hardware_buffer_transport",
     "disconnect_discards_partial_frame_before_replacement",
     "metadata.dev() == self.identity.device",
@@ -178,8 +181,11 @@ require(
     "enable_gpu_present_endpoint",
     "MAX_FRAMES_PER_DISPATCH: usize = 4",
     "gpu_present_pending_resource",
+    "gpu_present_pending_fence",
     "AHardwareBuffer_recvHandleFromUnixSocket",
-    "GPU acquire fences are not connected",
+    "MAX_RECEIVED_DESCRIPTORS: usize = 4",
+    "descriptor control message must contain exactly one descriptor",
+    "GPU acquire fences require Android resources",
     "scoped_gpu_endpoint_accepts_only_connected_control_frames",
 )
 reject(

@@ -68,7 +68,7 @@ resource ID, and split 64-bit fence sequence into one exact surface commit. The
 bounded state machine enforces unique surfaces, three known resources, monotonic
 fences, helper replacement, resource release, standard-buffer replacement, and
 damage-only retention. This closes the manager contract ambiguity; Mesa sender,
-vtest Resource/Present transport, and manager fence receipt remain required before
+vtest Resource/Present transport, fence consumption, and release return remain required before
 production can enable the global. Generated Rust bindings and an opt-in
 client/server socket test now prove exact set/commit and clear/commit latching.
 The test no longer inserts identity resources directly: it authenticates Hello,
@@ -93,8 +93,12 @@ retries would-block before reading another frame, validates its exact bounded
 metadata and stride-backed byte declaration, and retains it until idle
 DropResource. Resource and DropResource commit native-handle and identity state
 transactionally. A live API 35 Samsung nonblocking socket probe accepted a valid
-64×32 AHB and atomically rejected a mismatched declaration. Present still
-returns `Unsupported` until acquire-fence receipt is connected.
+64×32 AHB and atomically rejected a mismatched declaration. Present now consumes
+one marker byte carrying exactly one close-on-exec `SCM_RIGHTS` acquire-fence
+descriptor, retains one per resource, and retries would-block before reading
+another frame. The host test rejects a missing descriptor, and the Samsung probe
+exercises the valid nonblocking path. Fence consumption and release return remain
+open.
 
 APHB now distinguishes per-frame release from resource destruction. Present
 allows one outstanding sequence per resource. The manager must return Release

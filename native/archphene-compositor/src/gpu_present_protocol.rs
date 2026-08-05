@@ -2,9 +2,11 @@
 //!
 //! The byte contract is intentionally independent from vtest command payloads:
 //! the helper and compositor exchange Android buffer handles and fence FDs on a
-//! session-private side channel while vtest retains renderer commands. Every
-//! frame carries the authenticated session, helper generation, and random
-//! token so stale helpers and cross-session resources fail closed.
+//! session-private side channel while vtest retains renderer commands. Each
+//! Present frame is followed by one `0x46` marker byte carrying exactly one
+//! `SCM_RIGHTS` acquire-fence FD. Every frame carries the authenticated session,
+//! helper generation, and random token so stale helpers and cross-session
+//! resources fail closed.
 
 pub(crate) const GPU_PRESENT_FRAME_BYTES: usize = 64;
 pub(crate) const MAX_PRESENT_RESOURCES: usize = 3;

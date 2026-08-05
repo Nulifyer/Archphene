@@ -4047,7 +4047,7 @@ identity, requires an exact match to the latest authenticated present before a
 Wayland claim can latch, clears all identities on helper replacement/resource
 release, lets a normal `wl_buffer` replace GPU identity, and retains identity for damage-only
 commits. Five tests pass, and `wayland-scanner` accepts the XML. Mesa/vtest
-sender integration and manager acquire-fence receipt remain open. An
+sender integration, acquire-fence consumption, and release return remain open. An
 additional generated client/server socket test enables the otherwise dormant
 global, binds one surface, latches one scoped identity on the exact commit, and
 clears it on the next commit. Production does not enable the global, so no new
@@ -4059,8 +4059,9 @@ Resource/Present/Release frames; duplicate Hello and pre-handshake traffic fail.
 Each frame is applied to cloned APHB and Wayland identity registries and becomes
 visible only when both transitions succeed. The generated-client socket test
 uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
-claiming the exact surface commit. Native AHB handle receipt is implemented;
-acquire-fence receipt and helper/Mesa senders remain open.
+claiming the exact surface commit. Native AHB handle and acquire-fence receipt
+are implemented; fence consumption, release return, and helper/Mesa senders
+remain open.
 
 The Android vtest helper now implements only the scoped APHB bootstrap. Its
 private socket, session ID, helper generation, and 128-bit lowercase-hex token
@@ -4087,7 +4088,7 @@ and idle DropResource commit handle and identity state transactionally. A live
 API 35 Samsung nonblocking socket round trip accepted a valid 64×32 AHB and
 atomically rejected a mismatched declaration. The host core test still returns
 `Unsupported` because AHardwareBuffer is Android-only. The production launcher
-therefore leaves the endpoint disabled until the helper sender and fence path
+therefore leaves the endpoint disabled until the helper sender and release path
 exist.
 
 APHB direction and reuse are no longer ambiguous. Helper-to-manager traffic is
@@ -4095,7 +4096,12 @@ Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release
 carries the exact Present sequence and will carry one SurfaceFlinger release
 fence. The registry rejects a second Present or drop while ownership is
 outstanding, stale/mismatched release, and inbound Release on the manager
-endpoint. Acquire- and release-fence descriptor transfer is still unimplemented.
+endpoint. Present now requires one marker byte with exactly one `SCM_RIGHTS`
+acquire-fence descriptor. Receipt is nonblocking and close-on-exec, retains at
+most one fence per resource, and retries would-block before parsing another
+frame. A host test rejects a missing descriptor; the Samsung round trip includes
+the valid descriptor path. Fence consumption and manager-to-helper release-fence
+transfer are still unimplemented.
 
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned

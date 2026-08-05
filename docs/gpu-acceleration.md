@@ -210,8 +210,8 @@ rejects a duplicate hello, decodes fixed Resource/Present/Release frames, and
 updates cloned bounded registries only when both the APHB and Wayland identity
 transition succeed. The socket round trip therefore uses the same scoped APHB
 Resource and 64-bit Present sequence that the Wayland commit claims. Android AHB
-handle receipt is implemented; acquire-fence receipt and helper/Mesa senders
-remain unimplemented.
+handle and acquire-fence receipt are implemented; fence consumption,
+manager-to-helper release transfer, and helper/Mesa senders remain unimplemented.
 
 The pinned Android virglrenderer helper now has an optional fail-closed APHB
 bootstrap. Four arguments must appear together: a bounded Unix socket path,
@@ -220,7 +220,8 @@ token characters with at least one nonzero byte. The helper connects and writes
 the exact 64-byte scoped Hello before publishing its vtest socket; partial,
 malformed, overlong, or unreachable configuration terminates startup. Existing
 launches pass none of these arguments and retain current behavior until the
-remaining sender and fence path is connected. Both Android ABIs build. An isolated same-UID
+remaining sender and release path is connected. Both Android ABIs build. An
+isolated same-UID
 Samsung probe received bytes `APHB`, version 1, opcode 1, session 77, generation
 9, the exact 16-byte token, and zero reserved trailing bytes; a partial-argument
 probe exited 1 before starting graphics.
@@ -241,8 +242,13 @@ DropResource update the AHB and identity registries transactionally. A physical
 API 35 Samsung round trip accepted a valid 64×32 buffer on a nonblocking Unix
 socket and atomically rejected a mismatched declaration. The host core test
 continues to return `Unsupported` for Resource because AHardwareBuffer is
-Android-only. Production does not bind this endpoint yet, and Present remains
-unsupported until acquire-fence receipt is implemented.
+Android-only. An Android Present must be followed by one marker byte carrying
+exactly one `SCM_RIGHTS` acquire-fence descriptor. The descriptor arrives with
+`FD_CLOEXEC`, is retained once per resource, and a would-block packet is retried
+before another APHB frame is read. A host test rejects a missing descriptor and
+the Samsung round trip exercises the same nonblocking receive path. Production
+does not bind this endpoint yet because fence consumption, release return, and
+the helper sender remain absent.
 
 Direction and reuse are now explicit in APHB v1. Hello, Resource, Present, and
 DropResource travel helper-to-manager. Release travels manager-to-helper with

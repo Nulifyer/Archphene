@@ -373,8 +373,14 @@ mod syscall_ffi {
             iov_base: destination.as_mut_ptr().cast(),
             iov_len: destination.len(),
         };
-        // SAFETY: see `send_with_fd`; this buffer holds exactly one descriptor.
-        let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+        // Reserve enough room to take ownership of a bounded hostile
+        // multi-descriptor message before rejecting it. This prevents leaked
+        // installed descriptors on truncation or invalid cardinality.
+        const MAX_RECEIVED_DESCRIPTORS: usize = 4;
+        // SAFETY: the CMSG helper receives the bounded payload byte count.
+        let control_size =
+            unsafe { libc::CMSG_SPACE((size_of::<RawFd>() * MAX_RECEIVED_DESCRIPTORS) as u32) }
+                as usize;
         let control_words = control_size.div_ceil(size_of::<usize>());
         let mut control = vec![0usize; control_words];
         // SAFETY: an all-zero `msghdr` is its documented empty state.
@@ -397,44 +403,71 @@ mod syscall_ffi {
             }
         };
         let message_flags = message.msg_flags;
-        if message_flags & libc::MSG_CTRUNC != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated descriptor control message",
-            ));
-        }
-
         // SAFETY: `message` still points at the live aligned control buffer.
         let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
         let descriptor = if header.is_null() {
             None
         } else {
             // SAFETY: `header` points inside the live control buffer.
-            let valid = unsafe {
-                (*header).cmsg_level == libc::SOL_SOCKET
-                    && (*header).cmsg_type == libc::SCM_RIGHTS
-                    && (*header).cmsg_len == libc::CMSG_LEN(size_of::<RawFd>() as u32) as usize
+            let is_rights = unsafe {
+                (*header).cmsg_level == libc::SOL_SOCKET && (*header).cmsg_type == libc::SCM_RIGHTS
             };
-            if !valid {
+            if !is_rights {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid descriptor control message",
                 ));
             }
-            // SAFETY: exact CMSG length validation above proves one RawFd is
-            // present at the libc-provided data address.
-            let received_fd =
-                unsafe { ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>()) };
-            if received_fd < 0 {
+            // SAFETY: the header remains in the live bounded control buffer.
+            let header_length = unsafe { (*header).cmsg_len };
+            let empty_length = unsafe { libc::CMSG_LEN(0) } as usize;
+            if header_length < empty_length
+                || header_length > message.msg_controllen
+                || !(header_length - empty_length).is_multiple_of(size_of::<RawFd>())
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "received descriptor was invalid",
+                    "invalid descriptor control length",
                 ));
             }
-            // SAFETY: SCM_RIGHTS installs a new descriptor owned by this
-            // process; wrapping it immediately gives every error path RAII.
-            Some(unsafe { File::from_raw_fd(received_fd) })
+            let descriptor_count = (header_length - empty_length) / size_of::<RawFd>();
+            let mut descriptors = Vec::with_capacity(descriptor_count);
+            for index in 0..descriptor_count {
+                // SAFETY: validated CMSG payload bounds prove each indexed
+                // RawFd lies inside the live ancillary buffer.
+                let received_fd = unsafe {
+                    ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>().add(index))
+                };
+                if received_fd < 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "received descriptor was invalid",
+                    ));
+                }
+                // SAFETY: SCM_RIGHTS installed a new descriptor owned by this
+                // process; immediate wrapping gives every error path RAII.
+                descriptors.push(unsafe { File::from_raw_fd(received_fd) });
+            }
+            if message_flags & libc::MSG_CTRUNC != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated descriptor control message",
+                ));
+            }
+            if descriptors.len() != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "descriptor control message must contain exactly one descriptor",
+                ));
+            }
+            descriptors.pop()
         };
+        if message_flags & libc::MSG_CTRUNC != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated descriptor control message",
+            ));
+        }
         Ok(ReceivedMessage {
             length,
             flags: message_flags,
@@ -482,6 +515,8 @@ pub struct CompositorCore {
     gpu_present_scope: Option<GpuPresentScope>,
     #[cfg(target_os = "android")]
     gpu_present_pending_resource: Option<([u8; GPU_PRESENT_FRAME_BYTES], PresentResource)>,
+    #[cfg(target_os = "android")]
+    gpu_present_pending_fence: Option<([u8; GPU_PRESENT_FRAME_BYTES], u32)>,
     gpu_present_frame_count: u32,
     accepted_client_count: u32,
     active_client_count: Arc<AtomicUsize>,
@@ -12987,6 +13022,8 @@ impl CompositorCore {
             gpu_present_scope: None,
             #[cfg(target_os = "android")]
             gpu_present_pending_resource: None,
+            #[cfg(target_os = "android")]
+            gpu_present_pending_fence: None,
             gpu_present_frame_count: 0,
             accepted_client_count: 0,
             active_client_count: Arc::new(AtomicUsize::new(0)),
@@ -13295,6 +13332,29 @@ impl CompositorCore {
                 Err(error) => return Err(error),
             }
         }
+        #[cfg(target_os = "android")]
+        if let Some((frame, resource_id)) = self.gpu_present_pending_fence.take() {
+            let (present_registry, identity_registry, _) =
+                self.prepare_gpu_present_frame(&frame)?;
+            match self
+                .gpu_present_endpoint
+                .as_mut()
+                .expect("endpoint checked above")
+                .receive_present_fence(resource_id)
+            {
+                Ok(()) => {
+                    self.state.gpu_present_registry = Some(present_registry);
+                    self.state.gpu_surface_identity = Some(identity_registry);
+                    self.gpu_present_frame_count = self.gpu_present_frame_count.saturating_add(1);
+                    count += 1;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.gpu_present_pending_fence = Some((frame, resource_id));
+                    return Ok(count);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         while count < MAX_FRAMES_PER_DISPATCH {
             let frame = {
                 let Some(endpoint) = self.gpu_present_endpoint.as_mut() else {
@@ -13355,10 +13415,34 @@ impl CompositorCore {
                         "GPU resource handles require Android",
                     ));
                 }
-                GpuPresentMessage::Present { .. } => {
+                GpuPresentMessage::Present {
+                    resource_id: _resource_id,
+                    ..
+                } => {
+                    #[cfg(target_os = "android")]
+                    {
+                        let (present_registry, identity_registry, _) =
+                            self.prepare_gpu_present_frame(&frame)?;
+                        match self
+                            .gpu_present_endpoint
+                            .as_mut()
+                            .expect("endpoint checked above")
+                            .receive_present_fence(_resource_id)
+                        {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                self.gpu_present_pending_fence = Some((frame, _resource_id));
+                                break;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                        self.state.gpu_present_registry = Some(present_registry);
+                        self.state.gpu_surface_identity = Some(identity_registry);
+                    }
+                    #[cfg(not(target_os = "android"))]
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
-                        "GPU acquire fences are not connected",
+                        "GPU acquire fences require Android resources",
                     ));
                 }
                 GpuPresentMessage::Release { .. } => {

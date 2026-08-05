@@ -1,7 +1,13 @@
 //! Same-UID fixed-frame Unix transport for the private APHB channel.
+//!
+//! Android Resource frames are followed by one NDK AHardwareBuffer handle.
+//! Present frames are followed by one `0x46` byte carrying exactly one
+//! close-on-exec `SCM_RIGHTS` acquire-fence descriptor.
 
 #![allow(unsafe_code)]
 
+#[cfg(any(target_os = "android", test))]
+use std::fs::File;
 use std::io::{self, Read};
 use std::mem::{size_of, zeroed};
 use std::os::fd::AsRawFd;
@@ -20,6 +26,8 @@ use crate::gpu_present_protocol::GPU_PRESENT_FRAME_BYTES;
 use crate::gpu_present_protocol::PresentResource;
 
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
+#[cfg(any(target_os = "android", test))]
+const FENCE_PACKET_MARKER: u8 = 0x46;
 #[cfg(target_os = "android")]
 const PRESENT_RESOURCE_SLOTS: usize = 3;
 
@@ -27,6 +35,7 @@ const PRESENT_RESOURCE_SLOTS: usize = 3;
 struct ReceivedResource {
     resource_id: u32,
     _buffer: ReceivedHardwareBuffer,
+    acquire_fence: Option<File>,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +161,66 @@ impl GpuPresentEndpoint {
         *slot = None;
         Ok(())
     }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn receive_present_fence(&mut self, resource_id: u32) -> io::Result<()> {
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "GPU helper is not connected")
+        })?;
+        receive_present_fence_from_fd(&mut self.resources, stream.as_raw_fd(), resource_id)
+    }
+}
+
+#[cfg(target_os = "android")]
+fn receive_present_fence_from_fd(
+    resources: &mut [Option<ReceivedResource>; PRESENT_RESOURCE_SLOTS],
+    socket_fd: libc::c_int,
+    resource_id: u32,
+) -> io::Result<()> {
+    let resource = resources
+        .iter_mut()
+        .flatten()
+        .find(|resource| resource.resource_id == resource_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "GPU resource is unknown"))?;
+    if resource.acquire_fence.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "GPU resource already has an acquire fence",
+        ));
+    }
+    resource.acquire_fence = Some(receive_fence_packet(socket_fd)?);
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", test))]
+fn receive_fence_packet(socket_fd: libc::c_int) -> io::Result<File> {
+    let mut marker = [0_u8; 1];
+    let message = crate::syscall_ffi::receive_with_optional_fd(
+        socket_fd,
+        &mut marker,
+        libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC,
+    )?;
+    if message.length == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "GPU helper disconnected before acquire fence",
+        ));
+    }
+    if message.length != marker.len()
+        || message.flags & libc::MSG_TRUNC != 0
+        || marker[0] != FENCE_PACKET_MARKER
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid GPU acquire-fence packet",
+        ));
+    }
+    message.descriptor.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "GPU acquire-fence packet has no descriptor",
+        )
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -200,6 +269,7 @@ fn receive_resource_from_fd(
     *slot = Some(ReceivedResource {
         resource_id: resource.resource_id,
         _buffer: buffer,
+        acquire_fence: None,
     });
     Ok(())
 }
@@ -246,6 +316,22 @@ pub(crate) fn probe_hardware_buffer_transport() -> io::Result<()> {
         .is_some_and(|resource| resource.resource_id == 1)
     {
         return Err(io::Error::other("received GPU resource was not retained"));
+    }
+    let (fence, _) = crate::syscall_ffi::cloexec_pipe()?;
+    if crate::syscall_ffi::send_with_fd(
+        sender.as_raw_fd(),
+        &[FENCE_PACKET_MARKER],
+        fence.as_raw_fd(),
+    )? != 1
+    {
+        return Err(io::Error::other("GPU acquire-fence packet was incomplete"));
+    }
+    receive_present_fence_from_fd(&mut resources, receiver.as_raw_fd(), 1)?;
+    if !resources[0]
+        .as_ref()
+        .is_some_and(|resource| resource.acquire_fence.is_some())
+    {
+        return Err(io::Error::other("GPU acquire fence was not retained"));
     }
     let rejected = send_probe_hardware_buffer(sender.as_raw_fd(), 64, 32)?;
     let rejected_bytes = u64::from(rejected.stride) * u64::from(rejected.height) * 4;
@@ -318,6 +404,7 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::fd::AsRawFd;
 
     #[test]
     fn receives_one_fragmented_same_uid_fixed_frame_and_cleans_up() {
@@ -395,5 +482,37 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn receives_exactly_one_cloexec_fence_descriptor() {
+        let (mut sender, receiver) = UnixStream::pair().expect("socket pair");
+        receiver
+            .set_nonblocking(true)
+            .expect("nonblocking receiver");
+        let (fence, _) = crate::syscall_ffi::cloexec_pipe().expect("fence pipe");
+        assert_eq!(
+            crate::syscall_ffi::send_with_fd(
+                sender.as_raw_fd(),
+                &[FENCE_PACKET_MARKER],
+                fence.as_raw_fd(),
+            )
+            .expect("send fence"),
+            1
+        );
+        let received = receive_fence_packet(receiver.as_raw_fd()).expect("receive fence");
+        // SAFETY: F_GETFD reads flags from the live owned descriptor.
+        let flags = unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+
+        sender
+            .write_all(&[FENCE_PACKET_MARKER])
+            .expect("send missing descriptor marker");
+        assert_eq!(
+            receive_fence_packet(receiver.as_raw_fd())
+                .expect_err("invalid marker")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }
