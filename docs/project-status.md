@@ -314,6 +314,17 @@ production certificate gate for signed artifacts. Existing release-signing
 secrets are present, and the draft-first workflow source contract passes. No tag
 or remote release was created during this audit.
 
+The release workflow now generates a deterministic SPDX 2.3 file-level SBOM for
+each signed manager and Builder APK. Every ZIP entry carries SHA-1 and SHA-256,
+the package verification code follows the SPDX sorted-hash algorithm, and the
+document binds the complete APK SHA-256 to its release version and full source
+commit. Verification independently rebuilds the canonical document and rejects
+changed APK content, metadata, source revision, or file digests. A synthetic
+determinism/tamper contract passes, and generated inventories verify against all
+four local x86_64/arm64-v8a manager/Builder release artifacts. Licenses remain
+`NOASSERTION` in this file inventory until the separate component-license and
+notice audit is complete.
+
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
 SM-S908U. They prove cold launch, full-device insets and screenshots, touch
 batching, Activity recreation, HOME/resume continuity, Back shutdown, private

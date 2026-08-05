@@ -12,7 +12,9 @@ Choose assets matching the Android device ABI:
 - ARM64: `Archphene-arm64-v8a-<version>.apk`
 - x86_64: `Archphene-x86_64-<version>.apk`
 
-Verify the matching `.apk.sha256` file before installation. Install the matching
+Verify the matching `.apk.sha256` file before installation. Each APK also has a
+checksummed SPDX 2.3 `.apk.spdx.json` file inventory bound to the source commit.
+Install the matching
 `Archphene-Builder-<abi>-<version>.apk` only when AUR builds are needed. The
 Builder has no launcher Activity or Android network permission and must have the
 same production signer as the manager.

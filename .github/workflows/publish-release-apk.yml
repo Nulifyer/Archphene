@@ -52,6 +52,8 @@ jobs:
           {
             echo "VERSION_NAME=$version_name"
             echo "VERSION_CODE=$((1000000000 + GITHUB_RUN_NUMBER))"
+            echo "SOURCE_REVISION=$(git rev-parse HEAD)"
+            echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)"
             echo "APK_X86_NAME=Archphene-x86_64-$version_name.apk"
             echo "APK_ARM64_NAME=Archphene-arm64-v8a-$version_name.apk"
             echo "BUILDER_X86_NAME=Archphene-Builder-x86_64-$version_name.apk"
@@ -61,6 +63,7 @@ jobs:
       - name: Validate release contracts
         run: |
           python3 scripts/test-release-workflow-contract.py
+          python3 scripts/test-release-sbom.py
           python3 scripts/test-atspi-source-contract.py
 
       - name: Ensure release is a draft
@@ -275,6 +278,22 @@ jobs:
               -c -P 16 -v 4 "$asset"
             sha256sum "$asset" | sed "s|  .*|  $name|" \
               > "$asset.sha256"
+            sbom="$asset.spdx.json"
+            python3 scripts/release-sbom.py generate \
+              --apk "$asset" \
+              --artifact-name "$name" \
+              --version "$VERSION_NAME" \
+              --source-revision "$SOURCE_REVISION" \
+              --source-date-epoch "$SOURCE_DATE_EPOCH" \
+              --output "$sbom"
+            python3 scripts/release-sbom.py verify \
+              --apk "$asset" \
+              --sbom "$sbom" \
+              --artifact-name "$name" \
+              --version "$VERSION_NAME" \
+              --source-revision "$SOURCE_REVISION"
+            sha256sum "$sbom" | sed "s|  .*|  $name.spdx.json|" \
+              > "$sbom.sha256"
           done
 
       - name: Upload workflow artifacts
@@ -284,19 +303,22 @@ jobs:
           path: |
             ${{ runner.temp }}/Archphene-*.apk
             ${{ runner.temp }}/Archphene-*.apk.sha256
+            ${{ runner.temp }}/Archphene-*.apk.spdx.json
+            ${{ runner.temp }}/Archphene-*.apk.spdx.json.sha256
           if-no-files-found: error
 
       - name: Attach APKs and publish release
         run: |
-          assets=(
-            "$RUNNER_TEMP/$APK_X86_NAME"
-            "$RUNNER_TEMP/$APK_X86_NAME.sha256"
-            "$RUNNER_TEMP/$APK_ARM64_NAME"
-            "$RUNNER_TEMP/$APK_ARM64_NAME.sha256"
-            "$RUNNER_TEMP/$BUILDER_X86_NAME"
-            "$RUNNER_TEMP/$BUILDER_X86_NAME.sha256"
-            "$RUNNER_TEMP/$BUILDER_ARM64_NAME"
-            "$RUNNER_TEMP/$BUILDER_ARM64_NAME.sha256"
-          )
+          assets=()
+          for name in \
+            "$APK_X86_NAME" "$APK_ARM64_NAME" \
+            "$BUILDER_X86_NAME" "$BUILDER_ARM64_NAME"; do
+            assets+=(
+              "$RUNNER_TEMP/$name"
+              "$RUNNER_TEMP/$name.sha256"
+              "$RUNNER_TEMP/$name.spdx.json"
+              "$RUNNER_TEMP/$name.spdx.json.sha256"
+            )
+          done
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           gh release edit "$RELEASE_TAG" --draft=false
