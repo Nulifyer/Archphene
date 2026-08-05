@@ -294,6 +294,11 @@ and reproducible artifacts.
     `android/app`. Use the new-product `org.archpheneos.manager` identity, inject
     the tag version, emit exact-ABI assets, and update the verifier before
     creating a new tag.
+  - [x] Derive target-filtered manager and Builder Rust runtime closures from
+    locked Cargo metadata and include package URLs, source checksums, and
+    declared licenses in each verified SPDX release SBOM.
+  - [ ] Finish the canonical native/runtime component inventory, required
+    notices and license texts, and corresponding-source or relinking audit.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,
   status, changelog, support policy, and release notes from proven behavior.
 

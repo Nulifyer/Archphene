@@ -63,6 +63,7 @@ jobs:
       - name: Validate release contracts
         run: |
           python3 scripts/test-release-workflow-contract.py
+          python3 scripts/test-release-rust-components.py
           python3 scripts/test-release-sbom.py
           python3 scripts/test-release-license-contract.py
           python3 scripts/test-legacy-migration-contract.py
@@ -136,6 +137,28 @@ jobs:
             install -Dm755 \
               "tooling/build/release-rust/$target/release/libarchphene_compositor.so" \
               "android/app/build/generated/compositorJniLibs/$abi/libarchphene_compositor.so"
+          done
+          component_dir=tooling/build/release-rust-components
+          mkdir -p "$component_dir"
+          for target in x86_64-linux-android aarch64-linux-android; do
+            metadata="$component_dir/metadata-$target.json"
+            docker run --rm --network=none \
+              -v "$PWD:/workspace" \
+              -v archphene-cargo-registry:/opt/cargo/registry \
+              -w /workspace \
+              -e RUSTUP_TOOLCHAIN=1.88.0 \
+              archphene-android-native:release \
+              cargo metadata --offline --locked \
+                --filter-platform "$target" --format-version 1 > "$metadata"
+            python3 scripts/release-rust-components.py \
+              --metadata "$metadata" --lock Cargo.lock --target "$target" \
+              --root archphene-android --root archphene-compositor \
+              --output "$component_dir/manager-$target.json"
+            python3 scripts/release-rust-components.py \
+              --metadata "$metadata" --lock Cargo.lock --target "$target" \
+              --root archphene-builder \
+              --output "$component_dir/builder-$target.json"
+            rm "$metadata"
           done
 
       - name: Build Android capability and desktop integration payloads
@@ -280,6 +303,17 @@ jobs:
               -c -P 16 -v 4 "$asset"
             sha256sum "$asset" | sed "s|  .*|  $name|" \
               > "$asset.sha256"
+            if [[ "$name" == *-arm64-v8a-* ]]; then
+              rust_target=aarch64-linux-android
+            else
+              rust_target=x86_64-linux-android
+            fi
+            if [[ "$name" == Archphene-Builder-* ]]; then
+              component_role=builder
+            else
+              component_role=manager
+            fi
+            components="tooling/build/release-rust-components/$component_role-$rust_target.json"
             sbom="$asset.spdx.json"
             python3 scripts/release-sbom.py generate \
               --apk "$asset" \
@@ -287,13 +321,17 @@ jobs:
               --version "$VERSION_NAME" \
               --source-revision "$SOURCE_REVISION" \
               --source-date-epoch "$SOURCE_DATE_EPOCH" \
+              --rust-components "$components" \
+              --rust-target "$rust_target" \
               --output "$sbom"
             python3 scripts/release-sbom.py verify \
               --apk "$asset" \
               --sbom "$sbom" \
               --artifact-name "$name" \
               --version "$VERSION_NAME" \
-              --source-revision "$SOURCE_REVISION"
+              --source-revision "$SOURCE_REVISION" \
+              --rust-components "$components" \
+              --rust-target "$rust_target"
             sha256sum "$sbom" | sed "s|  .*|  $name.spdx.json|" \
               > "$sbom.sha256"
           done
