@@ -54,6 +54,7 @@ required_workflow = (
     "Archphene-glibc-source-$version_name.zip",
     "python3 scripts/release-glibc-source.py generate",
     "python3 scripts/release-glibc-source.py verify",
+    'bash scripts/build-mesa-virpipe-sender-podman.sh "$architecture"',
     "python3 scripts/test-legacy-migration-contract.py",
     "python3 scripts/release-sbom.py generate",
     "python3 scripts/release-sbom.py verify",

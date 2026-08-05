@@ -3,10 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCHITECTURE="${1:-x86_64}"
+CONTAINER_CLI="${CONTAINER_CLI:-podman}"
 
 case "$ARCHITECTURE" in
   x86_64)
-    exec podman run --rm \
+    exec "$CONTAINER_CLI" run --rm \
       -v "$ROOT:/workspace:Z" \
       -w /workspace \
       docker.io/library/archlinux:base-devel \
@@ -19,7 +20,7 @@ case "$ARCHITECTURE" in
       '
     ;;
   aarch64)
-    exec podman run --rm --platform linux/amd64 \
+    exec "$CONTAINER_CLI" run --rm --platform linux/amd64 \
       -v "$ROOT:/workspace:Z" \
       -w /workspace \
       docker.io/library/debian:trixie \

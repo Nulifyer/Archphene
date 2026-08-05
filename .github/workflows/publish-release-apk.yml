@@ -299,6 +299,10 @@ jobs:
       - name: Build Android GPU helpers
         run: |
           for architecture in x86_64 aarch64; do
+            CONTAINER_CLI=docker \
+              bash scripts/build-mesa-virpipe-sender-podman.sh "$architecture"
+          done
+          for architecture in x86_64 aarch64; do
             docker run --rm \
               -v "$PWD:/workspace" \
               -w /workspace \
