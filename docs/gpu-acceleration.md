@@ -249,7 +249,9 @@ loader sends the returned helper generation, resource ID, and exact 64-bit
 sequence through `set_resource` before the same `wl_surface.commit`. It activates
 only with `ARCHPHENE_AHB_PRESENT=1`, a valid
 `ARCHPHENE_GPU_HELPER_GENERATION`, and the private compositor global; otherwise
-Mesa retains `wl_shm`. Reproducible x86_64 and AArch64 builds pass. Production
+Mesa retains `wl_shm`. After flushing that exact commit, the DRI loader performs
+command 41 before `eglSwapBuffers` returns, preventing rendering from reusing the
+resource early. Reproducible x86_64 and AArch64 builds pass. Production
 remains disabled until those install trees are staged and the manager presents
 the received helper AHB and returns its SurfaceFlinger release.
 

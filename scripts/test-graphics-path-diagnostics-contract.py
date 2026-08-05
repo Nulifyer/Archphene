@@ -192,6 +192,12 @@ require(
     "missing Archphene GPU identity",
 )
 require(
+    "native/mesa-virpipe-sender/patches/0002-wait-release-after-commit.patch",
+    "driSWRastFinishPresent",
+    "archphene_finish_present",
+    "finish_present_data",
+)
+require(
     "native/android-gpu-helper/patches/0010-archphene-release-receive.patch",
     "VCMD_ARCHPHENE_WAIT_RELEASE_AHB 41",
     "vtest_server_receive_archphene_release",

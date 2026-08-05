@@ -11,9 +11,9 @@ The patch adds three bounded operations:
 - It obtains the exact 64-bit Present sequence through command `40` and sends
   that identity through `org_archphene_gpu_surface_v1.set_resource` before the
   same surface commit.
-- It waits for command `41` before reusing or destroying a resource, so the
-  helper cannot overwrite a buffer before the manager returns SurfaceFlinger
-  ownership.
+- After the exact Wayland commit is flushed, it waits for command `41` before
+  `eglSwapBuffers` returns or the resource is destroyed. The application cannot
+  begin rendering the next frame before the manager returns ownership.
 
 The path activates only when `ARCHPHENE_AHB_PRESENT=1`,
 `ARCHPHENE_GPU_HELPER_GENERATION` is a valid nonzero 32-bit integer, and the

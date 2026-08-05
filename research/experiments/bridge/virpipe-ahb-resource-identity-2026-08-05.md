@@ -95,9 +95,10 @@ probe completed sequences 1 and 2 around marker-only Release (`46,52,46`).
 The generic Mesa/Wayland sender is now implemented as a pinned Mesa 26.1.5
 patch. Eligible 8-bit RGBA/BGRA display targets use private commands 39 and 40,
 send the returned exact identity through `set_resource` before the same surface
-commit, and wait on command 41 before reuse. The path requires explicit
-activation, a valid helper generation, and the private Wayland global; otherwise
-Mesa retains `wl_shm`. Reproducible x86_64 and AArch64 builds pass. Production
+commit, then wait on command 41 before `eglSwapBuffers` returns. The path
+requires explicit activation, a valid helper generation, and the private
+Wayland global; otherwise Mesa retains `wl_shm`. Reproducible x86_64 and AArch64
+builds pass. Production
 and the manager's SurfaceFlinger-backed Release sender remain disabled because
 the custom Mesa install tree is not staged and received helper AHBs are not yet
 submitted to Android presentation.
