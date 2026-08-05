@@ -318,6 +318,10 @@ and reproducible artifacts.
     exact historical package-recipe commit and verify all downloaded bytes.
   - [x] Publish deterministic corresponding source, build-framework snapshots,
     and indexed licenses for all 14 Termux PulseAudio closure packages.
+  - [ ] Replace or reconstruct the GTK x86_64 and AArch64 prebuilts from fully
+    pinned source/package/toolchain inputs and prove exact release hashes.
+  - [ ] Replace the floating Arch x86_64 and AArch64 package-runtime transactions
+    with immutable package/source locks and corresponding license inventories.
   - [ ] Resolve every recorded native/runtime notice, license-text,
     reproducibility, provenance, corresponding-source, and relinking blocker.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,
