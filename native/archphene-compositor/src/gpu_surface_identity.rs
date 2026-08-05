@@ -33,7 +33,8 @@ pub(crate) enum GpuSurfaceIdentityError {
 #[derive(Clone, Copy)]
 struct ResourceState {
     resource_id: u32,
-    last_fence_sequence: u64,
+    presented_fence_sequence: u64,
+    claimed_fence_sequence: u64,
 }
 
 struct SurfaceBinding {
@@ -97,8 +98,29 @@ impl GpuSurfaceIdentityRegistry {
         };
         *slot = Some(ResourceState {
             resource_id,
-            last_fence_sequence: 0,
+            presented_fence_sequence: 0,
+            claimed_fence_sequence: 0,
         });
+        Ok(())
+    }
+
+    pub(crate) fn present_resource(
+        &mut self,
+        resource_id: u32,
+        fence_sequence: u64,
+    ) -> Result<(), GpuSurfaceIdentityError> {
+        let Some(resource) = self
+            .resources
+            .iter_mut()
+            .flatten()
+            .find(|resource| resource.resource_id == resource_id)
+        else {
+            return Err(GpuSurfaceIdentityError::UnknownResource);
+        };
+        if fence_sequence == 0 || fence_sequence <= resource.presented_fence_sequence {
+            return Err(GpuSurfaceIdentityError::StaleFence);
+        }
+        resource.presented_fence_sequence = fence_sequence;
         Ok(())
     }
 
@@ -199,8 +221,11 @@ impl GpuSurfaceIdentityRegistry {
         else {
             return Err(GpuSurfaceIdentityError::UnknownResource);
         };
-        if identity.fence_sequence <= resource.last_fence_sequence {
+        if identity.fence_sequence <= resource.claimed_fence_sequence {
             return Err(GpuSurfaceIdentityError::StaleFence);
+        }
+        if identity.fence_sequence != resource.presented_fence_sequence {
+            return Err(GpuSurfaceIdentityError::InvalidIdentity);
         }
         let Some(binding) = self
             .bindings
@@ -209,7 +234,7 @@ impl GpuSurfaceIdentityRegistry {
         else {
             return Err(GpuSurfaceIdentityError::UnknownBinding);
         };
-        resource.last_fence_sequence = identity.fence_sequence;
+        resource.claimed_fence_sequence = identity.fence_sequence;
         binding.pending = Some(Some(identity));
         Ok(())
     }
@@ -332,6 +357,13 @@ mod tests {
             registry.set_resource(1, identity(7, 14, 1)),
             Err(GpuSurfaceIdentityError::UnknownResource)
         );
+        assert_eq!(
+            registry.set_resource(1, identity(7, 11, 1)),
+            Err(GpuSurfaceIdentityError::InvalidIdentity)
+        );
+        registry
+            .present_resource(11, 1)
+            .expect("authenticated present");
         registry
             .set_resource(1, identity(7, 11, 1))
             .expect("scoped identity");
@@ -343,12 +375,14 @@ mod tests {
         let mut registry = GpuSurfaceIdentityRegistry::new(1).expect("registry");
         registry.bind_surface(1, 100).expect("binding");
         registry.register_resource(5).expect("resource");
+        registry.present_resource(5, 9).expect("first present");
         registry
             .set_resource(1, identity(1, 5, 9))
             .expect("identity");
         assert_eq!(registry.commit(1, true), Ok(Some(identity(1, 5, 9))));
         assert_eq!(registry.commit(1, false), Ok(Some(identity(1, 5, 9))));
         assert_eq!(registry.commit(1, true), Ok(None));
+        registry.present_resource(5, 10).expect("second present");
         registry
             .set_resource(1, identity(1, 5, 10))
             .expect("next identity");
@@ -362,6 +396,7 @@ mod tests {
         registry.register_resource(8).expect("resource");
         registry.bind_surface(1, 100).expect("first binding");
         registry.bind_surface(2, 200).expect("second binding");
+        registry.present_resource(8, 12).expect("present");
         registry
             .set_resource(1, identity(3, 8, 12))
             .expect("new fence");
@@ -380,6 +415,7 @@ mod tests {
         let mut registry = GpuSurfaceIdentityRegistry::new(2).expect("registry");
         registry.bind_surface(1, 100).expect("binding");
         registry.register_resource(4).expect("resource");
+        registry.present_resource(4, 1).expect("present");
         registry
             .set_resource(1, identity(2, 4, 1))
             .expect("identity");

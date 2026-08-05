@@ -111,6 +111,8 @@ require(
     "DuplicateSurface",
     "StaleFence",
     "standard_buffer_updated",
+    "present_resource",
+    "identity.fence_sequence != resource.presented_fence_sequence",
     "helper_replacement_and_resource_release_clear_committed_identity",
 )
 require(
@@ -132,6 +134,7 @@ require(
     "native/archphene-compositor/src/lib.rs",
     "enable_gpu_surface_identity",
     "register_gpu_surface_resource",
+    "present_gpu_surface_resource",
     "private_gpu_identity_latches_on_the_exact_surface_commit",
     "binding.set_resource(9, 44, 1, 2)",
     "binding.clear()",

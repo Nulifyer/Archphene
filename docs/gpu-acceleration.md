@@ -191,7 +191,8 @@ The manager-side Wayland half of that identity contract is now specified as
 resource ID, and 64-bit fence sequence into one exact `wl_surface.commit`.
 Thirty-two unique surface bindings and three resources are hard limits. The
 state machine rejects duplicate bindings/surfaces/resources, unknown resources,
-cross-generation identities, and non-increasing fences; normal `wl_buffer`
+cross-generation identities, non-increasing presents, replayed claims, and any
+claim that does not exactly match the last authenticated present; normal `wl_buffer`
 replacement and explicit clear remove committed GPU identity, while damage-only
 commits retain it. Five unit tests cover these transitions. The XML passes
 `wayland-scanner` server-header and private-code generation. Generated Rust

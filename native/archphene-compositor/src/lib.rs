@@ -12885,6 +12885,19 @@ impl CompositorCore {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
     }
 
+    pub fn present_gpu_surface_resource(
+        &mut self,
+        resource_id: u32,
+        fence_sequence: u64,
+    ) -> std::io::Result<()> {
+        self.state
+            .gpu_surface_identity
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
+            .present_resource(resource_id, fence_sequence)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
+    }
+
     pub fn replace_gpu_surface_helper(&mut self, helper_generation: u32) -> std::io::Result<()> {
         self.state
             .gpu_surface_identity
@@ -19920,6 +19933,8 @@ mod tests {
                 .expect("enable private GPU identity");
             core.register_gpu_surface_resource(44)
                 .expect("register private GPU resource");
+            core.present_gpu_surface_resource(44, 0x1_0000_0002)
+                .expect("authenticate private GPU present");
             core.bind_socket(&server_socket).expect("bind socket");
             while server_stage.load(Ordering::Acquire) != 3 {
                 core.dispatch_once().expect("dispatch GPU identity client");
