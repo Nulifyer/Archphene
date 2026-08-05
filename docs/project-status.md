@@ -281,6 +281,18 @@ panic-abort, and symbol stripping. Broad package, compositor, and Builder paths
 remain outside the baseline profiles and continue to be governed by the
 existing debug allocation, JNI, latency, memory, lifecycle, and soak gates.
 
+The greenfield manager is not ready for tag publication. Its local unsigned
+release APK passes the optimization gate, but still identifies as
+`org.archphene.app` version `0.1.0` with both ABIs. The current tag workflow and
+`verify-release-apk.sh` still build and validate
+`prototypes/linux-app-manager-stub` as `org.archpheneos.manager`. Publishing a
+new tag now would therefore release the legacy manager rather than the tested
+greenfield application. Release migration must first resolve the production
+package/update identity, inject the tag version, build separate ABI artifacts,
+and teach the verifier the new package contract. Existing release-signing
+secrets are present, and the draft-first workflow source contract passes; no tag
+or remote release was created during this audit.
+
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
 SM-S908U. They prove cold launch, full-device insets and screenshots, touch
 batching, Activity recreation, HOME/resume continuity, Back shutdown, private
