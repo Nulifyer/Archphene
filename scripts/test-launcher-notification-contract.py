@@ -50,7 +50,7 @@ require(
 )
 require(
     ROOT / "docs/android-capabilities.md",
-    "## Current production launcher contract",
+    "## Current production app-shell contract",
     "first notification",
     "wrapper APK owns the resulting Android notification",
 )
