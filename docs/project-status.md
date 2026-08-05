@@ -363,7 +363,8 @@ restarting entered normal onboarding, started the runtime Service, and reached
 the package runtime; the isolated package was then uninstalled.
 
 Both exact-ABI release pairs remained byte-identical across repeated
-`1.1.0-rc.7`, code `1000001240`, builds. Manager SHA-256 values are
+`1.1.0-rc.7`, code `1000001240`, builds from implementation commit
+`2def1311de95741b3ae3dafb370c150dd2baa5a9`. Manager SHA-256 values are
 `fefaa18d485b35bfeda1ec538fa5a066f954194c920e260953cd6e51b605b0a4`
 for x86_64 and
 `593fb373f0856283591f3d04bdd110ed1f0d13edb664239b0e5aecfdbba3bbec`
