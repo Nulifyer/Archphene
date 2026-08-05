@@ -1,8 +1,9 @@
 //! Same-UID fixed-frame Unix transport for the private APHB channel.
 //!
 //! Android Resource frames are followed by one NDK AHardwareBuffer handle.
-//! Present frames are followed by one `0x46` byte carrying exactly one
-//! close-on-exec `SCM_RIGHTS` acquire-fence descriptor.
+//! Present frames are followed by one `0x46` byte and zero or one close-on-exec
+//! `SCM_RIGHTS` acquire-fence descriptor. No descriptor means rendering was
+//! conservatively completed before the marker was sent.
 
 #![allow(unsafe_code)]
 
@@ -35,7 +36,13 @@ const PRESENT_RESOURCE_SLOTS: usize = 3;
 struct ReceivedResource {
     resource_id: u32,
     _buffer: ReceivedHardwareBuffer,
-    acquire_fence: Option<File>,
+    acquire: Option<AcquireState>,
+}
+
+#[cfg(target_os = "android")]
+enum AcquireState {
+    Complete,
+    Fence { _descriptor: File },
 }
 
 #[derive(Clone, Copy)]
@@ -182,18 +189,21 @@ fn receive_present_fence_from_fd(
         .flatten()
         .find(|resource| resource.resource_id == resource_id)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "GPU resource is unknown"))?;
-    if resource.acquire_fence.is_some() {
+    if resource.acquire.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "GPU resource already has an acquire fence",
+            "GPU resource already has an acquire state",
         ));
     }
-    resource.acquire_fence = Some(receive_fence_packet(socket_fd)?);
+    resource.acquire = Some(match receive_fence_packet(socket_fd)? {
+        Some(fence) => AcquireState::Fence { _descriptor: fence },
+        None => AcquireState::Complete,
+    });
     Ok(())
 }
 
 #[cfg(any(target_os = "android", test))]
-fn receive_fence_packet(socket_fd: libc::c_int) -> io::Result<File> {
+fn receive_fence_packet(socket_fd: libc::c_int) -> io::Result<Option<File>> {
     let mut marker = [0_u8; 1];
     let message = crate::syscall_ffi::receive_with_optional_fd(
         socket_fd,
@@ -215,12 +225,7 @@ fn receive_fence_packet(socket_fd: libc::c_int) -> io::Result<File> {
             "invalid GPU acquire-fence packet",
         ));
     }
-    message.descriptor.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "GPU acquire-fence packet has no descriptor",
-        )
-    })
+    Ok(message.descriptor)
 }
 
 #[cfg(target_os = "android")]
@@ -269,7 +274,7 @@ fn receive_resource_from_fd(
     *slot = Some(ReceivedResource {
         resource_id: resource.resource_id,
         _buffer: buffer,
-        acquire_fence: None,
+        acquire: None,
     });
     Ok(())
 }
@@ -329,9 +334,34 @@ pub(crate) fn probe_hardware_buffer_transport() -> io::Result<()> {
     receive_present_fence_from_fd(&mut resources, receiver.as_raw_fd(), 1)?;
     if !resources[0]
         .as_ref()
-        .is_some_and(|resource| resource.acquire_fence.is_some())
+        .is_some_and(|resource| matches!(resource.acquire, Some(AcquireState::Fence { .. })))
     {
         return Err(io::Error::other("GPU acquire fence was not retained"));
+    }
+    let completed = send_probe_hardware_buffer(sender.as_raw_fd(), 64, 32)?;
+    let completed_bytes = u64::from(completed.stride) * u64::from(completed.height) * 4;
+    receive_resource_from_fd(
+        &mut resources,
+        receiver.as_raw_fd(),
+        PresentResource {
+            resource_id: 3,
+            slot: 2,
+            width: 64,
+            height: 32,
+            estimated_bytes: completed_bytes,
+        },
+    )?;
+    if crate::syscall_ffi::write(sender.as_raw_fd(), &[FENCE_PACKET_MARKER])? != 1 {
+        return Err(io::Error::other("GPU completed marker was incomplete"));
+    }
+    receive_present_fence_from_fd(&mut resources, receiver.as_raw_fd(), 3)?;
+    if !resources[2]
+        .as_ref()
+        .is_some_and(|resource| matches!(resource.acquire, Some(AcquireState::Complete)))
+    {
+        return Err(io::Error::other(
+            "GPU completed acquire state was not retained",
+        ));
     }
     let rejected = send_probe_hardware_buffer(sender.as_raw_fd(), 64, 32)?;
     let rejected_bytes = u64::from(rejected.stride) * u64::from(rejected.height) * 4;
@@ -500,14 +530,22 @@ mod tests {
             .expect("send fence"),
             1
         );
-        let received = receive_fence_packet(receiver.as_raw_fd()).expect("receive fence");
+        let received = receive_fence_packet(receiver.as_raw_fd())
+            .expect("receive fence")
+            .expect("fence descriptor");
         // SAFETY: F_GETFD reads flags from the live owned descriptor.
         let flags = unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) };
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
 
         sender
             .write_all(&[FENCE_PACKET_MARKER])
-            .expect("send missing descriptor marker");
+            .expect("send completed marker");
+        assert!(
+            receive_fence_packet(receiver.as_raw_fd())
+                .expect("receive completed marker")
+                .is_none()
+        );
+        sender.write_all(&[0]).expect("send invalid marker");
         assert_eq!(
             receive_fence_packet(receiver.as_raw_fd())
                 .expect_err("invalid marker")

@@ -158,9 +158,10 @@ copying.
   - [x] Receive Resource handles through the Android NDK, validate exact RGBA
     dimensions, stride-backed byte accounting, layers, usage, and reserved
     fields, and retain at most three handles until idle DropResource.
-  - [x] Receive exactly one close-on-exec acquire-fence descriptor after each
-    Present frame, retry incomplete nonblocking packets before frame parsing,
-    and retain at most one outstanding fence per resource.
+  - [x] Receive one Present marker with zero or one close-on-exec acquire-fence
+    descriptor, retry incomplete nonblocking packets before frame parsing, and
+    retain one explicit acquire state per resource. Marker-only means the helper
+    completed rendering conservatively before send.
   - [ ] Connect the contracts to a generic Mesa virpipe winsys extension and the
     helper's Resource/Present/Release sender.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before

@@ -170,6 +170,7 @@ require(
     "AHardwareBuffer does not match the declared GPU resource",
     "FENCE_PACKET_MARKER: u8 = 0x46",
     "receive_fence_packet",
+    "AcquireState::Complete",
     "receives_exactly_one_cloexec_fence_descriptor",
     "probe_hardware_buffer_transport",
     "disconnect_discards_partial_frame_before_replacement",

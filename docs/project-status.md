@@ -4096,11 +4096,13 @@ Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release
 carries the exact Present sequence and will carry one SurfaceFlinger release
 fence. The registry rejects a second Present or drop while ownership is
 outstanding, stale/mismatched release, and inbound Release on the manager
-endpoint. Present now requires one marker byte with exactly one `SCM_RIGHTS`
-acquire-fence descriptor. Receipt is nonblocking and close-on-exec, retains at
-most one fence per resource, and retries would-block before parsing another
-frame. A host test rejects a missing descriptor; the Samsung round trip includes
-the valid descriptor path. Fence consumption and manager-to-helper release-fence
+endpoint. Present now requires one marker byte with zero or one `SCM_RIGHTS`
+acquire-fence descriptor. A descriptor is close-on-exec; marker-only records
+that the helper completed rendering conservatively before send. Receipt is
+nonblocking, retains one explicit acquire state per resource, and retries
+would-block before parsing another frame. Host tests cover both forms and reject
+a wrong marker; the Samsung round trip includes the descriptor path. Fence
+consumption and manager-to-helper release-fence
 transfer are still unimplemented.
 
 API 36 per-buffer release handling is implemented behind runtime symbol

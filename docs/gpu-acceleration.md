@@ -243,10 +243,12 @@ API 35 Samsung round trip accepted a valid 64×32 buffer on a nonblocking Unix
 socket and atomically rejected a mismatched declaration. The host core test
 continues to return `Unsupported` for Resource because AHardwareBuffer is
 Android-only. An Android Present must be followed by one marker byte carrying
-exactly one `SCM_RIGHTS` acquire-fence descriptor. The descriptor arrives with
-`FD_CLOEXEC`, is retained once per resource, and a would-block packet is retried
-before another APHB frame is read. A host test rejects a missing descriptor and
-the Samsung round trip exercises the same nonblocking receive path. Production
+zero or one `SCM_RIGHTS` acquire-fence descriptor. A descriptor arrives with
+`FD_CLOEXEC`; no descriptor means the helper completed rendering conservatively
+before sending the marker. One explicit acquire state is retained per resource,
+and a would-block packet is retried before another APHB frame is read. Host tests
+cover both forms and reject a wrong marker; the Samsung round trip exercises the
+descriptor form on the same nonblocking receive path. Production
 does not bind this endpoint yet because fence consumption, release return, and
 the helper sender remain absent.
 

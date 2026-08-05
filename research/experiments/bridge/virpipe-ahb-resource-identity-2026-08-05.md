@@ -94,11 +94,12 @@ metadata and stride-backed byte declaration, and retains it until idle
 DropResource. Resource and DropResource commit native-handle and identity state
 transactionally. A live API 35 Samsung nonblocking socket probe accepted a valid
 64×32 AHB and atomically rejected a mismatched declaration. Present now consumes
-one marker byte carrying exactly one close-on-exec `SCM_RIGHTS` acquire-fence
-descriptor, retains one per resource, and retries would-block before reading
-another frame. The host test rejects a missing descriptor, and the Samsung probe
-exercises the valid nonblocking path. Fence consumption and release return remain
-open.
+one marker byte carrying zero or one close-on-exec `SCM_RIGHTS` acquire-fence
+descriptor. Marker-only means the helper conservatively completed rendering
+before send. The endpoint retains one explicit acquire state per resource and
+retries would-block before reading another frame. Host tests cover both forms
+and reject a wrong marker; the Samsung probe exercises the descriptor form.
+Fence consumption and release return remain open.
 
 APHB now distinguishes per-frame release from resource destruction. Present
 allows one outstanding sequence per resource. The manager must return Release
