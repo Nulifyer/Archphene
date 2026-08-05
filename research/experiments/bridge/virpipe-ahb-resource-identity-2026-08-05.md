@@ -68,7 +68,7 @@ resource ID, and split 64-bit fence sequence into one exact surface commit. The
 bounded state machine enforces unique surfaces, three known resources, monotonic
 fences, helper replacement, resource release, standard-buffer replacement, and
 damage-only retention. This closes the manager contract ambiguity; Mesa sender,
-vtest/AHB transport, and manager receiver implementation remain required before
+vtest Resource/Present transport, and manager fence receipt remain required before
 production can enable the global. Generated Rust bindings and an opt-in
 client/server socket test now prove exact set/commit and clear/commit latching.
 The test no longer inserts identity resources directly: it authenticates Hello,
@@ -80,16 +80,21 @@ The Android vtest helper now has a dormant strict APHB Hello sender. It accepts
 the present socket, session ID, helper generation, and 128-bit token only as one
 complete configuration and sends Hello before exposing vtest. Both ABI builds
 pass, and a same-UID Samsung listener received the exact 64-byte frame. Current
-manager launches intentionally omit the arguments until the receiver exists;
-resource allocation, AHB handle transfer, Present/fence production, and Release
-remain unimplemented.
+manager launches intentionally omit the arguments until the complete sender and
+fence path exists; resource allocation, Present/fence production, and Release
+remain unimplemented in the helper.
 
 The compositor now has a dormant same-UID fixed-frame listener. It bounds path
 length and frames per dispatch, validates `SO_PEERCRED`, safely reassembles
 fragments, drops partial state on helper replacement, and preserves a socket
-that replaced its own inode. Scoped Hello passes end to end in a core test.
-Resource and Present deliberately return `Unsupported` until the receiver can
-consume the immediately following AHB native handle and production fence.
+that replaced its own inode. Scoped Hello passes end to end in a core test. The
+Android endpoint now consumes the immediately following AHB native handle,
+retries would-block before reading another frame, validates its exact bounded
+metadata and stride-backed byte declaration, and retains it until idle
+DropResource. Resource and DropResource commit native-handle and identity state
+transactionally. A live API 35 Samsung nonblocking socket probe accepted a valid
+64×32 AHB and atomically rejected a mismatched declaration. Present still
+returns `Unsupported` until acquire-fence receipt is connected.
 
 APHB now distinguishes per-frame release from resource destruction. Present
 allows one outstanding sequence per resource. The manager must return Release

@@ -4047,7 +4047,7 @@ identity, requires an exact match to the latest authenticated present before a
 Wayland claim can latch, clears all identities on helper replacement/resource
 release, lets a normal `wl_buffer` replace GPU identity, and retains identity for damage-only
 commits. Five tests pass, and `wayland-scanner` accepts the XML. Mesa/vtest
-sender integration and the authenticated manager AHB receiver remain open. An
+sender integration and manager acquire-fence receipt remain open. An
 additional generated client/server socket test enables the otherwise dormant
 global, binds one surface, latches one scoped identity on the exact commit, and
 clears it on the next commit. Production does not enable the global, so no new
@@ -4059,8 +4059,8 @@ Resource/Present/Release frames; duplicate Hello and pre-handshake traffic fail.
 Each frame is applied to cloned APHB and Wayland identity registries and becomes
 visible only when both transitions succeed. The generated-client socket test
 uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
-claiming the exact surface commit. Native handle receipt and helper/Mesa senders
-remain open.
+claiming the exact surface commit. Native AHB handle receipt is implemented;
+acquire-fence receipt and helper/Mesa senders remain open.
 
 The Android vtest helper now implements only the scoped APHB bootstrap. Its
 private socket, session ID, helper generation, and 128-bit lowercase-hex token
@@ -4070,25 +4070,32 @@ connections terminate the helper. Dual-ABI release builds pass. A same-UID
 physical Samsung listener received the exact 64 bytes for session 77,
 generation 9, token `6a` repeated 16 times, and zero reserved bytes. A partial
 configuration exited 1 with the expected bounded-contract error. Production
-does not pass the arguments yet; Resource/Present/Release, AHB handles, fences,
-and the manager receiver remain open.
+does not pass the arguments yet; helper Resource/Present production and fence
+return remain open.
 
-The manager-side dormant control endpoint is implemented through Hello
-admission, but not Resource handle receipt. It binds only a bounded absolute path, accepts
+The manager-side dormant control endpoint now admits Hello and Android Resource
+handles. It binds only a bounded absolute path and accepts
 only the current UID through `SO_PEERCRED`, reassembles fixed 64-byte frames,
 processes at most four per compositor dispatch, discards partial state across
 helper reconnect, and performs device/inode-checked socket cleanup. Unit tests
 cover fragmented delivery, reconnect, unsafe paths, and replacement-socket
-preservation. A core test accepts the exact scoped Hello and returns
-`Unsupported` for Resource because no AHB handle receiver exists yet. The
-production launcher therefore leaves the endpoint disabled.
+preservation. Android Resource receipt uses the NDK native-handle transport,
+retries would-block without reading another frame, validates exact RGBA
+dimensions, one layer, stride-backed declared bytes, required GPU sampling and
+render usage, and reserved fields, and retains at most three handles. Resource
+and idle DropResource commit handle and identity state transactionally. A live
+API 35 Samsung nonblocking socket round trip accepted a valid 64×32 AHB and
+atomically rejected a mismatched declaration. The host core test still returns
+`Unsupported` because AHardwareBuffer is Android-only. The production launcher
+therefore leaves the endpoint disabled until the helper sender and fence path
+exist.
 
 APHB direction and reuse are no longer ambiguous. Helper-to-manager traffic is
 Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release
 carries the exact Present sequence and will carry one SurfaceFlinger release
 fence. The registry rejects a second Present or drop while ownership is
 outstanding, stale/mismatched release, and inbound Release on the manager
-endpoint. Fence descriptor transfer is still unimplemented.
+endpoint. Acquire- and release-fence descriptor transfer is still unimplemented.
 
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned

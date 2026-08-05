@@ -155,8 +155,11 @@ copying.
   - [x] Add the dormant same-UID manager endpoint with fixed-frame reassembly,
     bounded dispatch, reconnect-safe partial-frame discard, and inode-checked
     cleanup. Reject Resource/Present until handle/fence receipt is connected.
-  - [ ] Connect the contracts to a generic Mesa virpipe winsys extension, the
-    helper's Resource/Present/Release sender, and the manager's AHB receiver.
+  - [x] Receive Resource handles through the Android NDK, validate exact RGBA
+    dimensions, stride-backed byte accounting, layers, usage, and reserved
+    fields, and retain at most three handles until idle DropResource.
+  - [ ] Connect the contracts to a generic Mesa virpipe winsys extension and the
+    helper's Resource/Present/Release sender.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
   buffer reuse. Bound dimensions, slots, estimated bytes, outstanding fences,
   pending releases, and device-loss recovery.

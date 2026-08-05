@@ -201,16 +201,17 @@ commits retain it. Five unit tests cover these transitions. The XML passes
 client/server bindings and an opt-in compositor global now pass a real socket
 round trip: one resource identity latches only on its target surface commit and
 an explicit clear latches on the following commit. Production does not enable
-the global because the Mesa sender, helper transport, and authenticated AHB
-receiver are still absent.
+the global because the Mesa sender and helper Resource/Present transport are
+still absent.
 
 The opt-in compositor path now applies APHB and Wayland identity state as one
 transaction. It requires one authenticated `Hello` before resource traffic,
 rejects a duplicate hello, decodes fixed Resource/Present/Release frames, and
 updates cloned bounded registries only when both the APHB and Wayland identity
 transition succeed. The socket round trip therefore uses the same scoped APHB
-Resource and 64-bit Present sequence that the Wayland commit claims. Native AHB
-handle receipt and helper/Mesa senders remain unimplemented.
+Resource and 64-bit Present sequence that the Wayland commit claims. Android AHB
+handle receipt is implemented; acquire-fence receipt and helper/Mesa senders
+remain unimplemented.
 
 The pinned Android virglrenderer helper now has an optional fail-closed APHB
 bootstrap. Four arguments must appear together: a bounded Unix socket path,
@@ -219,7 +220,7 @@ token characters with at least one nonzero byte. The helper connects and writes
 the exact 64-byte scoped Hello before publishing its vtest socket; partial,
 malformed, overlong, or unreachable configuration terminates startup. Existing
 launches pass none of these arguments and retain current behavior until the
-manager receiver is connected. Both Android ABIs build. An isolated same-UID
+remaining sender and fence path is connected. Both Android ABIs build. An isolated same-UID
 Samsung probe received bytes `APHB`, version 1, opcode 1, session 77, generation
 9, the exact 16-byte token, and zero reserved trailing bytes; a partial-argument
 probe exited 1 before starting graphics.
@@ -231,18 +232,26 @@ frame without allocation, and processes at most four frames per compositor
 dispatch. Disconnect discards a partial frame before accepting a replacement
 helper. Teardown unlinks only the exact device/inode it created. Three transport
 tests cover fragmented delivery, helper replacement, unsafe paths, and
-replacement-socket preservation; a core test accepts scoped Hello and rejects
-Resource as unsupported. Production does not bind this endpoint yet, and it
-deliberately rejects Resource/Present until native AHB handle and fence receipt
-are implemented.
+replacement-socket preservation. On Android, Resource consumes the immediately
+following NDK AHardwareBuffer handle without blocking the compositor, validates
+RGBA dimensions, one layer, stride-backed declared bytes, sampling and render
+usage, and zero reserved fields, then retains at most three handles by slot.
+Would-block receipt is retried before another frame is read. Resource and
+DropResource update the AHB and identity registries transactionally. A physical
+API 35 Samsung round trip accepted a valid 64×32 buffer on a nonblocking Unix
+socket and atomically rejected a mismatched declaration. The host core test
+continues to return `Unsupported` for Resource because AHardwareBuffer is
+Android-only. Production does not bind this endpoint yet, and Present remains
+unsupported until acquire-fence receipt is implemented.
 
 Direction and reuse are now explicit in APHB v1. Hello, Resource, Present, and
 DropResource travel helper-to-manager. Release travels manager-to-helper with
 the same 64-bit sequence and one release fence. A second Present or DropResource
 fails while a fence is outstanding; stale or mismatched Release fails. This
 prevents destroying a resource as a substitute for returning SurfaceFlinger
-ownership. The dormant receiver rejects inbound Release and still rejects
-Resource/Present before consuming any unauthenticated handle payload.
+ownership. The dormant receiver rejects inbound Release and Present. It accepts
+Resource only after the authenticated fixed frame and validates the native
+handle before committing either registry.
 
 References:
 

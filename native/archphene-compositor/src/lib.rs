@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "android")]
+use gpu_present_protocol::{GPU_PRESENT_FRAME_BYTES, PresentResource};
 use gpu_present_protocol::{
     GpuPresentMessage, GpuPresentRegistry, GpuPresentScope, decode_gpu_present,
 };
@@ -478,6 +480,8 @@ pub struct CompositorCore {
     socket_identity: Option<SocketIdentity>,
     gpu_present_endpoint: Option<GpuPresentEndpoint>,
     gpu_present_scope: Option<GpuPresentScope>,
+    #[cfg(target_os = "android")]
+    gpu_present_pending_resource: Option<([u8; GPU_PRESENT_FRAME_BYTES], PresentResource)>,
     gpu_present_frame_count: u32,
     accepted_client_count: u32,
     active_client_count: Arc<AtomicUsize>,
@@ -2078,6 +2082,7 @@ mod android_graphics_ffi {
     use super::android_gpu_renderer::{Damage, GpuRenderer, SourceFormat};
     use super::{PresentationCopyDamage, PresentationSlotContent};
     use std::ffi::{c_char, c_void};
+    use std::io;
     use std::marker::PhantomData;
     use std::mem::zeroed;
     use std::ptr::{self, NonNull};
@@ -2169,6 +2174,16 @@ mod android_graphics_ffi {
         ) -> i32;
         #[link_name = "AHardwareBuffer_release"]
         fn android_hardware_buffer_release(buffer: *mut AndroidHardwareBuffer);
+        #[link_name = "AHardwareBuffer_recvHandleFromUnixSocket"]
+        fn android_hardware_buffer_receive_handle(
+            socket_fd: libc::c_int,
+            output: *mut *mut AndroidHardwareBuffer,
+        ) -> libc::c_int;
+        #[link_name = "AHardwareBuffer_sendHandleToUnixSocket"]
+        fn android_hardware_buffer_send_handle(
+            buffer: *const AndroidHardwareBuffer,
+            socket_fd: libc::c_int,
+        ) -> libc::c_int;
         #[link_name = "AHardwareBuffer_describe"]
         fn android_hardware_buffer_describe(
             buffer: *const AndroidHardwareBuffer,
@@ -2255,6 +2270,112 @@ mod android_graphics_ffi {
         *mut c_void,
         unsafe extern "C" fn(*mut c_void, i32),
     );
+
+    pub(crate) struct ReceivedHardwareBuffer(NonNull<AndroidHardwareBuffer>);
+
+    pub(crate) struct ReceivedHardwareBufferDescription {
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) layers: u32,
+        pub(crate) format: u32,
+        pub(crate) usage: u64,
+        pub(crate) stride: u32,
+        pub(crate) reserved_zero: u32,
+        pub(crate) reserved_one: u64,
+    }
+
+    // SAFETY: an AHardwareBuffer reference is explicitly transferable between
+    // threads; this owner only describes or releases the retained reference.
+    unsafe impl Send for ReceivedHardwareBuffer {}
+
+    impl ReceivedHardwareBuffer {
+        pub(crate) fn receive(socket_fd: libc::c_int) -> io::Result<Self> {
+            let mut pointer = ptr::null_mut();
+            // SAFETY: the descriptor is live and the output location is
+            // writable. On success the NDK transfers one owned reference.
+            let status =
+                unsafe { android_hardware_buffer_receive_handle(socket_fd, &raw mut pointer) };
+            if status != 0 {
+                let errno = status
+                    .checked_abs()
+                    .filter(|value| *value != 0)
+                    .unwrap_or(libc::EIO);
+                return Err(io::Error::from_raw_os_error(errno));
+            }
+            NonNull::new(pointer).map(Self).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "AHardwareBuffer receive returned a null buffer",
+                )
+            })
+        }
+
+        pub(crate) fn description(&self) -> ReceivedHardwareBufferDescription {
+            // SAFETY: the C description is a plain value whose all-zero state
+            // is valid before the NDK fills every documented field.
+            let mut description: HardwareBufferDescription = unsafe { zeroed() };
+            // SAFETY: the owned reference remains live and `description` is a
+            // writable ABI-compatible output value.
+            unsafe { android_hardware_buffer_describe(self.0.as_ptr(), &raw mut description) };
+            ReceivedHardwareBufferDescription {
+                width: description.width,
+                height: description.height,
+                layers: description.layers,
+                format: description.format,
+                usage: description.usage,
+                stride: description.stride,
+                reserved_zero: description.reserved_zero,
+                reserved_one: description.reserved_one,
+            }
+        }
+    }
+
+    pub(crate) fn send_probe_hardware_buffer(
+        socket_fd: libc::c_int,
+        width: u32,
+        height: u32,
+    ) -> io::Result<ReceivedHardwareBufferDescription> {
+        let requested = HardwareBufferDescription {
+            width,
+            height,
+            layers: 1,
+            format: ANDROID_RGBA_8888 as u32,
+            usage: HARDWARE_BUFFER_GPU_SAMPLED_IMAGE | HARDWARE_BUFFER_GPU_COLOR_OUTPUT,
+            stride: 0,
+            reserved_zero: 0,
+            reserved_one: 0,
+        };
+        let mut pointer = ptr::null_mut();
+        // SAFETY: `requested` is initialized and the pointer output is writable.
+        let status = unsafe { android_hardware_buffer_allocate(&requested, &raw mut pointer) };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(
+                status.checked_abs().unwrap_or(libc::EIO),
+            ));
+        }
+        let buffer = ReceivedHardwareBuffer(NonNull::new(pointer).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "AHardwareBuffer allocation returned null",
+            )
+        })?);
+        // SAFETY: the allocated buffer and socket descriptor remain live for
+        // the synchronous NDK transfer call.
+        let status = unsafe { android_hardware_buffer_send_handle(buffer.0.as_ptr(), socket_fd) };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(
+                status.checked_abs().unwrap_or(libc::EIO),
+            ));
+        }
+        Ok(buffer.description())
+    }
+
+    impl Drop for ReceivedHardwareBuffer {
+        fn drop(&mut self) {
+            // SAFETY: this object owns one NDK reference and releases it once.
+            unsafe { android_hardware_buffer_release(self.0.as_ptr()) };
+        }
+    }
 
     pub(super) struct NativeWindow {
         gpu: GpuRendererState,
@@ -12864,6 +12985,8 @@ impl CompositorCore {
             socket_identity: None,
             gpu_present_endpoint: None,
             gpu_present_scope: None,
+            #[cfg(target_os = "android")]
+            gpu_present_pending_resource: None,
             gpu_present_frame_count: 0,
             accepted_client_count: 0,
             active_client_count: Arc::new(AtomicUsize::new(0)),
@@ -12918,6 +13041,20 @@ impl CompositorCore {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn apply_gpu_present_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        let (present_registry, identity_registry, _) = self.prepare_gpu_present_frame(frame)?;
+        self.state.gpu_present_registry = Some(present_registry);
+        self.state.gpu_surface_identity = Some(identity_registry);
+        Ok(())
+    }
+
+    fn prepare_gpu_present_frame(
+        &self,
+        frame: &[u8],
+    ) -> std::io::Result<(
+        GpuPresentRegistry,
+        GpuSurfaceIdentityRegistry,
+        GpuPresentMessage,
+    )> {
         let mut present_registry = self
             .state
             .gpu_present_registry
@@ -12955,9 +13092,7 @@ impl CompositorCore {
                     io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}"))
                 })?,
         }
-        self.state.gpu_present_registry = Some(present_registry);
-        self.state.gpu_surface_identity = Some(identity_registry);
-        Ok(())
+        Ok((present_registry, identity_registry, message))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -13137,6 +13272,29 @@ impl CompositorCore {
             return Ok(0);
         };
         let mut count = 0_usize;
+        #[cfg(target_os = "android")]
+        if let Some((frame, resource)) = self.gpu_present_pending_resource.take() {
+            let (present_registry, identity_registry, _) =
+                self.prepare_gpu_present_frame(&frame)?;
+            match self
+                .gpu_present_endpoint
+                .as_mut()
+                .expect("endpoint checked above")
+                .receive_resource(resource)
+            {
+                Ok(()) => {
+                    self.state.gpu_present_registry = Some(present_registry);
+                    self.state.gpu_surface_identity = Some(identity_registry);
+                    self.gpu_present_frame_count = self.gpu_present_frame_count.saturating_add(1);
+                    count += 1;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.gpu_present_pending_resource = Some((frame, resource));
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         while count < MAX_FRAMES_PER_DISPATCH {
             let frame = {
                 let Some(endpoint) = self.gpu_present_endpoint.as_mut() else {
@@ -13150,13 +13308,57 @@ impl CompositorCore {
             match decode_gpu_present(scope, &frame)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))?
             {
-                GpuPresentMessage::Hello | GpuPresentMessage::DropResource { .. } => {
+                GpuPresentMessage::Hello => {
                     self.apply_gpu_present_frame(&frame)?;
                 }
-                GpuPresentMessage::Resource(_) | GpuPresentMessage::Present { .. } => {
+                GpuPresentMessage::DropResource {
+                    resource_id: _resource_id,
+                } => {
+                    #[cfg(target_os = "android")]
+                    {
+                        let (present_registry, identity_registry, _) =
+                            self.prepare_gpu_present_frame(&frame)?;
+                        self.gpu_present_endpoint
+                            .as_mut()
+                            .expect("endpoint checked above")
+                            .drop_resource(_resource_id)?;
+                        self.state.gpu_present_registry = Some(present_registry);
+                        self.state.gpu_surface_identity = Some(identity_registry);
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    self.apply_gpu_present_frame(&frame)?;
+                }
+                GpuPresentMessage::Resource(_resource) => {
+                    #[cfg(target_os = "android")]
+                    {
+                        let (present_registry, identity_registry, _) =
+                            self.prepare_gpu_present_frame(&frame)?;
+                        match self
+                            .gpu_present_endpoint
+                            .as_mut()
+                            .expect("endpoint checked above")
+                            .receive_resource(_resource)
+                        {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                self.gpu_present_pending_resource = Some((frame, _resource));
+                                break;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                        self.state.gpu_present_registry = Some(present_registry);
+                        self.state.gpu_surface_identity = Some(identity_registry);
+                    }
+                    #[cfg(not(target_os = "android"))]
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
-                        "GPU resource handles and fences are not connected",
+                        "GPU resource handles require Android",
+                    ));
+                }
+                GpuPresentMessage::Present { .. } => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "GPU acquire fences are not connected",
                     ));
                 }
                 GpuPresentMessage::Release { .. } => {
@@ -17994,6 +18196,15 @@ pub(super) fn run_glibc_fds(
 }
 #[cfg(any(target_os = "android", test))]
 use runtime_process_ffi::*;
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "C" fn archphene_gpu_present_ahb_transport_probe() -> i32 {
+    match gpu_present_transport::probe_hardware_buffer_transport() {
+        Ok(()) => 0,
+        Err(error) => -error.raw_os_error().unwrap_or(libc::EIO),
+    }
+}
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]

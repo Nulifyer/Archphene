@@ -5,13 +5,29 @@
 use std::io::{self, Read};
 use std::mem::{size_of, zeroed};
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "android")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "android")]
+use crate::android_graphics_ffi::ReceivedHardwareBuffer;
+#[cfg(target_os = "android")]
+use crate::android_graphics_ffi::send_probe_hardware_buffer;
 use crate::gpu_present_protocol::GPU_PRESENT_FRAME_BYTES;
+#[cfg(target_os = "android")]
+use crate::gpu_present_protocol::PresentResource;
 
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
+#[cfg(target_os = "android")]
+const PRESENT_RESOURCE_SLOTS: usize = 3;
+
+#[cfg(target_os = "android")]
+struct ReceivedResource {
+    resource_id: u32,
+    _buffer: ReceivedHardwareBuffer,
+}
 
 #[derive(Clone, Copy)]
 struct SocketIdentity {
@@ -27,6 +43,8 @@ pub(crate) struct GpuPresentEndpoint {
     expected_uid: u32,
     frame: [u8; GPU_PRESENT_FRAME_BYTES],
     frame_length: usize,
+    #[cfg(target_os = "android")]
+    resources: [Option<ReceivedResource>; PRESENT_RESOURCE_SLOTS],
 }
 
 impl GpuPresentEndpoint {
@@ -70,6 +88,8 @@ impl GpuPresentEndpoint {
             expected_uid,
             frame: [0; GPU_PRESENT_FRAME_BYTES],
             frame_length: 0,
+            #[cfg(target_os = "android")]
+            resources: std::array::from_fn(|_| None),
         })
     }
 
@@ -108,6 +128,145 @@ impl GpuPresentEndpoint {
             }
         }
     }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn receive_resource(&mut self, resource: PresentResource) -> io::Result<()> {
+        let stream = self.stream.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "GPU helper is not connected")
+        })?;
+        receive_resource_from_fd(&mut self.resources, stream.as_raw_fd(), resource)
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn drop_resource(&mut self, resource_id: u32) -> io::Result<()> {
+        let slot = self
+            .resources
+            .iter_mut()
+            .find(|slot| {
+                slot.as_ref()
+                    .is_some_and(|entry| entry.resource_id == resource_id)
+            })
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "GPU resource handle is unknown")
+            })?;
+        *slot = None;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "android")]
+fn receive_resource_from_fd(
+    resources: &mut [Option<ReceivedResource>; PRESENT_RESOURCE_SLOTS],
+    socket_fd: libc::c_int,
+    resource: PresentResource,
+) -> io::Result<()> {
+    let index = usize::from(resource.slot);
+    let Some(slot) = resources.get_mut(index) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "GPU resource slot is out of range",
+        ));
+    };
+    if slot.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "GPU resource slot is already occupied",
+        ));
+    }
+    let buffer = ReceivedHardwareBuffer::receive(socket_fd)?;
+    let description = buffer.description();
+    let actual_bytes = u64::from(description.stride)
+        .checked_mul(u64::from(description.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "AHardwareBuffer size overflow")
+        })?;
+    let required_usage = (1 << 8) | (1 << 9);
+    if description.width != resource.width
+        || description.height != resource.height
+        || description.layers != 1
+        || description.format != 1
+        || description.stride < description.width
+        || description.usage & required_usage != required_usage
+        || description.reserved_zero != 0
+        || description.reserved_one != 0
+        || actual_bytes > resource.estimated_bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "AHardwareBuffer does not match the declared GPU resource",
+        ));
+    }
+    *slot = Some(ReceivedResource {
+        resource_id: resource.resource_id,
+        _buffer: buffer,
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn probe_hardware_buffer_transport() -> io::Result<()> {
+    let mut descriptors = [-1; 2];
+    // SAFETY: the two-element output array is writable, and successful
+    // SOCK_CLOEXEC socketpair creation transfers two owned descriptors.
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+            descriptors.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful socketpair returned two distinct owned descriptors.
+    let (sender, receiver) = unsafe {
+        (
+            OwnedFd::from_raw_fd(descriptors[0]),
+            OwnedFd::from_raw_fd(descriptors[1]),
+        )
+    };
+    let sent = send_probe_hardware_buffer(sender.as_raw_fd(), 64, 32)?;
+    let estimated_bytes = u64::from(sent.stride) * u64::from(sent.height) * 4;
+    let mut resources = std::array::from_fn(|_| None);
+    receive_resource_from_fd(
+        &mut resources,
+        receiver.as_raw_fd(),
+        PresentResource {
+            resource_id: 1,
+            slot: 0,
+            width: 64,
+            height: 32,
+            estimated_bytes,
+        },
+    )?;
+    if !resources[0]
+        .as_ref()
+        .is_some_and(|resource| resource.resource_id == 1)
+    {
+        return Err(io::Error::other("received GPU resource was not retained"));
+    }
+    let rejected = send_probe_hardware_buffer(sender.as_raw_fd(), 64, 32)?;
+    let rejected_bytes = u64::from(rejected.stride) * u64::from(rejected.height) * 4;
+    let error = receive_resource_from_fd(
+        &mut resources,
+        receiver.as_raw_fd(),
+        PresentResource {
+            resource_id: 2,
+            slot: 1,
+            width: 63,
+            height: 32,
+            estimated_bytes: rejected_bytes,
+        },
+    )
+    .expect_err("mismatched AHardwareBuffer dimensions must fail");
+    if error.kind() != io::ErrorKind::InvalidData || resources[1].is_some() {
+        return Err(io::Error::other(
+            "mismatched GPU resource was not rejected atomically",
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for GpuPresentEndpoint {

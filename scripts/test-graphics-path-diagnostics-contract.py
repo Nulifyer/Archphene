@@ -166,6 +166,9 @@ require(
     "libc::SO_PEERCRED",
     "peer_uid(&stream)? != self.expected_uid",
     "GPU_PRESENT_FRAME_BYTES",
+    "ReceivedHardwareBuffer::receive",
+    "AHardwareBuffer does not match the declared GPU resource",
+    "probe_hardware_buffer_transport",
     "disconnect_discards_partial_frame_before_replacement",
     "metadata.dev() == self.identity.device",
     "metadata.ino() == self.identity.inode",
@@ -174,7 +177,9 @@ require(
     "native/archphene-compositor/src/lib.rs",
     "enable_gpu_present_endpoint",
     "MAX_FRAMES_PER_DISPATCH: usize = 4",
-    "GPU resource handles and fences are not connected",
+    "gpu_present_pending_resource",
+    "AHardwareBuffer_recvHandleFromUnixSocket",
+    "GPU acquire fences are not connected",
     "scoped_gpu_endpoint_accepts_only_connected_control_frames",
 )
 reject(
