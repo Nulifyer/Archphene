@@ -1,6 +1,11 @@
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[cfg(target_os = "android")]
+mod android_gpu_renderer;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod gpu_damage;
+
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
@@ -2045,6 +2050,7 @@ fn copy_wayland_pixels_to_android(
 #[cfg(target_os = "android")]
 #[allow(unsafe_code)]
 mod android_graphics_ffi {
+    use super::android_gpu_renderer::{Damage, GpuRenderer, SourceFormat};
     use super::{PresentationCopyDamage, PresentationSlotContent};
     use std::ffi::{c_char, c_void};
     use std::marker::PhantomData;
@@ -2217,7 +2223,14 @@ mod android_graphics_ffi {
     }
 
     pub(super) struct NativeWindow {
+        gpu: GpuRendererState,
         presentation: Arc<PresentationState>,
+    }
+
+    enum GpuRendererState {
+        Uninitialized,
+        Active(GpuRenderer),
+        Unavailable,
     }
 
     // SAFETY: presentation calls remain serialized on the launcher surface
@@ -2234,6 +2247,8 @@ mod android_graphics_ffi {
     #[derive(Default)]
     struct GraphicsPresentationDiagnostics {
         cpu_conversions: AtomicU32,
+        texture_uploads: AtomicU32,
+        gpu_compositions: AtomicU32,
         ahb_submissions: AtomicU32,
         surfaceflinger_releases: AtomicU32,
     }
@@ -2266,6 +2281,7 @@ mod android_graphics_ffi {
         generation: u32,
         buffer: NonNull<AndroidHardwareBuffer>,
         stride_bytes: usize,
+        gpu_color_output: bool,
         content: PresentationSlotContent,
         state: HardwareBufferState,
         release_context: ReleaseContext,
@@ -2284,6 +2300,7 @@ mod android_graphics_ffi {
         width: usize,
         height: usize,
         stride_bytes: usize,
+        gpu_color_output: bool,
         copy_damage: PresentationCopyDamage,
         frame_damage: PresentationCopyDamage,
     }
@@ -2322,6 +2339,7 @@ mod android_graphics_ffi {
             unsafe { android_native_window_release(window.as_ptr()) };
             let control = control?;
             Some(Self {
+                gpu: GpuRendererState::Uninitialized,
                 presentation: Arc::new(PresentationState {
                     control,
                     buffers: Mutex::new(PresentationBuffers {
@@ -2349,9 +2367,19 @@ mod android_graphics_ffi {
                 1 => self
                     .presentation
                     .diagnostics
-                    .ahb_submissions
+                    .texture_uploads
                     .load(Ordering::Relaxed),
                 2 => self
+                    .presentation
+                    .diagnostics
+                    .gpu_compositions
+                    .load(Ordering::Relaxed),
+                3 => self
+                    .presentation
+                    .diagnostics
+                    .ahb_submissions
+                    .load(Ordering::Relaxed),
+                4 => self
                     .presentation
                     .diagnostics
                     .surfaceflinger_releases
@@ -2395,29 +2423,112 @@ mod android_graphics_ffi {
                 }
             }
             let mut new_slots = allocate_hardware_buffers(width, height)?;
-            let mut buffers = self
-                .presentation
-                .buffers
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            collect_retired_buffers(&mut buffers);
-            if buffers.slots.len() + new_slots.len() > MAX_HARDWARE_BUFFER_SLOTS {
+            let (mut retired, admitted) = {
+                let mut buffers = self
+                    .presentation
+                    .buffers
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let retired = take_retired_buffers(&mut buffers);
+                if buffers.slots.len() + new_slots.len() > MAX_HARDWARE_BUFFER_SLOTS {
+                    (retired, false)
+                } else {
+                    buffers.generation = buffers.generation.wrapping_add(1).max(1);
+                    for slot in &mut new_slots {
+                        slot.id = buffers.next_id;
+                        slot.release_context.slot_id = slot.id;
+                        slot.generation = buffers.generation;
+                        buffers.next_id = buffers.next_id.wrapping_add(1).max(1);
+                    }
+                    buffers.width = width;
+                    buffers.height = height;
+                    buffers.destination_width = destination_width;
+                    buffers.destination_height = destination_height;
+                    buffers.slots.extend(new_slots.drain(..));
+                    (retired, true)
+                }
+            };
+            self.release_retired_slots(&mut retired);
+            if !admitted {
                 release_hardware_slots(&mut new_slots);
                 return Err(());
             }
-            buffers.generation = buffers.generation.wrapping_add(1).max(1);
-            for slot in &mut new_slots {
-                slot.id = buffers.next_id;
-                slot.release_context.slot_id = slot.id;
-                slot.generation = buffers.generation;
-                buffers.next_id = buffers.next_id.wrapping_add(1).max(1);
-            }
-            buffers.width = width;
-            buffers.height = height;
-            buffers.destination_width = destination_width;
-            buffers.destination_height = destination_height;
-            buffers.slots.extend(new_slots);
             Ok(())
+        }
+
+        fn release_retired_slots(&mut self, slots: &mut Vec<Box<HardwareBufferSlot>>) {
+            if let GpuRendererState::Active(renderer) = &mut self.gpu
+                && slots
+                    .iter()
+                    .any(|slot| renderer.remove_target(slot.id).is_err())
+            {
+                self.gpu = GpuRendererState::Unavailable;
+            }
+            release_hardware_slots(slots);
+        }
+
+        pub(super) fn with_gpu_rgba(
+            &mut self,
+            frame_width: i32,
+            frame_height: i32,
+            frame_format: SourceFormat,
+            frame_pixels: &[u8],
+            frame_damage: PresentationCopyDamage,
+        ) -> Option<Result<(i32, i32), i32>> {
+            if matches!(self.gpu, GpuRendererState::Uninitialized) {
+                self.gpu = GpuRenderer::new()
+                    .map(GpuRendererState::Active)
+                    .unwrap_or(GpuRendererState::Unavailable);
+            }
+            if !matches!(self.gpu, GpuRendererState::Active(_)) {
+                return None;
+            }
+            let reservation = match reserve_hardware_slot(&self.presentation, frame_damage) {
+                Some(reservation) => reservation,
+                None => return Some(Err(-8)),
+            };
+            if !reservation.gpu_color_output {
+                return_hardware_slot(&self.presentation, reservation.id, -1);
+                self.gpu = GpuRendererState::Unavailable;
+                return None;
+            }
+            let damage = match reservation.frame_damage {
+                PresentationCopyDamage::Full => Damage {
+                    x: 0,
+                    y: 0,
+                    width: frame_width,
+                    height: frame_height,
+                },
+                PresentationCopyDamage::Region(region) => Damage {
+                    x: region.x,
+                    y: region.y,
+                    width: region.width,
+                    height: region.height,
+                },
+            };
+            let rendered = match &mut self.gpu {
+                GpuRendererState::Active(renderer) => renderer.render(
+                    reservation.id,
+                    reservation.buffer.as_ptr().cast(),
+                    reservation.width as i32,
+                    reservation.height as i32,
+                    frame_width,
+                    frame_height,
+                    frame_pixels,
+                    frame_format,
+                    damage,
+                ),
+                _ => unreachable!("active renderer checked"),
+            };
+            if rendered.is_err() {
+                invalidate_hardware_slot(&self.presentation, reservation.id, -1);
+                self.gpu = GpuRendererState::Unavailable;
+                return None;
+            }
+            increment_diagnostic(&self.presentation.diagnostics.texture_uploads);
+            increment_diagnostic(&self.presentation.diagnostics.gpu_compositions);
+            let posted = present_hardware_slot(&self.presentation, reservation, -1);
+            Some(Ok((0, posted)))
         }
 
         pub(super) fn with_locked_rgba(
@@ -2582,6 +2693,7 @@ mod android_graphics_ffi {
                 generation: 0,
                 buffer,
                 stride_bytes,
+                gpu_color_output: actual.usage & HARDWARE_BUFFER_GPU_COLOR_OUTPUT != 0,
                 content: PresentationSlotContent::default(),
                 state: HardwareBufferState::Available(-1),
                 release_context: ReleaseContext {
@@ -2601,7 +2713,6 @@ mod android_graphics_ffi {
             .buffers
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        collect_retired_buffers(&mut buffers);
         let generation = buffers.generation;
         let width = buffers.width;
         let height = buffers.height;
@@ -2624,6 +2735,7 @@ mod android_graphics_ffi {
             width,
             height,
             stride_bytes: slot.stride_bytes,
+            gpu_color_output: slot.gpu_color_output,
             copy_damage,
             frame_damage,
         })
@@ -2846,19 +2958,20 @@ mod android_graphics_ffi {
         ready
     }
 
-    fn collect_retired_buffers(buffers: &mut PresentationBuffers) {
+    fn take_retired_buffers(buffers: &mut PresentationBuffers) -> Vec<Box<HardwareBufferSlot>> {
         let generation = buffers.generation;
+        let mut retired_slots = Vec::new();
         let mut index = 0;
         while index < buffers.slots.len() {
             let retired = buffers.slots[index].generation != generation
                 && available_fence_signaled(&mut buffers.slots[index].state);
             if retired {
-                let slot = buffers.slots.swap_remove(index);
-                unsafe { android_hardware_buffer_release(slot.buffer.as_ptr()) };
+                retired_slots.push(buffers.slots.swap_remove(index));
             } else {
                 index += 1;
             }
         }
+        retired_slots
     }
 
     fn release_hardware_slots(slots: &mut Vec<Box<HardwareBufferSlot>>) {
@@ -2977,16 +3090,16 @@ impl LauncherSurfaceCompositor {
         if component == 0 {
             return i32::try_from(self.core.state.shm_snapshot_count).unwrap_or(i32::MAX);
         }
-        if (1..=3).contains(&component) {
-            // GPU readback, texture upload, and GPU composition are explicit
-            // zeroes until those paths exist; this prevents the current
-            // CPU-upload path from being mislabeled as zero-copy.
+        if component == 1 {
+            // No production path reads GPU output back to the CPU.
             return 0;
         }
         let native_component = match component {
+            2 => 1,
+            3 => 2,
             4 => 0,
-            5 => 1,
-            6 => 2,
+            5 => 3,
+            6 => 4,
             _ => return -1,
         };
         let total = self.windows.iter().fold(0_u32, |total, attached| {
@@ -3610,11 +3723,24 @@ fn copy_frame_to_native_window(
         *buffer_width = width;
         *buffer_height = height;
     }
-    let (result, posted) = match window.with_locked_rgba(frame_damage, |buffer, copy_damage| {
-        copy_frame_to_native_window_buffer(frame, buffer, copy_damage)
-    }) {
-        Ok(result) => result,
-        Err(error) => return error,
+    let format = match frame.format {
+        wl_shm::Format::Argb8888 => android_gpu_renderer::SourceFormat::Argb8888,
+        wl_shm::Format::Xrgb8888 => android_gpu_renderer::SourceFormat::Xrgb8888,
+        _ => return -5,
+    };
+    let gpu_result = {
+        let pixels = frame.pixels();
+        window.with_gpu_rgba(width, height, format, &pixels, frame_damage)
+    };
+    let (result, posted) = match gpu_result {
+        Some(Ok(result)) => result,
+        Some(Err(error)) => return error,
+        None => match window.with_locked_rgba(frame_damage, |buffer, copy_damage| {
+            copy_frame_to_native_window_buffer(frame, buffer, copy_damage)
+        }) {
+            Ok(result) => result,
+            Err(error) => return error,
+        },
     };
     if result != 0 {
         result

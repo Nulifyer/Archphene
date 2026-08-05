@@ -137,7 +137,7 @@ copying.
 - [x] Add release diagnostics that distinguish SHM snapshot, CPU conversion,
   GPU readback, texture upload, GPU composition, direct AHB submission, and
   SurfaceFlinger release. Do not label the current AHB upload path zero-copy.
-- [ ] Add a Bionic EGL/GLES renderer to import the bounded output
+- [x] Add a Bionic EGL/GLES renderer to import the bounded output
   `AHardwareBuffer` ring, upload only changed SHM regions into retained textures,
   and GPU-compose the output. Keep the current CPU conversion path as the
   mandatory fallback.

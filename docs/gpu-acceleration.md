@@ -12,7 +12,9 @@ glibc Linux application
   -> Android EGL / OpenGL ES driver
   -> wl_shm frame
   -> Archphene Wayland compositor
-  -> Android Activity
+  -> bounded damaged-region texture upload
+  -> EGL/GLES composition into an AHardwareBuffer output slot
+  -> SurfaceFlinger / Android Activity
 ```
 
 The Rust/Kotlin manager includes an exact-ABI native helper built from pinned
@@ -45,11 +47,21 @@ file-sized buffer nor treats prose or partial names as capabilities. A shared
 observation remains the fallback for larger executables, exhausted scan
 budgets, and names constructed at runtime.
 
+On devices with `EGL_ANDROID_image_native_buffer` and `GL_OES_EGL_image`, the
+compositor imports its existing bounded three-slot AHB ring as retained EGL
+images. One retained RGBA texture receives only the admitted SHM damage
+rectangle, then a fixed GLES 2 shader composes the complete output into the
+selected slot. Resize generations remain bounded, retired images are destroyed
+before their AHBs, and `glFinish` conservatively completes rendering before the
+existing SurfaceControl handoff. Initialization, import, shader, framebuffer,
+or draw failure permanently selects the existing CPU-locked conversion path for
+that Android window.
+
 The fixed presentation snapshot also exposes cumulative counters for SHM
 snapshot, CPU conversion, GPU readback, texture upload, GPU composition, direct
 `AHardwareBuffer` submission, and SurfaceFlinger release. Unimplemented GPU
 stages report explicit zeroes. These diagnostics describe the actual path and
-do not classify the current CPU-written AHB ring as zero-copy.
+do not classify either the SHM upload or conservative GPU finish as zero-copy.
 
 ## Android compatibility patches
 
@@ -92,16 +104,23 @@ llvmpipe reconnect; both stages publish fresh frames on the emulator and
 Samsung.
 
 An isolated unmodified Mousepad Quick launch on the physical Samsung validated
-the diagnostic sequence without changing retained app shells. Four presented
-frames reported four SHM snapshots, four CPU conversions, four direct AHB
-submissions, two completed asynchronous SurfaceFlinger releases, and zero GPU
-readbacks, texture uploads, or GPU compositions before clean session shutdown.
+the EGL/GLES path without changing retained app shells. Four presented frames
+reported four SHM snapshots, four damaged-region texture uploads, four GPU
+compositions, four direct AHB submissions, two completed asynchronous
+SurfaceFlinger releases, and zero CPU conversions or GPU readbacks. Hardware
+text input visibly updated the retained texture, portrait/landscape recreation
+returned to a correctly oriented full-device frame, and Back closed the session
+cleanly. The preceding CPU-path baseline reported the inverse diagnostic split
+and remains the mandatory fallback evidence.
 
 ## Current limits
 
-GPU commands can execute on Android's GLES driver, but the final Linux window
-is currently copied through `wl_shm`. This is not zero-copy and caps benchmark
-throughput. Current Electron 42 on Samsung sees `/dev/dri/renderD128`, but
+GPU commands can execute on Android's GLES driver, but virpipe output still
+returns to the compositor through `wl_shm`. The current output renderer then
+performs a CPU channel conversion for the damaged rectangle before one texture
+upload; it does not read GPU output back or CPU-lock the destination AHB. This
+is not zero-copy and does not yet connect virgl resources directly to the
+output ring. Current Electron 42 on Samsung sees `/dev/dri/renderD128`, but
 Android SELinux denies the ordinary app domain access; Chromium consequently
 fails render-node/GBM initialization, crashes its GPU process three times, and
 restarts it with `--use-gl=disabled`. The emulator exposes no `/dev/dri`.
@@ -110,9 +129,10 @@ diagnostic profiles did not produce a safe accelerated path. Those temporary
 profiles were removed. Chromium acceleration therefore remains gated on both a
 safe userspace render-node/GBM strategy and compatible Wayland GPU
 presentation/readback rather than an app-specific override.
-The next presentation milestone is EGL-backed Android `AHardwareBuffer` image
-import and composition with explicit synchronization and SHM fallback. The
-2026-08-04 Samsung `SM_S908U` SurfaceFlinger probe exposes
+The next presentation milestone is a host-allocated virpipe resource that can
+enter the EGL/AHB path without returning through SHM, followed by native-fence
+production instead of the current conservative `glFinish`. The 2026-08-04
+Samsung `SM_S908U` SurfaceFlinger probe exposes
 `EGL_ANDROID_image_native_buffer` and `GL_OES_EGL_image`, but not
 `EGL_EXT_image_dma_buf_import`. Native-buffer image import is therefore a
 viable Android composition boundary on that device; direct client-dmabuf import

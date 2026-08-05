@@ -3987,16 +3987,31 @@ low-alpha opaque-region fallback, and popup-base isolation; the full workspace
 and strict Clippy gates plus rebuilt x86_64 and AArch64 Android compositor probes
 pass.
 
-Release graphics diagnostics now count seven distinct stages in the fixed
+Release graphics diagnostics count seven distinct stages in the fixed
 presentation snapshot: SHM snapshot, CPU conversion, GPU readback, texture
 upload, GPU composition, direct `AHardwareBuffer` submission, and
-SurfaceFlinger release. The three unimplemented GPU stages remain explicit
-zeroes, so the retained CPU-written AHB ring is not mislabeled zero-copy. An
-isolated unmodified Mousepad Quick launch on physical Samsung `SM-S908U`
-reported four SHM snapshots, four CPU conversions, four direct AHB submissions,
-two asynchronous releases, and zeroes for every GPU stage before Back closed
-the session and runtime cleanly. Host Rust tests/Clippy, Android app unit/lint,
-the source contract, and exact AArch64/x86_64 compositor builds pass.
+SurfaceFlinger release. The initial physical baseline reported four SHM
+snapshots, four CPU conversions, four direct AHB submissions, two asynchronous
+releases, and zero GPU stages.
+
+The current Bionic EGL/GLES renderer now imports the existing bounded AHB ring
+as retained EGL images, keeps one source texture per Android window, converts
+and uploads only the admitted SHM damage rectangle, and draws a fixed full-frame
+quad into the selected output slot. Resize generations destroy retired EGL
+images before releasing their AHBs. Missing extensions and every initialization,
+import, shader, framebuffer, or draw failure select the existing CPU-locked
+fallback for that window. GPU work currently completes through `glFinish` before
+the existing SurfaceControl release-fence path; there is no `AHardwareBuffer_lock`,
+`glReadPixels`, Kotlin frame copy, or JNI frame copy on the GPU path.
+
+An isolated unmodified Mousepad Quick launch on physical Samsung `SM-S908U`
+reported four SHM snapshots, four texture uploads, four GPU compositions, four
+direct AHB submissions, two asynchronous releases, and zero CPU conversions or
+GPU readbacks. Hardware text input visibly updated the correctly oriented
+full-device frame, portrait/landscape recreation recovered the same path, and
+Back closed the session and runtime cleanly. Host Rust tests/Clippy, Android app
+unit/lint, the source contract, and exact AArch64/x86_64 builds pass. Virpipe
+still returns through SHM, so this is not a zero-copy or direct-virgl claim.
 
 Hardware key, repeat, and modifier delivery no longer clones focused
 `WlKeyboard` resources into a temporary vector. Focused resources stream in
