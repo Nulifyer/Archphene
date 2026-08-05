@@ -132,7 +132,7 @@ index ba4feb1..e2ef352 100644
     if (res->iov.iov_base)
        munmap(res->iov.iov_base, res->iov.iov_len);
  
-@@ -1346,6 +1381,155 @@ int vtest_create_resource2(UNUSED uint32_t length_dw)
+@@ -1346,6 +1381,158 @@ int vtest_create_resource2(UNUSED uint32_t length_dw)
     return vtest_create_resource_internal(ctx, VCMD_RESOURCE_CREATE2, &args, shm_size);
  }
  
@@ -162,7 +162,10 @@ index ba4feb1..e2ef352 100644
 +   if (ret)
 +      return ret;
 +   if (args.handle || args.target != PIPE_TEXTURE_2D ||
-+       args.format != VIRGL_FORMAT_R8G8B8A8_UNORM ||
++       (args.format != VIRGL_FORMAT_R8G8B8A8_UNORM &&
++        args.format != VIRGL_FORMAT_R8G8B8X8_UNORM &&
++        args.format != VIRGL_FORMAT_B8G8R8A8_UNORM &&
++        args.format != VIRGL_FORMAT_B8G8R8X8_UNORM) ||
 +       !(args.bind & VIRGL_BIND_RENDER_TARGET) ||
 +       args.width == 0 || args.width > 8192 ||
 +       args.height == 0 || args.height > 8192 ||

@@ -175,6 +175,21 @@ require(
     "vtest_server_send_archphene_resource",
     "vtest_server_send_archphene_present",
     "vtest_server_close_archphene_present_socket();",
+    "VIRGL_FORMAT_B8G8R8A8_UNORM",
+    "VIRGL_FORMAT_B8G8R8X8_UNORM",
+)
+require(
+    "native/mesa-virpipe-sender/patches/0001-archphene-ahb-present.patch",
+    "ARCHPHENE_AHB_PRESENT",
+    "ARCHPHENE_GPU_HELPER_GENERATION",
+    "VCMD_ARCHPHENE_RESOURCE_CREATE_AHB 39",
+    "VCMD_ARCHPHENE_PRESENT_AHB 40",
+    "VCMD_ARCHPHENE_WAIT_RELEASE_AHB 41",
+    "org_archphene_gpu_surface_v1_set_resource",
+    "archphene_outstanding_sequence",
+    "virgl_vtest_send_archphene_wait_release",
+    "displaytarget_present_resource",
+    "missing Archphene GPU identity",
 )
 require(
     "native/android-gpu-helper/patches/0010-archphene-release-receive.patch",

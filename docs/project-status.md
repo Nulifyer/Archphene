@@ -4060,9 +4060,10 @@ Each frame is applied to cloned APHB and Wayland identity registries and becomes
 visible only when both transitions succeed. The generated-client socket test
 uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
 claiming the exact surface commit. Native AHB handle and acquire-fence receipt
-are implemented. The helper private Resource/Present sender and blocking Release
-receiver are implemented; manager SurfaceFlinger release transmission and
-generic Mesa/Wayland production remain open.
+are implemented. The helper private Resource/Present sender, blocking Release
+receiver, and generic Mesa/Wayland identity sender are implemented; runtime
+staging, Android submission of received helper AHBs, and manager SurfaceFlinger
+release transmission remain open.
 
 The Android vtest helper now implements the scoped APHB bootstrap and a dormant
 AHB-backed resource path. Its
@@ -4083,9 +4084,13 @@ exact scoped Release, accepts marker `52` with zero or one close-on-exec fence,
 waits a received fence, and permits reuse only after the matching sequence.
 Malformed scope, resource, sequence, marker, truncation, or descriptor count
 closes the channel. The Samsung probe completed Present sequences 1 and 2 around
-one marker-only Release (`46,52,46`). Production does not pass the arguments or
-issue the commands; generic Mesa/Wayland production and SurfaceFlinger-backed
-release return remain open.
+one marker-only Release (`46,52,46`). The pinned Mesa 26.1.5 patch now issues
+commands 39, 40, and 41 for eligible RGBA/BGRA display targets, sends the exact
+returned sequence through the private Wayland request before the matching
+surface commit, and falls back to `wl_shm` unless explicitly activated with the
+private global. Reproducible x86_64 and AArch64 builds pass. Production does not
+stage this Mesa tree or pass the helper arguments; Android submission of the
+received helper AHB and SurfaceFlinger-backed release return remain open.
 
 The dormant manager endpoint also has a bounded outbound Release transport. It
 admits at most three responses, transactionally commits registry release only
@@ -4109,8 +4114,8 @@ and idle DropResource commit handle and identity state transactionally. A live
 API 35 Samsung nonblocking socket round trip accepted a valid 64×32 AHB and
 atomically rejected a mismatched declaration. The host core test still returns
 `Unsupported` because AHardwareBuffer is Android-only. The production launcher
-therefore leaves the endpoint disabled until generic Mesa/Wayland production
-and the release path exist.
+therefore leaves the endpoint disabled until patched Mesa runtime staging,
+Android presentation of received helper AHBs, and the release path exist.
 
 APHB direction and reuse are no longer ambiguous. Helper-to-manager traffic is
 Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release

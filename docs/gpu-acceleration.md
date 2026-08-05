@@ -201,8 +201,9 @@ commits retain it. Five unit tests cover these transitions. The XML passes
 client/server bindings and an opt-in compositor global now pass a real socket
 round trip: one resource identity latches only on its target surface commit and
 an explicit clear latches on the following commit. Production does not enable
-the global because the Mesa sender and helper Resource/Present transport are
-still absent.
+the global because the patched Mesa install tree is not staged into Linux
+runtimes and helper AHB submission/release is not connected to Android
+presentation.
 
 The opt-in compositor path now applies APHB and Wayland identity state as one
 transaction. It requires one authenticated `Hello` before resource traffic,
@@ -211,8 +212,9 @@ updates cloned bounded registries only when both the APHB and Wayland identity
 transition succeed. The socket round trip therefore uses the same scoped APHB
 Resource and 64-bit Present sequence that the Wayland commit claims. Android AHB
 handle and acquire-state receipt are implemented. The helper Resource/Present
-sender is implemented behind private vtest commands; generic Mesa/Wayland
-production, fence consumption, and manager-to-helper release remain open.
+sender and a generic Mesa/Wayland identity sender are implemented behind private
+vtest commands. Runtime staging, Android AHB submission, and
+SurfaceFlinger-backed release remain open.
 
 The pinned Android virglrenderer helper now has an optional fail-closed APHB
 bootstrap and AHB resource path. Four arguments must appear together: a bounded Unix socket path,
@@ -226,8 +228,8 @@ isolated same-UID
 Samsung probe received bytes `APHB`, version 1, opcode 1, session 77, generation
 9, the exact 16-byte token, and zero reserved trailing bytes; a partial-argument
 probe exited 1 before starting graphics. Two private vtest commands are admitted
-only after this channel exists. Resource creation accepts one bounded 2D
-`VIRGL_FORMAT_R8G8B8A8_UNORM` render target, allocates one of three Android
+only after this channel exists. Resource creation accepts one bounded 2D 8-bit
+RGBA/BGRA render target, allocates one of three Android
 RGBA AHB slots with sampling and render usage, imports its EGL image through
 `virgl_renderer_resource_import_eglimage`, and sends the exact scoped Resource
 frame and NDK handle before returning the resource ID. Present calls `glFinish`,
@@ -239,8 +241,17 @@ the exact scoped Release sequence, accepts marker `52` with zero or one
 close-on-exec release-fence FD, waits the FD when present, and only then permits
 reuse. Invalid scope, resource, sequence, marker, truncation, or descriptor
 cardinality closes the APHB channel. The Samsung probe completed sequences 1
-and 2 around one marker-only Release (`46,52,46`). The path remains disabled in
-production until Mesa/Wayland identity and SurfaceFlinger Release senders exist.
+and 2 around one marker-only Release (`46,52,46`).
+
+The pinned Mesa 26.1.5 patch now replaces eligible virpipe display-target
+creation, present, and reuse with private commands 39, 40, and 41. Its Wayland
+loader sends the returned helper generation, resource ID, and exact 64-bit
+sequence through `set_resource` before the same `wl_surface.commit`. It activates
+only with `ARCHPHENE_AHB_PRESENT=1`, a valid
+`ARCHPHENE_GPU_HELPER_GENERATION`, and the private compositor global; otherwise
+Mesa retains `wl_shm`. Reproducible x86_64 and AArch64 builds pass. Production
+remains disabled until those install trees are staged and the manager presents
+the received helper AHB and returns its SurfaceFlinger release.
 
 The manager transport can now queue three Release responses without blocking
 the compositor. Registry release is prepared on cloned state and becomes
@@ -274,9 +285,9 @@ zero or one `SCM_RIGHTS` acquire-fence descriptor. A descriptor arrives with
 before sending the marker. One explicit acquire state is retained per resource,
 and a would-block packet is retried before another APHB frame is read. Host tests
 cover both forms and reject a wrong marker; the Samsung round trip exercises the
-descriptor form on the same nonblocking receive path. Production
-does not bind this endpoint yet because generic Mesa/Wayland production, fence
-consumption, and release return remain absent.
+descriptor form on the same nonblocking receive path. Production does not bind
+this endpoint yet because patched Mesa runtime staging, Android submission of
+the received AHB, and SurfaceFlinger release return remain absent.
 
 Direction and reuse are now explicit in APHB v1. Hello, Resource, Present, and
 DropResource travel helper-to-manager. Release travels manager-to-helper with

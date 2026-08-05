@@ -92,8 +92,15 @@ exact scoped manager Release, accepts marker `52` with zero or one close-on-exec
 fence, waits a received fence, and permits reuse only after sequence equality.
 Malformed framing or descriptor cardinality closes the channel. The Samsung
 probe completed sequences 1 and 2 around marker-only Release (`46,52,46`).
-Generic Mesa/Wayland production and the manager's SurfaceFlinger-backed Release
-sender remain disabled.
+The generic Mesa/Wayland sender is now implemented as a pinned Mesa 26.1.5
+patch. Eligible 8-bit RGBA/BGRA display targets use private commands 39 and 40,
+send the returned exact identity through `set_resource` before the same surface
+commit, and wait on command 41 before reuse. The path requires explicit
+activation, a valid helper generation, and the private Wayland global; otherwise
+Mesa retains `wl_shm`. Reproducible x86_64 and AArch64 builds pass. Production
+and the manager's SurfaceFlinger-backed Release sender remain disabled because
+the custom Mesa install tree is not staged and received helper AHBs are not yet
+submitted to Android presentation.
 
 The manager now has the transport half of Release sending. A three-entry queue
 admits only an exact registry-valid sequence, writes the full scoped frame before

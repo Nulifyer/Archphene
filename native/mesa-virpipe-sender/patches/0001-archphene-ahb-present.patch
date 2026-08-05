@@ -1,0 +1,793 @@
+diff --git a/include/GL/internal/dri_interface.h b/include/GL/internal/dri_interface.h
+index a4d576e..07f38ed 100644
+--- a/include/GL/internal/dri_interface.h
++++ b/include/GL/internal/dri_interface.h
+@@ -564,7 +564,7 @@ struct __DRIsystemTimeExtensionRec {
+  * Version 1 is advertised by the X server.
+  */
+ #define __DRI_SWRAST_LOADER "DRI_SWRastLoader"
+-#define __DRI_SWRAST_LOADER_VERSION 6
++#define __DRI_SWRAST_LOADER_VERSION 7
+ struct __DRIswrastLoaderExtensionRec {
+     __DRIextension base;
+ 
+@@ -654,6 +654,18 @@ struct __DRIswrastLoaderExtensionRec {
+     unsigned char (*getImageShm2)(__DRIdrawable *readable,
+                                   int x, int y, int width, int height,
+                                   int shmid, void *loaderPrivate);
++
++    /**
++     * Present a private authenticated host resource on the next surface
++     * commit instead of copying image data.
++     *
++     * \since 7
++     */
++    unsigned char (*presentResource)(__DRIdrawable *drawable,
++                                     uint32_t helper_generation,
++                                     uint32_t resource_id,
++                                     uint64_t fence_sequence,
++                                     void *loaderPrivate);
+ };
+ 
+ /**
+diff --git a/src/egl/drivers/dri2/egl_dri2.h b/src/egl/drivers/dri2/egl_dri2.h
+index aa5692a..f82f77a 100644
+--- a/src/egl/drivers/dri2/egl_dri2.h
++++ b/src/egl/drivers/dri2/egl_dri2.h
+@@ -268,6 +268,7 @@ struct dri2_egl_display {
+ #endif
+ 
+ #ifdef HAVE_WAYLAND_PLATFORM
++   struct org_archphene_gpu_present_manager_v1 *archphene_gpu_present_manager;
+    struct wl_display *wl_dpy;
+    struct wl_display *wl_dpy_wrapper;
+    struct wl_registry *wl_registry;
+@@ -321,6 +322,8 @@ struct dri2_egl_surface {
+ #endif
+ 
+ #ifdef HAVE_WAYLAND_PLATFORM
++   struct org_archphene_gpu_surface_v1 *archphene_gpu_surface;
++   bool archphene_gpu_present_pending;
+    struct wl_egl_window *wl_win;
+    int dx;
+    int dy;
+diff --git a/src/egl/drivers/dri2/platform_wayland.c b/src/egl/drivers/dri2/platform_wayland.c
+index 5316b70..175c756 100644
+--- a/src/egl/drivers/dri2/platform_wayland.c
++++ b/src/egl/drivers/dri2/platform_wayland.c
+@@ -57,6 +57,7 @@
+ #include <loader_wayland_helper.h>
+ 
+ #include "linux-dmabuf-unstable-v1-client-protocol.h"
++#include "archphene-gpu-present-v1-client-protocol.h"
+ #ifdef HAVE_BIND_WL_DISPLAY
+ #include "wayland-drm-client-protocol.h"
+ #endif
+@@ -834,6 +835,17 @@ dri2_wl_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
+          goto cleanup_dmabuf_feedback;
+    }
+ 
++   if (dri2_dpy->archphene_gpu_present_manager) {
++      dri2_surf->archphene_gpu_surface =
++         org_archphene_gpu_present_manager_v1_get_surface_binding(
++            dri2_dpy->archphene_gpu_present_manager,
++            dri2_surf->wayland_surface.wrapper);
++      if (!dri2_surf->archphene_gpu_surface)
++         goto cleanup_dmabuf_feedback;
++      wl_proxy_set_queue((struct wl_proxy *)dri2_surf->archphene_gpu_surface,
++                         dri2_surf->wl_queue);
++   }
++
+    dri2_surf->wl_win = window;
+    dri2_surf->wl_win->driver_private = dri2_surf;
+    dri2_surf->wl_win->destroy_window_callback = destroy_window_callback;
+@@ -848,6 +860,8 @@ dri2_wl_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
+    return &dri2_surf->base;
+ 
+ cleanup_dmabuf_feedback:
++   if (dri2_surf->archphene_gpu_surface)
++      org_archphene_gpu_surface_v1_destroy(dri2_surf->archphene_gpu_surface);
+    if (dri2_surf->wl_dmabuf_feedback) {
+       zwp_linux_dmabuf_feedback_v1_destroy(dri2_surf->wl_dmabuf_feedback);
+       dmabuf_feedback_fini(&dri2_surf->dmabuf_feedback);
+@@ -976,6 +990,9 @@ dri2_wl_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
+ 
+    loader_wayland_presentation_destroy(&dri2_surf->wayland_presentation);
+ 
++   if (dri2_surf->archphene_gpu_surface)
++      org_archphene_gpu_surface_v1_destroy(dri2_surf->archphene_gpu_surface);
++
+    loader_wayland_surface_destroy(&dri2_surf->wayland_surface);
+    wl_proxy_wrapper_destroy(dri2_surf->wl_dpy_wrapper);
+ #ifdef HAVE_BIND_WL_DISPLAY
+@@ -3058,6 +3075,30 @@ dri2_wl_swrast_put_image(struct dri_drawable *draw, int op, int x, int y, int w,
+    dri2_wl_swrast_put_image2(draw, op, x, y, w, h, stride, data, loaderPrivate);
+ }
+ 
++static unsigned char
++dri2_wl_swrast_present_resource(struct dri_drawable *draw,
++                                uint32_t helper_generation,
++                                uint32_t resource_id,
++                                uint64_t fence_sequence,
++                                void *loaderPrivate)
++{
++   struct dri2_egl_surface *dri2_surf = loaderPrivate;
++
++   if (!dri2_surf->archphene_gpu_surface ||
++       dri2_surf->archphene_gpu_present_pending || !helper_generation)
++      return 0;
++   if (!resource_id && !fence_sequence)
++      return 1;
++   if (!resource_id || !fence_sequence)
++      return 0;
++
++   org_archphene_gpu_surface_v1_set_resource(
++      dri2_surf->archphene_gpu_surface, helper_generation, resource_id,
++      (uint32_t)(fence_sequence >> 32), (uint32_t)fence_sequence);
++   dri2_surf->archphene_gpu_present_pending = true;
++   return 1;
++}
++
+ static EGLBoolean
+ dri2_wl_swrast_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
+                                         const EGLint *rects, EGLint n_rects)
+@@ -3069,7 +3110,9 @@ dri2_wl_swrast_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
+ 
+    (void)swrast_update_buffers(dri2_surf);
+ 
+-   if (dri2_wl_surface_throttle(dri2_surf))
++   bool direct = dri2_surf->archphene_gpu_surface != NULL;
++
++   if (!direct && dri2_wl_surface_throttle(dri2_surf))
+       wl_surface_attach(dri2_surf->wayland_surface.wrapper,
+          /* 'back' here will be promoted to 'current' */
+          dri2_surf->back->wayland_buffer.buffer, dri2_surf->dx,
+@@ -3083,24 +3126,39 @@ dri2_wl_swrast_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
+                         INT32_MAX);
+ 
+    /* guarantee full copy for partial update */
+-   int w = n_rects == 1 ? (rects[2] - rects[0]) : 0;
+-   int copy_width = dri2_wl_swrast_get_stride_for_format(dri2_surf->format, w);
+-   int dst_stride = dri2_wl_swrast_get_stride_for_format(dri2_surf->format,
+-                                                         dri2_surf->base.Width);
+-   char *dst = dri2_wl_swrast_get_backbuffer_data(dri2_surf);
++   if (!direct) {
++      int w = n_rects == 1 ? (rects[2] - rects[0]) : 0;
++      int copy_width = dri2_wl_swrast_get_stride_for_format(dri2_surf->format, w);
++      int dst_stride = dri2_wl_swrast_get_stride_for_format(dri2_surf->format,
++                                                            dri2_surf->base.Width);
++      char *dst = dri2_wl_swrast_get_backbuffer_data(dri2_surf);
+ 
+-   /* partial copy, copy old content */
+-   if (copy_width < dst_stride)
+-      dri2_wl_swrast_get_image(NULL, 0, 0, dri2_surf->base.Width,
+-                                 dri2_surf->base.Height, dst, dri2_surf);
++      /* partial copy, copy old content */
++      if (copy_width < dst_stride)
++         dri2_wl_swrast_get_image(NULL, 0, 0, dri2_surf->base.Width,
++                                  dri2_surf->base.Height, dst, dri2_surf);
++   }
+ 
+    if (n_rects)
+       driSwapBuffersWithDamage(dri2_surf->dri_drawable, n_rects, rects);
+    else
+       driSwapBuffers(dri2_surf->dri_drawable);
+ 
+-   dri2_surf->current = dri2_surf->back;
+-   dri2_surf->back = NULL;
++   if (direct) {
++      if (!dri2_surf->archphene_gpu_present_pending) {
++         dri2_surf->back->locked = false;
++         dri2_surf->back = NULL;
++         _eglError(EGL_BAD_SURFACE, "missing Archphene GPU identity");
++         return EGL_FALSE;
++      }
++      dri2_surf->archphene_gpu_present_pending = false;
++      dri2_surf->back->locked = false;
++      dri2_surf->back = NULL;
++      dri2_surf->current = NULL;
++   } else {
++      dri2_surf->current = dri2_surf->back;
++      dri2_surf->back = NULL;
++   }
+ 
+    dri2_wl_swrast_commit_backbuffer(dri2_surf);
+    return EGL_TRUE;
+@@ -3154,6 +3212,12 @@ registry_handle_global_swrast(void *data, struct wl_registry *registry,
+          wl_registry_bind(registry, name, &wp_presentation_interface, 1);
+       wp_presentation_add_listener(dri2_dpy->wp_presentation,
+                                    &presentation_listener, dri2_dpy);
++   } else if (strcmp(interface,
++                     org_archphene_gpu_present_manager_v1_interface.name) == 0 &&
++              getenv("ARCHPHENE_AHB_PRESENT") &&
++              strcmp(getenv("ARCHPHENE_AHB_PRESENT"), "1") == 0) {
++      dri2_dpy->archphene_gpu_present_manager = wl_registry_bind(
++         registry, name, &org_archphene_gpu_present_manager_v1_interface, 1);
+ #ifdef WL_FIXES_INTERFACE
+    } else if (strcmp(interface, wl_fixes_interface.name) == 0) {
+       dri2_dpy->wl_fixes = wl_registry_bind(registry, name, &wl_fixes_interface, 1);
+@@ -3182,12 +3246,13 @@ static const struct dri2_egl_display_vtbl dri2_wl_swrast_display_vtbl = {
+ };
+ 
+ static const __DRIswrastLoaderExtension swrast_loader_extension = {
+-   .base = {__DRI_SWRAST_LOADER, 2},
++   .base = {__DRI_SWRAST_LOADER, 7},
+ 
+    .getDrawableInfo = dri2_wl_swrast_get_drawable_info,
+    .putImage = dri2_wl_swrast_put_image,
+    .getImage = dri2_wl_swrast_get_image,
+    .putImage2 = dri2_wl_swrast_put_image2,
++   .presentResource = dri2_wl_swrast_present_resource,
+ };
+ 
+ static const __DRIextension *swrast_loader_extensions[] = {
+@@ -3294,6 +3359,9 @@ dri2_teardown_wayland(struct dri2_egl_display *dri2_dpy)
+    dri2_wl_formats_fini(&dri2_dpy->formats);
+    if (dri2_dpy->wp_presentation)
+       wp_presentation_destroy(dri2_dpy->wp_presentation);
++   if (dri2_dpy->archphene_gpu_present_manager)
++      org_archphene_gpu_present_manager_v1_destroy(
++         dri2_dpy->archphene_gpu_present_manager);
+ #ifdef HAVE_BIND_WL_DISPLAY
+    if (dri2_dpy->wl_drm)
+       wl_drm_destroy(dri2_dpy->wl_drm);
+diff --git a/src/egl/meson.build b/src/egl/meson.build
+index 1680984..b5bb652 100644
+--- a/src/egl/meson.build
++++ b/src/egl/meson.build
+@@ -124,6 +124,7 @@ if with_dri
+     files_egl += files('drivers/dri2/platform_wayland.c')
+     files_egl += wp_files['linux-dmabuf-unstable-v1']
+     files_egl += wp_files['presentation-time']
++    files_egl += wp_files['archphene-gpu-present-v1']
+     if with_wayland_bind_display
+       files_egl += [wayland_drm_client_protocol_h]
+       link_for_egl += [libwayland_drm]
+diff --git a/src/egl/wayland/archphene-gpu-present-v1.xml b/src/egl/wayland/archphene-gpu-present-v1.xml
+new file mode 100644
+index 0000000..4d21ebe
+--- /dev/null
++++ b/src/egl/wayland/archphene-gpu-present-v1.xml
+@@ -0,0 +1,63 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="archphene_gpu_present_v1">
++  <copyright>
++    Copyright 2026 Archphene contributors
++
++    SPDX-License-Identifier: Apache-2.0
++  </copyright>
++
++  <interface name="org_archphene_gpu_present_manager_v1" version="1">
++    <description summary="private GPU resource identity manager">
++      This private protocol associates a resource accepted through Archphene's
++      authenticated APHB side channel with one exact wl_surface commit. Binding
++      this interface does not grant access to an AHardwareBuffer.
++    </description>
++
++    <request name="destroy" type="destructor"/>
++
++    <request name="get_surface_binding">
++      <description summary="bind one identity stream to one surface">
++        A wl_surface may have at most one live GPU presentation binding.
++      </description>
++      <arg name="id" type="new_id" interface="org_archphene_gpu_surface_v1"/>
++      <arg name="surface" type="object" interface="wl_surface"/>
++    </request>
++
++    <enum name="error">
++      <entry name="binding_limit" value="0" summary="bounded binding limit exceeded"/>
++      <entry name="surface_exists" value="1" summary="surface already has a binding"/>
++    </enum>
++  </interface>
++
++  <interface name="org_archphene_gpu_surface_v1" version="1">
++    <description summary="GPU identity for one wl_surface">
++      set_resource is double-buffered and applies on the next wl_surface.commit.
++      A standard wl_buffer attachment without set_resource replaces the current
++      GPU identity. A standard buffer detach also clears the identity. A
++      damage-only commit retains the current identity.
++    </description>
++
++    <request name="destroy" type="destructor"/>
++
++    <request name="set_resource">
++      <description summary="set the resource for the next surface commit">
++        The helper generation, resource ID, and fence sequence must match one
++        already authenticated APHB Present frame. The 64-bit fence sequence is
++        encoded as unsigned high and low words.
++      </description>
++      <arg name="helper_generation" type="uint"/>
++      <arg name="resource_id" type="uint"/>
++      <arg name="fence_sequence_hi" type="uint"/>
++      <arg name="fence_sequence_lo" type="uint"/>
++    </request>
++
++    <request name="clear">
++      <description summary="clear the identity on the next surface commit"/>
++    </request>
++
++    <enum name="error">
++      <entry name="invalid_identity" value="0" summary="identity is zero, stale, unknown, or cross-generation"/>
++      <entry name="stale_fence" value="1" summary="fence sequence does not strictly increase"/>
++    </enum>
++  </interface>
++</protocol>
+diff --git a/src/gallium/frontends/dri/drisw.c b/src/gallium/frontends/dri/drisw.c
+index 394b698..139b99c 100644
+--- a/src/gallium/frontends/dri/drisw.c
++++ b/src/gallium/frontends/dri/drisw.c
+@@ -187,6 +187,21 @@ drisw_put_image_shm(struct dri_drawable *drawable,
+    put_image_shm(drawable, shmid, shmaddr, offset, offset_x, x, y, width, height, stride);
+ }
+ 
++static bool
++drisw_present_resource(struct dri_drawable *drawable,
++                       uint32_t helper_generation,
++                       uint32_t resource_id,
++                       uint64_t fence_sequence)
++{
++   const __DRIswrastLoaderExtension *loader = drawable->screen->swrast_loader;
++
++   if (loader->base.version < 7 || !loader->presentResource)
++      return false;
++
++   return loader->presentResource(drawable, helper_generation, resource_id,
++                                  fence_sequence, drawable->loaderPrivate);
++}
++
+ static inline void
+ drisw_present_texture(struct pipe_context *pipe, struct dri_drawable *drawable,
+                       struct pipe_resource *ptex, unsigned nrects, struct pipe_box *sub_box)
+@@ -578,14 +593,16 @@ drisw_update_tex_buffer(struct dri_drawable *drawable,
+ static const struct drisw_loader_funcs drisw_lf = {
+    .get_image = drisw_get_image,
+    .put_image = drisw_put_image,
+-   .put_image2 = drisw_put_image2
++   .put_image2 = drisw_put_image2,
++   .present_resource = drisw_present_resource,
+ };
+ 
+ static const struct drisw_loader_funcs drisw_shm_lf = {
+    .get_image = drisw_get_image,
+    .put_image = drisw_put_image,
+    .put_image2 = drisw_put_image2,
+-   .put_image_shm = drisw_put_image_shm
++   .put_image_shm = drisw_put_image_shm,
++   .present_resource = drisw_present_resource,
+ };
+ 
+ void
+diff --git a/src/gallium/include/frontend/drisw_api.h b/src/gallium/include/frontend/drisw_api.h
+index 037f4b6..1995095 100644
+--- a/src/gallium/include/frontend/drisw_api.h
++++ b/src/gallium/include/frontend/drisw_api.h
+@@ -21,7 +21,11 @@ struct drisw_loader_funcs
+                        void *data, int x, int y, unsigned width, unsigned height, unsigned stride);
+    void (*put_image_shm) (struct dri_drawable *dri_drawable,
+                           int shmid, char *shmaddr, unsigned offset, unsigned offset_x,
+-                          int x, int y, unsigned width, unsigned height, unsigned stride);
++                           int x, int y, unsigned width, unsigned height, unsigned stride);
++   bool (*present_resource) (struct dri_drawable *dri_drawable,
++                             uint32_t helper_generation,
++                             uint32_t resource_id,
++                             uint64_t fence_sequence);
+ };
+ 
+ #endif
+diff --git a/src/gallium/include/frontend/sw_winsys.h b/src/gallium/include/frontend/sw_winsys.h
+index 9c916f8..bdc8685 100644
+--- a/src/gallium/include/frontend/sw_winsys.h
++++ b/src/gallium/include/frontend/sw_winsys.h
+@@ -135,6 +135,17 @@ struct sw_winsys
+                              unsigned nboxes,
+                              struct pipe_box *box );
+ 
++   /**
++    * Present an authenticated host resource instead of copying a display
++    * target. Implementations return false when this private path is absent.
++    */
++   bool
++   (*displaytarget_present_resource)( struct sw_winsys *ws,
++                                      void *context_private,
++                                      uint32_t helper_generation,
++                                      uint32_t resource_id,
++                                      uint64_t fence_sequence );
++
+    void 
+    (*displaytarget_destroy)( struct sw_winsys *ws, 
+                              struct sw_displaytarget *dt );
+diff --git a/src/gallium/include/mesa_interface.h b/src/gallium/include/mesa_interface.h
+index 4529e4a..f5b7048 100644
+--- a/src/gallium/include/mesa_interface.h
++++ b/src/gallium/include/mesa_interface.h
+@@ -221,6 +221,18 @@ typedef struct {
+     unsigned char (*getImageShm2)(struct dri_drawable *readable,
+                                   int x, int y, int width, int height,
+                                   int shmid, void *loaderPrivate);
++
++    /**
++     * Present a private authenticated host resource on the next surface
++     * commit instead of copying image data.
++     *
++     * \since 7
++     */
++    unsigned char (*presentResource)(struct dri_drawable *drawable,
++                                     uint32_t helper_generation,
++                                     uint32_t resource_id,
++                                     uint64_t fence_sequence,
++                                     void *loaderPrivate);
+ } __DRIswrastLoaderExtension;
+ 
+ /**
+diff --git a/src/gallium/winsys/sw/dri/dri_sw_winsys.c b/src/gallium/winsys/sw/dri/dri_sw_winsys.c
+index d7b2453..cb6f1f4 100644
+--- a/src/gallium/winsys/sw/dri/dri_sw_winsys.c
++++ b/src/gallium/winsys/sw/dri/dri_sw_winsys.c
+@@ -90,6 +90,20 @@ dri_sw_winsys( struct sw_winsys *ws )
+    return (struct dri_sw_winsys *)ws;
+ }
+ 
++static bool
++dri_sw_displaytarget_present_resource(struct sw_winsys *winsys,
++                                      void *context_private,
++                                      uint32_t helper_generation,
++                                      uint32_t resource_id,
++                                      uint64_t fence_sequence)
++{
++   struct dri_sw_winsys *ws = dri_sw_winsys(winsys);
++
++   return ws->lf->present_resource &&
++          ws->lf->present_resource(context_private, helper_generation,
++                                   resource_id, fence_sequence);
++}
++
+ 
+ static bool
+ dri_sw_is_displaytarget_format_supported( struct sw_winsys *ws,
+@@ -425,6 +439,8 @@ dri_create_sw_winsys(const struct drisw_loader_funcs *lf)
+    ws->base.displaytarget_unmap = dri_sw_displaytarget_unmap;
+ 
+    ws->base.displaytarget_display = dri_sw_displaytarget_display;
++   ws->base.displaytarget_present_resource =
++      dri_sw_displaytarget_present_resource;
+ 
+    return &ws->base;
+ }
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c b/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
+index a74b4c6..fe723c4 100644
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_socket.c
+@@ -381,6 +381,87 @@ uint32_t virgl_vtest_send_resource_create(struct virgl_vtest_winsys *vws,
+    return handle;
+ }
+ 
++uint32_t
++virgl_vtest_send_archphene_resource_create(struct virgl_vtest_winsys *vws,
++                                           enum pipe_texture_target target,
++                                           uint32_t format,
++                                           uint32_t bind,
++                                           uint32_t width,
++                                           uint32_t height,
++                                           uint32_t depth,
++                                           uint32_t array_size,
++                                           uint32_t last_level,
++                                           uint32_t nr_samples)
++{
++   uint32_t request[VCMD_ARCHPHENE_RES_CREATE_AHB_SIZE];
++   uint32_t response[VTEST_HDR_SIZE];
++   uint32_t handle;
++
++   response[VTEST_CMD_LEN] = VCMD_ARCHPHENE_RES_CREATE_AHB_SIZE;
++   response[VTEST_CMD_ID] = VCMD_ARCHPHENE_RESOURCE_CREATE_AHB;
++   request[VCMD_RES_CREATE_RES_HANDLE] = 0;
++   request[VCMD_RES_CREATE_TARGET] = target;
++   request[VCMD_RES_CREATE_FORMAT] = format;
++   request[VCMD_RES_CREATE_BIND] = bind;
++   request[VCMD_RES_CREATE_WIDTH] = width;
++   request[VCMD_RES_CREATE_HEIGHT] = height;
++   request[VCMD_RES_CREATE_DEPTH] = depth;
++   request[VCMD_RES_CREATE_ARRAY_SIZE] = array_size;
++   request[VCMD_RES_CREATE_LAST_LEVEL] = last_level;
++   request[VCMD_RES_CREATE_NR_SAMPLES] = nr_samples;
++
++   virgl_block_write(vws->sock_fd, response, sizeof(response));
++   virgl_block_write(vws->sock_fd, request, sizeof(request));
++   virgl_block_read(vws->sock_fd, response, sizeof(response));
++   if (response[VTEST_CMD_LEN] != VCMD_ARCHPHENE_RES_CREATE_AHB_RESP_SIZE ||
++       response[VTEST_CMD_ID] != VCMD_ARCHPHENE_RESOURCE_CREATE_AHB)
++      return 0;
++   virgl_block_read(vws->sock_fd, &handle, sizeof(handle));
++   return handle;
++}
++
++uint64_t
++virgl_vtest_send_archphene_present(struct virgl_vtest_winsys *vws,
++                                   uint32_t handle)
++{
++   uint32_t header[VTEST_HDR_SIZE] = {
++      [VTEST_CMD_LEN] = VCMD_ARCHPHENE_PRESENT_AHB_SIZE,
++      [VTEST_CMD_ID] = VCMD_ARCHPHENE_PRESENT_AHB,
++   };
++   uint32_t response[VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE];
++
++   virgl_block_write(vws->sock_fd, header, sizeof(header));
++   virgl_block_write(vws->sock_fd, &handle, sizeof(handle));
++   virgl_block_read(vws->sock_fd, header, sizeof(header));
++   if (header[VTEST_CMD_LEN] != VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE ||
++       header[VTEST_CMD_ID] != VCMD_ARCHPHENE_PRESENT_AHB)
++      return 0;
++   virgl_block_read(vws->sock_fd, response, sizeof(response));
++   return (uint64_t)response[0] | ((uint64_t)response[1] << 32);
++}
++
++bool
++virgl_vtest_send_archphene_wait_release(struct virgl_vtest_winsys *vws,
++                                        uint32_t handle,
++                                        uint64_t fence_sequence)
++{
++   uint32_t header[VTEST_HDR_SIZE] = {
++      [VTEST_CMD_LEN] = VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SIZE,
++      [VTEST_CMD_ID] = VCMD_ARCHPHENE_WAIT_RELEASE_AHB,
++   };
++   uint32_t request[VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SIZE] = {
++      handle,
++      (uint32_t)fence_sequence,
++      (uint32_t)(fence_sequence >> 32),
++   };
++
++   virgl_block_write(vws->sock_fd, header, sizeof(header));
++   virgl_block_write(vws->sock_fd, request, sizeof(request));
++   virgl_block_read(vws->sock_fd, header, sizeof(header));
++   return header[VTEST_CMD_LEN] == 0 &&
++          header[VTEST_CMD_ID] == VCMD_ARCHPHENE_WAIT_RELEASE_AHB;
++}
++
+ int virgl_vtest_submit_cmd(struct virgl_vtest_winsys *vws,
+                            uint32_t *buf, uint32_t buf_len)
+ {
+@@ -594,4 +675,3 @@ virgl_vtest_send_create_blob(struct virgl_vtest_winsys *vws,
+ 
+    return res_id;
+ }
+-
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+index bea4d19..4c9987d 100644
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.c
+@@ -20,7 +20,9 @@
+  * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+  * USE OR OTHER DEALINGS IN THE SOFTWARE.
+  */
++#include <errno.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include "util/macros.h"
+ #include "util/u_surface.h"
+ #include "util/u_memory.h"
+@@ -52,6 +54,31 @@ static inline bool can_cache_resource_with_bind(uint32_t bind)
+           bind == VIRGL_BIND_STAGING;
+ }
+ 
++static bool
++archphene_resource_is_presentable(struct virgl_vtest_winsys *vtws,
++                                  const void *map_front_private,
++                                  enum pipe_texture_target target,
++                                  uint32_t format, uint32_t bind,
++                                  uint32_t width, uint32_t height,
++                                  uint32_t depth, uint32_t array_size,
++                                  uint32_t last_level, uint32_t nr_samples)
++{
++   return vtws->archphene_present_enabled && map_front_private &&
++          vtws->sws->displaytarget_present_resource(
++             vtws->sws, (void *)map_front_private,
++             vtws->archphene_helper_generation, 0, 0) &&
++          target == PIPE_TEXTURE_2D &&
++          (format == PIPE_FORMAT_R8G8B8A8_UNORM ||
++           format == PIPE_FORMAT_R8G8B8X8_UNORM ||
++           format == PIPE_FORMAT_B8G8R8A8_UNORM ||
++           format == PIPE_FORMAT_B8G8R8X8_UNORM) &&
++          (bind & VIRGL_BIND_RENDER_TARGET) &&
++          (bind & (VIRGL_BIND_DISPLAY_TARGET | VIRGL_BIND_SCANOUT)) &&
++          width > 0 && width <= 8192 && height > 0 && height <= 8192 &&
++          (uint64_t)width * height <= 33554432 && depth == 1 &&
++          array_size == 1 && last_level == 0 && nr_samples == 0;
++}
++
+ static uint32_t vtest_get_transfer_size(struct virgl_hw_res *res,
+                                         const struct pipe_box *box,
+                                         uint32_t stride, uint32_t layer_stride,
+@@ -176,6 +203,11 @@ virgl_vtest_transfer_get(struct virgl_winsys *vws,
+ static void virgl_hw_res_destroy(struct virgl_vtest_winsys *vtws,
+                                  struct virgl_hw_res *res)
+ {
++   if (res->archphene_outstanding_sequence) {
++      (void)virgl_vtest_send_archphene_wait_release(
++         vtws, res->res_handle, res->archphene_outstanding_sequence);
++      res->archphene_outstanding_sequence = 0;
++   }
+    virgl_vtest_send_resource_unref(vtws, res->res_handle);
+    if (res->dt)
+       vtws->sws->displaytarget_destroy(vtws->sws, res->dt);
+@@ -291,12 +323,16 @@ virgl_vtest_winsys_resource_create(struct virgl_winsys *vws,
+                                            .array_size = array_size,
+                                            .last_level = last_level,
+                                            .target = target };
++   bool archphene_presentable = archphene_resource_is_presentable(
++      vtws, map_front_private, target, format, bind, width, height, depth, array_size,
++      last_level, nr_samples);
+ 
+    res = CALLOC_STRUCT(virgl_hw_res);
+    if (!res)
+       return NULL;
+ 
+-   if (bind & (VIRGL_BIND_DISPLAY_TARGET | VIRGL_BIND_SCANOUT)) {
++   if (!archphene_presentable &&
++       bind & (VIRGL_BIND_DISPLAY_TARGET | VIRGL_BIND_SCANOUT)) {
+       res->dt = vtws->sws->displaytarget_create(vtws->sws, bind, format,
+                                                 width, height, 64, map_front_private,
+                                                 &res->stride);
+@@ -309,8 +345,12 @@ virgl_vtest_winsys_resource_create(struct virgl_winsys *vws,
+       }
+    }
+ 
+-   if ((flags & (VIRGL_RESOURCE_FLAG_MAP_PERSISTENT |
+-                 VIRGL_RESOURCE_FLAG_MAP_COHERENT))) {
++   if (archphene_presentable) {
++      new_handle = virgl_vtest_send_archphene_resource_create(
++         vtws, target, pipe_to_virgl_format(format), bind, width, height,
++         depth, array_size, last_level, nr_samples);
++   } else if ((flags & (VIRGL_RESOURCE_FLAG_MAP_PERSISTENT |
++                        VIRGL_RESOURCE_FLAG_MAP_COHERENT))) {
+       width = align(width, getpagesize());
+       size = align(size, getpagesize());
+       new_handle = virgl_vtest_winsys_resource_create_blob(vws, target, format, bind,
+@@ -337,8 +377,9 @@ virgl_vtest_winsys_resource_create(struct virgl_winsys *vws,
+    res->height = height;
+    res->width = width;
+    res->size = size;
++   res->archphene_presentable = archphene_presentable;
+ 
+-   if (vtws->protocol_version >= 2) {
++   if (vtws->protocol_version >= 2 && !archphene_presentable) {
+       if (res->size == 0) {
+          res->ptr = NULL;
+          res->res_handle = new_handle;
+@@ -690,6 +731,28 @@ static void virgl_vtest_flush_frontbuffer(struct virgl_winsys *vws,
+    struct virgl_vtest_winsys *vtws = virgl_vtest_winsys(vws);
+    struct pipe_box box;
+    uint32_t offset = 0;
++   if (res->archphene_presentable) {
++      uint64_t sequence;
++
++      if (res->archphene_outstanding_sequence &&
++          !virgl_vtest_send_archphene_wait_release(
++             vtws, res->res_handle, res->archphene_outstanding_sequence)) {
++         fprintf(stderr, "Archphene release response was invalid\n");
++         return;
++      }
++      res->archphene_outstanding_sequence = 0;
++      sequence = virgl_vtest_send_archphene_present(vtws, res->res_handle);
++      if (!sequence || !vtws->sws->displaytarget_present_resource ||
++          !vtws->sws->displaytarget_present_resource(
++             vtws->sws, winsys_drawable_handle,
++             vtws->archphene_helper_generation, res->res_handle, sequence)) {
++         fprintf(stderr, "Archphene resource identity was not accepted\n");
++         return;
++      }
++      res->archphene_outstanding_sequence = sequence;
++      return;
++   }
++
+    if (!res->dt)
+       return;
+ 
+@@ -758,6 +821,20 @@ virgl_vtest_winsys_wrap(struct sw_winsys *sws)
+    virgl_vtest_connect(vtws);
+    vtws->sws = sws;
+ 
++   const char *present = os_get_option("ARCHPHENE_AHB_PRESENT");
++   const char *generation = os_get_option("ARCHPHENE_GPU_HELPER_GENERATION");
++   if (present && !strcmp(present, "1") && generation &&
++       sws->displaytarget_present_resource) {
++      char *end = NULL;
++      errno = 0;
++      unsigned long parsed = strtoul(generation, &end, 10);
++      if (!errno && end != generation && *end == '\0' && parsed > 0 &&
++          parsed <= UINT32_MAX) {
++         vtws->archphene_present_enabled = true;
++         vtws->archphene_helper_generation = parsed;
++      }
++   }
++
+    virgl_resource_cache_init(&vtws->cache, CACHE_TIMEOUT_USEC,
+                              virgl_vtest_resource_cache_entry_is_busy,
+                              virgl_vtest_resource_cache_entry_release,
+diff --git a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
+index 8ad4060..2da8083 100644
+--- a/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
++++ b/src/gallium/winsys/virgl/vtest/virgl_vtest_winsys.h
+@@ -51,6 +51,8 @@ struct virgl_vtest_winsys {
+ 
+    int32_t blob_id;
+    unsigned protocol_version;
++   bool archphene_present_enabled;
++   uint32_t archphene_helper_generation;
+ };
+ 
+ struct virgl_hw_res {
+@@ -70,6 +72,8 @@ struct virgl_hw_res {
+    void *mapped;
+ 
+    uint32_t bind;
++   bool archphene_presentable;
++   uint64_t archphene_outstanding_sequence;
+    struct virgl_resource_cache_entry cache_entry;
+ };
+ 
+@@ -119,6 +123,27 @@ uint32_t virgl_vtest_send_resource_create(struct virgl_vtest_winsys *vws,
+                                           uint32_t size,
+                                           int *out_fd);
+ 
++uint32_t
++virgl_vtest_send_archphene_resource_create(struct virgl_vtest_winsys *vws,
++                                           enum pipe_texture_target target,
++                                           uint32_t format,
++                                           uint32_t bind,
++                                           uint32_t width,
++                                           uint32_t height,
++                                           uint32_t depth,
++                                           uint32_t array_size,
++                                           uint32_t last_level,
++                                           uint32_t nr_samples);
++
++uint64_t
++virgl_vtest_send_archphene_present(struct virgl_vtest_winsys *vws,
++                                   uint32_t handle);
++
++bool
++virgl_vtest_send_archphene_wait_release(struct virgl_vtest_winsys *vws,
++                                        uint32_t handle,
++                                        uint64_t fence_sequence);
++
+ int virgl_vtest_send_resource_unref(struct virgl_vtest_winsys *vws,
+                                     uint32_t handle);
+ 
+diff --git a/src/loader/meson.build b/src/loader/meson.build
+index a8603ad..7a3f292 100644
+--- a/src/loader/meson.build
++++ b/src/loader/meson.build
+@@ -17,6 +17,12 @@ if with_platform_wayland
+   foreach name, xml : wp_protos
+     wp_files += {name : mod_wl.scan_xml(xml, include_core_only : false)}
+   endforeach
++  wp_files += {
++    'archphene-gpu-present-v1': mod_wl.scan_xml(
++      files('../egl/wayland/archphene-gpu-present-v1.xml'),
++      include_core_only : false,
++    ),
++  }
+ 
+   libloader_wayland_helper = static_library(
+     'loader_wayland_helper',
+diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+index 1bd515c..980172f 100644
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -94,6 +94,17 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
+ 
++/* Archphene private extension, enabled only for its authenticated helper. */
++#define VCMD_ARCHPHENE_RESOURCE_CREATE_AHB 39
++#define VCMD_ARCHPHENE_PRESENT_AHB 40
++#define VCMD_ARCHPHENE_WAIT_RELEASE_AHB 41
++
++#define VCMD_ARCHPHENE_RES_CREATE_AHB_SIZE VCMD_RES_CREATE_SIZE
++#define VCMD_ARCHPHENE_RES_CREATE_AHB_RESP_SIZE 1
++#define VCMD_ARCHPHENE_PRESENT_AHB_SIZE 1
++#define VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE 2
++#define VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SIZE 3
++
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+ #define VCMD_RES_CREATE_TARGET 1
