@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use gpu_present_protocol::{GpuPresentMessage, GpuPresentRegistry, GpuPresentScope};
 use gpu_surface_identity::{
     GpuSurfaceIdentity, GpuSurfaceIdentityError, GpuSurfaceIdentityRegistry,
 };
@@ -636,6 +637,8 @@ pub struct CompositorState {
     text_input_count: u32,
     text_inputs: Vec<ZwpTextInputV3>,
     gpu_surface_identity: Option<GpuSurfaceIdentityRegistry>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    gpu_present_registry: Option<GpuPresentRegistry>,
     gpu_surface_bindings: Vec<OrgArchpheneGpuSurfaceV1>,
     ime_active: bool,
     ime_show_requests: u32,
@@ -12859,61 +12862,93 @@ impl CompositorCore {
         })
     }
 
-    pub fn enable_gpu_surface_identity(&mut self, helper_generation: u32) -> std::io::Result<()> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn enable_gpu_surface_identity(
+        &mut self,
+        scope: GpuPresentScope,
+    ) -> std::io::Result<()> {
         if self.state.gpu_surface_identity.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "GPU surface identity is already enabled",
             ));
         }
-        let registry = GpuSurfaceIdentityRegistry::new(helper_generation).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "invalid helper generation")
-        })?;
-        self.state.gpu_surface_identity = Some(registry);
+        let identity_registry =
+            GpuSurfaceIdentityRegistry::new(scope.helper_generation).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid helper generation")
+            })?;
+        let present_registry = GpuPresentRegistry::new(scope)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))?;
+        self.state.gpu_surface_identity = Some(identity_registry);
+        self.state.gpu_present_registry = Some(present_registry);
         self.display
             .handle()
             .create_global::<CompositorState, OrgArchpheneGpuPresentManagerV1, _>(1, ());
         Ok(())
     }
 
-    pub fn register_gpu_surface_resource(&mut self, resource_id: u32) -> std::io::Result<()> {
-        self.state
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn apply_gpu_present_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        let mut present_registry = self
+            .state
+            .gpu_present_registry
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU present is disabled"))?
+            .clone();
+        let mut identity_registry = self
+            .state
             .gpu_surface_identity
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
-            .register_resource(resource_id)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
+            .clone();
+        let message = present_registry
+            .apply_frame(frame)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))?;
+        match message {
+            GpuPresentMessage::Hello => {}
+            GpuPresentMessage::Resource(resource) => identity_registry
+                .register_resource(resource.resource_id)
+                .map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}"))
+                })?,
+            GpuPresentMessage::Present {
+                resource_id,
+                fence_sequence,
+            } => identity_registry
+                .present_resource(resource_id, fence_sequence)
+                .map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}"))
+                })?,
+            GpuPresentMessage::Release { resource_id } => identity_registry
+                .release_resource(resource_id)
+                .map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}"))
+                })?,
+        }
+        self.state.gpu_present_registry = Some(present_registry);
+        self.state.gpu_surface_identity = Some(identity_registry);
+        Ok(())
     }
 
-    pub fn present_gpu_surface_resource(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn replace_gpu_surface_helper(
         &mut self,
-        resource_id: u32,
-        fence_sequence: u64,
+        scope: GpuPresentScope,
     ) -> std::io::Result<()> {
-        self.state
+        let mut identity_registry = self
+            .state
             .gpu_surface_identity
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
-            .present_resource(resource_id, fence_sequence)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
-    }
-
-    pub fn replace_gpu_surface_helper(&mut self, helper_generation: u32) -> std::io::Result<()> {
-        self.state
-            .gpu_surface_identity
-            .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
-            .replace_helper(helper_generation)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
-    }
-
-    pub fn release_gpu_surface_resource(&mut self, resource_id: u32) -> std::io::Result<()> {
-        self.state
-            .gpu_surface_identity
-            .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
-            .release_resource(resource_id)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
+            .clone();
+        identity_registry
+            .replace_helper(scope.helper_generation)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))?;
+        let present_registry = GpuPresentRegistry::new(scope)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))?;
+        self.state.gpu_present_registry = Some(present_registry);
+        self.state.gpu_surface_identity = Some(identity_registry);
+        Ok(())
     }
 
     pub fn bind_socket(&mut self, path: &Path) -> std::io::Result<()> {
@@ -19929,12 +19964,32 @@ mod tests {
         let server_socket = socket.clone();
         let server = std::thread::spawn(move || {
             let mut core = CompositorCore::new().expect("Wayland display");
-            core.enable_gpu_surface_identity(9)
+            let scope = GpuPresentScope {
+                session_id: 77,
+                helper_generation: 9,
+                token: [0x6a; 16],
+            };
+            core.enable_gpu_surface_identity(scope)
                 .expect("enable private GPU identity");
-            core.register_gpu_surface_resource(44)
-                .expect("register private GPU resource");
-            core.present_gpu_surface_resource(44, 0x1_0000_0002)
-                .expect("authenticate private GPU present");
+            for message in [
+                GpuPresentMessage::Hello,
+                GpuPresentMessage::Resource(gpu_present_protocol::PresentResource {
+                    resource_id: 44,
+                    slot: 0,
+                    width: 64,
+                    height: 64,
+                    estimated_bytes: 64 * 64 * 4,
+                }),
+                GpuPresentMessage::Present {
+                    resource_id: 44,
+                    fence_sequence: 0x1_0000_0002,
+                },
+            ] {
+                let frame = gpu_present_protocol::encode_gpu_present(scope, message)
+                    .expect("encode authenticated GPU present frame");
+                core.apply_gpu_present_frame(&frame)
+                    .expect("apply authenticated GPU present frame");
+            }
             core.bind_socket(&server_socket).expect("bind socket");
             while server_stage.load(Ordering::Acquire) != 3 {
                 core.dispatch_once().expect("dispatch GPU identity client");
@@ -19970,6 +20025,26 @@ mod tests {
             {
                 core.dispatch_once().expect("dispatch GPU identity clear");
             }
+            let replacement_scope = GpuPresentScope {
+                session_id: 77,
+                helper_generation: 10,
+                token: [0x7b; 16],
+            };
+            core.replace_gpu_surface_helper(replacement_scope)
+                .expect("replace scoped GPU helper");
+            let stale_hello = gpu_present_protocol::encode_gpu_present(
+                scope,
+                GpuPresentMessage::Hello,
+            )
+            .expect("encode stale helper hello");
+            assert!(core.apply_gpu_present_frame(&stale_hello).is_err());
+            let replacement_hello = gpu_present_protocol::encode_gpu_present(
+                replacement_scope,
+                GpuPresentMessage::Hello,
+            )
+            .expect("encode replacement helper hello");
+            core.apply_gpu_present_frame(&replacement_hello)
+                .expect("accept replacement helper hello");
         });
 
         let connection = loop {

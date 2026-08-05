@@ -202,6 +202,14 @@ an explicit clear latches on the following commit. Production does not enable
 the global because the Mesa sender, helper transport, and authenticated AHB
 receiver are still absent.
 
+The opt-in compositor path now applies APHB and Wayland identity state as one
+transaction. It requires one authenticated `Hello` before resource traffic,
+rejects a duplicate hello, decodes fixed Resource/Present/Release frames, and
+updates cloned bounded registries only when both the APHB and Wayland identity
+transition succeed. The socket round trip therefore uses the same scoped APHB
+Resource and 64-bit Present sequence that the Wayland commit claims. Native AHB
+handle receipt and helper/Mesa senders remain unimplemented.
+
 References:
 
 - [Android graphics architecture](https://source.android.com/docs/core/graphics/architecture)

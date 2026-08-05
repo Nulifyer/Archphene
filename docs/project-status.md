@@ -4050,6 +4050,15 @@ global, binds one surface, latches one scoped identity on the exact commit, and
 clears it on the next commit. Production does not enable the global, so no new
 direct-presentation claim is published.
 
+The dormant compositor global is now fed only through the fixed APHB registry,
+not direct test-only resource insertion. An authenticated Hello must precede
+Resource/Present/Release frames; duplicate Hello and pre-handshake traffic fail.
+Each frame is applied to cloned APHB and Wayland identity registries and becomes
+visible only when both transitions succeed. The generated-client socket test
+uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
+claiming the exact surface commit. Native handle receipt and helper/Mesa senders
+remain open.
+
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned
 callback context with a weak presentation reference and exact slot ID; its fence

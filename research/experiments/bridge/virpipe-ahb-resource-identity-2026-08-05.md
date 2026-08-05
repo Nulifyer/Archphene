@@ -71,3 +71,7 @@ damage-only retention. This closes the manager contract ambiguity; Mesa sender,
 vtest/AHB transport, and manager receiver implementation remain required before
 production can enable the global. Generated Rust bindings and an opt-in
 client/server socket test now prove exact set/commit and clear/commit latching.
+The test no longer inserts identity resources directly: it authenticates Hello,
+Resource, and a 64-bit Present frame through the APHB registry, atomically
+coordinates both bounded registries, and then submits the matching Wayland
+claim. Native handle transfer and external senders remain the next boundary.

@@ -37,6 +37,7 @@ struct ResourceState {
     claimed_fence_sequence: u64,
 }
 
+#[derive(Clone)]
 struct SurfaceBinding {
     binding_id: u32,
     surface_id: u32,
@@ -44,6 +45,7 @@ struct SurfaceBinding {
     committed: Option<GpuSurfaceIdentity>,
 }
 
+#[derive(Clone)]
 pub(crate) struct GpuSurfaceIdentityRegistry {
     helper_generation: u32,
     resources: [Option<ResourceState>; MAX_GPU_SURFACE_RESOURCES],

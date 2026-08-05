@@ -193,11 +193,13 @@ fn token_matches(candidate: &[u8], expected: &[u8; 16]) -> bool {
             == 0
 }
 
+#[derive(Clone)]
 pub(crate) struct GpuPresentRegistry {
     scope: GpuPresentScope,
     resources: [Option<PresentResource>; MAX_PRESENT_RESOURCES],
     last_fence: [u64; MAX_PRESENT_RESOURCES],
     total_bytes: u64,
+    hello_received: bool,
 }
 
 impl GpuPresentRegistry {
@@ -210,6 +212,7 @@ impl GpuPresentRegistry {
             resources: [None; MAX_PRESENT_RESOURCES],
             last_fence: [0; MAX_PRESENT_RESOURCES],
             total_bytes: 0,
+            hello_received: false,
         })
     }
 
@@ -218,8 +221,18 @@ impl GpuPresentRegistry {
         frame: &[u8],
     ) -> Result<GpuPresentMessage, GpuPresentProtocolError> {
         let message = decode_gpu_present(self.scope, frame)?;
+        if message == GpuPresentMessage::Hello {
+            if self.hello_received {
+                return Err(GpuPresentProtocolError::InvalidFrame);
+            }
+            self.hello_received = true;
+            return Ok(message);
+        }
+        if !self.hello_received {
+            return Err(GpuPresentProtocolError::InvalidFrame);
+        }
         match message {
-            GpuPresentMessage::Hello => {}
+            GpuPresentMessage::Hello => unreachable!("hello handled before state dispatch"),
             GpuPresentMessage::Resource(resource) => {
                 if self.resources.iter().flatten().any(|known| {
                     known.resource_id == resource.resource_id || known.slot == resource.slot
@@ -361,6 +374,12 @@ mod tests {
     #[test]
     fn bounds_resources_bytes_and_monotonic_fences() {
         let mut registry = GpuPresentRegistry::new(scope()).expect("registry");
+        let hello = encode_gpu_present(scope(), GpuPresentMessage::Hello).expect("hello frame");
+        assert_eq!(registry.apply_frame(&hello), Ok(GpuPresentMessage::Hello));
+        assert_eq!(
+            registry.apply_frame(&hello),
+            Err(GpuPresentProtocolError::InvalidFrame)
+        );
         for slot in 0..MAX_PRESENT_RESOURCES as u16 {
             let message = GpuPresentMessage::Resource(resource(u32::from(slot) + 1, slot));
             let frame = encode_gpu_present(scope(), message).expect("resource frame");
@@ -410,8 +429,15 @@ mod tests {
             resource_id: 404,
             fence_sequence: 1,
         };
+        let present_frame = encode_gpu_present(scope(), present).expect("unknown");
         assert_eq!(
-            registry.apply_frame(&encode_gpu_present(scope(), present).expect("unknown")),
+            registry.apply_frame(&present_frame),
+            Err(GpuPresentProtocolError::InvalidFrame),
+        );
+        let hello = encode_gpu_present(scope(), GpuPresentMessage::Hello).expect("hello frame");
+        assert_eq!(registry.apply_frame(&hello), Ok(GpuPresentMessage::Hello));
+        assert_eq!(
+            registry.apply_frame(&present_frame),
             Err(GpuPresentProtocolError::UnknownResource),
         );
     }
