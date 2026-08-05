@@ -10,10 +10,12 @@ CLIENT = (
     / "GitHubReleaseClient.java"
 )
 GREENFIELD_BUILD = ROOT / "android/app/build.gradle.kts"
+GREENFIELD_RELEASE_BUILDER = ROOT / "scripts/build-archphene-release-apk.sh"
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
 client = CLIENT.read_text(encoding="utf-8")
 greenfield_build = GREENFIELD_BUILD.read_text(encoding="utf-8")
+greenfield_release_builder = GREENFIELD_RELEASE_BUILDER.read_text(encoding="utf-8")
 
 required_workflow = (
     'push:\n    tags:\n      - "v*"',
@@ -84,6 +86,18 @@ for value in (
 ):
     if value not in greenfield_build:
         raise SystemExit(f"greenfield release version contract missing: {value}")
+
+for value in (
+    'flock "$build_lock_fd"',
+    '"-ParchpheneAbi=$abi"',
+    '"-ParchpheneVersionCode=$version_code"',
+    '"-ParchpheneVersionName=$version_name"',
+    ':android:app:assembleRelease',
+    'app-release-unsigned.apk',
+    'Archphene-$abi-$version_name-unsigned.apk',
+):
+    if value not in greenfield_release_builder:
+        raise SystemExit(f"greenfield release builder contract missing: {value}")
 
 print(
     "Release workflow contract passed: draft-first publication, exact ABI assets, "

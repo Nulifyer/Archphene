@@ -288,8 +288,11 @@ and rejects invalid values before task execution. Exact-ABI release builds can
 therefore carry a prospective tag version without changing source. Both
 `arm64-v8a` and `x86_64` release builds produced only their requested native ABI
 with version `1.1.0-rc.1` and version code `1000001234`; over-limit codes and an
-incomplete semantic version were rejected during configuration. The current tag
-workflow and `verify-release-apk.sh` still build and validate
+incomplete semantic version were rejected during configuration. Release
+migration can call `build-archphene-release-apk.sh`, which serializes the
+shared Gradle output, verifies exact version and ABI badging, and publishes a
+stable unsigned artifact for signing. The current tag workflow and
+`verify-release-apk.sh` still build and validate
 `prototypes/linux-app-manager-stub` as `org.archpheneos.manager`. Publishing a
 new tag now would therefore release the legacy manager rather than the tested
 greenfield application. Release migration must still resolve the production
