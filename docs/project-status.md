@@ -4035,6 +4035,17 @@ bind guest scanout resources to transferred AHB handles, so the corresponding
 release-plan item remains open and current virpipe frames still return through
 SHM.
 
+The private Wayland commit-identity half is also defined but deliberately not
+advertised. Version 1 binds one object to one `wl_surface`; its double-buffered
+`set_resource` request carries the helper generation, resource ID, and 64-bit
+fence sequence into the exact next commit. A bounded Rust state machine permits
+32 unique surfaces and three known resources, rejects duplicate or stale
+identity, clears all identities on helper replacement/resource release, lets a
+normal `wl_buffer` replace GPU identity, and retains identity for damage-only
+commits. Five tests pass, and `wayland-scanner` accepts the XML. Mesa/vtest
+sender integration and the authenticated manager AHB receiver remain open, so
+no new protocol global or direct-presentation claim is published.
+
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned
 callback context with a weak presentation reference and exact slot ID; its fence

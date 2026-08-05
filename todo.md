@@ -146,6 +146,11 @@ copying.
 - [ ] Extend the private virpipe/vtest contract with a host-allocated,
   AHardwareBuffer-backed presentable resource. Scope every resource and fence to
   one authenticated session and helper generation.
+  - [x] Define the fixed authenticated APHB side channel and the bounded private
+    Wayland commit-identity contract. Reject duplicate surfaces/resources,
+    cross-generation identities, stale fences, and unbounded bindings.
+  - [ ] Connect the contracts to a generic Mesa virpipe winsys extension, the
+    vtest helper, and the manager's AHB receiver.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
   buffer reuse. Bound dimensions, slots, estimated bytes, outstanding fences,
   pending releases, and device-loss recovery.

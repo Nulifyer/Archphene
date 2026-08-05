@@ -185,6 +185,19 @@ so it is not an acceptable direct-AHB implementation. The required generic
 Mesa/vtest-to-Wayland identity contract and bounded runtime delivery experiment
 are recorded in the [virpipe AHB resource identity audit](../research/experiments/bridge/virpipe-ahb-resource-identity-2026-08-05.md).
 
+The manager-side Wayland half of that identity contract is now specified as
+`org_archphene_gpu_present_manager_v1` and
+`org_archphene_gpu_surface_v1`. `set_resource` carries the helper generation,
+resource ID, and 64-bit fence sequence into one exact `wl_surface.commit`.
+Thirty-two unique surface bindings and three resources are hard limits. The
+state machine rejects duplicate bindings/surfaces/resources, unknown resources,
+cross-generation identities, and non-increasing fences; normal `wl_buffer`
+replacement and explicit clear remove committed GPU identity, while damage-only
+commits retain it. Five unit tests cover these transitions. The XML passes
+`wayland-scanner` server-header and private-code generation. The interface is
+not advertised yet because the Mesa sender, helper transport, and authenticated
+AHB receiver are still absent.
+
 References:
 
 - [Android graphics architecture](https://source.android.com/docs/core/graphics/architecture)

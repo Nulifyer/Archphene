@@ -102,6 +102,24 @@ require(
     "StaleFence",
     "rejects_cross_session_generation_token_and_trailing_fields",
 )
+require(
+    "native/archphene-compositor/src/gpu_surface_identity.rs",
+    "MAX_GPU_SURFACE_BINDINGS: usize = 32",
+    "MAX_GPU_SURFACE_RESOURCES: usize = 3",
+    "DuplicateSurface",
+    "StaleFence",
+    "standard_buffer_attached",
+    "helper_replacement_and_resource_release_clear_committed_identity",
+)
+require(
+    "native/archphene-compositor/protocols/archphene-gpu-present-v1.xml",
+    'interface name="org_archphene_gpu_present_manager_v1" version="1"',
+    'interface name="org_archphene_gpu_surface_v1" version="1"',
+    'request name="set_resource"',
+    'arg name="helper_generation" type="uint"',
+    'arg name="fence_sequence_hi" type="uint"',
+    "already authenticated APHB Present frame",
+)
 reject(
     "native/archphene-compositor/src/android_gpu_renderer.rs",
     "AHardwareBuffer_lock",

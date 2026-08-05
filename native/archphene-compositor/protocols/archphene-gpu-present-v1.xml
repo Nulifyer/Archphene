@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="archphene_gpu_present_v1">
+  <copyright>
+    Copyright 2026 Archphene contributors
+
+    SPDX-License-Identifier: Apache-2.0
+  </copyright>
+
+  <interface name="org_archphene_gpu_present_manager_v1" version="1">
+    <description summary="private GPU resource identity manager">
+      This private protocol associates a resource accepted through Archphene's
+      authenticated APHB side channel with one exact wl_surface commit. Binding
+      this interface does not grant access to an AHardwareBuffer.
+    </description>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="get_surface_binding">
+      <description summary="bind one identity stream to one surface">
+        A wl_surface may have at most one live GPU presentation binding.
+      </description>
+      <arg name="id" type="new_id" interface="org_archphene_gpu_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <enum name="error">
+      <entry name="binding_limit" value="0" summary="bounded binding limit exceeded"/>
+      <entry name="surface_exists" value="1" summary="surface already has a binding"/>
+    </enum>
+  </interface>
+
+  <interface name="org_archphene_gpu_surface_v1" version="1">
+    <description summary="GPU identity for one wl_surface">
+      set_resource is double-buffered and applies on the next wl_surface.commit.
+      A standard wl_buffer attachment without set_resource replaces the current
+      GPU identity. A damage-only commit retains the current identity.
+    </description>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="set_resource">
+      <description summary="set the resource for the next surface commit">
+        The helper generation, resource ID, and fence sequence must match one
+        already authenticated APHB Present frame. The 64-bit fence sequence is
+        encoded as unsigned high and low words.
+      </description>
+      <arg name="helper_generation" type="uint"/>
+      <arg name="resource_id" type="uint"/>
+      <arg name="fence_sequence_hi" type="uint"/>
+      <arg name="fence_sequence_lo" type="uint"/>
+    </request>
+
+    <request name="clear">
+      <description summary="clear the identity on the next surface commit"/>
+    </request>
+
+    <enum name="error">
+      <entry name="invalid_identity" value="0" summary="identity is zero, stale, unknown, or cross-generation"/>
+      <entry name="stale_fence" value="1" summary="fence sequence does not strictly increase"/>
+    </enum>
+  </interface>
+</protocol>

@@ -59,3 +59,14 @@ The next implementation must propagate one bounded identity end to end:
 This requires a reviewed generic Mesa runtime component, not an
 application-specific source patch. Until that experiment succeeds, the current
 virpipe-to-SHM path and explicit non-zero-copy claim remain authoritative.
+
+## 2026-08-05 manager contract update
+
+The manager-side protocol and state transition are now fixed but not advertised.
+`org_archphene_gpu_surface_v1.set_resource` carries the helper generation,
+resource ID, and split 64-bit fence sequence into one exact surface commit. The
+bounded state machine enforces unique surfaces, three known resources, monotonic
+fences, helper replacement, resource release, standard-buffer replacement, and
+damage-only retention. This closes the manager contract ambiguity; Mesa sender,
+vtest/AHB transport, and manager receiver implementation remain required before
+the global can be enabled.
