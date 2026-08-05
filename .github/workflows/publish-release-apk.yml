@@ -67,7 +67,12 @@ jobs:
         run: |
           state="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
           if [[ -z "$state" ]]; then
-            args=(--verify-tag --draft --generate-notes --title "Archphene $RELEASE_TAG")
+            args=(
+              --verify-tag
+              --draft
+              --notes-file docs/release-notes.md
+              --title "Archphene $RELEASE_TAG"
+            )
             if [[ "$VERSION_NAME" == *-* ]]; then
               args+=(--prerelease)
             fi

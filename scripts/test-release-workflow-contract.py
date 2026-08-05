@@ -4,12 +4,15 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/publish-release-apk.yml"
+RELEASE_NOTES = ROOT / "docs/release-notes.md"
 GREENFIELD_BUILD = ROOT / "android/app/build.gradle.kts"
 GREENFIELD_BUILDER_BUILD = ROOT / "android/builder/build.gradle.kts"
 GREENFIELD_RELEASE_BUILDER = ROOT / "scripts/build-archphene-release-apk.sh"
 GREENFIELD_RELEASE_VERIFIER = ROOT / "scripts/verify-release-apk.sh"
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
+release_notes = RELEASE_NOTES.read_text(encoding="utf-8")
+normalized_release_notes = " ".join(release_notes.split())
 greenfield_build = GREENFIELD_BUILD.read_text(encoding="utf-8")
 greenfield_builder_build = GREENFIELD_BUILDER_BUILD.read_text(encoding="utf-8")
 greenfield_release_builder = GREENFIELD_RELEASE_BUILDER.read_text(encoding="utf-8")
@@ -19,7 +22,7 @@ required_workflow = (
     'push:\n    tags:\n      - "v*"',
     "Ensure release is a draft",
     "python3 scripts/test-atspi-source-contract.py",
-    'args=(--verify-tag --draft',
+    "--notes-file docs/release-notes.md",
     "Archphene-x86_64-$version_name.apk",
     "Archphene-arm64-v8a-$version_name.apk",
     "Archphene-Builder-x86_64-$version_name.apk",
@@ -63,6 +66,17 @@ if workflow.index('gh release upload "$RELEASE_TAG"') > workflow.index(
     'gh release edit "$RELEASE_TAG" --draft=false'
 ):
     raise SystemExit("release assets must be uploaded before publication")
+
+for value in (
+    "Archphene-Builder-<abi>-<version>.apk",
+    "private package/runtime state",
+    "Virpipe rendering still returns through SHM",
+    "Vulkan and XWayland are not supported release paths",
+    "GrapheneOS",
+    "physical x86_64",
+):
+    if value not in normalized_release_notes:
+        raise SystemExit(f"curated release notes are missing a required boundary: {value}")
 
 for value in (
     'providers.gradleProperty("archpheneVersionCode")',
