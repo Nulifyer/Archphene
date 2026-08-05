@@ -513,6 +513,7 @@ pub struct CompositorState {
     surfaces: Vec<WlSurface>,
     regions: Vec<WlRegion>,
     surface_commit_count: u32,
+    shm_snapshot_count: u32,
     subcompositor_binds: u32,
     subsurface_count: u32,
     subsurfaces: Vec<WlSubsurface>,
@@ -2049,6 +2050,7 @@ mod android_graphics_ffi {
     use std::marker::PhantomData;
     use std::mem::zeroed;
     use std::ptr::{self, NonNull};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
     const ANDROID_RGBA_8888: i32 = 1;
@@ -2226,6 +2228,20 @@ mod android_graphics_ffi {
     struct PresentationState {
         control: NonNull<AndroidSurfaceControl>,
         buffers: Mutex<PresentationBuffers>,
+        diagnostics: GraphicsPresentationDiagnostics,
+    }
+
+    #[derive(Default)]
+    struct GraphicsPresentationDiagnostics {
+        cpu_conversions: AtomicU32,
+        ahb_submissions: AtomicU32,
+        surfaceflinger_releases: AtomicU32,
+    }
+
+    fn increment_diagnostic(counter: &AtomicU32) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
     }
 
     // SAFETY: the opaque control is used only by Android transaction functions
@@ -2318,8 +2334,30 @@ mod android_graphics_ffi {
                         current: None,
                         next_id: 1,
                     }),
+                    diagnostics: GraphicsPresentationDiagnostics::default(),
                 }),
             })
+        }
+
+        pub(super) fn graphics_diagnostic_component(&self, component: usize) -> u32 {
+            match component {
+                0 => self
+                    .presentation
+                    .diagnostics
+                    .cpu_conversions
+                    .load(Ordering::Relaxed),
+                1 => self
+                    .presentation
+                    .diagnostics
+                    .ahb_submissions
+                    .load(Ordering::Relaxed),
+                2 => self
+                    .presentation
+                    .diagnostics
+                    .surfaceflinger_releases
+                    .load(Ordering::Relaxed),
+                _ => 0,
+            }
         }
 
         pub(super) fn set_rgba_geometry(
@@ -2431,6 +2469,9 @@ mod android_graphics_ffi {
                 },
                 reservation.copy_damage,
             );
+            if result == 0 {
+                increment_diagnostic(&self.presentation.diagnostics.cpu_conversions);
+            }
             let mut acquire_fence = -1;
             // SAFETY: exactly balances the successful exclusive lock.
             let unlocked = unsafe {
@@ -2739,6 +2780,7 @@ mod android_graphics_ffi {
             android_surface_transaction_apply(transaction.as_ptr());
             android_surface_transaction_delete(transaction.as_ptr());
         }
+        increment_diagnostic(&presentation.diagnostics.ahb_submissions);
         0
     }
 
@@ -2758,6 +2800,7 @@ mod android_graphics_ffi {
         else {
             return;
         };
+        increment_diagnostic(&presentation.diagnostics.surfaceflinger_releases);
         let fence = if stats.is_null() {
             -1
         } else {
@@ -2930,6 +2973,32 @@ struct LauncherAttachedWindow {
 
 #[cfg(target_os = "android")]
 impl LauncherSurfaceCompositor {
+    fn graphics_diagnostic_component(&self, component: usize) -> i32 {
+        if component == 0 {
+            return i32::try_from(self.core.state.shm_snapshot_count).unwrap_or(i32::MAX);
+        }
+        if (1..=3).contains(&component) {
+            // GPU readback, texture upload, and GPU composition are explicit
+            // zeroes until those paths exist; this prevents the current
+            // CPU-upload path from being mislabeled as zero-copy.
+            return 0;
+        }
+        let native_component = match component {
+            4 => 0,
+            5 => 1,
+            6 => 2,
+            _ => return -1,
+        };
+        let total = self.windows.iter().fold(0_u32, |total, attached| {
+            total.saturating_add(
+                attached
+                    .window
+                    .graphics_diagnostic_component(native_component),
+            )
+        });
+        i32::try_from(total).unwrap_or(i32::MAX)
+    }
+
     fn detach_surface(&mut self) {
         self.detach_window(0);
     }
@@ -10030,6 +10099,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             },
                         ) {
                             Ok(frame) => {
+                                state.shm_snapshot_count =
+                                    state.shm_snapshot_count.saturating_add(1);
                                 if buffer.resource.is_alive() {
                                     buffer.resource.release();
                                 }
@@ -17657,7 +17728,9 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
     let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
-    const COMPONENTS: usize = 35;
+    const PRESENTATION_COMPONENTS: usize = 35;
+    const GRAPHICS_DIAGNOSTIC_COMPONENTS: usize = 7;
+    const COMPONENTS: usize = PRESENTATION_COMPONENTS + GRAPHICS_DIAGNOSTIC_COMPONENTS;
     const BYTES: usize = COMPONENTS * std::mem::size_of::<i32>();
     let (Ok(capacity), Ok(address)) = (
         environment.get_direct_buffer_capacity(&output),
@@ -17670,10 +17743,12 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
     }
     let output = unsafe { std::slice::from_raw_parts_mut(address, BYTES) };
     for (component, destination) in output.chunks_exact_mut(4).enumerate() {
-        destination.copy_from_slice(
-            &launcher_presentation_component(&compositor.core.state, component as i32)
-                .to_le_bytes(),
-        );
+        let value = if component < PRESENTATION_COMPONENTS {
+            launcher_presentation_component(&compositor.core.state, component as i32)
+        } else {
+            compositor.graphics_diagnostic_component(component - PRESENTATION_COMPONENTS)
+        };
+        destination.copy_from_slice(&value.to_le_bytes());
     }
     COMPONENTS as i32
 }

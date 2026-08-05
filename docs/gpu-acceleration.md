@@ -45,6 +45,12 @@ file-sized buffer nor treats prose or partial names as capabilities. A shared
 observation remains the fallback for larger executables, exhausted scan
 budgets, and names constructed at runtime.
 
+The fixed presentation snapshot also exposes cumulative counters for SHM
+snapshot, CPU conversion, GPU readback, texture upload, GPU composition, direct
+`AHardwareBuffer` submission, and SurfaceFlinger release. Unimplemented GPU
+stages report explicit zeroes. These diagnostics describe the actual path and
+do not classify the current CPU-written AHB ring as zero-copy.
+
 ## Android compatibility patches
 
 The build applies narrowly scoped patches for Android NDK compilation and Android EGL:
@@ -84,6 +90,12 @@ process death on both devices. Killing the helper twice under a current Qt 5
 app shell proves one replacement-helper reconnect followed by an explicit
 llvmpipe reconnect; both stages publish fresh frames on the emulator and
 Samsung.
+
+An isolated unmodified Mousepad Quick launch on the physical Samsung validated
+the diagnostic sequence without changing retained app shells. Four presented
+frames reported four SHM snapshots, four CPU conversions, four direct AHB
+submissions, two completed asynchronous SurfaceFlinger releases, and zero GPU
+readbacks, texture uploads, or GPU compositions before clean session shutdown.
 
 ## Current limits
 

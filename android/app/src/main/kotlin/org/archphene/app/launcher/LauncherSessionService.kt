@@ -3563,7 +3563,14 @@ class LauncherSessionService : Service() {
                 "${session.presentationComponent(31)} " +
                 "presentation=${session.presentationComponent(32)}x" +
                 "${session.presentationComponent(33)} " +
-                "windowStates=${session.presentationComponent(34)}",
+                "windowStates=${session.presentationComponent(34)} " +
+                "graphics=shmSnapshot:${session.presentationComponent(35)}," +
+                "cpuConversion:${session.presentationComponent(39)}," +
+                "gpuReadback:${session.presentationComponent(36)}," +
+                "textureUpload:${session.presentationComponent(37)}," +
+                "gpuComposition:${session.presentationComponent(38)}," +
+                "directAhbSubmit:${session.presentationComponent(40)}," +
+                "surfaceFlingerRelease:${session.presentationComponent(41)}",
         )
     }
 

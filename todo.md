@@ -134,7 +134,7 @@ its Linux environment.
 virpipe clients can reach SurfaceFlinger without GPU readback and full-frame CPU
 copying.
 
-- [ ] Add release diagnostics that distinguish SHM snapshot, CPU conversion,
+- [x] Add release diagnostics that distinguish SHM snapshot, CPU conversion,
   GPU readback, texture upload, GPU composition, direct AHB submission, and
   SurfaceFlinger release. Do not label the current AHB upload path zero-copy.
 - [ ] Add a Bionic EGL/GLES renderer to import the bounded output

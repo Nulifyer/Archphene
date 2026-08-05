@@ -3987,6 +3987,17 @@ low-alpha opaque-region fallback, and popup-base isolation; the full workspace
 and strict Clippy gates plus rebuilt x86_64 and AArch64 Android compositor probes
 pass.
 
+Release graphics diagnostics now count seven distinct stages in the fixed
+presentation snapshot: SHM snapshot, CPU conversion, GPU readback, texture
+upload, GPU composition, direct `AHardwareBuffer` submission, and
+SurfaceFlinger release. The three unimplemented GPU stages remain explicit
+zeroes, so the retained CPU-written AHB ring is not mislabeled zero-copy. An
+isolated unmodified Mousepad Quick launch on physical Samsung `SM-S908U`
+reported four SHM snapshots, four CPU conversions, four direct AHB submissions,
+two asynchronous releases, and zeroes for every GPU stage before Back closed
+the session and runtime cleanly. Host Rust tests/Clippy, Android app unit/lint,
+the source contract, and exact AArch64/x86_64 compositor builds pass.
+
 Hardware key, repeat, and modifier delivery no longer clones focused
 `WlKeyboard` resources into a temporary vector. Focused resources stream in
 retained order through a reusable live/same-client iterator; accepted events
