@@ -4,7 +4,7 @@ Archphene maps Android appearance policy into each Linux app at launch. The poli
 
 ## Greenfield bridge status
 
-The Rust + Kotlin launcher no longer uses a global `QT_SCALE_FACTOR` to make a
+The Rust + Kotlin app shell no longer uses a global `QT_SCALE_FACTOR` to make a
 physical Android buffer look logical. It derives a Wayland logical extent from
 the wrapper Surface and Android density, advertises integer
 `wl_output.scale` plus `wp_fractional_scale_v1`, maps physical input into the

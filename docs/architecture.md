@@ -88,7 +88,7 @@ bounds, close ordering, and crash recovery follow the
 ### Archphene Builder companion
 
 AUR recipe execution belongs to one hidden companion APK, not to the manager
-UID and not to each desktop application's launcher APK. The companion has a
+UID and not to each desktop application's app-shell APK. The companion has a
 separate ordinary Android UID and private storage, requests no `INTERNET`
 permission, publishes no launcher Activity, and accepts only an explicit
 signature-permission Binder call from the matching Archphene manager signer.
@@ -219,7 +219,7 @@ process boundary. It does not mark the descriptor as published, generate an
 APK, or start PackageInstaller. Quick launch is currently a basic trial surface
 with touch, pointer, hardware-key, frame, and close handling; generated app
 shells remain the production path for document intents, Android capability
-brokers, independent tasks, launcher identity, and lifecycle restoration.
+brokers, independent tasks, app-shell identity, and lifecycle restoration.
 
 The manager assembles app shells from a reproducible precompiled template, signs
 them with one persistent non-exportable Android Keystore identity, verifies the
@@ -263,14 +263,14 @@ has the trusted signer and a higher Android version, reconciliation advances
 the desired generation above it rather than attempting a downgrade.
 
 The app-shell signing certificate is intentionally different from the manager's
-release certificate. The exported launcher Service therefore cannot rely on a
+release certificate. The exported app-shell Service therefore cannot rely on a
 static signature permission. During every Binder transaction it resolves the
 calling UID, requires exactly the registered generated package, verifies the
 installed signer against the manager's app-shell signing certificate, and checks
-the bounded launcher descriptor. Package-name strings supplied by callers are
+the bounded app-shell descriptor. Package-name strings supplied by callers are
 never authentication.
 
-Discovery snapshots are reconciled only when complete. The Rust-owned launcher
+Discovery snapshots are reconciled only when complete. The Rust-owned app-shell
 registry derives desktop ownership from pacman's local file database and stores
 the complete structured launch request, stable full descriptor identity,
 deterministic Android package name, and desired/published/pending generations.
@@ -424,7 +424,7 @@ URI permission.
 Linux-owned state lives only in the manager's private shared root. Visible
 files under `/home/archphene` are exposed through the manager DocumentsProvider.
 Selected Android documents and folders cross the boundary through SAF and
-bounded synchronization. Thin launchers do not own a second Linux home.
+bounded synchronization. Thin app shells do not own a second Linux home.
 
 See [Linux home and Android storage](storage.md).
 
@@ -436,14 +436,14 @@ See [Linux home and Android storage](storage.md).
    their installed results join the shared Linux trust domain.
 3. Generated APK contents are deterministic and bounded; package, signer,
    capabilities, and descriptor identity are verified before PackageInstaller.
-4. Every launcher Binder call is authenticated from the kernel-supplied UID,
+4. Every app-shell Binder call is authenticated from the kernel-supplied UID,
    installed signer, and manager registry.
 5. Linux paths and file descriptors never become caller-selected Android host
    paths.
 6. Process groups, Binder death, and Service lifecycle provide deterministic
    cleanup without claiming that packages are isolated from one another.
 
-See the [package and launcher trust policy](trust-policy.md) and
+See the [package and app-shell trust policy](trust-policy.md) and
 [security model](security.md).
 
 ## Historical prototype

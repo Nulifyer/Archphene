@@ -22,7 +22,7 @@ user-visible storage
 ```
 
 Pacman and AUR packages intentionally share `/home/archphene`, `/usr`, `/etc`,
-`/var`, and the same package database. Thin Android launcher entries will bind
+`/var`, and the same package database. Thin Android app shells will bind
 to that shared runtime; they will not receive separate Linux roots. Android
 still owns URI grants, system pickers, share flows, permissions, lifecycle,
 and the boundary to storage outside Archphene.
@@ -66,7 +66,7 @@ Archphene does not request `MANAGE_EXTERNAL_STORAGE`, legacy
 advanced broad-storage mode: the supported file boundary uses system pickers,
 scoped URI grants, Archphene's DocumentsProvider, and explicit synchronized
 mirrors. A source contract runs in CI, and the same gate inspects packaged APK
-permissions and installed manager, Builder, and generated-launcher packages
+permissions and installed manager, Builder, and generated app-shell packages
 when given artifacts or device serials.
 
 The first production bridge is now active: visible regular files and
@@ -421,19 +421,19 @@ symlinks, or the rest of the Arch root. They are not a full-environment backup.
 
 Revoking or removing a connected-folder grant stops later synchronization but
 does not delete the private `~/Projects/<folder>` mirror. Reconnecting requires
-Android's system picker again. Removing a generated desktop launcher removes
+Android's system picker again. Removing a desktop app shell removes
 only that Android entry; it does not remove its pacman package or shared Linux
 data.
 
 Clearing Archphene's Android storage or uninstalling the manager deletes the
 shared Arch root, package database, package cache, Linux home, synchronization
-records, and manager-held launcher signing key. Android also revokes the
-manager's document grants. Thin launcher APKs are separate installed packages,
+records, and manager-held app-shell signing key. Android also revokes the
+manager's document grants. App-shell APKs are separate installed packages,
 so Android may leave them in the app drawer, but without the manager and its
 matching key/registry they fail closed and cannot start Linux applications.
 Users must synchronize or copy important files before clearing data or
 uninstalling. A future release needs an explicit whole-environment
-backup/export and stale-launcher cleanup workflow.
+backup/export and stale-app-shell cleanup workflow.
 
 ## Bridge Contract
 
@@ -477,7 +477,7 @@ support claims of the Rust + Kotlin replacement.
 The sections below record the retired Java prototype's per-wrapper runtime-pack
 storage measurements. They do not describe the approved production model.
 Greenfield Archphene keeps packages, Linux processes, and user state in the one
-shared manager-owned root described above; thin launcher APKs do not
+shared manager-owned root described above; app-shell APKs do not
 materialize a second Linux home or persistent package closure.
 
 ### Validated runtime descriptor proof

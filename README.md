@@ -8,7 +8,7 @@ Archphene is a research project for running unmodified Arch Linux desktop
 applications from one shared, user-owned Arch environment inside an ordinary
 Android app, without a VM, root access, chroot, or OS modification.
 
-Graphical desktop entries receive thin Android launcher APKs, but Linux
+Graphical desktop entries receive thin Android app-shell APKs, but Linux
 packages, processes, files, home, and tools remain in the manager-owned shared
 root. An Android-owned Wayland bridge renders the Linux interface and brokers
 Android features such as input, clipboard, documents, themes, rotation, and
@@ -37,13 +37,13 @@ physical Samsung coverage for:
   project snapshots;
 - persistent package activity, actionable failures, background work, adaptive
   manager navigation, and every planned package/launcher state;
-- bounded shared-root desktop discovery and an atomic manager-owned launcher
+- bounded shared-root desktop discovery and an atomic manager-owned app-shell
   registry with package ownership, stable Android identities, and durable
   publication/removal generations;
-- deterministic thin launcher APK assembly, Android Keystore signing,
+- deterministic thin app-shell APK assembly, Android Keystore signing,
   root-safe package icon normalization, PackageInstaller confirmation,
-  cold-start reconciliation, and launcher-only removal;
-- an authenticated generated launcher running package-installed Foot from the
+  cold-start reconciliation, and app-shell-only removal;
+- an authenticated generated app shell running package-installed Foot from the
   shared AArch64 root, with private Wayland, density-aware logical output,
   physical-resolution subsurface composition, safe Android insets, Samsung IME
   text, clipboard, and live portrait/landscape Surface replacement;
@@ -93,7 +93,7 @@ These results prove the bridge on the listed targets only. They do not establish
 ## Approved production model
 
 ```text
-thin launcher Activity (separate APK/UID)
+thin app-shell Activity (separate APK/UID)
                     |
        authenticated Binder + Surface
                     |
@@ -104,7 +104,7 @@ thin launcher Activity (separate APK/UID)
  one private shared Arch root and Linux home
 ```
 
-Android remains the installer and outer sandbox authority. The launcher is an
+Android remains the installer and outer sandbox authority. The app shell is an
 entry point and Android UI host, not a second Linux container. See the
 [architecture](docs/architecture.md) for the authenticated session and trust
 boundaries.

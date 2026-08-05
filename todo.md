@@ -84,7 +84,7 @@ parallel, but it does not replace the exit criteria of an earlier milestone.
 one phone task or multiple Android desktop/document tasks without duplicating
 its Linux environment.
 
-- [ ] Use **app shell** consistently for the generated Android package; reserve
+- [x] Use **app shell** consistently for the generated Android package; reserve
   **launcher** for Android launcher surfaces and launch actions.
 - [x] Define stable identities for application, Linux session, Android task,
   Linux toplevel, imported document, and attached Surface. Document which state

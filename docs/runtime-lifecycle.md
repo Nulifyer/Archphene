@@ -10,7 +10,7 @@ application can keep processes alive after Android kills or force-stops its UID.
 ## Ownership and process groups
 
 The Archphene manager owns every Linux process in the shared Arch root.
-Generated launcher APKs supply an authenticated Android surface and input; they
+Generated app-shell APKs supply an authenticated Android surface and input; they
 never own or fork the Linux application.
 
 Each graphical application, terminal session, and bounded batch command starts
@@ -91,10 +91,10 @@ stopped before the runtime and all remaining fixed registries are dropped.
 ## Crash and mutation recovery
 
 Interactive process memory is ephemeral. User files, package state, settings,
-launcher registry, and independently completed content-addressed outputs are
+app-shell registry, and independently completed content-addressed outputs are
 persistent.
 
-Package and launcher mutations cross external state boundaries, so they use
+Package and app-shell mutations cross external state boundaries, so they use
 durable intent/phase journals. Startup distinguishes interruption before a
 mutation from interruption during one; the former can be retried and the latter
 requires the visible Repair or Roll back path. AUR recipe processes are never
@@ -104,4 +104,4 @@ their own bounded recovery records and remove or reconcile incomplete state.
 
 The service is `START_NOT_STICKY` and Archphene has no boot receiver for Linux
 processes. Recovery is explicit when the user next opens Archphene or a
-generated launcher.
+generated app shell.

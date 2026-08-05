@@ -6,9 +6,9 @@ state. A Linux syscall cannot grant an Android permission. Operations that need
 wrapper-owned Android services therefore cross an explicit, capability-gated
 manager broker and an authenticated Binder callback to the wrapper Activity.
 
-## Current production launcher contract
+## Current production app-shell contract
 
-Generated launchers publish the exact V4 capability set
+Generated app shells publish the exact V4 capability set
 `wayland,input,ime,clipboard,documents,open-uri,notifications`. The manager owns
 the shared Linux process and one private D-Bus/broker pair per authenticated
 launcher session. The thin wrapper owns Android UI, permission prompts, and
@@ -30,7 +30,7 @@ The wrapper APK owns the resulting Android notification, channel, app label,
 and content intent. Tapping it returns to that wrapper's existing task.
 Portal and classic IDs are separate notification tags, replacement is
 idempotent, and withdrawal removes both pending and already-posted entries.
-Every generated graphical launcher declares this standard desktop capability;
+Every generated graphical app shell declares this standard desktop capability;
 Android's runtime dialog remains the explicit user review for the only
 permission involved.
 
@@ -39,7 +39,7 @@ portal/classic post, wrapper package attribution, notification-shade visuals,
 content-intent routing, withdrawal, and fatal logs. The reusable gate is
 `scripts/test-launcher-notifications.sh`.
 
-Generated launchers also declare bounded `ACTION_VIEW` and `ACTION_SEND`
+Generated app shells also declare bounded `ACTION_VIEW` and `ACTION_SEND`
 filters derived from the current desktop entry's `MimeType` values, but only
 when its `Exec` consumes a file or URL field code. The signed MIME declaration
 must exactly match the manager registry during Binder authorization. A wrapper
@@ -119,7 +119,7 @@ Wrappers whose verified ELF closure contains a CUPS client declare the exact V5 
 
 Android cannot present `PrintManager` before it has a rendered document adapter. Archphene therefore returns bounded default settings and a token from `PreparePrint`, then presents the authoritative Android dialog during `Print`; token-bearing calls do not bypass that dialog. This preserves unmodified toolkit sequencing but differs from desktop portals that present their dialog during `PreparePrint`.
 
-The current physical AArch64 Samsung regression validates `PreparePrint`, descriptor transfer, a rendered one-page full-device Android preview, Save as PDF discovery, cancellation cleanup, and rejection of malformed PDF and non-regular descriptors without opening the print UI. Samsung Mousepad and emulator Code OSS validate that a launcher without CUPS evidence cannot invoke printing. Printing requires no Android runtime permission. Availability is still determined by the device's Android printing feature and installed print services; a printing-capable x86_64 package remains to be exercised.
+The current physical AArch64 Samsung regression validates `PreparePrint`, descriptor transfer, a rendered one-page full-device Android preview, Save as PDF discovery, cancellation cleanup, and rejection of malformed PDF and non-regular descriptors without opening the print UI. Samsung Mousepad and emulator Code OSS validate that an app shell without CUPS evidence cannot invoke printing. Printing requires no Android runtime permission. Availability is still determined by the device's Android printing feature and installed print services; a printing-capable x86_64 package remains to be exercised.
 
 ## Audio input and output
 
@@ -127,19 +127,19 @@ Wrappers whose verified ELF closure contains a Pulse client declare `audio-outpu
 
 The manager embeds one checksum-verified Bionic server payload per supported ABI and copies it only into audio-enabled wrappers. The Linux application continues using its unmodified glibc Pulse client. On the x86_64 emulator, an on-device conversion of the official Arch `pavucontrol` package detects GTK4 and Pulse, generates an `audio-output` wrapper, launches the private AAudio sink, authenticates the Linux client, creates pavucontrol's monitor stream, and renders the live Volume Control GUI. Direct server playback also passes on the x86_64 emulator and physical AArch64 Samsung device.
 
-Speaker playback needs no runtime permission. Microphone input remains a separate reviewed launcher capability. A fixed-buffer Bionic helper exposes a private mono 48 kHz PCM16 Pulse source and monitors only streams attached to that source. The first attached recording stream sends `REQUEST_AUDIO_INPUT` through the private broker; the authenticated launcher receives a one-shot manager-created consent intent, while the manager alone declares `RECORD_AUDIO`. After consent, the manager promotes that launcher session to Android's microphone foreground-service type before AAudio capture begins. Denial is session-scoped and does not repeatedly prompt, Android's permission and global privacy switch remain authoritative, and the foreground authority plus private audio state are removed when the launcher session closes.
+Speaker playback needs no runtime permission. Microphone input remains a separate reviewed app-shell capability. A fixed-buffer Bionic helper exposes a private mono 48 kHz PCM16 Pulse source and monitors only streams attached to that source. The first attached recording stream sends `REQUEST_AUDIO_INPUT` through the private broker; the authenticated launcher receives a one-shot manager-created consent intent, while the manager alone declares `RECORD_AUDIO`. After consent, the manager promotes that launcher session to Android's microphone foreground-service type before AAudio capture begins. Denial is session-scoped and does not repeatedly prompt, Android's permission and global privacy switch remain authoritative, and the foreground authority plus private audio state are removed when the launcher session closes.
 
-The manager explanation and Android permission grant paths pass with full-device screenshots on the x86_64 emulator and physical AArch64 Samsung. The bounded unmodified Pulse probe captures 96,000 bytes with real nonzero samples on both architectures. Emulator denial grants no permission and starts no AAudio capture; Samsung's enabled device-wide microphone privacy switch produces exactly 96,000 zero bytes. Launcher force-stop removes the foreground authority, Pulse server, input helper, cache directory, and Linux client process tree.
+The manager explanation and Android permission grant paths pass with full-device screenshots on the x86_64 emulator and physical AArch64 Samsung. The bounded unmodified Pulse probe captures 96,000 bytes with real nonzero samples on both architectures. Emulator denial grants no permission and starts no AAudio capture; Samsung's enabled device-wide microphone privacy switch produces exactly 96,000 zero bytes. App-shell force-stop removes the foreground authority, Pulse server, input helper, cache directory, and Linux client process tree.
 
 Capability-scoped drag-and-drop maps Android `DragEvent` motion/drop/cancel lifecycle to standard Wayland data devices in both directions. Plain text is bounded to 8 MiB. Android URI clips accept at most 32 files, retain the temporary drag grant for the document session, import through the existing conflict-safe broker, and expose only local `file://` paths under `Documents/Android` to Linux. Linux `text/uri-list` sources are bounded to 1 MiB of metadata and may export at most 32 canonical, non-dot files under the visible Linux home; Android receives wrapper-provider content URIs with exact temporary read grants. Actions remain copy-only. Protocol transfer, import/writeback, external denial without a grant, granted reads, cancellation, and cleanup pass on the x86_64 emulator and physical AArch64.
 
 ## Camera
 
-A generated V9 wrapper declares `camera` only when the verified launcher profile contains camera evidence. It then declares `CAMERA` and both Android camera features as optional; non-camera wrappers contain none of those declarations. The visible wrapper owns the first-use Android permission request and persists denial rather than repeatedly prompting.
+A generated V9 wrapper declares `camera` only when the verified app-shell profile contains camera evidence. It then declares `CAMERA` and both Android camera features as optional; non-camera wrappers contain none of those declarations. The visible wrapper owns the first-use Android permission request and persists denial rather than repeatedly prompting.
 
 After consent, bounded one-shot JPEG capture accepts a regular output descriptor, maximum dimensions up to 8192 pixels, and front/back preference. Streaming uses Camera2 at 640×480 and preallocates three I420 frames plus one wire header; a slow consumer loses stale pending frames instead of growing a queue. The manager starts one session-private PipeWire daemon, policy helper, producer, and XDG Camera portal from verified APK-owned dual-ABI payloads, and tears them down with the launcher session.
 
-The current production path passes with the official unmodified Arch Snapshot package on the Android 16 x86_64 emulator and physical AArch64 Samsung. The emulator displays the live virtual scene with a 0–253 luminance range; both full-device captures have a zero hot-magenta ratio. GTK4 camera launchers alone receive `GSK_RENDERER=cairo` because Samsung's GSK GL/NGL path presented otherwise-valid planar textures as solid magenta; other GTK4 launchers retain acceleration. Earlier isolated regressions continue to cover pre-consent rejection, denial/no-reprompt, bounded JPEG capture, invalid dimensions, and per-plane I420 diagnostics.
+The current production path passes with the official unmodified Arch Snapshot package on the Android 16 x86_64 emulator and physical AArch64 Samsung. The emulator displays the live virtual scene with a 0–253 luminance range; both full-device captures have a zero hot-magenta ratio. GTK4 camera app shells alone receive `GSK_RENDERER=cairo` because Samsung's GSK GL/NGL path presented otherwise-valid planar textures as solid magenta; other GTK4 app shells retain acceleration. Earlier isolated regressions continue to cover pre-consent rejection, denial/no-reprompt, bounded JPEG capture, invalid dimensions, and per-plane I420 diagnostics.
 
 ## Accessibility
 

@@ -10,9 +10,9 @@ Archphene itself retains:
 - one Android UID and SELinux app domain;
 - one private shared Arch root and Linux trust domain;
 - Android-controlled lifecycle, storage grants, and system UI;
-- verified manager and generated-launcher installation transactions.
+- verified manager and generated app-shell installation transactions.
 
-Thin launcher APKs have separate Android identities so they appear normally in
+Thin app-shell APKs have separate Android identities so they appear normally in
 the launcher and can host Android UI. They do not own separate Linux roots or
 run the Linux payload. An authenticated Binder session gives the manager their
 Surface and bounded input/capability results; the manager owns and supervises
@@ -222,8 +222,8 @@ The installed package is not isolated: it joins the shared Archphene Linux
 trust domain.
 
 The authoritative rules for official packages, AUR graphs, lifecycle code,
-executables, embedded runtime content, and generated launchers are collected
-in the [package and launcher trust policy](trust-policy.md).
+executables, embedded runtime content, and generated app shells are collected
+in the [package and app-shell trust policy](trust-policy.md).
 
 The manager does not treat a process-surviving filename as authority to install
 an AUR package. Rust persists one bounded capability manifest atomically beside
@@ -247,8 +247,8 @@ retained outputs.
   Broader application, capability, GPU, external-display, and x86_64
   production-client coverage remain incomplete. Legacy per-wrapper runtime-pack
   results are historical evidence, not substitutes for those production gates.
-- Durable jobs already represent package and future launcher phases without
-  renumbering persisted v1 states. Real launcher installation results,
+- Durable jobs already represent package and future app-shell phases without
+  renumbering persisted v1 states. Real app-shell installation results,
   official/AUR package mutations, and exact verified AUR build capabilities
   reconcile across manager death. Active builds themselves are not resumed;
   only fully published, independently reverified outputs can reattach.

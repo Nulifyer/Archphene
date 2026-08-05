@@ -21,8 +21,8 @@ manager's ordinary Android app domain, creates its socket in a manager-private
 cache directory, and gains no Android permissions. Other Android UIDs cannot
 reach the socket through the private parent directory.
 
-Launcher authorization A3 carries the registry-derived integration topology
-alongside the signed launcher MIME declaration.
+App-shell authorization A3 carries the registry-derived integration topology
+alongside the signed app-shell MIME declaration.
 Only a current descriptor with verified OpenGL/EGL topology can request the
 bridge. The manager waits for the helper socket and sends its bounded path
 through launch protocol G6; Rust reauthorizes the descriptor, verifies that
@@ -81,7 +81,7 @@ The manager also passes dual-ABI packaging, authorization, real-socket
 validation, helper readiness, process ownership, and software fallback gates.
 Deliberately seeded stale runtime directories are recovered after manager
 process death on both devices. Killing the helper twice under a current Qt 5
-launcher proves one replacement-helper reconnect followed by an explicit
+app shell proves one replacement-helper reconnect followed by an explicit
 llvmpipe reconnect; both stages publish fresh frames on the emulator and
 Samsung.
 

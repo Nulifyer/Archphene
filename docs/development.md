@@ -34,7 +34,7 @@ Build outputs, SDKs, downloaded packages, signing files, screenshots, and test a
 
 ## Release optimization gate
 
-The manager, isolated Builder, and generated launcher carry small startup-only
+The manager, isolated Builder, and app shell carry small startup-only
 ART baseline profiles. Release builds use R8, while Rust release libraries use
 one code-generation unit, ThinLTO, panic-abort, and symbol stripping. Build all
 three release APKs and inspect the actual packaged profiles and dual-ABI native
@@ -79,7 +79,7 @@ more than 64 threads or 256 descriptors, any idle child process, frame p95 over
 250 ms, or more than 50% jank in the short navigation sample.
 
 Run the active Terminal and native-Wayland transaction gate with an exact-ABI
-manager APK and the currently installed manager-generated Foot launcher:
+manager APK and the currently installed Foot app shell:
 
 ```bash
 ./scripts/test-archphene-active-performance.sh \
@@ -164,8 +164,8 @@ The gate is non-installing by default. To replace the manager explicitly, add
 the matching `--apk <path> --install-apk`; this does not clear its private Arch
 root. The gate refuses active Foot sessions and pre-existing fixture paths,
 preserves the prior Android clipboard, display override, and manager running
-state, and requires a current generated launcher. Unicode IME control enters
-through a debug-only manager-session boundary; the launcher itself has no test
+state, and requires a current app shell. Unicode IME control enters
+through a debug-only manager-session boundary; the app shell itself has no test
 intent. The sequence
 replaces three successive Japanese preedit candidates without committing them,
 then requires an exact Japanese/CJK/emoji-modifier/ZWJ value in the shared
@@ -294,7 +294,7 @@ It verifies that Back removes the manager from the foreground promptly, native
 cancellation and worker draining complete on `ArchpheneShutdown`, and teardown
 emits neither an Archphene-owned StrictMode violation nor a fatal event.
 
-Use a currently published generated launcher to enforce compositor ownership
+Use a currently published app shell to enforce compositor ownership
 and exercise the off-thread clipboard descriptor path:
 
 ```bash
@@ -530,7 +530,7 @@ system-mode regressions with:
 ./scripts/test-kate-live-theme.sh --serial emulator-5554
 ```
 
-Validate Git from a current generated Code launcher's real integrated Bash
+Validate Git from a current Code app shell's real integrated Bash
 with:
 
 ```bash
@@ -566,7 +566,7 @@ rotation even when the test fails. Add `--apk <manager.apk> --install-apk` only
 for an explicitly approved manager replacement.
 
 Validate the authenticated Linux-to-Android browser handoff against an already
-published current-contract launcher with:
+published current-contract app shell with:
 
 ```bash
 ./scripts/test-launcher-open-uri.sh \

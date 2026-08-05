@@ -18,7 +18,7 @@ verified dual-ABI result into the manager APK.
 The manager creates the Pulse server and socket inside its private cache before
 starting the authorized Linux process. Only a descriptor whose verified
 executable closure carries `audio-output` receives the socket address. The
-socket is not exposed through Binder, a generated launcher UID, or shared
+socket is not exposed through Binder, a generated app-shell UID, or shared
 storage, and is removed when the session closes. Anonymous Pulse authentication
 is therefore bounded by the manager's Android sandbox and private filesystem
 mode.
@@ -28,7 +28,7 @@ not request `RECORD_AUDIO`; microphone input must be implemented later as an
 independent capability, permission, consent, and privacy boundary.
 
 Run `scripts/test-android-audio-bridge.sh` against a current generated
-`pavucontrol` launcher and an active non-audio launcher. The gate verifies exact
+`pavucontrol` app shell and an active non-audio app shell. The gate verifies exact
 metadata, absence of microphone permission, private server startup, stock
 client authentication, bounded 48 kHz stereo playback, non-audio denial,
 cleanup/fatal logs, and a full-device screenshot.

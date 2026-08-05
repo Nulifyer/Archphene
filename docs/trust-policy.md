@@ -1,9 +1,9 @@
-# Package and launcher trust policy
+# Package and app-shell trust policy
 
 Updated: 2026-07-29
 
 This document is the normative trust policy for content that Archphene
-downloads, builds, installs, executes, or publishes as an Android launcher.
+downloads, builds, installs, executes, or publishes as an Android app shell.
 The detailed mechanisms and current validation evidence remain in the
 [security model](security.md) and [project status](project-status.md).
 
@@ -82,7 +82,7 @@ excessive links, missing execute permission, and world-writable files.
 Graphical launch requests come from bounded desktop entries. Their structured
 `Exec` fields are parsed without a shell, their executable resolves to a
 contained non-world-writable file, and discovery attaches unambiguous pacman
-ownership. Launcher retention follows explicitly installed source packages;
+ownership. App-shell retention follows explicitly installed source packages;
 a surviving filename alone is not installation authority.
 
 Native runtime content shipped by Archphene is bound to the signed manager or
@@ -90,15 +90,15 @@ Builder APK through content-addressed manifests, exact ABI selection, sizes,
 modes, and SHA-256 digests. Installed Linux package ELF is executed through the
 Linux runtime boundary and is never loaded as manager JNI code.
 
-## Android launcher and Builder identity
+## Android app-shell and Builder identity
 
-Generated launchers are deterministic thin APKs containing a bounded
+Generated app shells are deterministic thin APKs containing a bounded
 descriptor, generation, capability declaration, label, and icon—not Linux
 package content. The manager signs them with its AndroidKeyStore alias
 `archphene-shared-launcher-signing-v1`, using RSA-3072 and APK Signature Scheme
 v2/v3, then reverifies the single signer and rejects debuggable output.
 
-Every launcher Binder call is authenticated from the kernel-supplied UID. The
+Every app-shell Binder call is authenticated from the kernel-supplied UID. The
 manager requires exactly one package for that UID, the deterministic package
 shape, the currently installed package metadata, signer equality, descriptor,
 generation, template digest, and capability contract. The hidden Builder

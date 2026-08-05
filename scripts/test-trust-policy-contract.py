@@ -19,7 +19,7 @@ require(
     "## AUR packages",
     "## Lifecycle scripts, hooks, and maintenance",
     "## Executables and runtime content",
-    "## Android launcher and Builder identity",
+    "## Android app-shell and Builder identity",
     "## Fail-closed rule and remaining evidence",
     "at most 32",
     "256 dependency edges",
@@ -29,7 +29,7 @@ require(
 )
 require(
     ROOT / "docs/README.md",
-    "[Package and launcher trust policy](trust-policy.md)",
+    "[Package and app-shell trust policy](trust-policy.md)",
 )
 for path in (
     ROOT / "docs/security.md",
@@ -101,5 +101,5 @@ require(
 
 print(
     "Trust policy contract passed: documentation matches the bounded AUR, "
-    "lifecycle, execution, runtime-content, and launcher-signing boundaries."
+    "lifecycle, execution, runtime-content, and app-shell-signing boundaries."
 )

@@ -82,5 +82,5 @@ The current validated applications and limitations are recorded in the
 [compatibility matrix](compatibility-matrix.md). Storage and uninstall
 consequences are documented in the [storage model](storage.md), and trust
 boundaries are documented in the [security model](security.md).
-The normative package, executable, runtime-content, and launcher rules are in
-the [package and launcher trust policy](trust-policy.md).
+The normative package, executable, runtime-content, and app-shell rules are in
+the [package and app-shell trust policy](trust-policy.md).

@@ -33,7 +33,7 @@ migration. No broader package data is used for launcher reconciliation.
 The Packages page now offers **Quick launch** when the exact resolved package
 has one current graphical launcher descriptor. The manager passes the cached
 package identity, full descriptor digest, and desired generation to a
-non-exported manager Activity. The launcher Service accepts the separate Binder
+non-exported manager Activity. The app-shell Service accepts the separate Binder
 transaction only from the manager UID and reauthorizes the unpublished
 descriptor before open, Surface attachment, input, close, and process start.
 The native registry requires the descriptor to remain desired and generation-
@@ -144,12 +144,12 @@ The current workspace passes `cargo fmt`, all locked Rust workspace tests,
 workspace Clippy with warnings denied, the complete JDK 26 Android unit/lint
 gate, every repository/source contract, and Bash syntax validation for the
 SuperTux workflow. Exact arm64-v8a and x86_64 manager APKs are installed on the
-Samsung SM-S908U and emulator. Their generated launchers were updated through
+Samsung SM-S908U and emulator. Their generated app shells were updated through
 Android's normal PackageInstaller confirmations; the current SuperTux wrapper
 versions are 1727 on Samsung and 1158 on the emulator. Both use authenticated
 Binder protocol v19.
 
-The current launcher work adds generic one-finger
+The current app-shell work adds generic one-finger
 Android-to-Wayland pointer routing, device-defined touch slop, SDL phone
 orientation policy, three-level editor evidence for empty and populated text
 fields, view-to-buffer input scaling against the compositor's returned logical output extent,
@@ -185,7 +185,7 @@ state. Signed manifests and inspected evidence are under
 The audio failure exposed a package-generic loader gap rather than a SuperTux
 special case. Pulse-enabled graphical launches now select SDL and OpenAL Pulse
 backends and include the verified `/usr/lib/pulseaudio` private directory, so
-OpenAL can load `libpulsecommon-17.0.so`. Generated launchers also suppress an
+OpenAL can load `libpulsecommon-17.0.so`. Generated app shells also suppress an
 implicit ambiguous-text IME after hardware gameplay keys while preserving
 explicit long-press and editor-backed IME requests, including fields that become
 empty after editing. Pulse sink suspension is serialized and completes before
@@ -226,12 +226,12 @@ added after concurrent x86_64/AArch64 builds combined a valid manifest with a
 dex missing `ArchpheneDebugApplication`; the invalid artifacts are now rejected
 before they can be installed.
 
-The package and launcher trust boundary is now normative rather than spread
+The package and app-shell trust boundary is now normative rather than spread
 across implementation notes. It defines verified official packages, bounded
 recursive AUR graphs built by the separate no-network Builder UID, exact
 lifecycle-script authorization, disabled arbitrary libalpm hooks with fixed
 maintenance adapters, contained executable and desktop ownership, APK-bound
-native runtime content, AndroidKeyStore launcher signing, authenticated Binder
+native runtime content, AndroidKeyStore app-shell signing, authenticated Binder
 identity, and explicit key-loss recovery. A source contract keeps these claims
 linked to their Rust/Kotlin enforcement. Signed-scriptlet reverse rollback now
 passes on x86_64 with verified `zsh` 5.9.1-1 and 5.9.2-1. The gate interrupts
@@ -260,7 +260,7 @@ foreground service with the visible “1 Linux app is running” notification;
 Back removes the Linux tree and notification. Full-device running, Home, and
 notification-shade captures were inspected.
 
-Generated Linux launchers now expose production Android notifications through
+Generated Linux app shells now expose production Android notifications through
 their exact V4 capability contract. Unmodified XDG portal and
 freedesktop.org clients cross the private manager broker, while the
 authenticated thin wrapper owns first-use Android 13+ consent, the fixed
@@ -269,10 +269,10 @@ intent, and withdrawal. Exact AArch64 Samsung and x86_64 emulator runs pass
 portal/classic post, wrapper attribution, first-use consent without a Linux
 retry, content routing, withdrawal, fatal logs, and inspected full-device
 notification shades. Inbound Android document/share intent filters remain the
-next launcher-integration gap.
+next app-shell integration gap.
 
 Release optimization is now an executable artifact gate rather than build-file
-intent. The manager, isolated Builder, and generated launcher each carry a
+intent. The manager, isolated Builder, and generated app shell each carry a
 small startup-only ART baseline profile; all three pass R8 and emit compiled
 `baseline.prof` plus `baseline.profm` payloads. The gate inspects the packaged
 x86_64 and arm64-v8a Rust libraries and requires them to be stripped, while the
@@ -316,15 +316,15 @@ generic preload path and defers its initial apply until `GtkSettings` exists;
 neither ABI performs steady-state polling. Stock Mousepad passes live
 light-to-dark-to-light updates on Samsung through the current GTK 3 wrapper,
 while current unmodified Snapshot proves the GTK 4 helper, portal state, and
-camera lifecycle on the exact x86_64 emulator and AArch64 Samsung without a
-launcher, manager, or Linux process restart. Snapshot's camera canvas remains
+camera lifecycle on the exact x86_64 emulator and AArch64 Samsung without an
+app-shell, manager, or Linux process restart. Snapshot's camera canvas remains
 intentionally black and is not treated as broad libadwaita visual evidence.
 The dual-device production gate checks the manager accessibility tree, exact
 preference state/restoration, helper diagnostics, stable processes, camera
 pause/resume while Settings is foreground, fatal logs, and measured
 full-device status/navigation-bar luminance.
 
-Generated-launcher framework accessibility search now validates the caller's
+Generated-app-shell framework accessibility search now validates the caller's
 query before case normalization. At most 1,024 UTF-16 code units are admitted;
 limit-plus-one returns no matches without allocating a lowercase copy, while
 null and blank queries retain their prior empty result. Three direct JVM tests
@@ -352,7 +352,7 @@ Runtime/hash evidence is under
 clean full-device package-runtime regression is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/gtk-bounded-config-foot-20260804`.
 Direct GTK visual runtime evidence is not claimed in this checkpoint: both
-installed Mousepad and Seahorse wrappers are rejected by launcher trust before
+installed Mousepad and Seahorse wrappers are rejected by app-shell trust before
 registry lookup and require explicit wrapper repair.
 
 The Qt 6 platform-theme module likewise watches `kdeglobals` through an
@@ -408,7 +408,7 @@ unchanged. Full-device light and dark captures are visually clean.
 Debug builds now install StrictMode main-thread I/O and closeable-leak
 diagnostics after OEM application initialization. Navigation, Terminal text,
 and Linux appearance settings read and commit through one serialized preference
-worker while UI and launcher paths consume immutable in-memory snapshots.
+worker while UI and app-shell paths consume immutable in-memory snapshots.
 Native library loading, runtime creation, and stale AUR artifact cleanup run on
 the existing bootstrap worker. A state-preserving gate cold-starts the manager,
 changes and restores App scale, verifies the restored value after process
@@ -441,7 +441,7 @@ on the emulator and 99 ms on Samsung and observes no Archphene StrictMode or
 fatal event. The manager-side Wayland compositor now records its creating
 thread and rejects every state/JNI call from another thread; blocking clipboard
 descriptor I/O is conversely rejected on that compositor owner. Current
-generated Foot launchers pass authenticated Surface/input/frame and off-thread
+generated Foot app shells pass authenticated Surface/input/frame and off-thread
 Android-to-Linux clipboard gates with visually inspected full-device captures
 on both exact ABIs. The runtime now asserts its package, AUR, storage,
 synchronization, shell, launcher-publisher, and bootstrap worker boundaries.
@@ -453,16 +453,16 @@ Queued progress, worker-thread journaling, cancellation, clean diagnostics, and
 visually inspected full-device presentation on both exact ABIs. The legacy Foot
 workflow is now migrated to the manager-owned shared root and session model.
 Only a debug manager receiver can inject bounded Unicode IME test input;
-generated launchers contain no test intents. Real launcher Surface/Binder input,
-clipboard-worker transfer, pointer selection, scrollback, live resize, close,
-force-stop cleanup, and cold relaunch pass with inspected full-device evidence
-on both exact ABIs.
+generated app shells contain no test intents. Real app-shell Surface/Binder
+input, clipboard-worker transfer, pointer selection, scrollback, live resize,
+close, force-stop cleanup, and cold relaunch pass with inspected full-device
+evidence on both exact ABIs.
 
-Generated-launcher clipboard Binder protocol v16 now carries an optional bounded
-`text/html` representation beside a required plain-text fallback. The native
-Wayland compositor advertises HTML only when present and keeps the requested
-format attached to every queued descriptor; Linux HTML is converted to a
-bounded Android fallback before publishing `ClipData`. A single delayed
+Generated-app-shell clipboard Binder protocol v16 now carries an optional
+bounded `text/html` representation beside a required plain-text fallback. The
+native Wayland compositor advertises HTML only when present and keeps the
+requested format attached to every queued descriptor; Linux HTML is converted
+to a bounded Android fallback before publishing `ClipData`. A single delayed
 focus-return retry covers the interval where Android reports window focus
 before granting clipboard reads, without adding polling. Current unmodified
 Code accepts a 29-byte fallback from a 43-byte rich clip through the dedicated
@@ -471,7 +471,7 @@ text, and native MIME-routing, Android unit, lint, and exact-ABI build gates
 pass. Binary formats and a package-installed Linux HTML producer remain open.
 
 The current wide Code workspace also exposed a Samsung touch displacement
-during IME resize. Android had already resized the launcher Surface while the
+during IME resize. Android had already resized the app-shell Surface while the
 client's old buffer and root hit-test layout remained 432x881 until it
 acknowledged the pending 432x537 `xdg_toplevel` configure. The compositor now
 records each exact pending toplevel size and, only while it matches the current
@@ -501,7 +501,7 @@ active-window latency p95; emulator maxima are 98,304/1,334,912 bytes with
 That sustained gate exposed an emulator-only graphics-fence leak: the legacy
 CPU `ANativeWindow_lock`/post path retained one `sync_file` descriptor per
 presented key frame, growing Foot from 160 to 250 descriptors in four windows
-while Samsung's mapper stayed flat. Generated-launcher presentation now uses
+while Samsung's mapper stayed flat. Generated-app-shell presentation now uses
 three preallocated `AHardwareBuffer`s submitted through `ASurfaceTransaction`.
 Acquire fences transfer to Android, previous-buffer release fences are polled
 without blocking the compositor and explicitly closed, and resize generations
@@ -675,7 +675,7 @@ commit intent, and pass scoped fatal logs plus inspected full-device light/dark
 screenshots. The normal Samsung signed-package lifecycle still passes
 verify, deliberate cache tamper/redownload, removal, cache reinstall, Terminal
 execution, and process restart afterward. The post-install
-launcher/toolkit/broker capability result remains pending.
+app-shell/toolkit/broker capability result remains pending.
 The local Binder path makes the Queued boundary deterministic in code: after
 the journal commit, the Service posts worker start to the next main-Looper turn
 and the Activity synchronously consumes the new job revision before its Install
@@ -692,7 +692,7 @@ before substring matches while retaining pacman's repository ordering within
 each group; a regression covers `strace` ahead of
 `gst-plugin-rstracers`.
 
-The durable journal now also represents the future launcher pipeline's
+The durable journal now also represents the future app-shell pipeline's
 Building, Publishing, and Awaiting Android confirmation states without
 renumbering any existing v1 value. Rust treats them as active, enforces a
 forward transition graph, recovers them after interruption, and retains the
@@ -704,10 +704,10 @@ message, expose Cancel only before the mutation boundary, retain Complete
 after a cold restart, leave the cache and pacman database untouched, emit no
 fatal logs, and pass visually inspected full-device screenshots. Existing
 device gates separately cover durable Failed and Cancelled. This validates the
-manager state model and presentation, not the still-pending real launcher
+manager state model and presentation, not the still-pending real app-shell
 builder and PackageInstaller handoff.
 
-The first launcher implementation slice now discovers graphical applications
+The first app-shell implementation slice now discovers graphical applications
 from the shared Arch root rather than assuming one runtime per Android wrapper.
 Rust enumerates at most 4,096 directory entries, examines at most 1,024
 `.desktop` candidates and 4 MiB of source, publishes at most 256 entries,
@@ -734,7 +734,7 @@ restarts preserve byte-identical registries on the emulator and Samsung;
 fixture removal reconciles cleanly and the manager reports the exact remaining
 catalog without fatal logs.
 
-Launcher-only state transitions no longer repeat desktop parsing, pacman
+App-shell-only state transitions no longer repeat desktop parsing, pacman
 ownership scans, and executable integration profiling. The Rust runtime keeps
 the already bounded immutable desktop catalog after an authoritative scan;
 Kotlin explicitly requests a rescan only after package-tree mutation and pages
@@ -743,9 +743,9 @@ dismissal, and result transitions. On the physical Samsung, a state-preserving
 bootstrap logged one scan across its 151 installed packages followed by one
 cached replay of the same four launchable entries and identical
 examined/rejected/truncated evidence. The full-device installed-app view
-remained correct with three current Android launchers.
+remained correct with three current Android app shells.
 
-Package icons now cross the complete generic launcher pipeline. Rust resolves
+Package icons now cross the complete generic app-shell pipeline. Rust resolves
 absolute icon paths and freedesktop hicolor/pixmaps names within the shared
 Arch root, expands relative and fake-root absolute symlinks with a fixed
 limit, rejects escapes, loops, writable/non-regular files, and publishes a
@@ -761,20 +761,20 @@ verification. Missing or unsupported icons use the Archphene mark.
 Host tests cover hicolor preference, absolute package links into `/usr/lib`,
 escape/loop/writable rejection, icon-content updates, and v1 migration. A
 debug-only signed wrapper proved exact custom PNG replacement on Samsung.
-The physical manager then migrated three real Foot launchers through normal
+The physical manager then migrated three real Foot app shells through normal
 Android confirmation; the system installer and full-device app drawer showed
-the package Foot icon, a cold restart settled at three current launchers, and
+the package Foot icon, a cold restart settled at three current app shells, and
 Foot still produced a real Wayland frame. The run also fixed stale-template
 reconciliation for a wrapper already awaiting removal and removed the two
 debug desktop fixtures without touching Linux user data. Capability declaration
-derivation and per-launcher compatibility diagnostics are now implemented; the
-remaining launcher gaps are listed in `Pending`.
+derivation and per-app-shell compatibility diagnostics are now implemented; the
+remaining app-shell gaps are listed in `Pending`.
 
-The manager now builds minimized launcher wrappers from one staged template,
+The manager now builds minimized app-shell wrappers from one staged template,
 patches bounded manifest identity fields, signs each APK with a persistent
 non-exportable RSA-3072 Android Keystore key, re-verifies its signer and exact
 entry digests, and streams the verified result through normal user-confirmed
-PackageInstaller sessions. A wrapper binds only to the exported launcher
+PackageInstaller sessions. A wrapper binds only to the exported app-shell
 session Service. Every transaction revalidates the kernel-supplied caller UID,
 its single exact installed package, signer, descriptor, generation, manager
 identity, and SHA-256 of the template from which it was built before consulting
@@ -846,7 +846,7 @@ socket or fatal log.
 
 A production Foot package now closes the first real-client gap on the physical
 AArch64 Samsung. The package was installed through Archphene's signed pacman
-transaction and its generated launcher was updated through normal Android
+transaction and its generated app shell was updated through normal Android
 confirmation. The generic glibc bridge maps private-root pathname Unix sockets,
 full-path and PATH-based exec/spawn calls, and bounded passwd identity without
 changing Foot or Bash. The shared root publishes `archphene` at
@@ -875,7 +875,7 @@ deterministic transitive host fixture passes, and interactive Bash launches the
 installed Foot binary through the nested bridge on both the x86_64 emulator and
 AArch64 Samsung with inspected full-device captures.
 
-The launcher now treats Android pixels and Wayland logical coordinates as
+The app shell now treats Android pixels and Wayland logical coordinates as
 separate spaces. It derives logical size, integer output scale, and fractional
 scale from Android density, maps touch/pointer coordinates back to that logical
 space, and retains the client's high-resolution raster while composing
@@ -897,7 +897,7 @@ workspace, 48 compositor tests, glibc path/exec/socket/identity probes, runtime
 source contract, exact AArch64 build/install, scoped fatal-log check, and
 full-device portrait/IME/landscape inspection pass.
 
-The generated launcher now also matches Android's composition-finish
+The generated app shell now also matches Android's composition-finish
 semantics. Wayland preedit is deliberately absent from client surrounding
 text, so clearing preedit when an IME called `finishComposingText()` discarded
 the user's accepted candidate. Each InputConnection now retains only its
@@ -943,7 +943,7 @@ The launcher template no longer embeds AGP's repository-wide
 `META-INF/version-control-info.textproto`. That metadata made the authenticated
 template digest change after unrelated manager commits or dirty-tree changes,
 which correctly triggered stale-wrapper reconciliation but needlessly asked
-the user to update every launcher. Template release builds now disable VCS
+the user to update every app shell. Template release builds now disable VCS
 metadata at the supported per-build-type DSL boundary. A dedicated gate rejects
 the entry and forces two complete launcher rebuilds; both produce the same
 `3db705420d7e923e8f91a770a086a8806248e136de47c6bfd90517e50608fcd3`
@@ -959,7 +959,7 @@ native compositor probes, scoped device logs, and inspected full-device
 captures pass. Authenticated Binder v7 also transfers changed legacy
 client-supplied ARGB cursor surfaces with a 256×256/65,536-pixel bound and
 strict bitmap/hotspot validation. Stock Qt 5 publishes repeated 24×24 arrow
-cursors with exact 3,1 hotspots through current generated launchers on both
+cursors with exact 3,1 hotspots through current generated app shells on both
 ABIs; Samsung additionally proves a 24×24 pointing-hand cursor with hotspot
 11,12. The device gate additionally found and fixed an Android
 ownership error: explicitly recycling the prior cursor bitmap could crash
@@ -991,7 +991,7 @@ Android's absent conventional `/dev/shm`; host bridge gates and a real shared
 Samsung Code-terminal launch pass.
 
 Real user-driven non-Latin composing input beyond the deterministic manager boundary, non-text
-clipboard formats, launcher accessibility, and real-client pointer
+clipboard formats, app-shell accessibility, and real-client pointer
 lock/confinement variants still need explicit production-client coverage.
 SHM snapshots and client-buffer normalization also remain copied; the new
 reused physical output canvas is not a claim of zero-copy, Vulkan, or sustained
@@ -2652,7 +2652,7 @@ Tests with mandatory fixture installation, exact APK restoration, or package
 publication semantics remain separate audit classes.
 
 The latest six conversions cover Linux-to-Android Open, Share, multi-share,
-Export, export recovery, and authenticated launcher Save. Representative
+Export, export recovery, and authenticated app-shell Save. Representative
 installed-manager runs pass on the physical Samsung and x86_64 emulator with
 no retained document fixture. Open/Share now also wait for an actionable
 Android system chooser accessibility tree before taking their full-device
@@ -2699,7 +2699,7 @@ The connected Samsung SM-S908U (Android 15, AArch64) now runs the exact current-
 
 Foot, KCalc, and Mousepad have now completed that physical migration and are installed by the manager under its maintained wrapper signer. Their restored Linux homes survive repeated same-signer updates. Foot passes its focused visual/runtime workflow; KCalc passes calculation, menus, contrast, live theme, manager appearance overrides, rotation, and descriptor lifecycle; Mousepad passes accessibility, IME, touch, Preferences checkbox/close interaction, Material You checked-state pixels, primary-host cleanup, and document restart/conflict/writeback. The migration also exposed and fixed a destructive ordering bug: Archphene now obtains Android's per-source install consent before uninstalling an older-signed wrapper and asks for final replacement confirmation only after returning from Settings.
 
-The focused Foot workflow now passes on both the current-source x86_64 emulator and AArch64 Samsung wrapper under the manager-owned session/shared-root architecture. A debug-only manager boundary supplies exact UTF-8 preedit/commit while the generated launcher remains free of test intents. The gate uses real wrapper input for bounded pointer selection, the authenticated clipboard worker in both directions, visible scrollback, live display resize with stable manager/wrapper/Linux processes, graceful session close, force-stop cleanup, and clean cold relaunch. It retains and visually checks full-device frames rather than app-only captures. Testing also fixed wrapper drag continuity for synthetic and OEM mouse sources that omit `buttonState` on move events. An earlier run exposed and fixed an auxiliary-command boundary bug: Bash found Android's unverified `clear` through `/system/bin` and leaked the glibc preload into Android's linker. Verified pack commands are now first in PATH and exact-path brokered, while unpublished host commands fail with status 127 on both architectures. Publishing additional dependency commands remains a separate bounded product decision.
+The focused Foot workflow now passes on both the current-source x86_64 emulator and AArch64 Samsung wrapper under the manager-owned session/shared-root architecture. A debug-only manager boundary supplies exact UTF-8 preedit/commit while the generated app shell remains free of test intents. The gate uses real wrapper input for bounded pointer selection, the authenticated clipboard worker in both directions, visible scrollback, live display resize with stable manager/wrapper/Linux processes, graceful session close, force-stop cleanup, and clean cold relaunch. It retains and visually checks full-device frames rather than app-only captures. Testing also fixed wrapper drag continuity for synthetic and OEM mouse sources that omit `buttonState` on move events. An earlier run exposed and fixed an auxiliary-command boundary bug: Bash found Android's unverified `clear` through `/system/bin` and leaked the glibc preload into Android's linker. Verified pack commands are now first in PATH and exact-path brokered, while unpublished host commands fail with status 127 on both architectures. Publishing additional dependency commands remains a separate bounded product decision.
 
 The current Foot gate also distinguishes omitted IME operations from explicit
 empty strings. Three successive Japanese preedit-only updates now replace the
@@ -2728,7 +2728,7 @@ from 100%/18 dp to 200%/22 dp with independent 32/48 dp interaction targets.
 The current real Code-OSS transaction on x86_64 completes through the generic
 official-package path. Pacman resolves, downloads, detached-signature verifies,
 and installs its current 198-package, 428 MiB closure; desktop discovery then
-publishes the Code-OSS Android launcher. Desktop reconciliation now retains
+publishes the Code-OSS Android app shell. Desktop reconciliation now retains
 entries only when their owning package was explicitly installed, preventing
 Code's dependency closure from publishing unrelated Avahi browsers. This run
 closed four general package-engine gaps: dependency resolution now has a
@@ -2957,8 +2957,8 @@ archive/signature pairs are reverified, the final pacman database has 194
 entries, and the compact full-device UI no longer exposes raw makepkg output or
 an unrelated terminal activity card. The exact rebuilt manager also removed six
 unrecoverable stale output copies on startup, reducing its transient cache from
-1.2 GiB to 3.5 KiB, then installed the generated Visual Studio Code Android
-launcher through Android's confirmation UI. After another manager restart,
+1.2 GiB to 3.5 KiB, then installed the generated Visual Studio Code Android app
+shell through Android's confirmation UI. After another manager restart,
 bounded no-follow pacman-local inspection identifies its `none` validation
 origin, renders an honest disabled Installed action, and enables conservative
 Remove instead of failing official-repository resolution. Cancelled
@@ -3022,7 +3022,7 @@ metadata for the two non-mutating plan passes only. Commit still installs the
 signed official dependencies, repeats an assumption-free plan, rechecks
 ownership/removals, and performs one final two-archive transaction. The device
 finished with 312 packages, exact `libpamac-aur`/`pamac-aur` records, four
-reconciled Android launchers, and no lock, mutation journal, retained graph
+reconciled Android app shells, and no lock, mutation journal, retained graph
 capability, or fatal log.
 
 The AUR pre-install decision surface is now explicitly gated as a complete
@@ -3043,16 +3043,16 @@ Retry submits another Android session. Exact-ABI emulator and Samsung gates
 remove one generated wrapper, cancel the Android confirmation, force-stop and
 restart the manager without a resubmission, then Retry and restore the wrapper
 through one successful confirmation. Reviewed batch selection and later
-launcher management are now implemented as well. When one reconcile introduces
+app-shell management are now implemented as well. When one reconcile introduces
 two or more desktop entries, Rust holds the complete set in `NeedsReview`; no
 wrapper can be claimed until one bounded, generation-checked batch records
 every choice atomically. The manager presents one default-selected checklist
 with Add selected, Skip all, and Not now. Unselected entries become durable
-Dismissed launchers, and the package summary opens them later for
+Dismissed app shells, and the package summary opens them later for
 re-enablement. Emulator and Samsung gates create two package-owned desktop
 entries, inspect full-device review/manage views, exercise skip,
 partial/re-enable paths through real generated wrappers, and restore the exact
-original package sets. Launcher recovery now also covers manager state loss:
+original package sets. App-shell recovery now also covers manager state loss:
 a trusted installed wrapper above a reset registry's desired generation is
 republished at a still-higher Android version rather than downgraded. An
 installed wrapper with an untrusted signer remains a visible retryable failure;
@@ -3087,7 +3087,7 @@ weakening exact user-package resolution. On the physical AArch64 Samsung,
 `libpamac-aur 11.7.4-2` and `pamac-aur 11.7.5-1` built as two isolated bases
 against the exact 339-package, 443,742,032-byte official closure, installed
 together, persisted exact pacman local records across Manager replacement and
-restart, and published the Add/Remove Software Android launcher.
+restart, and published the Add/Remove Software Android app shell.
 
 That run also closed two generic bridge regressions. Official package
 post-install scriptlets required by the disposable Builder root now execute
@@ -3205,7 +3205,7 @@ deliberate `SIGTRAP`.
 
 The next physical-device pass closes the immediate Code resize/input and PTY
 gaps without a Code patch. Activity-window touch and pointer coordinates are
-translated into the inset launcher Surface before Wayland mapping. Phone
+translated into the inset app-shell Surface before Wayland mapping. Phone
 auto-density preserves a 432-logical-pixel short edge, so Code commits an exact
 1080-wide Samsung raster rather than a 1134-pixel buffer that requires lossy
 downscaling. Full-device captures with the IME and at full height show crisp
@@ -3217,14 +3217,14 @@ The generic bridge now implements `openpty` and `forkpty` over
 `TIOCGPTPEER`, creates a controlling session for the PTY child, and allows
 normal terminal process-group changes while retaining the supervised GUI
 policy elsewhere. Stock Code opens a warning-free integrated Bash with working
-job control on Samsung. Force-stopping its Android launcher removes both Code
+job control on Samsung. Force-stopping its Android app shell removes both Code
 and the terminal shell while the manager remains alive.
 
 This is still a partial Electron claim. The temporary device tests established
 that Code requires `--no-sandbox` and `--disable-dev-shm-usage`; the manager now
 has a reviewed generic replacement for user `code-flags.conf`. It is
 default-off, requires an explicit reduced-isolation warning, is captured once
-per launcher session, and appends the two flags only when the exact desktop
+per app-shell session, and appends the two flags only when the exact desktop
 entry or retained supervised-process observation contains Chromium topology.
 Unit tests prove that consent or topology alone is insufficient and that
 existing flags are not duplicated. Exact-ABI emulator/Samsung gates prove
@@ -3232,7 +3232,7 @@ Cancel, explicit Enable, process-restart persistence, state restoration, and
 visually inspected full-device light/dark presentation. Current Code
 installations on both roots also pass the real supervised-process gate without
 a user `code-flags.conf`; the generic policy supplies both required flags while
-a current Foot launcher remains unaffected.
+a current Foot app shell remains unaffected.
 
 The diagnostic `--disable-gpu` flag was previously removed on both device
 lanes: full-device rendering and normal close remained stable, and Samsung
@@ -3261,11 +3261,11 @@ x86_64 evidence is under
 
 Current x86_64 Code-OSS now also reaches its full Ozone/Wayland workbench with
 the shared process, Node workers, extension host, file watcher, and integrated
-PTY alive. The generated launcher starts with Android's IME hidden until an
+PTY alive. The generated app shell starts with Android's IME hidden until an
 intentional touch requests it, avoiding a stale keyboard resize during cold
 startup. Closing the Android session first sends `xdg_toplevel.close`; Code
 flushes its application, shared, and workspace storage before a bounded
-SIGTERM/SIGKILL fallback. Reopening a stopped single-task launcher now clears
+SIGTERM/SIGKILL fallback. Reopening a stopped single-task app shell now clears
 the old Surface attachment and immediately binds the new authenticated session.
 Full-device emulator captures prove cold launch and close/relaunch, and the
 current Samsung manager and all four desired wrappers were reconciled before a
@@ -3386,11 +3386,11 @@ application-visible dual-file results, exact nested/dot/empty folder content,
 folder collision numbering, full-device captures, scoped fatal logs, and the
 current x86_64/AArch64 wrapper ABIs pass on the emulator and Samsung. The folder
 contract was exercised from the portal probe inside an unmodified generated
-Mousepad launcher; a stock GTK folder-selecting application, Qt 6 callers, and
+Mousepad app shell; a stock GTK folder-selecting application, Qt 6 callers, and
 GTK 4 multiple-file/Save/folder callers remain.
 
-Electron Open and Save As now pass through the same portal with current Code
-launchers on both exact ABIs. Binder protocol v16 retains v15's provider-final
+Electron Open and Save As now pass through the same portal with current Code app
+shells on both exact ABIs. Binder protocol v16 retains v15's provider-final
 validated Android display name with the Save descriptor. The manager places each
 save in a unique private nested slot while exposing that exact basename to the
 desktop caller, so Code no longer shows an opaque session-prefixed filename.
@@ -3424,19 +3424,19 @@ Qt multiple-file and folder selection remain pending.
 Folder streaming also has a sliding 30-second boundary around provider queries,
 descriptor opens, and reads. It first cancels the SAF operation or closes the
 active descriptor. If a provider ignores both for another two seconds, only
-the generated launcher process is terminated; the manager-owned pipe observes
+the generated app-shell process is terminated; the manager-owned pipe observes
 EOF and Rust discards descriptor-relative staging. A debuggable Archphene
 DocumentsProvider deliberately ignores cancellation for 60 seconds. Its modern
 Android 16 query path and Samsung Android 15 legacy query path both trigger at
 the expected deadline, leave the manager alive and no partial project, and
 permit the subsequent normal folder/collision/cancellation gate to pass.
 Full-device frames show the responsive picker before the stall and the
-dialog-free Android surface after the launcher is stopped.
+dialog-free Android surface after the app shell is stopped.
 
 The same provider boundary injects deterministic list and descriptor-open
 failures through the real DocumentsProvider/Binder route. On both exact ABIs,
-each failure leaves the launcher and manager alive, publishes no partial
-project, and returns a failed portal response. The generated launcher also
+each failure leaves the app shell and manager alive, publishes no partial
+project, and returns a failed portal response. The generated app shell also
 shows a native, readable “Couldn’t import that folder” message instead of
 silently dropping back into the Linux app. A normal retry then imports the
 exact fixture, with picker, feedback, and completed full-device frames
@@ -3447,7 +3447,7 @@ contract boundary. The fixture spans three bounded child cursors and contains
 9,997 files, including empty files and four nonempty hash sentinels. The
 manager imported all entries and 57 nonempty bytes in 13 seconds on the
 emulator and 49 seconds on Samsung. Counts, sampled hashes, empty content,
-launcher/manager survival, fatal logs, and complete picker/returned-app frames
+app-shell and manager survival, fatal logs, and complete picker/returned-app frames
 are independently checked on both devices.
 
 Slow but healthy provider streams are distinguished from stalls. A debuggable
@@ -3466,11 +3466,11 @@ the intentionally nested legacy `Read` result. It honors D-Bus no-reply calls,
 removing GTK's rejected startup error. The contract probe passes on both exact
 ABIs. Color scheme and Material You accent now remain live through a private
 11-byte versioned state record. The manager writes it with fsync and atomic
-rename from the launcher worker, while the portal accepts only a no-follow
+rename from the app-shell worker, while the portal accepts only a no-follow
 regular file with the exact size and grammar. Android configuration/display
 changes and wallpaper-color callbacks publish only actual value changes and
 the portal emits the corresponding `SettingChanged` signals. A real
-light-to-dark-to-light transition preserves the launcher and Linux process and
+light-to-dark-to-light transition preserves the app shell and Linux process and
 matches fresh `ReadOne` results on Android 16 x86_64 and Samsung Android 15
 AArch64. The device gate preserves the prior night-mode setting, rejects fatal
 logs, and captures full-device frames after the transition settles.
@@ -3519,7 +3519,7 @@ captured before the server and exact test tree were removed. Only the
 user-approved C# debugger-extension, breakpoint, and debug-control portion
 remains open.
 
-On 2026-08-04, the current Samsung `SM_S908U` launcher was independently
+On 2026-08-04, the current Samsung `SM_S908U` app shell was independently
 reopened through ADB as Visual Studio Code. Its Archphene-owned VS Code profile
 contains no extensions, while the available host C# extension is
 `ms-dotnettools.csharp-2.140.9-linux-x64` and cannot execute in the phone's
@@ -3538,7 +3538,7 @@ folder flow and a breakpoint is paused, inspected, continued, and restarted.
 With user approval, the normal Archphene package UI has now installed stock Git
 2.55.0 into both shared roots. The executable is immediately visible from the
 manager Terminal and each existing Code integrated Bash. A bounded device gate
-opens the current generated Code launcher, invokes an alphanumeric user command
+opens the current generated Code app shell, invokes an alphanumeric user command
 through the real integrated terminal, and verifies an actual `git init`,
 `git add`, and `git status --porcelain` transaction reports `A  sample.txt`.
 The gate removes its private command, result, and work tree, rejects fatal
@@ -3555,7 +3555,7 @@ desktop panes. The retained choice expands the normal 432-logical-pixel phone
 canvas to 576 pixels while Code continues to submit an exact physical frame;
 Code's own standard pane controls remain the authority for Explorer and Chat
 visibility. A state-preserving gate selects 75% through the public Settings UI,
-recreates the manager, starts the current generated Code launcher, opens its
+recreates the manager, starts the current generated Code app shell, opens its
 integrated terminal, checks resolved appearance and frame geometry, rejects
 fatal logs, and restores the prior preference. It passes with inspected
 full-device light/dark captures on the x86_64 emulator and AArch64 Samsung.
@@ -3573,7 +3573,7 @@ across both fake-chroot builds and root-identity installs; exact-root legacy
 physical links remain readable without accepting arbitrary Android paths.
 
 The same current-source arm64 manager preserves the Samsung shared root at 35
-installed packages and three current Foot launchers. Cached startup completes
+installed packages and three current Foot app shells. Cached startup completes
 in 255 ms, and a fresh generated Foot launch authenticates generation 328,
 starts the manager-owned Linux process, connects the real Wayland client,
 presents its first 1080×2202 frame, and resizes cleanly for the Samsung IME.
@@ -3583,7 +3583,7 @@ readable frame intact. A repeatable physical-device crash gate then sends
 `SIGKILL` to the real Foot leader through the manager UID, observes the
 wrapper-owned `Foot stopped (exit -9).` state, and proves that both the leader
 and its Bash child disappear even though Bash created a separate process
-group. The same generated launcher subsequently starts a fresh Foot/Bash tree
+group. The same generated app shell subsequently starts a fresh Foot/Bash tree
 and presents a new Wayland frame without a fatal Android log. Repeating the
 gate exposed an IME-resize race that had recreated the compositor and silently
 relaunched a stopped client in the same authenticated session. The Service now
@@ -3631,7 +3631,7 @@ array/direct-buffer/surface/bitmap conversion is now visibly enclosed in one
 documented boundary module. The workspace passes Clippy with warnings denied,
 all 260 Rust tests, and optimized Android builds for both exact ABIs.
 The remaining raw-pointer handles are now gone: fixed synchronized registries
-cap core/probe instances at eight and generated-launcher instances at four,
+cap core/probe instances at eight and generated-app-shell instances at four,
 encode a slot plus generation into each positive opaque handle, and reject
 exhaustion, stale use, double destroy, and stale-after-reuse without allocating
 per call. Direct tests and an exact JNI-name Android probe pass those cases on
@@ -3647,7 +3647,7 @@ compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
 The current Rust/Kotlin manager now also exposes separate persisted automatic
 or bounded controls for Linux workspace geometry, toolkit text, and visible
-control size. A manager-owned launcher snapshots them at process start, so a
+control size. A manager-owned app shell snapshots them at process start, so a
 running app remains stable and a relaunch applies the new policy. Physical
 Samsung validation covers Foot at an explicit 150% geometry setting
 (288×587 logical output) and the restored automatic phone setting (432×881),
@@ -3714,7 +3714,7 @@ The private FileChooser portal now preserves bounded XDG MIME filters through
 Android DocumentsUI. It reads the selected filter, or the first available
 filter when no selection is supplied, canonicalizes at most 16 MIME rules, and
 validates the serialized request again in the manager service and generated
-launcher. Multiple rules use Android's required `*/*` base type plus
+app shell. Multiple rules use Android's required `*/*` base type plus
 `EXTRA_MIME_TYPES`; a single rule remains narrow. Glob-only XDG filters fall
 back to `*/*` because Android has no equivalent filename-pattern contract.
 The reusable device gate presents text/plain and application/json beside an
@@ -3724,7 +3724,7 @@ return to a clean Mousepad frame, and emit no fatal logs. The pre-existing
 single-open, multi-open, Save As, and folder suites also pass unchanged on
 both devices after the shared parser change.
 
-Generated launchers and the manager-side launcher policy now parse signed
+Generated app shells and the manager-side app-shell policy now parse signed
 incoming-document MIME declarations incrementally. Their previous `split(';')`
 paths allocated every entry from the admitted 2,080-UTF-16-unit metadata string
 before checking the 16-type limit. Both parsers now use pre-sized bounded result
@@ -3818,7 +3818,7 @@ Package details now join the verified archive result to installed desktop-entry
 source and executable ownership, the exact broker-capability contract, and the
 generated wrapper's signer/generation/template/publication state. Terminal
 desktop entries no longer produce graphical wrappers. Real Foot installs on the
-x86_64 emulator and AArch64 Samsung pass the normal three-launcher review,
+x86_64 emulator and AArch64 Samsung pass the normal three-app-shell review,
 stale-signer uninstall recovery, one-time Android source permission, serialized
 system confirmations, Ready presentation, cold manager restart, and native
 Wayland launch. This gate found that the GTK settings preload relied on GLib
@@ -3832,7 +3832,7 @@ loading whole binaries. Package details can report Qt 5/6, GTK 3/4, SDL 2/3,
 native Wayland, X11 linkage, OpenGL/EGL, and Vulkan with incomplete-graph
 provenance. Current Foot reports Native Wayland on both devices. Scripts and
 plugin- or `dlopen`-only stacks are now covered by a separate observed-process
-topology. Every active generated launcher scans only its supervised process
+topology. Every active generated app shell scans only its supervised process
 group on a two-second startup warm-up and a 30-second steady cadence, streams
 `/proc` maps through fixed stack buffers, recognizes loaded
 toolkit/protocol/graphics SONAMEs and Chromium child roles, and accumulates
@@ -3848,13 +3848,13 @@ promote any topology into a compatibility claim.
 Optional bridge evidence is now similarly fail-closed. The bounded verified ELF
 walk recognizes exact Pulse, CUPS, PipeWire, libsecret, and KWallet SONAMEs and
 binds their audio-output, printing, camera, and secret-storage bits into
-launcher registry v6. A changed closure advances the existing Android launcher
+launcher registry v6. A changed closure advances the existing Android app-shell
 identity for review; v5 migration starts with no invented capability evidence.
 Package launcher review R4 carries both detected and unavailable masks, rejects
 overclaims, and names unavailable functions in official and installed-AUR
 details. The fixed V4 core contract remains unchanged. Printing and audio output
 are the first optional brokers promoted from evidence to authority. Only a
-verified CUPS-linked launcher receives the exact V5 `printing` contract. Binder
+verified CUPS-linked app shell receives the exact V5 `printing` contract. Binder
 protocol v11 carries one bounded PDF descriptor from the manager-owned portal
 to the authenticated visible wrapper; the wrapper rechecks file type and size,
 reparses page structure, stages the document privately, and invokes Android
@@ -3872,7 +3872,7 @@ playback, an active non-audio denial, cleanup, scoped fatal logs, and inspected
 full-device output pass on the x86_64 emulator and AArch64 Samsung. Microphone
 input remains a separate unported capability and permission boundary.
 
-Generated-launcher secret catalog publication now encodes directly into one
+Generated-app-shell secret catalog publication now encodes directly into one
 fixed 1 MiB buffer. The previous `ByteArrayOutputStream` could grow beyond that
 policy and then allocate a second complete `toByteArray()` copy before checking
 the limit. Byte, unsigned-short, big-endian integer, and length-prefixed UTF-8
@@ -3902,17 +3902,17 @@ Hashed visual evidence is under
 | Package job scheduler | Per-package phase/error state and a bounded structured diagnostic history survive Activity recreation, manager process death, and reboot; legacy jobs migrate without data loss, two preparation jobs can overlap, wrapper mutation/signing and Android confirmation are serialized, and package failures are isolated. List/detail progress, recent phases, cancel, retry, installer completion, and interrupted-completion reconciliation pass emulator tests. Active foreground package work also survives real Recents dismissal, shuts down only after completion, and restores exact cache-recovery results after cold restart on both exact-ABI targets. Real-reboot gates on the emulator and Samsung recover pre-mutation work as an exact-progress Failed/Review result without package or cache mutation. |
 | Terminal command channel | Up to eight foreground-service-owned PTYs issue collision-free per-request pacman facade commands. Search results and durable package-job resolve/download/install/complete/cancel/error states return through a signature- and caller-verified Terminal provider. A verified Arch Bash 5.3.15 closure becomes the default shell after installation; PTY startup, `C.UTF-8`, package queries, and home writes pass on the 4 KB x86_64 emulator and physical ARM64 Samsung device. A real `tree 2.3.2` install and fresh-session execution pass on x86_64, physical AArch64 executes managed `btop 1.4.7`, and untrusted shell result injection is rejected. The 16 KB x86_64 emulator fails closed with an explicit upstream-loader compatibility result |
 | Terminal project folders | A user-selected SAF tree receives a persisted scoped grant and an atomic `$HOME/Projects/<alias>` mirror. Recursive initial copy, exact SHA-256 baselines, no-op sync, bidirectional file/directory additions, edits, and deletions, serial crash-safe multi-delete checkpoints, deterministic conflict copies, live action-only directional progress, durable exact conflict history/Retry, native long-hash cancellation, bounded SAF deadlines with fail-closed mutation timeout recovery, restart/disconnect retention, and forced deletion/replacement journal recovery pass on physical AArch64 and exact x86_64. Terminal command exposure remains. |
-| Android storage boundary | Production manifests and packaged manager, Builder, and thin-launcher APKs request no `MANAGE_EXTERNAL_STORAGE`, legacy `READ_EXTERNAL_STORAGE`, or legacy `WRITE_EXTERNAL_STORAGE`. The CI source contract and installed-package audit cover the manager plus every generated launcher; the current physical Samsung and x86_64 emulator pass while all supported exchange remains behind SAF, scoped URI grants, the DocumentsProvider, and explicit synchronized mirrors. |
-| Android capability broker | The current Rust/Kotlin manager publishes a V4 core wrapper contract for Wayland, input, IME, clipboard, documents, OpenURI, and notifications, plus exact optional printing and audio-output variants only for matching verified executable closures. One randomized same-UID socket serves each authenticated visible launcher's private XDG portal. OpenURI accepts bounded HTTP(S) only, notifications remain wrapper-attributed, and Binder protocol v16 carries the implemented callbacks, bounded HTML/plain clipboard payloads, and the provider-final Save As display name. The same boundary binds registry-derived desktop MIME declarations into each signed wrapper without exposing Android grants or paths to Linux. Repeatable exact-ABI gates cover browser policy, notifications, document intake, unsupported MIME, and optional-capability denial on x86_64 and physical AArch64; the physical device also passes the complete printing path. |
-| Audio input/output | Verified Pulse evidence selects exact `audio-output,audio-input` launcher contracts. A session-scoped manager-owned Pulse server renders through AAudio with OpenSL ES fallback and exposes a private mono 48 kHz PCM16 source. Input permission is never inferred from playback or requested at startup: the first source stream triggers authenticated one-shot manager consent, and approved capture runs under Android's microphone foreground-service and privacy authority. Bionic audio dependencies cannot contaminate glibc application loading, and launchers without the reviewed capability are denied. Unmodified `pavucontrol`, bounded playback/capture, emulator denial, Samsung privacy-forced silence, real nonzero samples, foreground/cache teardown, fatal-log checks, and inspected full-device light/dark presentation pass on x86_64 and physical AArch64. |
-| Printing | Verified CUPS evidence selects the V5 launcher contract without an Android runtime permission. The manager-owned XDG adapter accepts one regular PDF descriptor, and the authenticated visible wrapper enforces a 256 MiB/four-job bound, validates `%PDF-`, reparses page structure with Android's PDF engine, stages only in private cache, and opens PrintManager. PreparePrint, rendered one-page full-device preview, Save as PDF discovery, cancellation cleanup, malformed-PDF failure, and non-regular-FD rejection pass on physical AArch64. Non-CUPS launchers fail closed on both maintained devices; a printing-capable x86_64 package remains to be exercised. |
+| Android storage boundary | Production manifests and packaged manager, Builder, and thin-app-shell APKs request no `MANAGE_EXTERNAL_STORAGE`, legacy `READ_EXTERNAL_STORAGE`, or legacy `WRITE_EXTERNAL_STORAGE`. The CI source contract and installed-package audit cover the manager plus every generated app shell; the current physical Samsung and x86_64 emulator pass while all supported exchange remains behind SAF, scoped URI grants, the DocumentsProvider, and explicit synchronized mirrors. |
+| Android capability broker | The current Rust/Kotlin manager publishes a V4 core wrapper contract for Wayland, input, IME, clipboard, documents, OpenURI, and notifications, plus exact optional printing and audio-output variants only for matching verified executable closures. One randomized same-UID socket serves each authenticated visible app shell's private XDG portal. OpenURI accepts bounded HTTP(S) only, notifications remain wrapper-attributed, and Binder protocol v16 carries the implemented callbacks, bounded HTML/plain clipboard payloads, and the provider-final Save As display name. The same boundary binds registry-derived desktop MIME declarations into each signed wrapper without exposing Android grants or paths to Linux. Repeatable exact-ABI gates cover browser policy, notifications, document intake, unsupported MIME, and optional-capability denial on x86_64 and physical AArch64; the physical device also passes the complete printing path. |
+| Audio input/output | Verified Pulse evidence selects exact `audio-output,audio-input` app-shell contracts. A session-scoped manager-owned Pulse server renders through AAudio with OpenSL ES fallback and exposes a private mono 48 kHz PCM16 source. Input permission is never inferred from playback or requested at startup: the first source stream triggers authenticated one-shot manager consent, and approved capture runs under Android's microphone foreground-service and privacy authority. Bionic audio dependencies cannot contaminate glibc application loading, and app shells without the reviewed capability are denied. Unmodified `pavucontrol`, bounded playback/capture, emulator denial, Samsung privacy-forced silence, real nonzero samples, foreground/cache teardown, fatal-log checks, and inspected full-device light/dark presentation pass on x86_64 and physical AArch64. |
+| Printing | Verified CUPS evidence selects the V5 app-shell contract without an Android runtime permission. The manager-owned XDG adapter accepts one regular PDF descriptor, and the authenticated visible wrapper enforces a 256 MiB/four-job bound, validates `%PDF-`, reparses page structure with Android's PDF engine, stages only in private cache, and opens PrintManager. PreparePrint, rendered one-page full-device preview, Save as PDF discovery, cancellation cleanup, malformed-PDF failure, and non-regular-FD rejection pass on physical AArch64. Non-CUPS app shells fail closed on both maintained devices; a printing-capable x86_64 package remains to be exercised. |
 | Accessibility transport | A declared `accessibility` capability publishes a bounded acyclic virtual node tree on the compositor View and queues Android click, focus, set-text, and scroll actions back to Linux. A private AT-SPI2 adapter translates unmodified Qt, GTK 3, and GTK 4 application trees, actions, focus, menus, and secondary windows. Cache topology is hydrated with live component bounds, actions, state, relations, and newly discovered children; selected/sensitive state is preserved, model-button labels follow standard `LABELLED_BY` relations, semantic default actions are role-scoped, and defunct transient controls are removed. Binder protocol v16 maps each tree's source viewport through the compositor's exact fitted-content rectangle and presentation canvas, including stale primary buffers and oversized secondary windows. A test-only AccessibilityService verifies normalized framework bounds and semantic actions through KCalc, Mousepad, Qt5 Settings, and GNOME Text Editor controls, edits, tabs, menus, dialogs, file-chooser result selection/Open, rotation, and parent restoration on x86_64 and physical AArch64 while preserving prior app state. Current Samsung proof includes aligned Mousepad Preferences Close targets and Qt5 Settings OK/Cancel/Apply bounds that remain 43 px high after rotation. |
-| Camera and PipeWire | The current Rust/Kotlin V9 path derives `camera` from verified launcher evidence, gives only those wrappers optional Android camera declarations, and requests `CAMERA` on first use. A fixed three-frame Camera2 I420 producer feeds one manager-owned private XDG Camera/PipeWire runtime assembled from verified APK payloads. Official unmodified Arch Snapshot passes current state-preserving gates on x86_64 and physical AArch64: permission, 640×480 stream startup, exact GTK4/Cairo environment, Linux presentation, fatal-free cleanup, and full-device zero-magenta inspection; the emulator shows its live virtual scene at luma 0–253. Earlier isolated coverage retains denial/no-reprompt, pre-consent rejection, invalid dimensions, bounded JPEG bytes, and per-plane diagnostics. The Cairo rule applies only to GTK4 camera launchers; ordinary GTK4 wrappers remain accelerated. |
+| Camera and PipeWire | The current Rust/Kotlin V9 path derives `camera` from verified launcher evidence, gives only those wrappers optional Android camera declarations, and requests `CAMERA` on first use. A fixed three-frame Camera2 I420 producer feeds one manager-owned private XDG Camera/PipeWire runtime assembled from verified APK payloads. Official unmodified Arch Snapshot passes current state-preserving gates on x86_64 and physical AArch64: permission, 640×480 stream startup, exact GTK4/Cairo environment, Linux presentation, fatal-free cleanup, and full-device zero-magenta inspection; the emulator shows its live virtual scene at luma 0–253. Earlier isolated coverage retains denial/no-reprompt, pre-consent rejection, invalid dimensions, bounded JPEG bytes, and per-plane diagnostics. The Cairo rule applies only to GTK4 camera app shells; ordinary GTK4 wrappers remain accelerated. |
 | Secrets and keyrings | A declared `secrets` capability exposes a per-wrapper AES-256-GCM collection backed by a non-exportable Android Keystore key and conditionally publishes `org.freedesktop.secrets` on the private session bus. Sender-bound plain and DH/AES sessions, create/search/get/set/replace/delete, content types, item signals, zero-length values, ciphertext, metadata, process-restart persistence, bounds, stale-socket rejection, and no-log-leak checks pass on 4 KB and 16 KB x86_64 emulators and physical AArch64. Unmodified Arch libsecret and KWallet clients pass on 4 KB x86_64. Official Arch Linux ARM `secret-tool`, patched `kwalletd6`, and official `kwallet-query` pass encrypted store/read/clear, daemon-restart persistence, and cleanup on physical AArch64; upstream 4 KB-aligned Arch x86_64 clients are skipped on 16 KB Android. |
 | Drag-and-drop | Generated GUI wrappers declare a `drag-drop` capability. Bounded plain text and `text/uri-list` map bidirectionally between Android `DragEvent` and standard Wayland data devices. Android files import through the conflict-safe document session; Linux exports are restricted to visible-home files and use exact Android URI grants. Copy negotiation, transfer, import/writeback, denied and granted provider access, completion, cancellation, and cleanup pass on x86_64 emulator and physical AArch64. |
 | GUI application documents | One manager-owned **Archphene Apps** DocumentsProvider exposes each generated GUI wrapper's visible Linux home while dotfiles and runtime state remain private. Per-wrapper endpoints require the manager signature permission and verify the calling package. `ACTION_VIEW` and `ACTION_EDIT` support up to 32 URI grants, collision-safe same-name imports, hash-based writeback, and concurrent Android-edit conflict copies. A document sent to an active `singleTask` wrapper presents a native warning before a generic safe restart; Cancel preserves the running app. Manager CRUD, direct-provider denial, active-app restart, same-name import, conflict preservation, writeback, and DocumentsUI browse pass on the x86_64 emulator and physical AArch64. |
 | Package discovery | Official Arch name/description candidates use deterministic exact, executable, prefix, token, and description ranking; executable ownership is merged from repository file databases, glmark2-es2-wayland resolves to glmark2, and installed-app multi-term search shares the same matching rules |
-| Recursive AUR package graphs | Rust-authorized dependency-first reviews, exact official/AUR provider partitioning, separate isolated Builder roots, digest-bound dependency manifests, independent output verification, one final pacman transaction, and durable graph-prefix restoration pass on physical AArch64 with current `libpamac-aur` → `pamac-aur`. The latest exact 356-package signed closure, forced death after base 1/2, no-rebuild prefix restore, remaining base, final two-archive transaction, both installed pacman records, generated launcher handoff, clean recovery state, and full-device completion presentation pass. |
+| Recursive AUR package graphs | Rust-authorized dependency-first reviews, exact official/AUR provider partitioning, separate isolated Builder roots, digest-bound dependency manifests, independent output verification, one final pacman transaction, and durable graph-prefix restoration pass on physical AArch64 with current `libpamac-aur` → `pamac-aur`. The latest exact 356-package signed closure, forced death after base 1/2, no-rebuild prefix restore, remaining base, final two-archive transaction, both installed pacman records, generated app-shell handoff, clean recovery state, and full-device completion presentation pass. |
 | OpenGL ES bridge | Current manager-generated GLMark2 wrappers start a same-UID Android virglrenderer helper on their first launch. The bounded ELF profiler recognizes exact literal `dlopen` SONAMEs without file-sized allocation, while process-map observation remains the fallback. Mesa reports virgl over the emulator NVIDIA OpenGL ES translator and completes 32 logged default scene variants at 1080x2205 with score 14 and exit 0. On the Samsung Galaxy S22 Ultra, virgl uses Qualcomm Adreno 730 / OpenGL ES 3.2 and completes 33 logged variants at 1080x2202 with score 12 and exit 0. Both devices pass distinct full-device frames, bounded geometry, stable-host, fallback/fatal-log, and same-UID fault-injection gates. |
 | 16 KB x86_64 loader | Patched glibc 2.43 is reproducibly linked with 64 KB PT_LOAD alignment and a 16 KB common page size. Every emitted loader/runtime ELF passes an independent alignment audit, and a similarly aligned dynamic executable runs through it inside the manager UID on the API 36 16 KB x86_64 emulator. Official Arch x86_64 package closures remain 4 KB-only and stay blocked. |
 | Release display matrix | Fail-closed KCalc, Mousepad, and Foot gates combine raw/PNG frames, contrast, semantic trees, toolkit config, actual content geometry, scoped logs, and manifests across phone/tablet/docked emulator density profiles. Current-source Samsung repeats the core KCalc, Mousepad, and Foot phone cases. Kate separately passes stable-process tablet rotation plus an actual temporary 1920x1080 emulator display, task placement, mapping, and targeted input. Unmodified Seahorse additionally passes a state-preserving live task move from phone to a temporary 1920x1080 display and back at explicit 125% geometry: manager/wrapper/Linux identities remain stable and the compositor converges from 346x706 to 1024x506 logical pixels and back. Sustained physical external-display coverage remains. |
@@ -3974,7 +3974,7 @@ compositor probes pass. The probe now accounts explicitly for the
 mapped toplevel's retained activation configure before proving that two later
 resize configures remain ordered and independently acknowledged.
 
-The common direct-root launcher path no longer constructs a redundant composed
+The common direct-root app-shell path no longer constructs a redundant composed
 output raster before copying into Android's retained `AHardwareBuffer`. When the
 tiled root exactly covers the physical output and needs no cursor, popup,
 secondary overlay, transform, viewport, subsurface, geometry adjustment, or
@@ -4034,7 +4034,7 @@ whole-file string allocation. Existing bounded-stream JVM tests cover exact,
 oversized, chunked, and zero-progress reads. JDK 26 app unit/lint and exact
 x86_64/AArch64 manager builds pass.
 
-Launcher secret-record and interrupted-write discovery now uses a bounded
+App-shell secret-record and interrupted-write discovery now uses a bounded
 directory stream instead of an uncapped `listFiles()` array. Each pass admits
 at most 256 records, removes at most 256 stale temporary files, and scans at
 most 513 recognized entries. Unknown names, symbolic links, and non-regular
@@ -4045,7 +4045,7 @@ symbolic links, unknown names, overflow progress, and mixed-entry recovery.
 Launcher-template unit/lint and exact release plus x86_64/AArch64 manager builds
 pass.
 
-Generated-launcher private print cleanup now uses the same bounded no-follow
+Generated-app-shell private print cleanup now uses the same bounded no-follow
 directory walker instead of allocating the complete staging directory before
 checking its 32-file ceiling. Unknown names and unsafe file types fail closed.
 Inactive PDF files are deleted as each accepted entry is visited, so overflow
@@ -4054,7 +4054,7 @@ stale set forever. JVM tests prove active-file preservation and stale-file
 recovery across overflow. Launcher-template unit/lint, exact release, and
 x86_64/AArch64 manager builds pass.
 
-Each generated launcher's Android PDF adapter now admits one active writer
+Each generated app shell's Android PDF adapter now admits one active writer
 instead of creating a thread for every overlapping `onWrite()` call.
 Cancellation closes the owned streams so pending I/O observes descriptor
 closure, completion reconciles late cancellation after cleanup, and the task
@@ -4432,7 +4432,7 @@ multibyte tail is removed. The JDK 26 app unit/lint gate passes. Current direct
 Gradle APKs also pass the manager-owned 48 kHz stereo output gate with
 `pavucontrol` on the x86_64 emulator and SuperTux on the physical AArch64
 Samsung, including private-runtime teardown within the 15-second gate. The
-emulator then passes a separate non-audio launcher denial probe.
+emulator then passes a separate non-audio app-shell denial probe.
 
 Audio-runtime cleanup now streams at most 32 matching cache roots instead of
 allocating an uncapped `listFiles()` array. Before deleting one runtime, it
@@ -4441,7 +4441,7 @@ collects a no-follow postorder bounded to 160 descendants and depth 3. Entry
 still deletes normally. Direct JVM tests prove both overflow cases retain every
 path and byte, plus successful bounded cleanup. The complete JDK 26 app
 unit/lint gate and exact x86_64/AArch64 manager builds pass. On physical
-Samsung, explicit launcher-service startup encountered an exact test-owned
+Samsung, explicit app-shell Service startup encountered an exact test-owned
 161-file audio runtime, logged the entry-limit rejection, retained all 161
 files, and allowed exact fixture cleanup afterward. Runtime evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/audio-runtime-cleanup-bound-20260804`;
@@ -4463,8 +4463,8 @@ reject entry 161 or depth 4 without partially deleting earlier paths; valid
 nested runtimes still delete normally, and owned live paths remain excluded.
 Direct JVM regressions prove valid removal plus byte/path-exact retention for
 both overflow classes. The complete JDK 26 app unit/lint gate and exact
-x86_64/AArch64 manager builds pass. On physical Samsung, explicit launcher-
-service startup encountered an exact test-owned 161-file camera runtime, logged
+x86_64/AArch64 manager builds pass. On physical Samsung, explicit app-shell
+Service startup encountered an exact test-owned 161-file camera runtime, logged
 the entry-limit rejection, retained all files, and allowed exact fixture cleanup
 afterward. Runtime evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/camera-runtime-atomic-cleanup-20260804`;
@@ -4506,7 +4506,7 @@ Android and Linux processes, a 34 px font, 126 px controls, and visible command
 output in inspected full-device frames. Evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/portal-request-field-bound-foot-20260804`.
 
-Authenticated launcher callback responses now use the same bounded splitter.
+Authenticated app-shell callback responses now use the same bounded splitter.
 Secret read responses admit four fields, secret list/catalog responses admit
 two, and camera capture responses admit four; each path preallocates only that
 schema and rejects the first extra field. This removes the second unbounded
@@ -4533,7 +4533,7 @@ Foot regression retained stable Android and Linux processes, a 34 px font,
 Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/portal-uri-allocation-bound-foot-20260804`.
 
-Generated-launcher browser dispatch now applies the same allocation-free 4 KiB
+Generated-app-shell browser dispatch now applies the same allocation-free 4 KiB
 UTF-8 boundary to portal callbacks and direct manager requests. The policy was
 extracted from the Activity so direct JVM tests can prove exact ASCII and
 multibyte admission, one-code-point overflow, malformed high/low surrogate
@@ -4546,7 +4546,7 @@ font, 126 px controls, and visible command output in an inspected full-device
 frame. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/generated-browser-uri-bound-foot-20260804`.
 
-Generated-launcher Android document names now share one directly tested,
+Generated-app-shell Android document names now share one directly tested,
 incremental policy. Provider display names, multi-document results, Save As
 suggestions, and manager result transfer admit at most 255 UTF-16 units and 255
 UTF-8 bytes, reject exact `.`/`..`, separators, controls, and malformed
@@ -4559,7 +4559,7 @@ retained stable processes, a 34 px font, 126 px controls, and visible command
 output in an inspected full-device frame. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/generated-document-name-bound-foot-20260804`.
 
-Generated-launcher accessibility action text and print titles now use a shared
+Generated-app-shell accessibility action text and print titles now use a shared
 allocation-free UTF-8 length policy before Binder transfer or print staging.
 Accessibility payloads retain their 4,096-UTF-16-unit and 16 KiB byte limits;
 print titles retain 256 UTF-16 units and 512 bytes. The walker admits an empty
@@ -4573,7 +4573,7 @@ retained stable processes, a 34 px font, 126 px controls, and visible command
 output in an inspected full-device frame. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/generated-accessibility-print-text-bound-foot-20260804`.
 
-The generated launcher's Android accessibility provider now applies that same
+The generated app shell's Android accessibility provider now applies that same
 allocation-free policy at framework `ACTION_SET_TEXT` ingress. Oversized or
 malformed text therefore fails before reaching the Activity callback and its
 independent second validation boundary; the provider no longer creates a
@@ -4585,7 +4585,7 @@ stable processes, a 34 px font, 126 px controls, and visible command output in
 an inspected full-device frame. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/generated-accessibility-provider-text-bound-foot-20260804`.
 
-Manager-side launcher callbacks now reuse an allocation-free UTF-8 policy for
+Manager-side app-shell callbacks now reuse an allocation-free UTF-8 policy for
 production and debug print titles, HTML-derived clipboard text, and Android
 document result names. Their existing 512-byte, 64 KiB, and 255-byte ceilings
 are enforced while walking code points instead of after complete encoded-copy
@@ -4598,7 +4598,7 @@ regression retained stable processes, a 34 px font, 126 px controls, and visible
 command output in an inspected full-device frame. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/manager-launcher-text-bound-foot-20260804`.
 
-Manager Binder ingress for generated-launcher accessibility actions now applies
+Manager Binder ingress for generated-app-shell accessibility actions now applies
 the same allocation-free policy before queuing text. Its independent
 4,096-UTF-16-unit and 16 KiB ceilings reject overflow and malformed surrogates
 without constructing a complete encoded copy after Parcel materialization.
@@ -4647,7 +4647,7 @@ physical-Samsung Foot regression retained stable processes, a 34 px font,
 Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/project-sync-history-length-bound-foot-20260804`.
 
-Generated Android launcher labels now enforce their 128-UTF-16-unit and
+Generated Android app-shell labels now enforce their 128-UTF-16-unit and
 512-byte policy without first allocating a complete encoded copy. The
 incremental check rejects malformed surrogates before APK metadata construction
 while preserving blank, control, and bidirectional-spoof rejection. Direct app
@@ -4924,7 +4924,7 @@ visible command output in inspected full-device frames. Hashed evidence is
 under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-icon-path-bound-foot-20260804`.
 
-Generated-launcher template and signed-APK ZIP entry names now validate in one
+Generated-app-shell template and signed-APK ZIP entry names now validate in one
 allocation-free scan instead of splitting every slash-delimited component. The
 scanner preserves the 240-character ceiling plus relative, nonempty-component,
 traversal, and backslash rejection before extraction or signed-output
@@ -4936,7 +4936,7 @@ retained stable processes, a 34 px font, 126 px controls, and visible command
 output in inspected full-device frames. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-entry-path-bound-foot-20260804`.
 
-Generated-launcher accessibility action responses now use the shared bounded
+Generated-app-shell accessibility action responses now use the shared bounded
 portal field parser instead of limit-splitting the complete response. The
 parser retains exactly four preallocated fields, preserves the required empty
 encoded field for internal refresh, and rejects field five before retention.
@@ -4975,7 +4975,7 @@ px controls, and visible command output in inspected full-device frames. Hashed
 evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/command-request-utf8-bound-foot-20260804`.
 
-Generated-launcher native clipboard reads now validate a successful length
+Generated-app-shell native clipboard reads now validate a successful length
 against both direct-buffer capacity and the independent 64 KiB clipboard
 policy before allocating a Java byte array or copying from the buffer. An
 invalid successful length becomes rejected clipboard content while the tracked
@@ -5002,7 +5002,7 @@ px controls, and visible command output in inspected full-device frames. Hashed
 evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/remaining-native-length-admission-foot-20260804`.
 
-Generated-launcher camera, audio, GPU, and private D-Bus Unix socket paths now
+Generated-app-shell camera, audio, GPU, and private D-Bus Unix socket paths now
 use allocation-free bounded UTF-8 admission instead of encoding complete
 temporary byte arrays only to check length. The shared policy reserves the
 native terminator byte, stops at the first overflow, and rejects malformed
@@ -5014,7 +5014,7 @@ px controls, and visible command output in inspected full-device frames. Hashed
 evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-socket-path-utf8-foot-20260804`.
 
-Generated-launcher file portal URI output now validates the
+Generated-app-shell file portal URI output now validates the
 `toASCIIString()` character count directly instead of allocating a redundant
 US-ASCII byte array only to check the 4 KiB protocol ceiling. Because every
 output character is ASCII, the character and encoded-byte counts are exact.
@@ -5028,7 +5028,7 @@ processes, a 34 px font, 126 px controls, and visible command output in
 inspected full-device frames. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/portal-file-uri-ascii-bound-foot-20260804`.
 
-Signed generated-launcher verification now streams each non-signature ZIP entry
+Signed generated-app-shell verification now streams each non-signature ZIP entry
 through SHA-256 under the existing 4 MiB per-entry ceiling instead of first
 retaining a complete entry byte array solely for hashing. The bounded digest
 reader uses a fixed 16 KiB buffer, probes one byte beyond the ceiling, and
@@ -5040,7 +5040,7 @@ regression retained stable processes, a 34 px font, 126 px controls, and visible
 command output in inspected full-device frames. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/signed-entry-streaming-foot-20260804`.
 
-Generated-launcher template ZIP entry extraction now reuses the shared bounded
+Generated-app-shell template ZIP entry extraction now reuses the shared bounded
 input reader instead of a separate `ByteArrayOutputStream` loop. The former loop
 could spin indefinitely when an input stream legally returned zero from a bulk
 read. The shared reader falls back to one bounded byte on zero progress, probes
@@ -5053,7 +5053,7 @@ font, 126 px controls, and visible command output in inspected full-device
 frames. Hashed evidence is under
 `tooling/artifacts/visual-audit/RFCT90AEEFA/launcher-entry-bounded-input-foot-20260804`.
 
-Generated-launcher binary Android-manifest string replacement now writes each
+Generated-app-shell binary Android-manifest string replacement now writes each
 UTF-8 or UTF-16 string-pool record into one exactly sized output array. The
 former path grew a `ByteArrayOutputStream` around the already encoded bytes and
 then allocated a second complete output copy. Length-prefix sizing uses checked
@@ -5101,7 +5101,7 @@ inspected full-device frames. Hashed evidence is under
 Exact UTF-8 length checks no longer allocate complete encoded copies solely to
 measure them. The shared malformed-Unicode-safe walker now returns the exact
 byte count under an optional ceiling and remains the implementation behind the
-existing boolean admission policy. Generated-launcher stored-entry alignment
+existing boolean admission policy. Generated-app-shell stored-entry alignment
 uses it for ZIP name length, while document-import and folder-import native
 response checks compare the reported length without re-encoding the complete
 response. A source audit finds no remaining production
@@ -5477,7 +5477,7 @@ also pass the Auto/Light/Dark and Material You appearance-policy gate on the
 x86_64 emulator and AArch64 Samsung without restarting manager, wrapper, or
 Linux processes.
 
-Generated-launcher status, IME-state, cursor, Linux-clipboard, pointer-capture,
+Generated-app-shell status, IME-state, cursor, Linux-clipboard, pointer-capture,
 and appearance Binder bursts now coalesce into one scheduled main-thread
 callback and one replaceable latest payload per type. Status, clipboard
 selection, capture intent, and appearance stay latest-wins; pointer-capture
@@ -5495,7 +5495,7 @@ replacement/clear/close disposal, scheduling failure, and both transition
 markers. Launcher-template debug unit tests and lint pass; exact release
 R8/template assembly passes in both x86_64 and AArch64 manager builds.
 
-Non-coalescible generated-launcher document, browser-URI, and notification
+Non-coalescible generated-app-shell document, browser-URI, and notification
 callbacks now enter a 32-item FIFO instead of posting unbounded main-thread
 closures. One drain remains scheduled at a time. Generation tokens invalidate
 removed lifecycle callbacks, stop-time pause rejects races, and session tags
@@ -5530,7 +5530,7 @@ merging, distinct replacement/lifecycle disposal, a 100-attachment exact-once
 release model, ordering, replacement failure, and close. JDK 26 app unit/lint and
 exact x86_64/AArch64 manager builds pass.
 
-Generated-launcher Android accessibility delivery now uses a 64-event FIFO with
+Generated-app-shell Android accessibility delivery now uses a 64-event FIFO with
 one scheduled main-thread drain. Events retain only bounded node identity, role,
 text, and host state. Detach pauses and clears the queue so stale SurfaceView
 events cannot enter a replacement host. Overflow latches one conservative root
