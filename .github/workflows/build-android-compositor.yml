@@ -48,6 +48,7 @@ jobs:
               -v "$PWD:/workspace" \
               -v archphene-cargo-registry:/opt/cargo/registry \
               -w /workspace/native/archphene-compositor \
+              -e CARGO_TARGET_DIR=/workspace/native/archphene-compositor/target \
               archphene-android-native:ci \
               bash -lc "cargo build --target $target --release --locked"
           done
