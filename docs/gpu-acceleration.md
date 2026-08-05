@@ -157,7 +157,9 @@ the helper. It defines one fixed 64-byte `APHB` v1 side-channel frame carrying
 the exact session ID, helper generation, and 128-bit session token on every
 message. A three-resource registry bounds dimensions, pixels, estimated bytes,
 slot identity, duplicate resources, and strictly increasing fence sequences;
-release permits bounded slot reuse. Cross-session, stale-generation,
+declared bytes must cover stride padding. One Present may remain outstanding per
+resource. The manager-to-helper Release must return the exact sequence before
+reuse, and DropResource removes only an idle resource. Cross-session, stale-generation,
 wrong-token, malformed/trailing-field, oversized-resource, unknown-resource,
 duplicate-resource, and stale-fence cases fail closed in unit tests. Actual AHB
 handle transfer, vtest scanout-resource binding, and helper-to-compositor
@@ -233,6 +235,14 @@ replacement-socket preservation; a core test accepts scoped Hello and rejects
 Resource as unsupported. Production does not bind this endpoint yet, and it
 deliberately rejects Resource/Present until native AHB handle and fence receipt
 are implemented.
+
+Direction and reuse are now explicit in APHB v1. Hello, Resource, Present, and
+DropResource travel helper-to-manager. Release travels manager-to-helper with
+the same 64-bit sequence and one release fence. A second Present or DropResource
+fails while a fence is outstanding; stale or mismatched Release fails. This
+prevents destroying a resource as a substitute for returning SurfaceFlinger
+ownership. The dormant receiver rejects inbound Release and still rejects
+Resource/Present before consuming any unauthenticated handle payload.
 
 References:
 

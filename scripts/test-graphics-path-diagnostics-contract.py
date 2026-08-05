@@ -99,11 +99,14 @@ require(
     "token: [u8; 16]",
     "MAX_PRESENT_TOTAL_BYTES",
     "last_fence: [u64; MAX_PRESENT_RESOURCES]",
+    "last_release: [u64; MAX_PRESENT_RESOURCES]",
     "fence_sequence: get_u64(frame, 48)",
     "hello_received: bool",
     "if !self.hello_received",
     "DuplicateResource",
     "StaleFence",
+    "OutstandingFence",
+    "GpuPresentMessage::DropResource",
     "rejects_cross_session_generation_token_and_trailing_fields",
 )
 require(
@@ -140,6 +143,7 @@ require(
     "GpuPresentMessage::Resource",
     "GpuPresentMessage::Present",
     "GpuPresentMessage::Release",
+    "GPU release frames are manager-to-helper only",
     "private_gpu_identity_latches_on_the_exact_surface_commit",
     "binding.set_resource(9, 44, 1, 2)",
     "binding.clear()",

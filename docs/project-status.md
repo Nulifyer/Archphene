@@ -4028,7 +4028,10 @@ and bounded registry. Every 64-byte `APHB` v1 frame authenticates the exact
 session, helper generation, and 128-bit session token. At most three live resources may
 declare bounded RGBA dimensions and exact estimated bytes; resource IDs and
 slots are unique, fence sequences strictly increase, and release is required
-before reuse. Four focused tests reject cross-session/generation/token frames,
+before reuse. Declared allocation bytes may include validated stride padding.
+One Present may be outstanding per resource; manager-to-helper Release must
+match its exact 64-bit sequence, and DropResource is accepted only while idle.
+Four focused tests reject cross-session/generation/token frames,
 reserved trailing fields, unsafe dimensions, duplicates, unknown resources, and
 stale fences. The active vtest helper does not yet consume this side channel or
 bind guest scanout resources to transferred AHB handles, so the corresponding
@@ -4079,6 +4082,13 @@ cover fragmented delivery, reconnect, unsafe paths, and replacement-socket
 preservation. A core test accepts the exact scoped Hello and returns
 `Unsupported` for Resource because no AHB handle receiver exists yet. The
 production launcher therefore leaves the endpoint disabled.
+
+APHB direction and reuse are no longer ambiguous. Helper-to-manager traffic is
+Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release
+carries the exact Present sequence and will carry one SurfaceFlinger release
+fence. The registry rejects a second Present or drop while ownership is
+outstanding, stale/mismatched release, and inbound Release on the manager
+endpoint. Fence descriptor transfer is still unimplemented.
 
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned

@@ -12948,7 +12948,8 @@ impl CompositorCore {
                 .map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}"))
                 })?,
-            GpuPresentMessage::Release { resource_id } => identity_registry
+            GpuPresentMessage::Release { .. } => {}
+            GpuPresentMessage::DropResource { resource_id } => identity_registry
                 .release_resource(resource_id)
                 .map_err(|error| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}"))
@@ -13149,13 +13150,19 @@ impl CompositorCore {
             match decode_gpu_present(scope, &frame)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))?
             {
-                GpuPresentMessage::Hello | GpuPresentMessage::Release { .. } => {
+                GpuPresentMessage::Hello | GpuPresentMessage::DropResource { .. } => {
                     self.apply_gpu_present_frame(&frame)?;
                 }
                 GpuPresentMessage::Resource(_) | GpuPresentMessage::Present { .. } => {
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
                         "GPU resource handles and fences are not connected",
+                    ));
+                }
+                GpuPresentMessage::Release { .. } => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "GPU release frames are manager-to-helper only",
                     ));
                 }
             }

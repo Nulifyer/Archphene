@@ -90,3 +90,10 @@ fragments, drops partial state on helper replacement, and preserves a socket
 that replaced its own inode. Scoped Hello passes end to end in a core test.
 Resource and Present deliberately return `Unsupported` until the receiver can
 consume the immediately following AHB native handle and production fence.
+
+APHB now distinguishes per-frame release from resource destruction. Present
+allows one outstanding sequence per resource. The manager must return Release
+with that exact sequence and a SurfaceFlinger fence before reuse; DropResource
+is helper-to-manager and idle-only. Declared allocation bytes may include real
+AHB stride padding. This removes the earlier ambiguity where Release destroyed
+the registry entry instead of returning buffer ownership.

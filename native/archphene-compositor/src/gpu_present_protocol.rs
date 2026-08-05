@@ -53,7 +53,7 @@ impl PresentResource {
             && (1..=MAX_PRESENT_DIMENSION).contains(&self.width)
             && (1..=MAX_PRESENT_DIMENSION).contains(&self.height)
             && u64::from(self.width) * u64::from(self.height) <= MAX_PRESENT_PIXELS
-            && self.estimated_bytes == u64::from(self.width) * u64::from(self.height) * 4
+            && self.estimated_bytes >= u64::from(self.width) * u64::from(self.height) * 4
             && self.estimated_bytes <= MAX_PRESENT_RESOURCE_BYTES
     }
 }
@@ -68,6 +68,10 @@ pub(crate) enum GpuPresentMessage {
     },
     Release {
         resource_id: u32,
+        fence_sequence: u64,
+    },
+    DropResource {
+        resource_id: u32,
     },
 }
 
@@ -80,6 +84,7 @@ pub(crate) enum GpuPresentProtocolError {
     ResourceLimit,
     UnknownResource,
     StaleFence,
+    OutstandingFence,
 }
 
 pub(crate) fn encode_gpu_present(
@@ -119,8 +124,17 @@ pub(crate) fn encode_gpu_present(
             put_u16(&mut frame, 38, FLAG_FENCE);
             put_u64(&mut frame, 48, fence_sequence);
         }
-        GpuPresentMessage::Release { resource_id } if resource_id != 0 => {
+        GpuPresentMessage::Release {
+            resource_id,
+            fence_sequence,
+        } if resource_id != 0 && fence_sequence != 0 => {
             put_u16(&mut frame, 6, 4);
+            put_u32(&mut frame, 32, resource_id);
+            put_u16(&mut frame, 38, FLAG_FENCE);
+            put_u64(&mut frame, 48, fence_sequence);
+        }
+        GpuPresentMessage::DropResource { resource_id } if resource_id != 0 => {
+            put_u16(&mut frame, 6, 5);
             put_u32(&mut frame, 32, resource_id);
         }
         _ => return Err(GpuPresentProtocolError::InvalidFrame),
@@ -175,8 +189,20 @@ pub(crate) fn decode_gpu_present(
                 fence_sequence: get_u64(frame, 48),
             })
         }
-        4 if resource_id != 0 && frame[36..].iter().all(|byte| *byte == 0) => {
-            Ok(GpuPresentMessage::Release { resource_id })
+        4 if resource_id != 0
+            && get_u16(frame, 38) == FLAG_FENCE
+            && get_u64(frame, 48) != 0
+            && frame[36..38].iter().all(|byte| *byte == 0)
+            && frame[40..48].iter().all(|byte| *byte == 0)
+            && frame[56..].iter().all(|byte| *byte == 0) =>
+        {
+            Ok(GpuPresentMessage::Release {
+                resource_id,
+                fence_sequence: get_u64(frame, 48),
+            })
+        }
+        5 if resource_id != 0 && frame[36..].iter().all(|byte| *byte == 0) => {
+            Ok(GpuPresentMessage::DropResource { resource_id })
         }
         _ => Err(GpuPresentProtocolError::InvalidFrame),
     }
@@ -198,6 +224,7 @@ pub(crate) struct GpuPresentRegistry {
     scope: GpuPresentScope,
     resources: [Option<PresentResource>; MAX_PRESENT_RESOURCES],
     last_fence: [u64; MAX_PRESENT_RESOURCES],
+    last_release: [u64; MAX_PRESENT_RESOURCES],
     total_bytes: u64,
     hello_received: bool,
 }
@@ -211,6 +238,7 @@ impl GpuPresentRegistry {
             scope,
             resources: [None; MAX_PRESENT_RESOURCES],
             last_fence: [0; MAX_PRESENT_RESOURCES],
+            last_release: [0; MAX_PRESENT_RESOURCES],
             total_bytes: 0,
             hello_received: false,
         })
@@ -259,14 +287,35 @@ impl GpuPresentRegistry {
                 if fence_sequence <= self.last_fence[index] {
                     return Err(GpuPresentProtocolError::StaleFence);
                 }
+                if self.last_fence[index] != self.last_release[index] {
+                    return Err(GpuPresentProtocolError::OutstandingFence);
+                }
                 self.last_fence[index] = fence_sequence;
             }
-            GpuPresentMessage::Release { resource_id } => {
+            GpuPresentMessage::Release {
+                resource_id,
+                fence_sequence,
+            } => {
                 let Some(index) = self.resource_index(resource_id) else {
                     return Err(GpuPresentProtocolError::UnknownResource);
                 };
+                if fence_sequence != self.last_fence[index]
+                    || fence_sequence <= self.last_release[index]
+                {
+                    return Err(GpuPresentProtocolError::StaleFence);
+                }
+                self.last_release[index] = fence_sequence;
+            }
+            GpuPresentMessage::DropResource { resource_id } => {
+                let Some(index) = self.resource_index(resource_id) else {
+                    return Err(GpuPresentProtocolError::UnknownResource);
+                };
+                if self.last_fence[index] != self.last_release[index] {
+                    return Err(GpuPresentProtocolError::OutstandingFence);
+                }
                 let resource = self.resources[index].take().expect("located resource");
                 self.last_fence[index] = 0;
+                self.last_release[index] = 0;
                 self.total_bytes = self.total_bytes.saturating_sub(resource.estimated_bytes);
             }
         }
@@ -335,7 +384,11 @@ mod tests {
                 resource_id: 11,
                 fence_sequence: 0x1_0000_0002,
             },
-            GpuPresentMessage::Release { resource_id: 11 },
+            GpuPresentMessage::Release {
+                resource_id: 11,
+                fence_sequence: 0x1_0000_0002,
+            },
+            GpuPresentMessage::DropResource { resource_id: 11 },
         ] {
             let frame = encode_gpu_present(scope(), message).expect("encode message");
             assert_eq!(frame.len(), GPU_PRESENT_FRAME_BYTES);
@@ -402,10 +455,35 @@ mod tests {
             registry.apply_frame(&encode_gpu_present(scope(), present).expect("stale frame")),
             Err(GpuPresentProtocolError::StaleFence),
         );
-        let release = GpuPresentMessage::Release { resource_id: 1 };
+        let next_present = GpuPresentMessage::Present {
+            resource_id: 1,
+            fence_sequence: 2,
+        };
+        assert_eq!(
+            registry.apply_frame(
+                &encode_gpu_present(scope(), next_present).expect("busy present frame")
+            ),
+            Err(GpuPresentProtocolError::OutstandingFence),
+        );
+        let drop_resource = GpuPresentMessage::DropResource { resource_id: 1 };
+        assert_eq!(
+            registry
+                .apply_frame(&encode_gpu_present(scope(), drop_resource).expect("busy drop frame")),
+            Err(GpuPresentProtocolError::OutstandingFence),
+        );
+        let release = GpuPresentMessage::Release {
+            resource_id: 1,
+            fence_sequence: 1,
+        };
         assert_eq!(
             registry.apply_frame(&encode_gpu_present(scope(), release).expect("release frame")),
             Ok(release),
+        );
+        assert_eq!(
+            registry.apply_frame(
+                &encode_gpu_present(scope(), drop_resource).expect("drop resource frame")
+            ),
+            Ok(drop_resource),
         );
         let replacement = GpuPresentMessage::Resource(resource(100, 0));
         assert_eq!(
@@ -422,6 +500,19 @@ mod tests {
         };
         assert_eq!(
             encode_gpu_present(scope(), GpuPresentMessage::Resource(invalid)),
+            Err(GpuPresentProtocolError::InvalidResource),
+        );
+        let padded = PresentResource {
+            estimated_bytes: 1920 * 1088 * 4,
+            ..resource(2, 1)
+        };
+        assert!(encode_gpu_present(scope(), GpuPresentMessage::Resource(padded)).is_ok());
+        let underestimated = PresentResource {
+            estimated_bytes: 1920 * 1080 * 4 - 1,
+            ..resource(3, 2)
+        };
+        assert_eq!(
+            encode_gpu_present(scope(), GpuPresentMessage::Resource(underestimated)),
             Err(GpuPresentProtocolError::InvalidResource),
         );
         let mut registry = GpuPresentRegistry::new(scope()).expect("registry");
