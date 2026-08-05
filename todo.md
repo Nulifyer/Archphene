@@ -106,7 +106,7 @@ its Linux environment.
 - [x] Drive compact/adaptive/desktop policy from the current window metrics,
   caption and system insets, display, pointer, keyboard, and application
   capability. Do not branch on Samsung, DeX, Pixel, or model names.
-- [ ] Preserve exact intent and lifecycle behavior across multiple tasks.
+- [x] Preserve exact intent and lifecycle behavior across multiple tasks.
   - [x] Preserve `ACTION_VIEW`, `ACTION_EDIT`, `ACTION_SEND`, notifications,
     root-task close, and wrapper force-stop behavior.
   - [x] Validate app-shell removal and manager absence without altering retained
