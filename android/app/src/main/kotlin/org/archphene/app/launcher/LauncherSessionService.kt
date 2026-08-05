@@ -223,6 +223,7 @@ class LauncherSessionService : Service() {
         var pendingDocumentRequest: PendingDocumentRequest? = null
         var pendingLaunchDocument: LauncherPortalOpenDocument? = null
         var launchDocumentImportStarted = false
+        var launchDocumentWritable = false
         val accessibilityActions =
             ArrayBlockingQueue<AccessibilityAction>(MAX_ACCESSIBILITY_ACTIONS)
         var launchDocumentPath: String? = null
@@ -666,6 +667,10 @@ class LauncherSessionService : Service() {
                     transactReleaseWindowTask(data, reply)
                     true
                 }
+                TRANSACTION_CLOSE_APPLICATION -> {
+                    transactCloseApplication(data, reply)
+                    true
+                }
                 else -> super.onTransact(code, data, reply, flags)
             }
         }
@@ -700,9 +705,16 @@ class LauncherSessionService : Service() {
                             val displayName = data.readString().orEmpty()
                             val mimeType = data.readString().orEmpty()
                             val descriptor = ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                            val writableValue =
+                                if (version >= EDIT_DOCUMENT_PROTOCOL_VERSION) {
+                                    data.readInt()
+                                } else {
+                                    0
+                                }
                             if (
                                 !safeDocumentName(displayName) ||
-                                !LauncherIntentMimePolicy.valid(mimeType)
+                                !LauncherIntentMimePolicy.valid(mimeType) ||
+                                writableValue !in 0..1
                             ) {
                                 descriptor.close()
                                 return@runCatching OpenResult(RESULT_INVALID, 0, null)
@@ -710,6 +722,7 @@ class LauncherSessionService : Service() {
                             PendingLaunchDocument(
                                 LauncherPortalOpenDocument(descriptor, displayName, false),
                                 mimeType,
+                                writableValue == 1,
                             )
                         } else if (hasDocument == 0) {
                             null
@@ -1194,6 +1207,18 @@ class LauncherSessionService : Service() {
             reply.writeInt(result)
         }
 
+        private fun transactCloseApplication(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            val result =
+                transactSessionOnly(data, "application replacement") { callingUid, sessionId ->
+                    closeApplication(callingUid, sessionId)
+                }
+            reply.writeNoException()
+            reply.writeInt(result)
+        }
+
         private fun transactSessionOnly(
             data: Parcel,
             operation: String,
@@ -1256,6 +1281,55 @@ class LauncherSessionService : Service() {
         return RESULT_OK
     }
 
+    @Synchronized
+    private fun closeApplication(
+        callingUid: Int,
+        sessionId: Int,
+    ): Int {
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        val root = rootSession(session) ?: return RESULT_NOT_READY
+        return closeRootApplication(root, "incoming Android document")
+    }
+
+    private fun closeRootApplication(
+        root: Session,
+        reason: String,
+    ): Int {
+        notifyLaunchDocumentWriteback(root)
+        val children =
+            sessions.values.filter { candidate ->
+                candidate.rootSessionId == root.id && candidate.id != root.id
+            }
+        for (child in children) {
+            releaseMicrophoneForeground(child)
+            child.clientToken.unlinkToDeath(sessionBinder, 0)
+            child.clientActive = false
+            child.active = false
+            sessions.remove(child.id)
+            child.surfaceAttachments?.close()
+            child.androidClipboardUpdates?.close()
+            child.accessibilityActions.clear()
+            val surface = child.surface
+            child.surface = null
+            if (surface != null && !surfaceHandler.post { surface.release() }) {
+                surface.release()
+            }
+        }
+        releaseMicrophoneForeground(root)
+        root.clientToken.unlinkToDeath(sessionBinder, 0)
+        root.clientActive = false
+        root.active = false
+        sessions.remove(root.id)
+        releaseSessionResources(root, root.surface, closeCompositor = true)
+        root.surface = null
+        Log.i(
+            TAG,
+            "Closed Linux application root=${root.id} attachments=${children.size + 1} " +
+                "for $reason",
+        )
+        return RESULT_OK
+    }
+
     private data class OpenResult(
         val result: Int,
         val sessionId: Int,
@@ -1271,6 +1345,7 @@ class LauncherSessionService : Service() {
     private data class PendingLaunchDocument(
         val document: LauncherPortalOpenDocument,
         val mimeType: String,
+        val writable: Boolean,
     )
 
     @Synchronized
@@ -1338,13 +1413,17 @@ class LauncherSessionService : Service() {
                 OpenResult(RESULT_INVALID, 0, null)
             }
         }
-        val existingRoot =
+        var existingRoot =
             sessions.values.firstOrNull { session ->
                 session.rootSessionId == session.id &&
                     session.active &&
                     session.uid == callingUid &&
                     session.identity == identity
             }
+        if (requestedToplevelId == 0 && pendingDocument != null && existingRoot != null) {
+            closeRootApplication(existingRoot, "cold Android document launch")
+            existingRoot = null
+        }
         val root =
             when {
                 requestedToplevelId == 0 && existingRoot == null -> null
@@ -1428,6 +1507,7 @@ class LauncherSessionService : Service() {
         sessions[sessionId] = session
         root?.let { owner -> owner.reconnectGeneration++ }
         session.pendingLaunchDocument = pendingDocument?.document
+        session.launchDocumentWritable = pendingDocument?.writable == true
         Log.i(
             TAG,
             "Authorized launcher package=${identity.androidPackage} " +
@@ -4809,6 +4889,59 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyLaunchDocumentWriteback(session: Session): Boolean {
+        if (
+            session.protocolVersion < EDIT_DOCUMENT_PROTOCOL_VERSION ||
+            !session.launchDocumentWritable ||
+            !session.clientActive
+        ) {
+            return false
+        }
+        val path = session.launchDocumentPath ?: return false
+        val bridge = session.portalBridge ?: return false
+        val descriptor =
+            runCatching { bridge.openLaunchDocumentForWriteback(path) }
+                .getOrElse { error ->
+                    Log.e(TAG, "Could not open edited launch document session=${session.id}", error)
+                    return false
+                }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(session.protocolVersion)
+            data.writeInt(session.id)
+            descriptor.writeToParcel(data, 0)
+            val delivered =
+                session.clientToken.transact(
+                    CALLBACK_EDIT_WRITEBACK,
+                    data,
+                    reply,
+                    0,
+                )
+            val accepted =
+                if (delivered) {
+                    reply.readException()
+                    reply.readInt() == RESULT_OK && reply.dataAvail() == 0
+                } else {
+                    false
+                }
+            if (accepted) {
+                Log.i(TAG, "Requested Android edit writeback session=${session.id}")
+            } else {
+                Log.w(TAG, "Could not request Android edit writeback session=${session.id}")
+            }
+            accepted
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not request Android edit writeback session=${session.id}", error)
+            false
+        } finally {
+            descriptor.close()
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
     @Synchronized
     private fun pendingDocumentOperation(
         callingUid: Int,
@@ -4998,7 +5131,10 @@ class LauncherSessionService : Service() {
         callingUid: Int,
         sessionId: Int,
     ): Int {
-        authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        if (session.rootSessionId == session.id) {
+            notifyLaunchDocumentWriteback(session)
+        }
         removeSession(sessionId)
         Log.i(TAG, "Closed launcher session=$sessionId")
         return RESULT_OK
@@ -5009,9 +5145,10 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 20
+        private const val PROTOCOL_VERSION = 21
         private const val MINIMUM_PROTOCOL_VERSION = 16
         private const val MULTI_WINDOW_PROTOCOL_VERSION = 20
+        private const val EDIT_DOCUMENT_PROTOCOL_VERSION = 21
         private const val INPUT_LOGICAL_COORDINATE_PROTOCOL_VERSION = 18
         private const val IME_EDITOR_EVIDENCE_PROTOCOL_VERSION = 17
         private const val IME_EDITOR_EVIDENCE_LEVEL_PROTOCOL_VERSION = 19
@@ -5031,6 +5168,8 @@ class LauncherSessionService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 9
         private const val TRANSACTION_RELEASE_WINDOW_TASK =
             IBinder.FIRST_CALL_TRANSACTION + 10
+        private const val TRANSACTION_CLOSE_APPLICATION =
+            IBinder.FIRST_CALL_TRANSACTION + 11
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
@@ -5050,6 +5189,7 @@ class LauncherSessionService : Service() {
         private const val CALLBACK_ACCESSIBILITY_VIEWPORT =
             IBinder.FIRST_CALL_TRANSACTION + 14
         private const val CALLBACK_WINDOWS = IBinder.FIRST_CALL_TRANSACTION + 15
+        private const val CALLBACK_EDIT_WRITEBACK = IBinder.FIRST_CALL_TRANSACTION + 16
         private const val ACCESSIBILITY_CALLBACK_TREE = 1
         private const val ACCESSIBILITY_CALLBACK_EVENT = 2
         private const val ACCESSIBILITY_CALLBACK_MENU = 3

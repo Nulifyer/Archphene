@@ -20,7 +20,7 @@ while (($#)); do
     --artifact-dir) artifact_dir="${2:?missing value for --artifact-dir}"; shift 2 ;;
     --timeout-seconds) timeout="${2:?missing value for --timeout-seconds}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --package GENERATED_LAUNCHER [--manager PACKAGE] [--provider-mode normal|code-workspace] [--intent-action view|send] [--artifact-dir PATH] [--timeout-seconds SECONDS]"
+      echo "usage: $0 --serial SERIAL --package GENERATED_LAUNCHER [--manager PACKAGE] [--provider-mode normal|code-workspace] [--intent-action view|edit|send] [--artifact-dir PATH] [--timeout-seconds SECONDS]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -34,8 +34,10 @@ done
   archphene_die "--manager is invalid"
 [[ "$provider_mode" == normal || "$provider_mode" == code-workspace ]] ||
   archphene_die "--provider-mode must be normal or code-workspace"
-[[ "$intent_action" == view || "$intent_action" == send ]] ||
-  archphene_die "--intent-action must be view or send"
+[[ "$intent_action" == view || "$intent_action" == edit || "$intent_action" == send ]] ||
+  archphene_die "--intent-action must be view, edit, or send"
+[[ "$intent_action" != edit || "$provider_mode" == normal ]] ||
+  archphene_die "--intent-action edit requires --provider-mode normal"
 [[ "$timeout" =~ ^[0-9]+$ ]] && ((timeout >= 20 && timeout <= 180)) ||
   archphene_die "--timeout-seconds must be 20..180"
 
@@ -84,6 +86,8 @@ mkdir -p "$artifact_dir"
 cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
   archphene_adb_run shell run-as "$manager" rm -f "$relative" >/dev/null 2>&1 || true
+  archphene_adb_run shell run-as "$manager" rm -f \
+    "cache/launcher-edit-$token.txt" >/dev/null 2>&1 || true
   if [[ "$initial_manager_running" == false ]]; then
     archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
   fi
@@ -131,6 +135,25 @@ archphene_regex_contains "$top" \
   archphene_die "generated launcher is not the resumed full-device Activity"
 
 archphene_adb_run exec-out screencap -p >"$artifact_dir/view.png"
+if [[ "$intent_action" == edit ]]; then
+  edit_marker="archphene-edit-writeback-$token"
+  edit_base64="$(printf '\n%s\n' "$edit_marker" | base64 -w0)"
+  archphene_adb_run shell run-as "$manager" sh -c \
+    "'printf %s $edit_base64 | base64 -d >> $relative'"
+  archphene_adb_run shell input keyevent KEYCODE_BACK
+  archphene_wait_log \
+    'Requested Android edit writeback session=' "$timeout" \
+    'ArchpheneLauncherSession:I AndroidRuntime:E *:S' >/dev/null
+  archphene_wait_log \
+    'Wrote edited Linux document to Android bytes=' "$timeout" \
+    'ArchpheneLauncher:I AndroidRuntime:E *:S' >/dev/null
+  edited="$(
+    archphene_adb_run shell run-as "$manager" cat \
+      "cache/launcher-edit-$token.txt" | tr -d '\r'
+  )"
+  [[ "$edited" == *"$edit_marker"* ]] ||
+    archphene_die "edited launcher document was not written back to its Android URI"
+fi
 archphene_adb_run logcat -d -v brief >"$artifact_dir/logcat.txt"
 fatal="$(
   archphene_adb_run logcat -d -v brief \

@@ -8,9 +8,44 @@ record their state at the time of validation. The authoritative forward plan is
 [`todo.md`](../todo.md); supported application claims are maintained in the
 [compatibility matrix](compatibility-matrix.md).
 
+## Android app-shell intent and lifecycle checkpoint
+
+Binder protocol v21 preserves Android document actions when an app shell already
+owns multiple tasks. A new `ACTION_VIEW`, `ACTION_EDIT`, or `ACTION_SEND` removes
+the old independent Android attachments, closes the one manager-owned Linux
+application, and starts one replacement root session with the exact validated
+`content://` document. A cold document launch also replaces a root retained by
+the 15-second reconnect grace instead of returning busy.
+
+`ACTION_EDIT` now opens the granted URI read/write, imports through the same
+bounded 512 MiB manager path, and retains only a session-scoped URI target in the
+visible app shell. On close, the manager reopens the exact imported regular file
+with `O_NOFOLLOW`, verifies one link and the size bound, and sends a read-only
+descriptor through an authenticated v21 callback. The app shell queues provider
+writeback on its document worker and opens the original URI with `rwt`; file
+bytes enter neither a Binder parcel nor a file-sized managed aggregate. Missing
+write permission, stale sessions, non-content URIs, signer or MIME mismatches,
+links, oversized files, and manager loss fail closed.
+
+On the Samsung SM-S908U, unmodified Mousepad held a root and independent child
+task at the temporary 720 dp viewport. Each of `ACTION_VIEW`, `ACTION_EDIT`, and
+`ACTION_SEND` then replaced both attachments and imported exact provider bytes;
+the edit lane appended and wrote back `archphene-edit-writeback-<token>` to the
+original provider URI. The wrapper-owned portal/classic notification lane also
+passed while both tasks existed, including content-intent return and withdrawal.
+Closing root session 5 retained Mousepad PID 31558 and child task 5760; closing
+the child then removed the process. Force-stopping both tasks retained Mousepad
+PID 28062 only for the reconnect grace, logged both Binder deaths, and removed
+the process when the grace expired. The density override was restored to 420.
+
+Manager absence and wrapper removal remain open because exercising either on the
+current physical manager would terminate or uninstall retained user sessions;
+they require an isolated populated manager instance or explicit destructive-test
+authorization. This checkpoint makes no DeX or external-display claim.
+
 ## Android app-shell multi-task checkpoint
 
-Binder protocol v20 now keeps one manager-owned Linux application session while
+Binder protocol v21 now keeps one manager-owned Linux application session while
 up to eight authenticated app-shell Activities attach independent window tokens
 and Surfaces. The native compositor retains a bounded aggregate of 33,554,432
 attached pixels, presents each independent toplevel into its Activity Surface,

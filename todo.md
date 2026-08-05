@@ -106,9 +106,11 @@ its Linux environment.
 - [x] Drive compact/adaptive/desktop policy from the current window metrics,
   caption and system insets, display, pointer, keyboard, and application
   capability. Do not branch on Samsung, DeX, Pixel, or model names.
-- [ ] Preserve exact `ACTION_VIEW`, `ACTION_EDIT`, `ACTION_SEND`, notification,
-  force-stop, wrapper removal, and manager-absence behavior across multiple
-  tasks.
+- [ ] Preserve exact intent and lifecycle behavior across multiple tasks.
+  - [x] Preserve `ACTION_VIEW`, `ACTION_EDIT`, `ACTION_SEND`, notifications,
+    root-task close, and wrapper force-stop behavior.
+  - [ ] Validate wrapper removal and manager absence without altering retained
+    user sessions on the maintained physical target.
 - [ ] Prototype manager-hosted **Quick launch** for trying a graphical package
   without another PackageInstaller confirmation. Keep **Add to Android** as the
   explicit action that publishes the real app shell.

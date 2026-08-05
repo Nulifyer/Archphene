@@ -201,6 +201,33 @@ internal class LauncherPortalBridge(
         return Uri.parse(uri).path ?: error("Imported document URI has no path")
     }
 
+    fun openLaunchDocumentForWriteback(logicalPath: String): ParcelFileDescriptor {
+        val prefix = "/home/archphene/Documents/Android/"
+        check(logicalPath.startsWith(prefix))
+        val name = logicalPath.removePrefix(prefix)
+        check(safeName(name) && '/' !in name && '\\' !in name)
+        val canonicalDirectory = importsDirectory.canonicalFile
+        val document = File(canonicalDirectory, name).canonicalFile
+        check(document.parentFile == canonicalDirectory)
+        val descriptor =
+            Os.open(
+                document.path,
+                OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+                0,
+            )
+        try {
+            val stat = Os.fstat(descriptor)
+            check(
+                OsConstants.S_ISREG(stat.st_mode) &&
+                    stat.st_nlink == 1L &&
+                    stat.st_size in 0..MAX_OPEN_BYTES,
+            )
+            return ParcelFileDescriptor.dup(descriptor)
+        } finally {
+            Os.close(descriptor)
+        }
+    }
+
     fun start() =
         synchronized(runtimeLifecycleLock) {
             runtimeRegistry.unreapedSnapshot().forEach { bridge ->

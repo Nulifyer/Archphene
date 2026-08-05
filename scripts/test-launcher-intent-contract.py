@@ -15,6 +15,7 @@ require(
     ROOT / "android/launcher-template/src/main/AndroidManifest.xml",
     'android:name="org.archphene.launcher.MIME_TYPES"',
     '<action android:name="android.intent.action.VIEW" />',
+    '<action android:name="android.intent.action.EDIT" />',
     '<action android:name="android.intent.action.SEND" />',
     '<data android:scheme="content" />',
     'android:name="org.archphene.launcher.LauncherWindowActivity"',
@@ -26,10 +27,10 @@ require(
     ROOT
     / "android/launcher-template/src/main/kotlin/org/archphene/launcher"
     / "LauncherActivity.kt",
-    "private const val PROTOCOL_VERSION = 20",
+    "private const val PROTOCOL_VERSION = 21",
     'uri?.scheme != "content"',
     "LauncherIntentMimePolicy.matches(declared, mimeType)",
-    'contentResolver.openFileDescriptor(request.uri, "r", cancellation)',
+    'if (request.writable) "rw" else "r"',
     "incoming.descriptor.writeToParcel(data, 0)",
     "CALLBACK_WINDOWS",
     "Intent.FLAG_ACTIVITY_NEW_DOCUMENT",
@@ -37,18 +38,22 @@ require(
     "activityManager.appTasks",
     "TRANSACTION_ACTIVATE_NEXT_WINDOW",
     "TRANSACTION_RELEASE_WINDOW_TASK",
+    "TRANSACTION_CLOSE_APPLICATION",
     "launcher_switch_window",
     "KeyEvent.KEYCODE_TAB",
     "event.isCtrlPressed",
     "COMPACT_SWITCHER_HEIGHT_DP",
     "getInsetsIgnoringVisibility",
     "applicationSupportsIndependentWindows",
+    "removeIndependentWindowTasks",
+    "CALLBACK_EDIT_WRITEBACK",
+    'contentResolver.openOutputStream(uri, "rwt")',
 )
 require(
     ROOT
     / "android/app/src/main/kotlin/org/archphene/app/launcher"
     / "LauncherSessionService.kt",
-    "private const val PROTOCOL_VERSION = 20",
+    "private const val PROTOCOL_VERSION = 21",
     "identity.mimeTypes != authorization.mimeTypes",
     "portalBridge.importLaunchDocument(pendingLaunchDocument)",
     "session.launchDocumentPath",
@@ -56,6 +61,10 @@ require(
     "private const val SESSION_RECONNECT_GRACE_MILLIS = 15_000L",
     "TRANSACTION_ACTIVATE_NEXT_WINDOW",
     "TRANSACTION_RELEASE_WINDOW_TASK",
+    "TRANSACTION_CLOSE_APPLICATION",
+    "Closed Linux application root=",
+    "EDIT_DOCUMENT_PROTOCOL_VERSION",
+    "Requested Android edit writeback session=",
 )
 require(
     ROOT
@@ -63,6 +72,7 @@ require(
     / "LauncherPortalBridge.kt",
     '"home/archphene/Documents/Android"',
     'check(running) { "Portal session closed during document import" }',
+    "openLaunchDocumentForWriteback",
 )
 require(
     ROOT / "crates/archphene-android/src/lib.rs",
@@ -80,6 +90,6 @@ require(
 
 print(
     "Launcher intent contract passed: signed MIME declarations, content-only "
-    "Android intake, SAF import, bounded document tasks, reconnect grace, and "
-    "desktop-entry argument delivery are enforced."
+    "Android intake, bounded edit writeback, document-task replacement, "
+    "reconnect grace, and desktop-entry argument delivery are enforced."
 )

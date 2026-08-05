@@ -270,7 +270,7 @@ small fixed transaction surface:
 5. broker explicit Android capability requests and results;
 6. stop or detach the session.
 
-Protocol v20 separates the manager-owned Linux application session from its
+Protocol v21 separates the manager-owned Linux application session from its
 Android task attachments. One root session owns the private Wayland socket,
 Linux process group, brokers, and compositor. Up to eight authenticated Android
 window sessions each own one bounded token and `Surface`; the compositor caps
@@ -288,6 +288,16 @@ closing its Linux toplevel. Parent-owned popups and transient surfaces remain
 composed with their toplevel. Recents are bounded to eight window tasks, and
 stable component-plus-data document intents reuse an existing task after
 Activity process death.
+
+Incoming Android documents retain action semantics across that task set. A new
+`ACTION_VIEW`, `ACTION_EDIT`, or `ACTION_SEND` closes every attachment for the
+old Linux application before the replacement root starts, including a root held
+only by reconnect grace. `ACTION_EDIT` additionally binds the original granted
+URI to that authenticated root session. At close, the manager opens the bounded
+import with `O_NOFOLLOW`, verifies a regular single-link file, and transfers one
+read-only descriptor back to the visible app shell. The shell performs the
+provider `rwt` copy on its document worker. The original URI never enters Linux,
+and document bytes never enter a Binder parcel or file-sized managed aggregate.
 
 The identities and lifetimes are:
 

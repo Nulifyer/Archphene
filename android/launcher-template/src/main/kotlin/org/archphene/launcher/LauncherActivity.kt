@@ -167,12 +167,14 @@ open class LauncherActivity :
     private data class IncomingDocumentRequest(
         val uri: Uri,
         val mimeType: String,
+        val writable: Boolean,
     )
 
     private data class PreparedIncomingDocument(
         val displayName: String,
         val mimeType: String,
         val descriptor: ParcelFileDescriptor,
+        val writable: Boolean,
     )
 
     private data class PendingNotification(
@@ -406,6 +408,7 @@ open class LauncherActivity :
     private var pendingDocumentOperation = 0
     private var incomingDocumentRequest: IncomingDocumentRequest? = null
     private var preparedIncomingDocument: PreparedIncomingDocument? = null
+    private val editTargets = LinkedHashMap<Int, Uri>(MAX_PENDING_EDIT_WRITEBACKS)
     private var preparingIncomingDocument = false
     private var incomingDocumentRejected = false
     private var incomingDocumentGeneration = 0
@@ -461,13 +464,16 @@ open class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_WINDOWS ||
+                    code !in CALLBACK_STATUS..CALLBACK_EDIT_WRITEBACK ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
                 }
-                check(Looper.myLooper() != Looper.getMainLooper()) {
-                    "Manager callbacks must not run on Android's main thread"
+                check(
+                    code == CALLBACK_EDIT_WRITEBACK ||
+                        Looper.myLooper() != Looper.getMainLooper(),
+                ) {
+                    "Non-writeback manager callbacks must not run on Android's main thread"
                 }
                 return runCatching {
                     data.enforceInterface(CALLBACK_INTERFACE)
@@ -475,7 +481,7 @@ open class LauncherActivity :
                     val callbackSession = data.readInt()
                     if (
                         version != PROTOCOL_VERSION ||
-                        callbackSession != sessionId
+                        (code != CALLBACK_EDIT_WRITEBACK && callbackSession != sessionId)
                     ) {
                         return@runCatching false
                     }
@@ -1028,6 +1034,28 @@ open class LauncherActivity :
                             handler.post { reconcileIndependentWindows(ids) }
                             true
                         }
+                        CALLBACK_EDIT_WRITEBACK -> {
+                            var descriptor: ParcelFileDescriptor? = null
+                            try {
+                                descriptor = ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                                val expected =
+                                    synchronized(editTargets) {
+                                        editTargets.containsKey(callbackSession)
+                                    }
+                                if (!expected || data.dataAvail() != 0) {
+                                    return@runCatching false
+                                }
+                                if (!queueEditWriteback(callbackSession, descriptor)) {
+                                    return@runCatching false
+                                }
+                                descriptor = null
+                                reply?.writeNoException()
+                                reply?.writeInt(RESULT_OK)
+                                true
+                            } finally {
+                                descriptor?.close()
+                            }
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -1049,6 +1077,9 @@ open class LauncherActivity :
             override fun onServiceDisconnected(name: ComponentName) {
                 remote = null
                 sessionId = 0
+                synchronized(editTargets) {
+                    editTargets.clear()
+                }
                 pendingActions.clear()
                 remoteStatus = STATUS_STARTING
                 resetSurfaceAttachment()
@@ -1122,6 +1153,9 @@ open class LauncherActivity :
                 Log.w(TAG, "Could not clean private print staging", error)
             }
         acceptIncomingIntent(intent)
+        if (incomingDocumentRequest != null) {
+            removeIndependentWindowTasks()
+        }
         surfaceView = createSurfaceView()
         status =
             TextView(this).apply {
@@ -1355,8 +1389,13 @@ open class LauncherActivity :
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (intent.action == Intent.ACTION_VIEW || intent.action == Intent.ACTION_SEND) {
-            closeSession()
+        if (
+            intent.action == Intent.ACTION_VIEW ||
+            intent.action == Intent.ACTION_EDIT ||
+            intent.action == Intent.ACTION_SEND
+        ) {
+            removeIndependentWindowTasks()
+            closeSession(replaceApplication = true)
             preparedIncomingDocument?.descriptor?.close()
             preparedIncomingDocument = null
             preparingIncomingDocument = false
@@ -1436,6 +1475,9 @@ open class LauncherActivity :
     private fun resetDeadBinding() {
         remote = null
         sessionId = 0
+        synchronized(editTargets) {
+            editTargets.clear()
+        }
         pendingActions.clear()
         remoteStatus = STATUS_STARTING
         accessibilityProvider.clear()
@@ -2817,11 +2859,13 @@ open class LauncherActivity :
             data.writeInt(PROTOCOL_VERSION)
             data.writeStrongBinder(clientToken)
             val incoming = preparedIncomingDocument
+            val editUri = incomingDocumentRequest?.takeIf { request -> request.writable }?.uri
             data.writeInt(if (incoming == null) 0 else 1)
             if (incoming != null) {
                 data.writeString(incoming.displayName)
                 data.writeString(incoming.mimeType)
                 incoming.descriptor.writeToParcel(data, 0)
+                data.writeInt(if (incoming.writable) 1 else 0)
             }
             data.writeInt(requestedToplevelId)
             if (!service.transact(TRANSACTION_OPEN, data, reply, 0)) {
@@ -2846,6 +2890,11 @@ open class LauncherActivity :
                     if (sessionId <= 0 || label.isEmpty()) {
                         showUnavailable()
                         return
+                    }
+                    if (editUri != null) {
+                        synchronized(editTargets) {
+                            editTargets[sessionId] = editUri
+                        }
                     }
                     applyLauncherOrientationPolicy(resources.configuration)
                     Log.i(
@@ -2891,7 +2940,11 @@ open class LauncherActivity :
         incomingDocumentCancellation = null
         incomingDocumentGeneration++
         incomingDocumentRejected = false
-        if (value.action != Intent.ACTION_VIEW && value.action != Intent.ACTION_SEND) {
+        if (
+            value.action != Intent.ACTION_VIEW &&
+            value.action != Intent.ACTION_EDIT &&
+            value.action != Intent.ACTION_SEND
+        ) {
             incomingDocumentRequest = null
             return
         }
@@ -2904,7 +2957,7 @@ open class LauncherActivity :
         val mimeType = value.type.orEmpty()
         @Suppress("DEPRECATION")
         val uri =
-            if (value.action == Intent.ACTION_VIEW) {
+            if (value.action == Intent.ACTION_VIEW || value.action == Intent.ACTION_EDIT) {
                 value.data
             } else {
                 value.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
@@ -2918,7 +2971,15 @@ open class LauncherActivity :
             incomingDocumentRejected = true
             return
         }
-        incomingDocumentRequest = IncomingDocumentRequest(uri, mimeType)
+        val writable = value.action == Intent.ACTION_EDIT
+        synchronized(editTargets) {
+            if (writable && editTargets.size >= MAX_PENDING_EDIT_WRITEBACKS) {
+                incomingDocumentRequest = null
+                incomingDocumentRejected = true
+                return
+            }
+        }
+        incomingDocumentRequest = IncomingDocumentRequest(uri, mimeType, writable)
     }
 
     private fun prepareIncomingDocument() {
@@ -2948,9 +3009,18 @@ open class LauncherActivity :
                         queryDocumentName(request.uri)
                             ?: "Android document"
                     val descriptor =
-                        contentResolver.openFileDescriptor(request.uri, "r", cancellation)
+                        contentResolver.openFileDescriptor(
+                            request.uri,
+                            if (request.writable) "rw" else "r",
+                            cancellation,
+                        )
                             ?: error("Provider returned no descriptor")
-                    PreparedIncomingDocument(name, request.mimeType, descriptor)
+                    PreparedIncomingDocument(
+                        name,
+                        request.mimeType,
+                        descriptor,
+                        request.writable,
+                    )
                 }.getOrNull()
             handler.post {
                 if (
@@ -2973,6 +3043,47 @@ open class LauncherActivity :
                 }
             }
         }
+    }
+
+    private fun queueEditWriteback(
+        callbackSession: Int,
+        descriptor: ParcelFileDescriptor,
+    ): Boolean {
+        val uri = synchronized(editTargets) { editTargets[callbackSession] }
+        if (uri == null) {
+            descriptor.close()
+            return false
+        }
+        val queued =
+            documentHandler.post {
+                runCatching {
+                    ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
+                        val output =
+                            contentResolver.openOutputStream(uri, "rwt")
+                                ?: error("Document provider returned no edit output")
+                        output.use {
+                            val buffer = ByteArray(EDIT_WRITEBACK_BUFFER_BYTES)
+                            var copied = 0L
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                copied += count
+                                check(copied <= MAX_EDIT_WRITEBACK_BYTES) {
+                                    "Edited Android document exceeds the size limit"
+                                }
+                                it.write(buffer, 0, count)
+                            }
+                            it.flush()
+                            Log.i(TAG, "Wrote edited Linux document to Android bytes=$copied")
+                        }
+                    }
+                }.onFailure { error ->
+                    runCatching { descriptor.close() }
+                    Log.e(TAG, "Could not write edited Linux document to Android", error)
+                }
+            }
+        if (!queued) descriptor.close()
+        return queued
     }
 
     private fun attachSurface() {
@@ -3658,7 +3769,7 @@ open class LauncherActivity :
         handler.postDelayed(::openSession, OPEN_RETRY_MILLIS)
     }
 
-    private fun closeSession() {
+    private fun closeSession(replaceApplication: Boolean = false) {
         val activeSession = sessionId
         detachSurface()
         pendingActions.clear()
@@ -3666,6 +3777,9 @@ open class LauncherActivity :
         remoteStatus = STATUS_STARTING
         val service = remote
         if (service == null || activeSession <= 0) {
+            synchronized(editTargets) {
+                editTargets.remove(activeSession)
+            }
             return
         }
         val data = Parcel.obtain()
@@ -3675,10 +3789,10 @@ open class LauncherActivity :
             data.writeInt(PROTOCOL_VERSION)
             data.writeInt(activeSession)
             val transaction =
-                if (preserveToplevelOnClose) {
-                    TRANSACTION_RELEASE_WINDOW_TASK
-                } else {
-                    TRANSACTION_CLOSE
+                when {
+                    replaceApplication -> TRANSACTION_CLOSE_APPLICATION
+                    preserveToplevelOnClose -> TRANSACTION_RELEASE_WINDOW_TASK
+                    else -> TRANSACTION_CLOSE
                 }
             if (service.transact(transaction, data, reply, 0)) {
                 reply.readException()
@@ -3689,6 +3803,9 @@ open class LauncherActivity :
         } finally {
             reply.recycle()
             data.recycle()
+            synchronized(editTargets) {
+                editTargets.remove(activeSession)
+            }
         }
     }
 
@@ -5044,6 +5161,22 @@ open class LauncherActivity :
             }
     }
 
+    private fun removeIndependentWindowTasks() {
+        val activityManager = getSystemService(ActivityManager::class.java) ?: return
+        activityManager.appTasks
+            .asSequence()
+            .take(MAX_APP_TASK_INSPECTION)
+            .filter { task ->
+                task.taskInfo.baseIntent.component?.className ==
+                    LauncherWindowActivity::class.java.name
+            }.forEach { task ->
+                runCatching { task.finishAndRemoveTask() }
+                    .onFailure { error ->
+                        Log.w(TAG, "Could not remove replaced Linux window task", error)
+                    }
+            }
+    }
+
     private fun reconcileWindowTaskPolicy() {
         if (requestedToplevelId > 0 && !desktopWindowTasksEnabled()) {
             preserveToplevelOnClose = true
@@ -5253,7 +5386,7 @@ open class LauncherActivity :
             )
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 20
+        private const val PROTOCOL_VERSION = 21
         private const val TEST_INPUT_DEBUG_EXTRA = "archphene_test_input_debug"
         private const val ACTION_OPEN_TOPLEVEL = "org.archphene.action.OPEN_TOPLEVEL"
         private const val EXTRA_TOPLEVEL_ID = "org.archphene.extra.TOPLEVEL_ID"
@@ -5271,6 +5404,8 @@ open class LauncherActivity :
             IBinder.FIRST_CALL_TRANSACTION + 9
         private const val TRANSACTION_RELEASE_WINDOW_TASK =
             IBinder.FIRST_CALL_TRANSACTION + 10
+        private const val TRANSACTION_CLOSE_APPLICATION =
+            IBinder.FIRST_CALL_TRANSACTION + 11
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
@@ -5290,6 +5425,7 @@ open class LauncherActivity :
         private const val CALLBACK_ACCESSIBILITY_VIEWPORT =
             IBinder.FIRST_CALL_TRANSACTION + 14
         private const val CALLBACK_WINDOWS = IBinder.FIRST_CALL_TRANSACTION + 15
+        private const val CALLBACK_EDIT_WRITEBACK = IBinder.FIRST_CALL_TRANSACTION + 16
         private const val MAX_INDEPENDENT_WINDOWS = 8
         private const val MAX_APP_TASK_INSPECTION = MAX_INDEPENDENT_WINDOWS + 1
         private const val ACCESSIBILITY_CALLBACK_TREE = 1
@@ -5346,6 +5482,9 @@ open class LauncherActivity :
         private const val MAX_PENDING_PRINTS = 4
         private const val MAX_PENDING_ACTION_CALLBACKS = 32
         private const val MAX_STALE_PRINT_FILES = 32
+        private const val MAX_PENDING_EDIT_WRITEBACKS = 4
+        private const val MAX_EDIT_WRITEBACK_BYTES = 512L * 1024 * 1024
+        private const val EDIT_WRITEBACK_BUFFER_BYTES = 64 * 1024
         private const val COMPACT_SWITCHER_HEIGHT_DP = 56
         private const val MAX_PRINT_PAGES = 10_000
         private const val MAX_PRINT_PAGE_DIMENSION = 100_000

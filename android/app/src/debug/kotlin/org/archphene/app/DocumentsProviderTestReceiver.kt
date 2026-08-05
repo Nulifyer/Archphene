@@ -554,20 +554,26 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
                 .appendPath(token)
                 .build()
         val launch =
-            if (intentAction == "view") {
-                Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType)
-            } else {
-                check(intentAction == "send")
-                Intent(Intent.ACTION_SEND)
-                    .setType(mimeType)
-                    .putExtra(Intent.EXTRA_STREAM, uri)
+            when (intentAction) {
+                "view" -> Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType)
+                "edit" -> Intent(Intent.ACTION_EDIT).setDataAndType(uri, mimeType)
+                "send" ->
+                    Intent(Intent.ACTION_SEND)
+                        .setType(mimeType)
+                        .putExtra(Intent.EXTRA_STREAM, uri)
+                else -> error("Unsupported launcher document action")
             }
         context.startActivity(
             launch
                 .setClassName(launcherPackage, "org.archphene.launcher.LauncherActivity")
                 .addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        if (intentAction == "edit") {
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        } else {
+                            0
+                        },
                 ),
         )
     }

@@ -26,7 +26,7 @@ require(
     / "android/launcher-template/src/main/kotlin/org/archphene/launcher"
     / "LauncherActivity.kt",
     f'"c:{capabilities}"',
-    "private const val PROTOCOL_VERSION = 20",
+    "private const val PROTOCOL_VERSION = 21",
     "CALLBACK_NOTIFICATION",
     "arrayOfNulls<PendingNotification>(LauncherNotificationPolicy.MAX_PENDING)",
     "requestPermissions(",
@@ -46,7 +46,7 @@ require(
     / "LauncherSessionService.kt",
     "requestNotification = { id, title, body ->",
     "CALLBACK_NOTIFICATION",
-    "private const val PROTOCOL_VERSION = 20",
+    "private const val PROTOCOL_VERSION = 21",
 )
 require(
     ROOT / "docs/android-capabilities.md",

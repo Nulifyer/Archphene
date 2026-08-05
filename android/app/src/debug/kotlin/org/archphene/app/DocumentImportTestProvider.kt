@@ -10,7 +10,9 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
+import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 
 internal class DocumentImportTestProvider : ContentProvider() {
@@ -51,10 +53,20 @@ internal class DocumentImportTestProvider : ContentProvider() {
         mode: String,
         signal: CancellationSignal?,
     ): ParcelFileDescriptor {
-        if (mode != "r") {
-            throw FileNotFoundException("Debug import provider is read-only")
-        }
         val fixture = fixture(uri)
+        if (mode != "r") {
+            if (fixture.mode != MODE_NORMAL || mode !in WRITABLE_MODES) {
+                throw FileNotFoundException("Debug import provider mode is read-only")
+            }
+            val file = editFile(fixture.token)
+            if (!file.exists()) {
+                FileOutputStream(file, false).use { output ->
+                    output.write(providerContent(fixture.token))
+                    output.fd.sync()
+                }
+            }
+            return ParcelFileDescriptor.open(file, ParcelFileDescriptor.parseMode(mode))
+        }
         if (fixture.mode == MODE_STALL_OPEN) {
             Log.i(TAG, "Stalling descriptor open token=${fixture.token}")
             val deadline = SystemClock.elapsedRealtime() + STALL_MILLIS
@@ -150,6 +162,13 @@ internal class DocumentImportTestProvider : ContentProvider() {
         }
     }
 
+    private fun editFile(token: String): File {
+        val root = checkNotNull(context).cacheDir.canonicalFile
+        val file = File(root, "$EDIT_FILE_PREFIX$token.txt").canonicalFile
+        check(file.parentFile == root)
+        return file
+    }
+
     private fun fixture(uri: Uri): Fixture {
         val segments = uri.pathSegments
         if (segments.size != 2 || segments[0] !in MODES || !TOKEN.matches(segments[1])) {
@@ -184,6 +203,8 @@ internal class DocumentImportTestProvider : ContentProvider() {
         private const val MODE_STALL_READ = "stall-read"
         private const val MODE_PACED_READ = "paced-read"
         private const val MODE_CODE_WORKSPACE = "code-workspace"
+        const val EDIT_FILE_PREFIX = "launcher-edit-"
+        private val WRITABLE_MODES = setOf("w", "wt", "wa", "rw", "rwt")
         private val MODES =
             setOf(
                 MODE_NORMAL,

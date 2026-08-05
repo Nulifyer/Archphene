@@ -8,6 +8,7 @@ package=
 manager=org.archphene.app.debug
 artifact_dir=
 clean_data=false
+reuse_active_session=false
 timeout=45
 while (($#)); do
   case "$1" in
@@ -16,9 +17,10 @@ while (($#)); do
     --manager) manager="${2:?missing value for --manager}"; shift 2 ;;
     --artifact-dir) artifact_dir="${2:?missing value for --artifact-dir}"; shift 2 ;;
     --clean-data) clean_data=true; shift ;;
+    --reuse-active-session) reuse_active_session=true; shift ;;
     --timeout-seconds) timeout="${2:?missing value for --timeout-seconds}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --package GENERATED_LAUNCHER [--manager PACKAGE] [--artifact-dir PATH] [--clean-data] [--timeout-seconds SECONDS]"
+      echo "usage: $0 --serial SERIAL --package GENERATED_LAUNCHER [--manager PACKAGE] [--artifact-dir PATH] [--clean-data] [--reuse-active-session] [--timeout-seconds SECONDS]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -63,11 +65,15 @@ else
 fi
 
 activity="$(archphene_launcher "$package")"
-archphene_adb_run logcat -c
+if [[ "$reuse_active_session" == false ]]; then
+  archphene_adb_run logcat -c
+fi
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
-archphene_wait_log \
-  'Private desktop portal ready session=' "$timeout" \
-  'ArchphenePortal:I ArchpheneLauncherSession:I AndroidRuntime:E *:S' >/dev/null
+if [[ "$reuse_active_session" == false ]]; then
+  archphene_wait_log \
+    'Private desktop portal ready session=' "$timeout" \
+    'ArchphenePortal:I ArchpheneLauncherSession:I AndroidRuntime:E *:S' >/dev/null
+fi
 
 bus=
 deadline=$((SECONDS + timeout))
