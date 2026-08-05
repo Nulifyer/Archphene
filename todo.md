@@ -149,8 +149,11 @@ copying.
   - [x] Define the fixed authenticated APHB side channel and the bounded private
     Wayland commit-identity contract. Reject duplicate surfaces/resources,
     cross-generation identities, stale fences, and unbounded bindings.
+  - [x] Add strict optional helper arguments for the private present socket,
+    session ID, helper generation, and 128-bit token. Connect and send the exact
+    APHB Hello before publishing the vtest socket.
   - [ ] Connect the contracts to a generic Mesa virpipe winsys extension, the
-    vtest helper, and the manager's AHB receiver.
+    helper's Resource/Present/Release sender, and the manager's AHB receiver.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
   buffer reuse. Bound dimensions, slots, estimated bytes, outstanding fences,
   pending releases, and device-loss recovery.

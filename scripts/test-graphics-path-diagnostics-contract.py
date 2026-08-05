@@ -144,6 +144,18 @@ require(
     "binding.set_resource(9, 44, 1, 2)",
     "binding.clear()",
 )
+require(
+    "native/android-gpu-helper/patches/0008-archphene-present-channel.patch",
+    '"archphene-present-socket"',
+    '"archphene-session-id"',
+    '"archphene-helper-generation"',
+    '"archphene-present-token"',
+    "archphene_parse_u32",
+    "archphene_parse_token",
+    "server.archphene_present_socket_name[0] != '/'",
+    'memcpy(frame, "APHB", 4)',
+    "vtest_server_open_archphene_present_socket();",
+)
 reject(
     "native/archphene-compositor/src/android_gpu_renderer.rs",
     "AHardwareBuffer_lock",

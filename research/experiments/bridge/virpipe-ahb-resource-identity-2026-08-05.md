@@ -75,3 +75,11 @@ The test no longer inserts identity resources directly: it authenticates Hello,
 Resource, and a 64-bit Present frame through the APHB registry, atomically
 coordinates both bounded registries, and then submits the matching Wayland
 claim. Native handle transfer and external senders remain the next boundary.
+
+The Android vtest helper now has a dormant strict APHB Hello sender. It accepts
+the present socket, session ID, helper generation, and 128-bit token only as one
+complete configuration and sends Hello before exposing vtest. Both ABI builds
+pass, and a same-UID Samsung listener received the exact 64-byte frame. Current
+manager launches intentionally omit the arguments until the receiver exists;
+resource allocation, AHB handle transfer, Present/fence production, and Release
+remain unimplemented.

@@ -4059,6 +4059,17 @@ uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
 claiming the exact surface commit. Native handle receipt and helper/Mesa senders
 remain open.
 
+The Android vtest helper now implements only the scoped APHB bootstrap. Its
+private socket, session ID, helper generation, and 128-bit lowercase-hex token
+are strict all-or-none arguments. Valid configuration connects and writes Hello
+before the vtest socket becomes visible; malformed, partial, overlong, or failed
+connections terminate the helper. Dual-ABI release builds pass. A same-UID
+physical Samsung listener received the exact 64 bytes for session 77,
+generation 9, token `6a` repeated 16 times, and zero reserved bytes. A partial
+configuration exited 1 with the expected bounded-contract error. Production
+does not pass the arguments yet; Resource/Present/Release, AHB handles, fences,
+and the manager receiver remain open.
+
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned
 callback context with a weak presentation reference and exact slot ID; its fence

@@ -1,0 +1,261 @@
+diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
+index 7f829eb..8767251 100644
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -27,5 +27,8 @@
+ #endif
+ 
++#include <errno.h>
++#include <stddef.h>
++#include <stdint.h>
+ #include <stdio.h>
+ #include <signal.h>
+ #include <stdbool.h>
+@@ -81,6 +84,12 @@ struct vtest_server
+    const char *socket_name;
+    int socket;
+    const char *read_file;
++   const char *archphene_present_socket_name;
++   int archphene_present_socket;
++   uint32_t archphene_session_id;
++   uint32_t archphene_helper_generation;
++   uint8_t archphene_present_token[16];
++   bool archphene_present_token_set;
+ 
+    const char *render_device;
+ 
+@@ -108,5 +117,6 @@ struct vtest_server server = {
+    .socket_name = VTEST_DEFAULT_SOCKET_NAME,
+    .socket = -1,
++   .archphene_present_socket = -1,
+ 
+    .read_file = NULL,
+ 
+@@ -127,6 +137,8 @@ static void vtest_server_set_signal_child(void);
+ static void vtest_server_set_signal_segv(void);
+ static void vtest_server_open_read_file(void);
+ static void vtest_server_open_socket(void);
++static void vtest_server_open_archphene_present_socket(void);
++static void vtest_server_close_archphene_present_socket(void);
+ static void vtest_server_run(void);
+ static void vtest_server_close_socket(void);
+ static int vtest_client_dispatch_commands(struct vtest_client *client);
+@@ -176,6 +188,66 @@ int vtest_main(int argc, char **argv)
+ #define OPT_NO_VIRGL 'g'
+ #define OPT_COMPAT_PROFILE 'c'
+ #define OPT_DRM 'd'
++#define OPT_ARCHPHENE_PRESENT_SOCKET 0x100
++#define OPT_ARCHPHENE_SESSION_ID 0x101
++#define OPT_ARCHPHENE_HELPER_GENERATION 0x102
++#define OPT_ARCHPHENE_PRESENT_TOKEN 0x103
++
++static bool archphene_parse_u32(const char *value, uint32_t *result)
++{
++   char *end = NULL;
++   unsigned long parsed;
++
++   if (!value || !value[0])
++      return false;
++   errno = 0;
++   parsed = strtoul(value, &end, 10);
++   if (errno || !end || *end || !parsed || parsed > UINT32_MAX)
++      return false;
++   *result = (uint32_t)parsed;
++   return true;
++}
++
++static int archphene_hex_nibble(char value)
++{
++   if (value >= '0' && value <= '9')
++      return value - '0';
++   if (value >= 'a' && value <= 'f')
++      return value - 'a' + 10;
++   return -1;
++}
++
++static bool archphene_parse_token(const char *value, uint8_t token[16])
++{
++   unsigned nonzero = 0;
++   size_t i;
++
++   if (!value || strlen(value) != 32)
++      return false;
++   for (i = 0; i < 16; i++) {
++      int high = archphene_hex_nibble(value[i * 2]);
++      int low = archphene_hex_nibble(value[i * 2 + 1]);
++      if (high < 0 || low < 0)
++         return false;
++      token[i] = (uint8_t)((high << 4) | low);
++      nonzero |= token[i];
++   }
++   return nonzero != 0;
++}
++
++static void archphene_put_u16(uint8_t *frame, size_t offset, uint16_t value)
++{
++   frame[offset] = (uint8_t)value;
++   frame[offset + 1] = (uint8_t)(value >> 8);
++}
++
++static void archphene_put_u32(uint8_t *frame, size_t offset, uint32_t value)
++{
++   frame[offset] = (uint8_t)value;
++   frame[offset + 1] = (uint8_t)(value >> 8);
++   frame[offset + 2] = (uint8_t)(value >> 16);
++   frame[offset + 3] = (uint8_t)(value >> 24);
++}
+ 
+ static void vtest_server_parse_args(int argc, char **argv)
+ {
+@@ -194,6 +266,14 @@ static void vtest_server_parse_args(int argc, char **argv)
+       {"no-virgl",            no_argument, NULL, OPT_NO_VIRGL},
+       {"compat",              no_argument, NULL, OPT_COMPAT_PROFILE},
+       {"drm",                 no_argument, NULL, OPT_DRM},
++      {"archphene-present-socket", required_argument, NULL,
++       OPT_ARCHPHENE_PRESENT_SOCKET},
++      {"archphene-session-id", required_argument, NULL,
++       OPT_ARCHPHENE_SESSION_ID},
++      {"archphene-helper-generation", required_argument, NULL,
++       OPT_ARCHPHENE_HELPER_GENERATION},
++      {"archphene-present-token", required_argument, NULL,
++       OPT_ARCHPHENE_PRESENT_TOKEN},
+       {0, 0, 0, 0}
+    };
+ 
+@@ -247,10 +327,36 @@ static void vtest_server_parse_args(int argc, char **argv)
+          server.drm = true;
+          break;
+ #endif
++      case OPT_ARCHPHENE_PRESENT_SOCKET:
++         server.archphene_present_socket_name = optarg;
++         break;
++      case OPT_ARCHPHENE_SESSION_ID:
++         if (!archphene_parse_u32(optarg, &server.archphene_session_id)) {
++            fprintf(stderr, "Invalid Archphene session ID.\n");
++            exit(EXIT_FAILURE);
++         }
++         break;
++      case OPT_ARCHPHENE_HELPER_GENERATION:
++         if (!archphene_parse_u32(optarg, &server.archphene_helper_generation)) {
++            fprintf(stderr, "Invalid Archphene helper generation.\n");
++            exit(EXIT_FAILURE);
++         }
++         break;
++      case OPT_ARCHPHENE_PRESENT_TOKEN:
++         if (!archphene_parse_token(optarg, server.archphene_present_token)) {
++            fprintf(stderr, "Invalid Archphene present token.\n");
++            exit(EXIT_FAILURE);
++         }
++         server.archphene_present_token_set = true;
++         break;
+       default:
+          printf("Usage: %s [--no-fork] [--no-loop-or-fork] [--multi-clients] "
+                 "[--use-glx] [--use-egl-surfaceless] [--use-gles] [--no-virgl]"
+                 "[--rendernode <dev>] [--socket-path <path>] "
++                "[--archphene-present-socket <path> "
++                "--archphene-session-id <id> "
++                "--archphene-helper-generation <generation> "
++                "--archphene-present-token <32-lower-hex>] "
+ #ifdef ENABLE_VENUS
+                 " [--venus]"
+ #endif
+@@ -265,6 +371,21 @@ static void vtest_server_parse_args(int argc, char **argv)
+ 
+    } while (ret >= 0);
+ 
++   if (server.archphene_present_socket_name || server.archphene_session_id ||
++       server.archphene_helper_generation || server.archphene_present_token_set) {
++      if (!server.archphene_present_socket_name ||
++          server.archphene_present_socket_name[0] != '/' ||
++          !server.archphene_session_id ||
++          !server.archphene_helper_generation || !server.archphene_present_token_set ||
++          strlen(server.archphene_present_socket_name) >=
++             sizeof(((struct sockaddr_un *)0)->sun_path)) {
++         fprintf(stderr,
++                 "Archphene present channel requires one bounded socket path, "
++                 "session ID, helper generation, and token.\n");
++         exit(EXIT_FAILURE);
++      }
++   }
++
+    if (optind < argc) {
+       server.read_file = argv[optind];
+       server.loop = false;
+@@ -433,6 +552,60 @@ err:
+    exit(1);
+ }
+ 
++static void vtest_server_open_archphene_present_socket(void)
++{
++   struct sockaddr_un un;
++   uint8_t frame[64] = {0};
++   size_t written = 0;
++
++   if (!server.archphene_present_socket_name)
++      return;
++
++   server.archphene_present_socket = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++   if (server.archphene_present_socket < 0)
++      goto err;
++
++   memset(&un, 0, sizeof(un));
++   un.sun_family = AF_UNIX;
++   memcpy(un.sun_path, server.archphene_present_socket_name,
++          strlen(server.archphene_present_socket_name) + 1);
++   if (connect(server.archphene_present_socket, (struct sockaddr *)&un,
++               offsetof(struct sockaddr_un, sun_path) + strlen(un.sun_path) + 1) < 0)
++      goto err;
++
++   memcpy(frame, "APHB", 4);
++   archphene_put_u16(frame, 4, 1);
++   archphene_put_u16(frame, 6, 1);
++   archphene_put_u32(frame, 8, server.archphene_session_id);
++   archphene_put_u32(frame, 12, server.archphene_helper_generation);
++   memcpy(frame + 16, server.archphene_present_token, 16);
++   while (written < sizeof(frame)) {
++      ssize_t result = write(server.archphene_present_socket, frame + written,
++                             sizeof(frame) - written);
++      if (result > 0) {
++         written += (size_t)result;
++         continue;
++      }
++      if (result < 0 && errno == EINTR)
++         continue;
++      goto err;
++   }
++   return;
++
++err:
++   perror("Failed to open Archphene present channel");
++   vtest_server_close_archphene_present_socket();
++   exit(EXIT_FAILURE);
++}
++
++static void vtest_server_close_archphene_present_socket(void)
++{
++   if (server.archphene_present_socket != -1) {
++      close(server.archphene_present_socket);
++      server.archphene_present_socket = -1;
++   }
++}
++
+ static void vtest_server_wait_clients(void)
+ {
+    struct vtest_client *client;
+@@ -631,6 +804,8 @@ static void vtest_server_run(void)
+ {
+    bool run = true;
+ 
++   vtest_server_open_archphene_present_socket();
++
+    if (server.read_file) {
+       vtest_server_open_read_file();
+    } else {
+@@ -675,6 +850,7 @@ static void vtest_server_run(void)
+    }
+ 
+    vtest_server_close_socket();
++   vtest_server_close_archphene_present_socket();
+ }
+ 
+ static const struct vtest_command {

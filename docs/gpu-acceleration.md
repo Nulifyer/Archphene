@@ -210,6 +210,18 @@ transition succeed. The socket round trip therefore uses the same scoped APHB
 Resource and 64-bit Present sequence that the Wayland commit claims. Native AHB
 handle receipt and helper/Mesa senders remain unimplemented.
 
+The pinned Android virglrenderer helper now has an optional fail-closed APHB
+bootstrap. Four arguments must appear together: a bounded Unix socket path,
+nonzero session ID, nonzero helper generation, and exactly 32 lowercase hex
+token characters with at least one nonzero byte. The helper connects and writes
+the exact 64-byte scoped Hello before publishing its vtest socket; partial,
+malformed, overlong, or unreachable configuration terminates startup. Existing
+launches pass none of these arguments and retain current behavior until the
+manager receiver is connected. Both Android ABIs build. An isolated same-UID
+Samsung probe received bytes `APHB`, version 1, opcode 1, session 77, generation
+9, the exact 16-byte token, and zero reserved trailing bytes; a partial-argument
+probe exited 1 before starting graphics.
+
 References:
 
 - [Android graphics architecture](https://source.android.com/docs/core/graphics/architecture)
