@@ -396,7 +396,9 @@ presentation path remains shared-memory based. Android `AHardwareBuffer`
 composition remains a separate gate. Direct client-dmabuf import is also a
 separate, capability-negotiated gate: the current Samsung exposes
 `EGL_ANDROID_image_native_buffer` but not `EGL_EXT_image_dma_buf_import`.
-Vulkan presentation remains incomplete.
+AHB reuse uses API 36 per-buffer release callbacks when the symbol is available
+and the previous-release-fence transaction callback on older systems. Vulkan
+presentation remains incomplete.
 
 ### Android capabilities
 

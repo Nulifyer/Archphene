@@ -4035,6 +4035,17 @@ bind guest scanout resources to transferred AHB handles, so the corresponding
 release-plan item remains open and current virpipe frames still return through
 SHM.
 
+API 36 per-buffer release handling is implemented behind runtime symbol
+resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned
+callback context with a weak presentation reference and exact slot ID; its fence
+returns that slot to the available ring. When the symbol is absent, the existing
+transaction-completion callback obtains the previous release fence exactly as
+before. Dual-ABI ELF inspection shows no direct API 36 symbol dependency. On the
+API 35 Samsung `SM-S908U`, an isolated Mousepad Quick launch reported
+`Surface release mode=legacy transaction completion`, rendered four GPU-composed
+AHB submissions, observed two SurfaceFlinger releases, and closed cleanly. No API
+36 target was attached, so live per-buffer callback verification remains open.
+
 Hardware key, repeat, and modifier delivery no longer clones focused
 `WlKeyboard` resources into a temporary vector. Focused resources stream in
 retained order through a reusable live/same-client iterator; accepted events

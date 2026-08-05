@@ -154,6 +154,12 @@ copying.
   GPU-composited.
 - [ ] Use release-aware Surface transactions on API 36 where available while
   preserving the current tested callback/fence path on older supported APIs.
+  - [x] Resolve `ASurfaceTransaction_setBufferWithRelease` at runtime, retain
+    one callback context per submitted buffer, and preserve the legacy
+    transaction-completion path when the symbol is absent.
+  - [ ] Exercise the per-buffer callback on a live API 36 target. The physical
+    API 35 Samsung passes the legacy fallback, but no API 36 target is currently
+    attached.
 - [ ] Advertise standard Linux dmabuf only after a live format/modifier
   allocation-and-import round trip succeeds. The current Samsung must retain
   AHB/SHM fallback because it lacks `EGL_EXT_image_dma_buf_import`.

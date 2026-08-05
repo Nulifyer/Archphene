@@ -68,6 +68,13 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun usesReleaseAwareBuffers(): Boolean {
+        val current = ownerHandle()
+        return nativeUsesReleaseAwareBuffers(current).also {
+            PerformanceMetrics.recordCompositorJni()
+        }
+    }
+
     fun attachWindow(
         windowToken: Int,
         toplevelId: Int,
@@ -523,6 +530,8 @@ internal class NativeLauncherCompositor(
         densityDpi: Int,
         geometryPercent: Int,
     ): Int
+
+    private external fun nativeUsesReleaseAwareBuffers(handle: Long): Boolean
 
     private external fun nativeDetachSurface(handle: Long)
 

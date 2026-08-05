@@ -63,6 +63,20 @@ require(
     "pub(crate) fn remove_target",
 )
 require(
+    "native/archphene-compositor/src/lib.rs",
+    'c"ASurfaceTransaction_setBufferWithRelease"',
+    "surface_buffer_released",
+    "android_surface_transaction_set_buffer(",
+    "android_surface_transaction_set_on_complete(",
+    "release_aware_buffers_available",
+)
+require(
+    "android/app/src/main/kotlin/org/archphene/app/launcher/LauncherSessionService.kt",
+    '"Surface release mode="',
+    '"API36 per-buffer callback"',
+    '"legacy transaction completion"',
+)
+require(
     "native/archphene-compositor/src/jni_exports/steady_state_allocations.rs",
     "fn warmed_gpu_damage_staging_does_not_allocate()",
     "for _ in 0..1_000",

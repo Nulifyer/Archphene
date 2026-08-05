@@ -2630,6 +2630,15 @@ class LauncherSessionService : Service() {
                                 session.compositor = it
                                 session.compositorSocket = socket
                                 session.lastImeChangeSerial = Int.MIN_VALUE
+                                Log.i(
+                                    TAG,
+                                    "Surface release mode=" +
+                                        if (it.usesReleaseAwareBuffers()) {
+                                            "API36 per-buffer callback"
+                                        } else {
+                                            "legacy transaction completion"
+                                        },
+                                )
                             }
                         }
             check(

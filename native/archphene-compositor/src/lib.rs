@@ -2059,7 +2059,7 @@ mod android_graphics_ffi {
     use std::mem::zeroed;
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
 
     const ANDROID_RGBA_8888: i32 = 1;
     const MAX_DIMENSION: usize = 8192;
@@ -2224,6 +2224,15 @@ mod android_graphics_ffi {
         ) -> i32;
     }
 
+    type SetBufferWithRelease = unsafe extern "C" fn(
+        *mut AndroidSurfaceTransaction,
+        *mut AndroidSurfaceControl,
+        *mut AndroidHardwareBuffer,
+        i32,
+        *mut c_void,
+        unsafe extern "C" fn(*mut c_void, i32),
+    );
+
     pub(super) struct NativeWindow {
         gpu: GpuRendererState,
         presentation: Arc<PresentationState>,
@@ -2310,6 +2319,11 @@ mod android_graphics_ffi {
     struct ReleaseContext {
         slot_id: u64,
         presentation: Mutex<Option<Arc<PresentationState>>>,
+    }
+
+    struct BufferReleaseContext {
+        slot_id: u64,
+        presentation: Weak<PresentationState>,
     }
 
     impl NativeWindow {
@@ -2779,6 +2793,7 @@ mod android_graphics_ffi {
             return_hardware_slot(presentation, reservation.id, -1);
             return -5;
         };
+        let set_buffer_with_release = set_buffer_with_release();
         let (completion_context, source, destination, damage) = {
             let mut buffers = presentation
                 .buffers
@@ -2801,6 +2816,9 @@ mod android_graphics_ffi {
             let completion_context = buffers.current.and_then(|previous| {
                 let slot = buffers.slots.iter_mut().find(|slot| slot.id == previous)?;
                 slot.state = HardwareBufferState::PendingRelease;
+                if set_buffer_with_release.is_some() {
+                    return None;
+                }
                 let mut callback_presentation = slot
                     .release_context
                     .presentation
@@ -2851,12 +2869,27 @@ mod android_graphics_ffi {
             )
         };
         unsafe {
-            android_surface_transaction_set_buffer(
-                transaction.as_ptr(),
-                presentation.control.as_ptr(),
-                reservation.buffer.as_ptr(),
-                acquire_fence,
-            );
+            if let Some(set_buffer) = set_buffer_with_release {
+                let release_context = Box::into_raw(Box::new(BufferReleaseContext {
+                    slot_id: reservation.id,
+                    presentation: Arc::downgrade(presentation),
+                }));
+                set_buffer(
+                    transaction.as_ptr(),
+                    presentation.control.as_ptr(),
+                    reservation.buffer.as_ptr(),
+                    acquire_fence,
+                    release_context.cast(),
+                    surface_buffer_released,
+                );
+            } else {
+                android_surface_transaction_set_buffer(
+                    transaction.as_ptr(),
+                    presentation.control.as_ptr(),
+                    reservation.buffer.as_ptr(),
+                    acquire_fence,
+                );
+            }
             android_surface_transaction_set_geometry(
                 transaction.as_ptr(),
                 presentation.control.as_ptr(),
@@ -2896,6 +2929,63 @@ mod android_graphics_ffi {
         }
         increment_diagnostic(&presentation.diagnostics.ahb_submissions);
         0
+    }
+
+    pub(super) fn release_aware_buffers_available() -> bool {
+        set_buffer_with_release().is_some()
+    }
+
+    fn set_buffer_with_release() -> Option<SetBufferWithRelease> {
+        static FUNCTION: OnceLock<Option<SetBufferWithRelease>> = OnceLock::new();
+        *FUNCTION.get_or_init(|| unsafe {
+            // Keep this process-wide library reference open because the cached
+            // function pointer must remain valid for later frame submissions.
+            let library =
+                libc::dlopen(c"libandroid.so".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+            if library.is_null() {
+                return None;
+            }
+            let symbol = libc::dlsym(
+                library,
+                c"ASurfaceTransaction_setBufferWithRelease".as_ptr(),
+            );
+            if symbol.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*mut c_void, SetBufferWithRelease>(
+                    symbol,
+                ))
+            }
+        })
+    }
+
+    unsafe extern "C" fn surface_buffer_released(context: *mut c_void, fence: i32) {
+        if context.is_null() {
+            close_descriptor(fence);
+            return;
+        }
+        let context = unsafe { Box::from_raw(context.cast::<BufferReleaseContext>()) };
+        let Some(presentation) = context.presentation.upgrade() else {
+            close_descriptor(fence);
+            return;
+        };
+        increment_diagnostic(&presentation.diagnostics.surfaceflinger_releases);
+        let mut buffers = presentation
+            .buffers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(slot) = buffers
+            .slots
+            .iter_mut()
+            .find(|slot| slot.id == context.slot_id)
+        {
+            slot.state = HardwareBufferState::Available(fence);
+            if buffers.current == Some(context.slot_id) {
+                buffers.current = None;
+            }
+        } else {
+            close_descriptor(fence);
+        }
     }
 
     unsafe extern "C" fn surface_transaction_complete(
@@ -17731,6 +17821,16 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return -3;
     };
     compositor.attach_surface(window, width, height, density_dpi, geometry_percent)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeUsesReleaseAwareBuffers(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> bool {
+    launcher_compositor(handle).is_some() && android_graphics_ffi::release_aware_buffers_available()
 }
 
 #[cfg(target_os = "android")]

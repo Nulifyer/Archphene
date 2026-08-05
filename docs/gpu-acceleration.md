@@ -164,6 +164,17 @@ handle transfer, vtest scanout-resource binding, and helper-to-compositor
 presentation remain open, so this contract alone does not remove virpipe SHM
 readback.
 
+Surface submission resolves
+`ASurfaceTransaction_setBufferWithRelease` dynamically. On API 36 systems that
+export it, each submitted AHB owns a bounded heap callback context containing a
+weak presentation reference and slot ID; the returned release fence gates slot
+reuse. Older systems continue to use the tested transaction-completion callback
+and `ASurfaceTransactionStats_getPreviousReleaseFenceFd`. The compositor ELF
+contains no direct API 36 symbol dependency. The API 35 Samsung reports
+`Surface release mode=legacy transaction completion` and releases two of four
+submitted slots during the current Mousepad Quick launch probe. A live API 36
+callback-path probe remains pending.
+
 References:
 
 - [Android graphics architecture](https://source.android.com/docs/core/graphics/architecture)
