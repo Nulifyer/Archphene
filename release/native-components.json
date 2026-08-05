@@ -166,12 +166,17 @@
     },
     {
       "artifactScopes": ["manager"],
-      "blockers": [{"category": "corresponding-source", "detail": "Binary package checksums are pinned, but exact source archives, license metadata, notices, and source-delivery obligations are not recorded for the PulseAudio closure."}],
+      "blockers": [],
       "declaredLicense": "NOASSERTION",
-      "evidence": [{"contains": "pulseaudio|aarch64|17.0-1|", "path": "native/archphene-audio/termux-pulse-packages.tsv"}],
+      "evidence": [
+        {"contains": "pulseaudio|aarch64|17.0-1|", "path": "native/archphene-audio/termux-pulse-packages.tsv"},
+        {"contains": "\"recipeCommit\": \"0ab554db227f55a6ce8144f6f1e071d650c8ddae\"", "path": "release/termux-pulse-recipes.json"},
+        {"contains": "Termux Pulse source audit passed", "path": "scripts/release-termux-pulse-audit.py"},
+        {"contains": "org.archphene.termux-pulse-source-bundle.v1", "path": "scripts/release-termux-pulse-source.py"}
+      ],
       "id": "termux-pulse-packages",
       "kind": "binary-package-set",
-      "reviewState": "blocked",
+      "reviewState": "verified",
       "sourcePin": {"type": "manifest", "value": "native/archphene-audio/termux-pulse-packages.tsv"},
       "sourceUrl": "https://packages.termux.dev/apt/termux-main/",
       "version": "manifest-locked"
@@ -189,6 +194,7 @@
       "version": "1.3.0"
     }
   ],
+  "correspondingSourceComponents": ["termux-pulse-packages"],
   "format": "org.archphene.native-release-audit.v1",
   "licenseSources": [
     {"componentId": "dbus", "path": "tooling/downloads/dbus-1.16.2.tar.xz", "type": "archive"},

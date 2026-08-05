@@ -61,6 +61,7 @@ jobs:
             echo "BUILDER_ARM64_NAME=Archphene-Builder-arm64-v8a-$version_name.apk"
             echo "NATIVE_LICENSE_NAME=Archphene-native-licenses-$version_name.zip"
             echo "GLIBC_SOURCE_NAME=Archphene-glibc-source-$version_name.zip"
+            echo "TERMUX_SOURCE_NAME=Archphene-termux-pulse-source-$version_name.zip"
           } >> "$GITHUB_ENV"
 
       - name: Validate release contracts
@@ -79,6 +80,29 @@ jobs:
 
       - name: Verify Qt prebuilt reproducibility
         run: CONTAINER_CLI=docker bash scripts/test-qt-prebuilt-reproducibility.sh
+
+      - name: Verify Termux Pulse source recipes
+        run: |
+          source=tooling/external/termux-packages-release
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/termux/termux-packages.git "$source"
+          git -C "$source" sparse-checkout init --cone
+          git -C "$source" sparse-checkout set packages
+          git -C "$source" checkout --quiet HEAD
+          python3 scripts/release-termux-pulse-audit.py --repository "$source"
+          bundle="$RUNNER_TEMP/$TERMUX_SOURCE_NAME"
+          python3 scripts/release-termux-pulse-source.py generate \
+            --manifest release/termux-pulse-recipes.json \
+            --repository "$source" \
+            --cache tooling/downloads/termux-pulse-source \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" --output "$bundle"
+          python3 scripts/release-termux-pulse-source.py verify \
+            --manifest release/termux-pulse-recipes.json \
+            --repository "$source" \
+            --cache tooling/downloads/termux-pulse-source \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" --output "$bundle"
+          sha256sum "$bundle" | sed "s|  .*|  $TERMUX_SOURCE_NAME|" \
+            > "$bundle.sha256"
 
       - name: Require complete native release audit
         run: python3 scripts/release-native-audit.py --require-complete
@@ -249,6 +273,12 @@ jobs:
               "pacman -Sy --noconfirm --needed meson >/dev/null && \
                bash scripts/build-pipewire-camera-runtime.sh $architecture"
           done
+
+      - name: Verify Termux Pulse binary inputs
+        run: |
+          python3 scripts/release-termux-pulse-audit.py \
+            --repository tooling/external/termux-packages-release \
+            --verify-binaries
 
       - name: Test private PipeWire camera runtime
         run: |
@@ -434,6 +464,8 @@ jobs:
             ${{ runner.temp }}/Archphene-native-licenses-*.zip.sha256
             ${{ runner.temp }}/Archphene-glibc-source-*.zip
             ${{ runner.temp }}/Archphene-glibc-source-*.zip.sha256
+            ${{ runner.temp }}/Archphene-termux-pulse-source-*.zip
+            ${{ runner.temp }}/Archphene-termux-pulse-source-*.zip.sha256
           if-no-files-found: error
 
       - name: Attach APKs and publish release
@@ -444,6 +476,8 @@ jobs:
             "$RUNNER_TEMP/$NATIVE_LICENSE_NAME.sha256"
             "$RUNNER_TEMP/$GLIBC_SOURCE_NAME"
             "$RUNNER_TEMP/$GLIBC_SOURCE_NAME.sha256"
+            "$RUNNER_TEMP/$TERMUX_SOURCE_NAME"
+            "$RUNNER_TEMP/$TERMUX_SOURCE_NAME.sha256"
           )
           for name in \
             "$APK_X86_NAME" "$APK_ARM64_NAME" \

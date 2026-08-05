@@ -312,6 +312,10 @@ and reproducible artifacts.
     and require byte-for-byte equality before the release audit gate.
   - [x] Rebuild the AArch64 Qt platform-theme and style plugins from historical
     source and require byte-for-byte equality before the release audit gate.
+  - [x] Bind both ABI copies of every Termux PulseAudio closure package to its
+    exact historical package-recipe commit and verify all downloaded bytes.
+  - [x] Publish deterministic corresponding source, build-framework snapshots,
+    and indexed licenses for all 14 Termux PulseAudio closure packages.
   - [ ] Resolve every recorded native/runtime notice, license-text,
     reproducibility, provenance, corresponding-source, and relinking blocker.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,

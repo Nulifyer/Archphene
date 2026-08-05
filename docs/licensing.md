@@ -63,10 +63,10 @@ locations, pins, declared licenses where reviewed, exact repository evidence,
 and concrete open blockers. `scripts/release-native-audit.py` rejects missing components,
 stale evidence, malformed blockers, and unreviewed additions.
 
-Eight records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
-libepoxy, virglrenderer, and the x86_64 Qt bridge. Release CI checks each source
-archive SHA-256 or Git commit and publishes every discovered license, notice,
-and copyright file in
+Nine records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
+libepoxy, virglrenderer, the x86_64 Qt bridge, and the Termux Pulse closure.
+Release CI checks each source archive SHA-256 or Git commit and publishes every
+discovered license, notice, and copyright file in
 `Archphene-native-licenses-<version>.zip`. The deterministic archive embeds the
 canonical manifest and a per-file checksum index.
 
@@ -75,11 +75,16 @@ deterministic archive of the exact pristine glibc Git tree, the applied
 Archphene patch, both architecture build scripts, the AArch64 container recipe,
 and an indexed checksum for every build-control file.
 
-Six records remain blocked. The unresolved work includes floating Arch
+The release supplies `Archphene-termux-pulse-source-<version>.zip` for all 28
+Termux binary packages. It includes each exact historical package recipe and
+build-framework snapshot, every checksum-pinned upstream source archive,
+recipe-contained Android source, and indexed license files for all 14 packages.
+
+Five records remain blocked. The unresolved work includes floating Arch
 package transactions, incomplete GTK prebuilt provenance, the AArch64 Qt
-KF6Config input/rebuild, and PulseAudio closure source records. The tag workflow
-runs `--require-complete` before creating a GitHub draft, so an accidental tag
-publish or remotely stage a release while any blocker remains. SPDX file
+KF6Config input/rebuild. The tag workflow runs `--require-complete` before
+creating a GitHub draft, so an accidental tag cannot publish or remotely stage
+a release while any blocker remains. SPDX file
 licenses and package license conclusions remain `NOASSERTION` rather than making
 unsupported conclusions.
 
@@ -95,4 +100,12 @@ python3 scripts/test-release-native-licenses.py
 python3 scripts/test-release-glibc-source.py
 python3 scripts/test-qt-prebuilt-provenance.py
 bash scripts/test-qt-prebuilt-reproducibility.sh
+python3 scripts/release-termux-pulse-audit.py \
+  --repository tooling/external/termux-packages-release --verify-binaries
+python3 scripts/release-termux-pulse-source.py verify \
+  --manifest release/termux-pulse-recipes.json \
+  --repository tooling/external/termux-packages-release \
+  --cache tooling/downloads/termux-pulse-source \
+  --source-date-epoch 1785888000 \
+  --output tooling/build/Archphene-termux-pulse-source-test.zip
 ```

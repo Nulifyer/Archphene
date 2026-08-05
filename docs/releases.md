@@ -69,6 +69,11 @@ that remain blocked. A separate `Archphene-glibc-source-<version>.zip` and check
 the exact pristine glibc revision, Archphene patch, and architecture build
 instructions required to reproduce the modified shared libraries.
 
+`Archphene-termux-pulse-source-<version>.zip` and its checksum provide the exact
+historical Termux recipes, build framework, upstream source archives, and
+indexed licenses corresponding to every checksum-pinned PulseAudio closure
+package for both ABIs.
+
 Install the manager APK matching the device ABI. Install the matching Builder
 APK to enable reviewed AUR builds under the separate no-network Android UID.
 The manager rejects a Builder with a different signer, package identity, ABI,
