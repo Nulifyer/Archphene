@@ -76,6 +76,10 @@ external displays, or every Android GPU/vendor family.
 - The complete C# breakpoint/debugger workflow and broader non-Latin IME,
   binary clipboard, SDL relative-pointer, and multi-vendor graphics matrices
   remain open.
+- The complete native/runtime component-license, notice, and corresponding-source
+  audit remains a release gate. Published artifacts must not be treated as
+  license-audit complete while their SPDX component licenses remain
+  `NOASSERTION`.
 
 Report reproducible issues through the repository bug form with Android version,
 device model, ABI, package version, and relevant Archphene diagnostics.

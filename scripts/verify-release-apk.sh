@@ -46,11 +46,21 @@ aapt2="$(sdk_tool aapt2)"
 apksigner="$(sdk_tool apksigner)"
 zipalign="$(sdk_tool zipalign)"
 command -v unzip >/dev/null || { echo "unzip is required" >&2; exit 1; }
+command -v cmp >/dev/null || { echo "cmp is required" >&2; exit 1; }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 entries="$work/entries"
 unzip -Z1 "$manager_apk" > "$entries"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+verify_asset() {
+  local apk="$1" entry="$2" source="$3" label="$4"
+  local extracted="$work/release-license"
+  unzip -p "$apk" "$entry" > "$extracted"
+  [[ -s "$extracted" ]] && cmp -s "$extracted" "$source" || {
+    echo "$label is missing or differs from its reviewed source" >&2; exit 1;
+  }
+}
 
 manager_badging="$("$aapt2" dump badging "$manager_apk")"
 grep -F "package: name='org.archpheneos.manager'" <<<"$manager_badging" >/dev/null || {
@@ -141,6 +151,15 @@ invalid_native="$(grep "^lib/$abi/" "$entries" \
   exit 1
 }
 "$zipalign" -c -P 16 -v 4 "$manager_apk" >/dev/null
+verify_asset "$manager_apk" assets/licenses/Archphene-MIT.txt \
+  "$root/LICENSE" "manager MIT license"
+verify_asset "$manager_apk" assets/licenses/Apache-2.0.txt \
+  "$root/third_party/termux-terminal/LICENSE-APACHE-2.0.txt" \
+  "manager Apache license"
+verify_asset "$manager_apk" assets/licenses/AndroidApkSig-NOTICE.txt \
+  "$root/third_party/android-apksig/NOTICE.txt" "manager apksig notice"
+verify_asset "$manager_apk" assets/licenses/JetBrainsMonoNerdFont-OFL.txt \
+  "$root/third_party/jetbrains-mono-nerd-font/OFL.txt" "manager font license"
 
 builder_badging="$("$aapt2" dump badging "$builder_apk")"
 grep -F "package: name='org.archphene.builder'" <<<"$builder_badging" >/dev/null || {
@@ -170,6 +189,8 @@ grep -F 'org.archphene.permission.BIND_BUILDER' <<<"$builder_manifest" >/dev/nul
   echo "Builder does not require the manager signature permission" >&2; exit 1;
 }
 "$zipalign" -c -P 16 -v 4 "$builder_apk" >/dev/null
+verify_asset "$builder_apk" assets/licenses/Archphene-MIT.txt \
+  "$root/LICENSE" "Builder MIT license"
 
 launcher_apk="$work/launcher-template.apk"
 unzip -p "$manager_apk" assets/launcher/launcher-template.apk > "$launcher_apk"
@@ -181,6 +202,8 @@ grep -F "package: name='org.archphene.linux.p00000000000000000000000000000000'" 
 if grep -Fq 'application-debuggable' <<<"$launcher_badging"; then
   echo "generated app-shell template is debuggable" >&2; exit 1
 fi
+verify_asset "$launcher_apk" assets/licenses/Archphene-MIT.txt \
+  "$root/LICENSE" "generated app-shell MIT license"
 
 manager_signer=unsigned
 if [[ "$allow_unsigned" == false ]]; then

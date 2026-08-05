@@ -6,6 +6,14 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 
+val stageArchpheneReleaseLicenses =
+    tasks.register<Sync>("stageArchpheneReleaseLicenses") {
+        from(rootProject.file("LICENSE")) {
+            rename { "Archphene-MIT.txt" }
+        }
+        into(layout.buildDirectory.dir("generated/releaseLicenses/assets/licenses"))
+    }
+
 android {
     namespace = "org.archphene.launcher"
     compileSdk = 36
@@ -22,6 +30,12 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        getByName("main") {
+            assets.directories.add("build/generated/releaseLicenses/assets")
+        }
     }
 
     buildFeatures {
@@ -47,4 +61,8 @@ android {
             proguardFiles("proguard-rules.pro")
         }
     }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(stageArchpheneReleaseLicenses)
 }

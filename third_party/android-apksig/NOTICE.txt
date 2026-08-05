@@ -1,0 +1,8 @@
+Android apksig 9.3.0
+
+Copyright (c) 2016, The Android Open Source Project
+
+Licensed under the Apache License, Version 2.0. The complete license text is
+packaged as assets/licenses/Apache-2.0.txt.
+
+Source: https://android.googlesource.com/platform/tools/apksig/

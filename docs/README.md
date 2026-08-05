@@ -13,6 +13,7 @@ This directory contains current documentation for using, building, and developin
 - [GPU acceleration](gpu-acceleration.md)
 - [Release APKs](releases.md)
 - [Greenfield release notes](release-notes.md)
+- [Licensing and release notices](licensing.md)
 - [Package and app-shell trust policy](trust-policy.md)
 - [Linux process and lifecycle policy](runtime-lifecycle.md)
 - [Security model](security.md)

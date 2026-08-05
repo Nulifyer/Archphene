@@ -32,6 +32,7 @@ required_workflow = (
     'builder_unsigned="tooling/build/apk/Archphene-Builder-$abi-$VERSION_NAME-unsigned.apk"',
     "--prebuilt-native",
     "python3 scripts/test-release-sbom.py",
+    "python3 scripts/test-release-license-contract.py",
     "python3 scripts/release-sbom.py generate",
     "python3 scripts/release-sbom.py verify",
     '--source-revision "$SOURCE_REVISION"',

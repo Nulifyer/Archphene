@@ -325,6 +325,24 @@ four local x86_64/arm64-v8a manager/Builder release artifacts. Licenses remain
 `NOASSERTION` in this file inventory until the separate component-license and
 notice audit is complete.
 
+The licensing audit found that Cargo metadata still declared Apache-2.0 while
+the selected repository license, README, and contribution terms declare MIT.
+All Archphene Rust workspace packages now report MIT consistently. Manager,
+Builder, and generated app-shell APKs package the exact project MIT text; the
+manager additionally packages the exact JetBrains font OFL text and Android
+`apksig` 9.3.0 Apache notice/license. The release verifier compares each notice
+byte-for-byte with its reviewed repository source. Version `1.1.0-rc.6`, code
+`1000001239`, rebuilt byte-identically after this change: manager SHA-256 values
+are `8c9eb180a13b1bf0ae2a405e6b78869c1d713471502c04e0b0471839b591ea24`
+for x86_64 and
+`65f548eecb22d01cdfb693e0afc7290c16cf30e5e57407f7e83c73592d3c92ba`
+for arm64-v8a; Builder values are
+`21ec6b2efc69183d9c97789dd46b7de90aed36b43123479f957fb953d700b37d`
+and
+`5696d7918aef99c628ebcda55a3625f379f2c7243652a8a52e7cce3a2a4fc1d2`.
+The broader native/runtime/transitive component license and corresponding-source
+audit remains an explicit release blocker.
+
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
 SM-S908U. They prove cold launch, full-device insets and screenshots, touch
 batching, Activity recreation, HOME/resume continuity, Back shutdown, private

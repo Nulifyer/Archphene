@@ -47,7 +47,8 @@ Each APK also has a deterministic `<apk-name>.spdx.json` SPDX 2.3 file inventory
 and matching `.spdx.json.sha256`. The SBOM binds every signed APK entry and the
 complete APK digest to the source commit and release version. Undetermined
 component licenses remain `NOASSERTION`; the SBOM does not replace the separate
-license and notice audit.
+license and notice audit. See [Licensing and release notices](licensing.md) for
+the notices already packaged and the remaining release gate.
 
 Install the manager APK matching the device ABI. Install the matching Builder
 APK to enable reviewed AUR builds under the separate no-network Android UID.

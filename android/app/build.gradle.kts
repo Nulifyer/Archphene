@@ -13,6 +13,19 @@ val sourceValidation =
     providers.gradleProperty("archpheneSourceValidation")
         .map(String::toBooleanStrict)
         .orElse(false)
+val stageArchpheneReleaseLicenses =
+    tasks.register<Sync>("stageArchpheneReleaseLicenses") {
+        from(rootProject.file("LICENSE")) {
+            rename { "Archphene-MIT.txt" }
+        }
+        from(rootProject.file("third_party/termux-terminal/LICENSE-APACHE-2.0.txt")) {
+            rename { "Apache-2.0.txt" }
+        }
+        from(rootProject.file("third_party/android-apksig/NOTICE.txt")) {
+            rename { "AndroidApkSig-NOTICE.txt" }
+        }
+        into(layout.buildDirectory.dir("generated/releaseLicenses/assets/licenses"))
+    }
 require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
     "archpheneAbi must be x86_64 or arm64-v8a"
 }
@@ -83,6 +96,7 @@ android {
             assets.directories.add("build/generated/packageRuntime/assets")
             assets.directories.add("build/generated/launcherTemplate/assets")
             assets.directories.add("build/generated/terminalFont/assets")
+            assets.directories.add("build/generated/releaseLicenses/assets")
         }
     }
 
@@ -113,6 +127,7 @@ android {
 }
 
 tasks.named("preBuild").configure {
+    dependsOn(stageArchpheneReleaseLicenses)
     if (!sourceValidation.get()) {
         dependsOn(rootProject.tasks.named("buildArchpheneRust"))
         dependsOn(rootProject.tasks.named("buildArchpheneCompositor"))

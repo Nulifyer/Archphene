@@ -13,6 +13,13 @@ val sourceValidation =
     providers.gradleProperty("archpheneSourceValidation")
         .map(String::toBooleanStrict)
         .orElse(false)
+val stageArchpheneReleaseLicenses =
+    tasks.register<Sync>("stageArchpheneReleaseLicenses") {
+        from(rootProject.file("LICENSE")) {
+            rename { "Archphene-MIT.txt" }
+        }
+        into(layout.buildDirectory.dir("generated/releaseLicenses/assets/licenses"))
+    }
 require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
     "archpheneAbi must be x86_64 or arm64-v8a"
 }
@@ -59,6 +66,7 @@ android {
             jniLibs.directories.add("build/generated/jniLibs")
             jniLibs.directories.add("build/generated/builderRuntime/jniLibs")
             assets.directories.add("build/generated/builderRuntime/assets")
+            assets.directories.add("build/generated/releaseLicenses/assets")
         }
     }
 
@@ -87,6 +95,7 @@ android {
 }
 
 tasks.named("preBuild").configure {
+    dependsOn(stageArchpheneReleaseLicenses)
     if (!sourceValidation.get()) {
         dependsOn(rootProject.tasks.named("buildArchpheneRust"))
         dependsOn(rootProject.tasks.named("stageArchpheneBuilderRuntime"))
