@@ -33,7 +33,8 @@
     <description summary="GPU identity for one wl_surface">
       set_resource is double-buffered and applies on the next wl_surface.commit.
       A standard wl_buffer attachment without set_resource replaces the current
-      GPU identity. A damage-only commit retains the current identity.
+      GPU identity. A standard buffer detach also clears the identity. A
+      damage-only commit retains the current identity.
     </description>
 
     <request name="destroy" type="destructor"/>

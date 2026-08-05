@@ -69,4 +69,5 @@ bounded state machine enforces unique surfaces, three known resources, monotonic
 fences, helper replacement, resource release, standard-buffer replacement, and
 damage-only retention. This closes the manager contract ambiguity; Mesa sender,
 vtest/AHB transport, and manager receiver implementation remain required before
-the global can be enabled.
+production can enable the global. Generated Rust bindings and an opt-in
+client/server socket test now prove exact set/commit and clear/commit latching.

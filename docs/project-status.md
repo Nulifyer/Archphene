@@ -4043,8 +4043,11 @@ fence sequence into the exact next commit. A bounded Rust state machine permits
 identity, clears all identities on helper replacement/resource release, lets a
 normal `wl_buffer` replace GPU identity, and retains identity for damage-only
 commits. Five tests pass, and `wayland-scanner` accepts the XML. Mesa/vtest
-sender integration and the authenticated manager AHB receiver remain open, so
-no new protocol global or direct-presentation claim is published.
+sender integration and the authenticated manager AHB receiver remain open. An
+additional generated client/server socket test enables the otherwise dormant
+global, binds one surface, latches one scoped identity on the exact commit, and
+clears it on the next commit. Production does not enable the global, so no new
+direct-presentation claim is published.
 
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned

@@ -194,9 +194,12 @@ state machine rejects duplicate bindings/surfaces/resources, unknown resources,
 cross-generation identities, and non-increasing fences; normal `wl_buffer`
 replacement and explicit clear remove committed GPU identity, while damage-only
 commits retain it. Five unit tests cover these transitions. The XML passes
-`wayland-scanner` server-header and private-code generation. The interface is
-not advertised yet because the Mesa sender, helper transport, and authenticated
-AHB receiver are still absent.
+`wayland-scanner` server-header and private-code generation. Generated Rust
+client/server bindings and an opt-in compositor global now pass a real socket
+round trip: one resource identity latches only on its target surface commit and
+an explicit clear latches on the following commit. Production does not enable
+the global because the Mesa sender, helper transport, and authenticated AHB
+receiver are still absent.
 
 References:
 

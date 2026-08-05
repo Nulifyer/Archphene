@@ -108,7 +108,7 @@ require(
     "MAX_GPU_SURFACE_RESOURCES: usize = 3",
     "DuplicateSurface",
     "StaleFence",
-    "standard_buffer_attached",
+    "standard_buffer_updated",
     "helper_replacement_and_resource_release_clear_committed_identity",
 )
 require(
@@ -119,6 +119,20 @@ require(
     'arg name="helper_generation" type="uint"',
     'arg name="fence_sequence_hi" type="uint"',
     "already authenticated APHB Present frame",
+)
+require(
+    "native/archphene-compositor/src/gpu_surface_protocol.rs",
+    "generate_server_code!",
+    "generate_client_code!",
+    '"./protocols/archphene-gpu-present-v1.xml"',
+)
+require(
+    "native/archphene-compositor/src/lib.rs",
+    "enable_gpu_surface_identity",
+    "register_gpu_surface_resource",
+    "private_gpu_identity_latches_on_the_exact_surface_commit",
+    "binding.set_resource(9, 44, 1, 2)",
+    "binding.clear()",
 )
 reject(
     "native/archphene-compositor/src/android_gpu_renderer.rs",

@@ -8,6 +8,7 @@ mod gpu_damage;
 #[cfg_attr(not(test), allow(dead_code))]
 mod gpu_present_protocol;
 mod gpu_surface_identity;
+mod gpu_surface_protocol;
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -23,6 +24,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use gpu_surface_identity::{
+    GpuSurfaceIdentity, GpuSurfaceIdentityError, GpuSurfaceIdentityRegistry,
+};
+use gpu_surface_protocol::server::org_archphene_gpu_present_manager_v1::{
+    self, OrgArchpheneGpuPresentManagerV1,
+};
+use gpu_surface_protocol::server::org_archphene_gpu_surface_v1::{self, OrgArchpheneGpuSurfaceV1};
 #[cfg(target_os = "android")]
 use jni::objects::{JByteBuffer, JObject};
 #[cfg(target_os = "android")]
@@ -627,6 +635,8 @@ pub struct CompositorState {
     text_input_manager_binds: u32,
     text_input_count: u32,
     text_inputs: Vec<ZwpTextInputV3>,
+    gpu_surface_identity: Option<GpuSurfaceIdentityRegistry>,
+    gpu_surface_bindings: Vec<OrgArchpheneGpuSurfaceV1>,
     ime_active: bool,
     ime_show_requests: u32,
     ime_hide_requests: u32,
@@ -747,6 +757,8 @@ struct ViewportSource {
 struct ViewportData {
     surface: WlSurface,
 }
+
+struct GpuSurfaceData;
 
 struct FractionalScaleData {
     surface: WlSurface,
@@ -7215,6 +7227,132 @@ impl GlobalDispatch<WpViewporter, ()> for CompositorState {
     }
 }
 
+impl GlobalDispatch<OrgArchpheneGpuPresentManagerV1, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
+        resource: New<OrgArchpheneGpuPresentManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let manager = data_init.init(resource, ());
+        admit_global_binding(state, client, handle, &manager);
+    }
+}
+
+impl Dispatch<OrgArchpheneGpuPresentManagerV1, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &OrgArchpheneGpuPresentManagerV1,
+        request: org_archphene_gpu_present_manager_v1::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            org_archphene_gpu_present_manager_v1::Request::Destroy => {}
+            org_archphene_gpu_present_manager_v1::Request::GetSurfaceBinding { id, surface } => {
+                let binding = data_init.init(id, GpuSurfaceData);
+                let Some(registry) = state.gpu_surface_identity.as_mut() else {
+                    resource.post_error(
+                        org_archphene_gpu_present_manager_v1::Error::BindingLimit,
+                        "GPU presentation identity is not active",
+                    );
+                    return;
+                };
+                match registry.bind_surface(binding.id().protocol_id(), surface.id().protocol_id())
+                {
+                    Ok(()) => state.gpu_surface_bindings.push(binding),
+                    Err(GpuSurfaceIdentityError::DuplicateSurface) => resource.post_error(
+                        org_archphene_gpu_present_manager_v1::Error::SurfaceExists,
+                        "wl_surface already has a GPU presentation binding",
+                    ),
+                    Err(_) => resource.post_error(
+                        org_archphene_gpu_present_manager_v1::Error::BindingLimit,
+                        "GPU presentation binding limit exceeded",
+                    ),
+                }
+            }
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &OrgArchpheneGpuPresentManagerV1,
+        _data: &(),
+    ) {
+        release_global_binding(state, &resource.id());
+    }
+}
+
+impl Dispatch<OrgArchpheneGpuSurfaceV1, GpuSurfaceData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &OrgArchpheneGpuSurfaceV1,
+        request: org_archphene_gpu_surface_v1::Request,
+        _data: &GpuSurfaceData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        let Some(registry) = state.gpu_surface_identity.as_mut() else {
+            resource.post_error(
+                org_archphene_gpu_surface_v1::Error::InvalidIdentity,
+                "GPU presentation identity is not active",
+            );
+            return;
+        };
+        let result = match request {
+            org_archphene_gpu_surface_v1::Request::Destroy => return,
+            org_archphene_gpu_surface_v1::Request::SetResource {
+                helper_generation,
+                resource_id,
+                fence_sequence_hi,
+                fence_sequence_lo,
+            } => registry.set_resource(
+                resource.id().protocol_id(),
+                GpuSurfaceIdentity {
+                    helper_generation,
+                    resource_id,
+                    fence_sequence: (u64::from(fence_sequence_hi) << 32)
+                        | u64::from(fence_sequence_lo),
+                },
+            ),
+            org_archphene_gpu_surface_v1::Request::Clear => {
+                registry.clear(resource.id().protocol_id())
+            }
+        };
+        if let Err(error) = result {
+            let protocol_error = if error == GpuSurfaceIdentityError::StaleFence {
+                org_archphene_gpu_surface_v1::Error::StaleFence
+            } else {
+                org_archphene_gpu_surface_v1::Error::InvalidIdentity
+            };
+            resource.post_error(
+                protocol_error,
+                format!("GPU surface identity rejected: {error:?}"),
+            );
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &OrgArchpheneGpuSurfaceV1,
+        _data: &GpuSurfaceData,
+    ) {
+        if let Some(registry) = state.gpu_surface_identity.as_mut() {
+            let _ = registry.destroy_binding(resource.id().protocol_id());
+        }
+        state
+            .gpu_surface_bindings
+            .retain(|binding| binding.id() != resource.id());
+    }
+}
+
 impl Dispatch<WpViewporter, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -10200,6 +10338,10 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let viewport_source_update = surface.pending_viewport_source.take();
                 let viewport_destination_update = surface.pending_viewport_destination.take();
                 let buffer_assignment = surface.pending_buffer.take();
+                if let Some(registry) = state.gpu_surface_identity.as_mut() {
+                    let _ = registry
+                        .commit_surface(resource.id().protocol_id(), buffer_assignment.is_some());
+                }
                 let mut callbacks = std::mem::take(&mut surface.pending_callbacks);
                 let role = surface.role;
                 let xdg_surface = surface.xdg_surface.clone();
@@ -12715,6 +12857,50 @@ impl CompositorCore {
             filesystem_client_count: Arc::new(AtomicUsize::new(0)),
             stopping: AtomicBool::new(false),
         })
+    }
+
+    pub fn enable_gpu_surface_identity(&mut self, helper_generation: u32) -> std::io::Result<()> {
+        if self.state.gpu_surface_identity.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "GPU surface identity is already enabled",
+            ));
+        }
+        let registry = GpuSurfaceIdentityRegistry::new(helper_generation).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid helper generation")
+        })?;
+        self.state.gpu_surface_identity = Some(registry);
+        self.display
+            .handle()
+            .create_global::<CompositorState, OrgArchpheneGpuPresentManagerV1, _>(1, ());
+        Ok(())
+    }
+
+    pub fn register_gpu_surface_resource(&mut self, resource_id: u32) -> std::io::Result<()> {
+        self.state
+            .gpu_surface_identity
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
+            .register_resource(resource_id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
+    }
+
+    pub fn replace_gpu_surface_helper(&mut self, helper_generation: u32) -> std::io::Result<()> {
+        self.state
+            .gpu_surface_identity
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
+            .replace_helper(helper_generation)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
+    }
+
+    pub fn release_gpu_surface_resource(&mut self, resource_id: u32) -> std::io::Result<()> {
+        self.state
+            .gpu_surface_identity
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU identity is disabled"))?
+            .release_resource(resource_id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))
     }
 
     pub fn bind_socket(&mut self, path: &Path) -> std::io::Result<()> {
@@ -19492,6 +19678,8 @@ mod tests {
         wl_touch as client_wl_touch,
     };
     use wayland_client::{Connection, QueueHandle};
+    use crate::gpu_surface_protocol::client::org_archphene_gpu_present_manager_v1 as client_gpu_present_manager;
+    use crate::gpu_surface_protocol::client::org_archphene_gpu_surface_v1 as client_gpu_surface;
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_confined_pointer_v1 as client_confined_pointer;
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1 as client_locked_pointer;
     use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1 as client_pointer_constraints;
@@ -19548,6 +19736,8 @@ mod tests {
     );
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_callback::WlCallback);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_buffer::WlBuffer);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_gpu_present_manager::OrgArchpheneGpuPresentManagerV1);
+    wayland_client::delegate_noop!(PointerProtocolClient: client_gpu_surface::OrgArchpheneGpuSurfaceV1);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_keyboard::WlKeyboard);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_output::WlOutput);
     wayland_client::delegate_noop!(PointerProtocolClient: ignore client_wl_touch::WlTouch);
@@ -19712,6 +19902,106 @@ mod tests {
                 state.relative_motion = Some((dx, dy));
             }
         }
+    }
+
+    #[test]
+    fn private_gpu_identity_latches_on_the_exact_surface_commit() {
+        let socket = std::env::temp_dir().join(format!(
+            "archphene-gpu-identity-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let stage = Arc::new(AtomicU8::new(0));
+        let server_stage = Arc::clone(&stage);
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut core = CompositorCore::new().expect("Wayland display");
+            core.enable_gpu_surface_identity(9)
+                .expect("enable private GPU identity");
+            core.register_gpu_surface_resource(44)
+                .expect("register private GPU resource");
+            core.bind_socket(&server_socket).expect("bind socket");
+            while server_stage.load(Ordering::Acquire) != 3 {
+                core.dispatch_once().expect("dispatch GPU identity client");
+                if server_stage.load(Ordering::Acquire) == 1
+                    && core
+                        .state
+                        .gpu_surface_identity
+                        .as_ref()
+                        .and_then(|registry| {
+                            core.state.surfaces.first().and_then(|surface| {
+                                registry.committed_surface(surface.id().protocol_id())
+                            })
+                        })
+                        == Some(GpuSurfaceIdentity {
+                            helper_generation: 9,
+                            resource_id: 44,
+                            fence_sequence: 0x1_0000_0002,
+                        })
+                {
+                    server_stage.store(2, Ordering::Release);
+                }
+            }
+            while core
+                .state
+                .gpu_surface_identity
+                .as_ref()
+                .and_then(|registry| {
+                    core.state.surfaces.first().and_then(|surface| {
+                        registry.committed_surface(surface.id().protocol_id())
+                    })
+                })
+                .is_some()
+            {
+                core.dispatch_once().expect("dispatch GPU identity clear");
+            }
+        });
+
+        let connection = loop {
+            match UnixStream::connect(&socket) {
+                Ok(stream) => break Connection::from_socket(stream).expect("client connection"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("connect GPU identity client: {error}"),
+            }
+        };
+        let (globals, mut events) =
+            registry_queue_init::<PointerProtocolClient>(&connection).expect("registry");
+        let queue = events.handle();
+        let compositor = globals
+            .bind::<client_wl_compositor::WlCompositor, _, _>(&queue, 1..=6, ())
+            .expect("wl_compositor");
+        let manager = globals
+            .bind::<client_gpu_present_manager::OrgArchpheneGpuPresentManagerV1, _, _>(
+                &queue,
+                1..=1,
+                (),
+            )
+            .expect("private GPU presentation manager");
+        let surface = compositor.create_surface(&queue, ());
+        let binding = manager.get_surface_binding(&surface, &queue, ());
+        binding.set_resource(9, 44, 1, 2);
+        surface.commit();
+        connection.flush().expect("flush GPU identity commit");
+        stage.store(1, Ordering::Release);
+        while stage.load(Ordering::Acquire) != 2 {
+            events
+                .roundtrip(&mut PointerProtocolClient::default())
+                .expect("GPU identity roundtrip");
+        }
+        binding.clear();
+        surface.commit();
+        connection.flush().expect("flush GPU identity clear");
+        stage.store(3, Ordering::Release);
+        server.join().expect("GPU identity server");
+        drop((binding, surface, manager, compositor, events, connection));
+        let _ = std::fs::remove_file(socket);
     }
 
     #[test]

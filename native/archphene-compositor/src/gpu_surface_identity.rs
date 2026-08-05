@@ -233,7 +233,7 @@ impl GpuSurfaceIdentityRegistry {
     pub(crate) fn commit(
         &mut self,
         binding_id: u32,
-        standard_buffer_attached: bool,
+        standard_buffer_updated: bool,
     ) -> Result<Option<GpuSurfaceIdentity>, GpuSurfaceIdentityError> {
         let Some(binding) = self
             .bindings
@@ -244,10 +244,33 @@ impl GpuSurfaceIdentityRegistry {
         };
         if let Some(pending) = binding.pending.take() {
             binding.committed = pending;
-        } else if standard_buffer_attached {
+        } else if standard_buffer_updated {
             binding.committed = None;
         }
         Ok(binding.committed)
+    }
+
+    pub(crate) fn commit_surface(
+        &mut self,
+        surface_id: u32,
+        standard_buffer_updated: bool,
+    ) -> Result<Option<GpuSurfaceIdentity>, GpuSurfaceIdentityError> {
+        let Some(binding_id) = self
+            .bindings
+            .iter()
+            .find(|binding| binding.surface_id == surface_id)
+            .map(|binding| binding.binding_id)
+        else {
+            return Ok(None);
+        };
+        self.commit(binding_id, standard_buffer_updated)
+    }
+
+    pub(crate) fn committed_surface(&self, surface_id: u32) -> Option<GpuSurfaceIdentity> {
+        self.bindings
+            .iter()
+            .find(|binding| binding.surface_id == surface_id)
+            .and_then(|binding| binding.committed)
     }
 }
 
