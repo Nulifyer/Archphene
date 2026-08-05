@@ -113,6 +113,17 @@ returned to a correctly oriented full-device frame, and Back closed the session
 cleanly. The preceding CPU-path baseline reported the inverse diagnostic split
 and remains the mandatory fallback evidence.
 
+The GPU hot-path proof is deliberately narrower than whole-process allocation
+accounting. Its source contract rejects `AHardwareBuffer_lock`, `glReadPixels`,
+heap-building primitives in `GpuRenderer::render`, and managed frame-buffer
+allocation or copy primitives in Kotlin dispatch. A warmed test stages the same
+damaged rectangle 1,000 times with zero measured Rust allocations. During the
+physical run, 1,688 compositor dispatches reported zero JNI array-copy and
+Kotlin-copy bytes while diagnostics retained GPU upload/composition and zero CPU
+conversion/readback. ART recorded unrelated bounded service and debug-probe
+objects, so Archphene does not claim that the complete Android process is
+allocation-free.
+
 ## Current limits
 
 GPU commands can execute on Android's GLES driver, but virpipe output still

@@ -20,6 +20,25 @@ def reject(path: str, *markers: str) -> None:
         raise SystemExit(f"{path}: forbidden graphics path markers: {present}")
 
 
+def function_body(path: str, signature: str) -> str:
+    text = (ROOT / path).read_text(encoding="utf-8")
+    start = text.find(signature)
+    if start < 0:
+        raise SystemExit(f"{path}: missing function signature: {signature}")
+    opening = text.find("{", start)
+    if opening < 0:
+        raise SystemExit(f"{path}: missing function body: {signature}")
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening : index + 1]
+    raise SystemExit(f"{path}: unterminated function body: {signature}")
+
+
 require(
     "native/archphene-compositor/src/lib.rs",
     "shm_snapshot_count",
@@ -43,11 +62,32 @@ require(
     "const MAX_TARGETS: usize = 15;",
     "pub(crate) fn remove_target",
 )
+require(
+    "native/archphene-compositor/src/jni_exports/steady_state_allocations.rs",
+    "fn warmed_gpu_damage_staging_does_not_allocate()",
+    "for _ in 0..1_000",
+    "assert_eq!(allocations, 0);",
+)
 reject(
     "native/archphene-compositor/src/android_gpu_renderer.rs",
     "AHardwareBuffer_lock",
     "glReadPixels",
 )
+gpu_render = function_body(
+    "native/archphene-compositor/src/android_gpu_renderer.rs",
+    "pub(crate) fn render(",
+)
+for forbidden in ("Vec::", "vec![", "Box::", "String::", ".collect", ".to_vec"):
+    if forbidden in gpu_render:
+        raise SystemExit(f"GPU render hot path allocates through {forbidden}")
+
+managed_dispatch = function_body(
+    "android/app/src/main/kotlin/org/archphene/app/launcher/NativeLauncherCompositor.kt",
+    "fun dispatchAndPresent(",
+)
+for forbidden in ("ByteBuffer.allocate", "ByteArray", "Bitmap", ".copyOf"):
+    if forbidden in managed_dispatch:
+        raise SystemExit(f"Managed frame dispatch copies through {forbidden}")
 require(
     "android/app/src/main/kotlin/org/archphene/app/launcher/NativeLauncherCompositor.kt",
     "const val PRESENTATION_COMPONENTS = 42",

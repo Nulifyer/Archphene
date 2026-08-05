@@ -20,6 +20,8 @@ use wayland_client::{Connection, QueueHandle};
 use wayland_server::protocol::wl_shm;
 use wayland_server::Resource;
 
+use crate::gpu_damage::{Damage, SourceFormat, stage_rgba_damage};
+
 use super::{
     BufferTransform, CommittedFrame, CompositorCore, RegionRectangle, ShmBufferInner,
     ShmPoolInner, ShmSnapshotState, SurfaceData, SurfaceState, apply_cached_subsurface_children,
@@ -355,6 +357,45 @@ fn warmed_hardware_buffer_damage_conversion_does_not_allocate() {
     assert_eq!(&destination[20..24], &[0xaa; 4]);
     assert_eq!(&destination[24..32], &[18, 17, 16, 255, 21, 20, 19, 255]);
     assert_eq!(&destination[32..40], &[0xaa; 8]);
+}
+
+#[test]
+fn warmed_gpu_damage_staging_does_not_allocate() {
+    let source = vec![0x7f; 64 * 32 * 4];
+    let mut staging = vec![0; source.len()];
+    let damage = Damage {
+        x: 11,
+        y: 7,
+        width: 19,
+        height: 13,
+    };
+    assert_eq!(
+        stage_rgba_damage(
+            64,
+            32,
+            &source,
+            SourceFormat::Argb8888,
+            damage,
+            &mut staging,
+        ),
+        Ok(19 * 13 * 4),
+    );
+    let allocations = count_allocations(|| {
+        for _ in 0..1_000 {
+            assert_eq!(
+                stage_rgba_damage(
+                    64,
+                    32,
+                    &source,
+                    SourceFormat::Argb8888,
+                    damage,
+                    &mut staging,
+                ),
+                Ok(19 * 13 * 4),
+            );
+        }
+    });
+    assert_eq!(allocations, 0);
 }
 
 #[test]

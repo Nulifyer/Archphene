@@ -4013,6 +4013,16 @@ Back closed the session and runtime cleanly. Host Rust tests/Clippy, Android app
 unit/lint, the source contract, and exact AArch64/x86_64 builds pass. Virpipe
 still returns through SHM, so this is not a zero-copy or direct-virgl claim.
 
+The no-readback/no-managed-copy gate rejects `AHardwareBuffer_lock` and
+`glReadPixels` in the GPU renderer, heap-building primitives in its warmed
+render function, and managed frame-buffer allocation/copy primitives in Kotlin
+dispatch. A fixed damaged-region staging buffer completes 1,000 conversions
+with zero measured Rust allocations. The physical Samsung run recorded 1,688
+live compositor dispatches, zero JNI array-copy bytes, zero Kotlin-copy bytes,
+GPU upload/composition, and zero CPU conversion/readback. The wider service and
+debug probe still allocated bounded ART objects, so the claim applies to the
+frame path rather than the entire Android process.
+
 Hardware key, repeat, and modifier delivery no longer clones focused
 `WlKeyboard` resources into a temporary vector. Focused resources stream in
 retained order through a reusable live/same-client iterator; accepted events

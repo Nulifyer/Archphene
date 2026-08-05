@@ -141,7 +141,7 @@ copying.
   `AHardwareBuffer` ring, upload only changed SHM regions into retained textures,
   and GPU-compose the output. Keep the current CPU conversion path as the
   mandatory fallback.
-- [ ] Prove the GPU-composition path uses no `AHardwareBuffer_lock`,
+- [x] Prove the GPU-composition path uses no `AHardwareBuffer_lock`,
   `glReadPixels`, full-frame Kotlin/JNI copies, or per-frame managed allocation.
 - [ ] Extend the private virpipe/vtest contract with a host-allocated,
   AHardwareBuffer-backed presentable resource. Scope every resource and fence to
