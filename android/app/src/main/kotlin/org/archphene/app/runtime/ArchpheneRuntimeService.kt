@@ -2765,6 +2765,9 @@ class ArchpheneRuntimeService : Service() {
         private val LAUNCHER_PACKAGE =
             Regex("org\\.archphene\\.linux\\.p[0-9a-f]{32}")
         private val LAUNCHER_DESCRIPTOR = Regex("[0-9a-f]{64}")
+        private const val LAUNCHER_MARKER_CATEGORY =
+            "org.archphene.category.GENERATED_APP_SHELL"
+        private const val LAUNCHER_ACTIVITY_CLASS = "org.archphene.launcher.LauncherActivity"
         private const val LAUNCHER_STATUS_NEEDS_PUBLISH = 1
         private const val LAUNCHER_STATUS_AWAITING_INSTALL = 3
         private const val LAUNCHER_STATUS_NEEDS_REMOVAL = 5
@@ -6637,6 +6640,7 @@ class ArchpheneRuntimeService : Service() {
         }
         val signer = LauncherApkSigner.signerSha256()
         val templateDigest = LauncherApkAssembler.templateDigestHex(this)
+        val visibleMarkerPackages = visibleLauncherMarkerPackages()
         val activeInstallerSessions =
             runCatching {
                 packageManager.packageInstaller.mySessions
@@ -6656,6 +6660,8 @@ class ArchpheneRuntimeService : Service() {
                         ?: error("launcher application metadata is missing")
                     val metadata = application.metaData
                         ?: error("launcher metadata is missing")
+                    val installedTemplateDigest =
+                        metadata.getString("org.archphene.launcher.TEMPLATE_SHA256")
                     val generationValue =
                         metadata
                             .getString("org.archphene.launcher.GENERATION")
@@ -6677,6 +6683,11 @@ class ArchpheneRuntimeService : Service() {
                             "d:${row.descriptorIdHex}" &&
                             metadata.getString("org.archphene.launcher.MANAGER_PACKAGE") ==
                             packageName &&
+                            (
+                                installedTemplateDigest != "h:$templateDigest" ||
+                                    visibleMarkerPackages == null ||
+                                    row.androidPackage in visibleMarkerPackages
+                            ) &&
                             certificates.size == 1 &&
                             MessageDigest.isEqual(
                                 MessageDigest
@@ -6696,9 +6707,7 @@ class ArchpheneRuntimeService : Service() {
                                 generationValue == row.desiredGeneration &&
                                     !removalPending &&
                                     (
-                                        metadata.getString(
-                                            "org.archphene.launcher.TEMPLATE_SHA256",
-                                        ) != "h:$templateDigest" ||
+                                        installedTemplateDigest != "h:$templateDigest" ||
                                             !LauncherApkAssembler.validMetadataCapabilities(
                                                 metadata.getString(
                                                     "org.archphene.launcher.CAPABILITIES",
@@ -6799,6 +6808,35 @@ class ArchpheneRuntimeService : Service() {
                 "Could not reconcile Android launcher ${row.androidPackage}"
             }
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun visibleLauncherMarkerPackages(): Set<String>? {
+        val marker = Intent(Intent.ACTION_MAIN).addCategory(LAUNCHER_MARKER_CATEGORY)
+        val resolved =
+            runCatching {
+                packageManager.queryIntentActivities(marker, 0)
+            }.getOrElse { error ->
+                Log.w(TAG, "Could not inspect generated app-shell markers", error)
+                return null
+            }
+        val packages = HashSet<String>(minOf(resolved.size, NativeRuntime.DESKTOP_ENTRY_LIMIT))
+        for (candidate in resolved) {
+            val activity = candidate.activityInfo ?: continue
+            if (
+                activity.name != LAUNCHER_ACTIVITY_CLASS ||
+                !activity.exported ||
+                !LAUNCHER_PACKAGE.matches(activity.packageName)
+            ) {
+                continue
+            }
+            packages.add(activity.packageName)
+            if (packages.size > NativeRuntime.DESKTOP_ENTRY_LIMIT) {
+                Log.w(TAG, "Generated app-shell marker discovery exceeded its bound")
+                return null
+            }
+        }
+        return packages
     }
 
     private fun readLauncherRegistryRows(activeHandle: Long): List<LauncherRegistryRow> {

@@ -50,6 +50,7 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="org.archphene.category.GENERATED_APP_SHELL" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

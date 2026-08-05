@@ -8,6 +8,26 @@ record their state at the time of validation. The authoritative forward plan is
 [`todo.md`](../todo.md); supported application claims are maintained in the
 [compatibility matrix](compatibility-matrix.md).
 
+## Generated app-shell visibility checkpoint
+
+The generated app-shell template and manager now share the narrow
+`org.archphene.category.GENERATED_APP_SHELL` marker. The template adds it to the
+existing exported `MAIN` Activity, while the manager declares an exact marker
+intent in `<queries>` and performs bounded `queryIntentActivities` discovery.
+Only the generated package-name shape and production Activity class enter the
+marker set. A marker match never authorizes a shell: reconciliation still starts
+from the Rust registry and independently verifies package name, app-shell
+signer, descriptor digest, Android version/generation, manager package,
+template digest, capability metadata, and the manager's active PackageInstaller
+sessions. Current-template shells must also resolve through the marker.
+
+The investigation does not support removing `QUERY_ALL_PACKAGES` in the same
+release. Pre-marker shells are invisible if a user skips the migration release,
+and a hostile non-marker package occupying a deterministic generated identity
+cannot be inspected before Android rejects the signed update. Archphene retains
+the app-store visibility permission until both cases have a tested fail-closed
+migration. No broader package data is used for launcher reconciliation.
+
 ## Manager-hosted Quick launch checkpoint
 
 The Packages page now offers **Quick launch** when the exact resolved package

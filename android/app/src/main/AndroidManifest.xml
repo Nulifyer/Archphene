@@ -30,6 +30,10 @@
     <queries>
         <package android:name="org.archphene.builder" />
         <package android:name="org.archphene.builder.debug" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="org.archphene.category.GENERATED_APP_SHELL" />
+        </intent>
     </queries>
 
     <application

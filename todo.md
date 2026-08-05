@@ -114,7 +114,7 @@ its Linux environment.
 - [x] Prototype manager-hosted **Quick launch** for trying a graphical package
   without another PackageInstaller confirmation. Keep **Add to Android** as the
   explicit action that publishes the real app shell.
-- [ ] Investigate replacing `QUERY_ALL_PACKAGES` with a narrow marker intent
+- [x] Investigate replacing `QUERY_ALL_PACKAGES` with a narrow marker intent
   query for generated shells. Continue to verify every candidate by package
   name, signer, descriptor, generation, installer state, and embedded metadata.
 

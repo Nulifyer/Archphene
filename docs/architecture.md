@@ -233,12 +233,25 @@ identity, and verifies the signer, package, version, label, manager,
 descriptor, generation, and archive contents. PackageInstaller receives the
 APK only while its streamed SHA-256 still matches the verified output.
 
-Because generated package names are dynamic, they cannot be declared through a
-finite Android `<queries>` list. The manager therefore declares
-`QUERY_ALL_PACKAGES` for its app-store role and uses the visibility only to
-reconcile its registry identities. It asks the user to allow app-shell
-installation before claiming publication work, then retains Android's
-per-shell install and uninstall confirmations. Interrupted installer
+New app-shell templates add a private Archphene category to their existing
+`MAIN` Activity filter, and the manager declares the corresponding narrow
+`<queries><intent>` marker. Marker resolution is bounded and accepts only the
+exact generated package-name shape, exported production Activity class, and a
+registry-known identity; package name, signer, descriptor, generation, manager,
+template, capabilities, and active installer state are still verified
+separately. The marker is discovery evidence, not authentication.
+
+The manager still declares `QUERY_ALL_PACKAGES` for its app-store role. Removing
+it in the marker's first release would hide dormant app shells installed by an
+older template when a user skips the migration release. A hostile package that
+occupies a deterministic generated package name without declaring the marker
+would also remain invisible before PackageInstaller reports the conflict,
+preventing Archphene from verifying and quarantining it. The broad visibility
+permission therefore remains scoped to registry reconciliation until a
+skip-safe legacy migration and the non-marker collision path are proven. The
+manager asks the user to allow app-shell installation before claiming
+publication work, then retains Android's per-shell install and uninstall
+confirmations. Interrupted installer
 sessions are abandoned and requeued on manager restart; installed packages are
 adopted only after signer and embedded metadata verification. A conflicting or
 untrusted package is quarantined rather than replaced or silently removed.
