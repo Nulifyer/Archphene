@@ -4,29 +4,33 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/publish-release-apk.yml"
-CLIENT = (
-    ROOT
-    / "prototypes/linux-app-manager-stub/src/org/archpheneos/manager"
-    / "GitHubReleaseClient.java"
-)
 GREENFIELD_BUILD = ROOT / "android/app/build.gradle.kts"
+GREENFIELD_BUILDER_BUILD = ROOT / "android/builder/build.gradle.kts"
 GREENFIELD_RELEASE_BUILDER = ROOT / "scripts/build-archphene-release-apk.sh"
+GREENFIELD_RELEASE_VERIFIER = ROOT / "scripts/verify-release-apk.sh"
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
-client = CLIENT.read_text(encoding="utf-8")
 greenfield_build = GREENFIELD_BUILD.read_text(encoding="utf-8")
+greenfield_builder_build = GREENFIELD_BUILDER_BUILD.read_text(encoding="utf-8")
 greenfield_release_builder = GREENFIELD_RELEASE_BUILDER.read_text(encoding="utf-8")
+greenfield_release_verifier = GREENFIELD_RELEASE_VERIFIER.read_text(encoding="utf-8")
 
 required_workflow = (
     'push:\n    tags:\n      - "v*"',
     "Ensure release is a draft",
     "python3 scripts/test-atspi-source-contract.py",
     'args=(--verify-tag --draft',
-    "Create one-time v1.0.0 updater migration asset",
-    "if: env.VERSION_NAME == '1.0.1'",
-    'cp "$RUNNER_TEMP/$APK_X86_NAME" "$RUNNER_TEMP/$legacy_name"',
     "Archphene-x86_64-$version_name.apk",
     "Archphene-arm64-v8a-$version_name.apk",
+    "Archphene-Builder-x86_64-$version_name.apk",
+    "Archphene-Builder-arm64-v8a-$version_name.apk",
+    "bash scripts/build-archphene-release-apk.sh",
+    'unsigned="tooling/build/apk/Archphene-$abi-$VERSION_NAME-unsigned.apk"',
+    'builder_unsigned="tooling/build/apk/Archphene-Builder-$abi-$VERSION_NAME-unsigned.apk"',
+    "--prebuilt-native",
+    '--ks-pass env:KEYSTORE_PASSWORD',
+    '--key-pass env:KEY_PASSWORD',
+    'bash scripts/verify-release-apk.sh',
     'gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber',
     'gh release edit "$RELEASE_TAG" --draft=false',
     'java-version: "26"',
@@ -35,10 +39,13 @@ for value in required_workflow:
     if value not in workflow:
         raise SystemExit(f"release workflow contract missing: {value}")
 
-if workflow.count('legacy_name="Archphene-$VERSION_NAME.apk"') != 1:
-    raise SystemExit("release workflow has an unexpected ABI-neutral asset")
-if workflow.count("if: env.VERSION_NAME == '1.0.1'") != 1:
-    raise SystemExit("legacy x86 migration must be scoped only to v1.0.1")
+for forbidden in (
+    "prototypes/linux-app-manager-stub",
+    "build-linux-manager-apk.sh",
+    'legacy_name="Archphene-$VERSION_NAME.apk"',
+):
+    if forbidden in workflow:
+        raise SystemExit(f"release workflow still uses a legacy product path: {forbidden}")
 for action in (
     "actions/checkout",
     "actions/setup-java",
@@ -57,26 +64,6 @@ if workflow.index('gh release upload "$RELEASE_TAG"') > workflow.index(
 ):
     raise SystemExit("release assets must be uploaded before publication")
 
-for forbidden in (
-    "LEGACY_UNIVERSAL_VERSION",
-    "fallbackApkName",
-    "String fallbackApk",
-):
-    if forbidden in client:
-        raise SystemExit(f"self-update parser still accepts a universal fallback: {forbidden}")
-
-required_client = (
-    'String apkName = "Archphene-" + releaseAbi + "-" + version + ".apk";',
-    "List<Artifact> universalX86",
-    "List<Artifact> universalArm",
-    "List<Artifact> mixedX86",
-    "!universalX86.isEmpty()",
-    "!universalArm.isEmpty()",
-)
-for value in required_client:
-    if value not in client:
-        raise SystemExit(f"self-update ABI test contract missing: {value}")
-
 for value in (
     'providers.gradleProperty("archpheneVersionCode")',
     'providers.gradleProperty("archpheneApplicationId")',
@@ -89,20 +76,49 @@ for value in (
         raise SystemExit(f"greenfield release version contract missing: {value}")
 
 for value in (
+    'providers.gradleProperty("archpheneVersionCode")',
+    'providers.gradleProperty("archpheneVersionName")',
+    'versionCode = archpheneVersionCode?.toInt() ?: 1',
+    'versionName = archpheneVersionName ?: "0.1.0"',
+):
+    if value not in greenfield_builder_build:
+        raise SystemExit(f"Builder release version contract missing: {value}")
+
+for value in (
     'flock "$build_lock_fd"',
+    './gradlew "${gradle_args[@]}"',
+    "--prebuilt-native) prebuilt_native=true",
     '"-ParchpheneAbi=$abi"',
     '-ParchpheneApplicationId=org.archpheneos.manager',
     '"-ParchpheneVersionCode=$version_code"',
     '"-ParchpheneVersionName=$version_name"',
     ':android:app:assembleRelease',
+    ':android:builder:assembleRelease',
     'app-release-unsigned.apk',
     'Archphene-$abi-$version_name-unsigned.apk',
+    'Archphene-Builder-$abi-$version_name-unsigned.apk',
     'sha256sum "$(basename "$artifact")" > "$(basename "$checksum")"',
 ):
     if value not in greenfield_release_builder:
         raise SystemExit(f"greenfield release builder contract missing: {value}")
 
+if "--allow-unsigned" in workflow:
+    raise SystemExit("release workflow must not bypass production signing verification")
+
+for value in (
+    "package-runtime-$architecture.tsv",
+    "assets/launcher/launcher-template.apk",
+    "libarchphene_compositor.so",
+    "libarchphene_virgl_server.so",
+    "libgallium-26.1.5.so",
+    "android:pageSizeCompat",
+    "manager APK is debuggable",
+    "manager and Builder release signing identities are invalid",
+):
+    if value not in greenfield_release_verifier:
+        raise SystemExit(f"greenfield release verifier contract missing: {value}")
+
 print(
-    "Release workflow contract passed: draft-first publication, exact ABI assets, "
-    "and one-time x86 v1.0.0 migration."
+    "Release workflow contract passed: draft-first greenfield publication, exact "
+    "ABI assets, production identity, signing, and content verification."
 )

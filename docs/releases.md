@@ -1,6 +1,11 @@
 # Publishing Archphene APK releases
 
-GitHub Actions builds, verifies, and attaches the signed manager APK whenever a version tag is pushed. The build also signs an isolated Terminal companion with the same release key and embeds it in the manager APK, so users need only the manager release asset. The release is produced entirely on Ubuntu: a signature-verifying Arch container builds the package runtime and patched glibc, then Linux Android SDK tools build, align, sign, and verify the APK.
+GitHub Actions builds, signs, verifies, and attaches exact-ABI APKs when a
+version tag is pushed. The workflow builds the greenfield `android/app` manager
+with production package identity `org.archpheneos.manager` and the hidden
+`org.archphene.builder` companion from the same source revision. Both use the
+same production signing identity. Terminal functionality is integrated into the
+manager; there is no separate Terminal APK in this release path.
 
 ## One-time signing setup
 
@@ -10,61 +15,87 @@ Run:
 ./scripts/setup-github-release-signing.sh
 ```
 
-The script creates a dedicated production keystore and configures these repository Actions secrets:
+The script creates a dedicated production keystore and configures these
+repository Actions secrets:
 
 - `ARCHPHENE_RELEASE_KEYSTORE_BASE64`
 - `ARCHPHENE_RELEASE_STORE_PASSWORD`
 - `ARCHPHENE_RELEASE_KEY_ALIAS`
 - `ARCHPHENE_RELEASE_KEY_PASSWORD`
 
-The local keystore and credentials backup are stored under ignored `tooling/signing/`. Back up both files offline. Losing this signing identity prevents future APKs from updating existing installations. Never commit either file.
+The local keystore and credentials backup are stored under ignored
+`tooling/signing/`. Back up both files offline. Losing this signing identity
+prevents updates to existing installations. Never commit either file.
 
 ## Publish a release
 
 1. Ensure the release commit is on `main`.
-2. Create and push a tag using `vMAJOR.MINOR.PATCH`, such as `v1.0.1`. Suffixes such as `v1.1.0-beta.1` are accepted.
-3. The **Publish Archphene APK** workflow creates or reuses a draft release, builds and verifies both APKs, attaches every asset, and only then publishes the release.
-4. The workflow attaches:
-   - `Archphene-x86_64-<version>.apk`
-   - `Archphene-x86_64-<version>.apk.sha256`
-   - `Archphene-arm64-v8a-<version>.apk`
-   - `Archphene-arm64-v8a-<version>.apk.sha256`
+2. Create and push a tag using `vMAJOR.MINOR.PATCH`, such as `v1.1.0`. Suffixes
+   such as `v1.1.0-rc.1` are accepted.
+3. The **Publish Archphene APK** workflow creates or reuses a draft release,
+   builds and verifies all APKs, attaches every asset, and only then publishes
+   the release.
 
-Each APK contains only its matching package runtime, Terminal PTY library, compositor, GPU helper, trust data, and wrapper-template native libraries. Current managers accept only the asset for their exact supported Android ABI; an ABI-neutral filename is never treated as universal.
+The workflow attaches these APKs and a basename-scoped `.sha256` file for each:
 
-The published `v1.0.0` manager was x86_64-only but used the old `Archphene-<version>.apk` name and can discover only that naming form. The `v1.0.1` workflow therefore emits one extra, byte-identical x86_64 compatibility alias named `Archphene-1.0.1.apk`. This is a one-time updater bridge for existing `v1.0.0` x86_64 installations, not a universal APK. Android rejects it on devices without x86_64 support. After `v1.0.1`, only explicit ABI assets are published. AArch64 runtime artifacts are aligned for both 4 KB and 16 KB Android pages.
+- `Archphene-x86_64-<version>.apk`
+- `Archphene-arm64-v8a-<version>.apk`
+- `Archphene-Builder-x86_64-<version>.apk`
+- `Archphene-Builder-arm64-v8a-<version>.apk`
 
-Current upstream Arch x86_64 packages are 4 KB-only. On a 16 KB x86_64 Android system, Archphene declares Android's page-size compatibility mode so the generic system warning is not shown, presents its own precise compatibility notice, and blocks package search/install before any incompatible ELF executes. Manager and self-update functions remain available. This is a controlled unsupported-runtime state, not 16 KB compatibility for Arch x86_64 packages; those packages still need to be rebuilt with larger ELF load-segment alignment.
+Install the manager APK matching the device ABI. Install the matching Builder
+APK to enable reviewed AUR builds under the separate no-network Android UID.
+The manager rejects a Builder with a different signer, package identity, ABI,
+or network permission. Official package and integrated Terminal workflows do
+not require the Builder.
 
-The Android `versionName` comes from the release tag. The `versionCode` uses a high CI range plus the monotonic GitHub workflow run number, allowing a stable release after a prerelease with the same semantic version.
+Each manager APK contains only its matching package runtime and native
+components, including the compositor, GPU helper, capability brokers, trust
+data, Mesa runtime, and generated app-shell template. ABI-neutral filenames are
+not release assets. AArch64 runtime artifacts are aligned for 4 KiB and 16 KiB
+Android pages.
 
-The workflow can be rerun manually with **Run workflow** for an existing tag while its release remains a draft. Reruns may replace draft assets, but a published release is rejected before building. Published APKs and checksums are immutable: create a new version instead of mutating assets users may already have verified or installed. This draft-first sequence is also compatible with GitHub release immutability.
+Current upstream Arch x86_64 packages are 4 KiB-only. On a 16 KiB x86_64
+Android system, Archphene enables Android page-size compatibility mode, reports
+the unsupported package-runtime boundary, and blocks incompatible package work
+before an ELF executes. This does not make upstream x86_64 packages 16 KiB
+compatible.
+
+The Android `versionName` comes from the release tag. The `versionCode` uses a
+high CI range plus the monotonic GitHub workflow run number. Manager and Builder
+receive the same version.
+
+The workflow can be rerun manually for an existing tag while its release remains
+a draft. It rejects an already published release before building. Create a new
+version instead of mutating published APKs or checksums.
 
 ## Validate release contracts
 
-Run the fast source contract before tagging:
+Run the source contract before tagging:
 
 ```bash
 python3 scripts/test-release-workflow-contract.py
 ```
 
-It rejects publish-before-upload workflows, mutable action references, missing ABI assets, migration aliases outside `v1.0.1`, and any manager fallback to ABI-neutral assets.
-
-## Validate self-update
-
-The device regression installs an older exact-ABI manager signed by the production key, discovers and downloads the requested public GitHub Release through the manager, and accepts Android's system-owned update confirmation:
+Build and inspect unsigned local artifacts for both ABIs:
 
 ```bash
-# Current exact-ABI updater
-./scripts/test-linux-manager-github-self-update.sh --to-version 1.0.1 --rebuild-baseline
-
-# Exact-ABI updater on an attached ARM64 device
-./scripts/test-linux-manager-github-self-update.sh --serial <adb-serial> --to-version 1.0.1 --rebuild-baseline
-
-# One-time migration from the real published x86_64 v1.0.0 APK
-./scripts/test-linux-manager-github-self-update.sh --published-v100-migration --rebuild-baseline
+bash scripts/build-archphene-release-apk.sh \
+  --abi x86_64 --version-code 1000000001 --version-name 1.1.0-rc.1
+bash scripts/verify-release-apk.sh \
+  tooling/build/apk/Archphene-x86_64-1.1.0-rc.1-unsigned.apk \
+  tooling/build/apk/Archphene-Builder-x86_64-1.1.0-rc.1-unsigned.apk \
+  x86_64 1.1.0-rc.1 --allow-unsigned
 ```
 
-Use the exact-ABI command for each target. The migration mode downloads the real `v1.0.0` APK and checksum, rejects a non-x86_64 target, and verifies the old updater can consume the compatibility alias. These tests uninstall the manager package and therefore clear manager-private state, but they do not remove separately installed Linux application packages.
+The publish workflow omits `--allow-unsigned`. The verifier then requires the
+pinned production certificate for both APKs, exact package/version/ABI data,
+non-debuggable applications, 16 KiB ZIP alignment and compatibility metadata,
+the no-network hidden Builder boundary, the package-runtime catalog, required
+native components, and the generated app-shell template.
 
-The published `v1.0.1` release passed independent checksum, exact-ABI, embedded Terminal, alignment, and production-signer verification. Live `0.9.0 -> 1.0.1` updates pass on the x86_64 emulator and physical AArch64 Samsung. The real published x86_64 `v1.0.0 -> v1.0.1` migration also passes on a wiped 16 KB emulator, including the old release compatibility warning, GitHub discovery/download, Android confirmation, replacement, and reconciled restart.
+## Previous prototype release
+
+The published `v1.0.1` assets and their one-time `v1.0.0` x86_64 updater alias
+remain historical, immutable prototype artifacts. The greenfield tag workflow
+does not rebuild, rename, or preserve that legacy distribution format.

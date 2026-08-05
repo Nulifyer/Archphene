@@ -4,6 +4,7 @@
     <application
         android:allowBackup="false"
         android:label="Archphene Builder"
+        android:pageSizeCompat="enabled"
         android:supportsRtl="true">
 
         <service

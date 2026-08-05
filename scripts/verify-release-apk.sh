@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 MANAGER_APK ABI VERSION" >&2
+if [[ $# -lt 4 || $# -gt 5 ]]; then
+  echo "usage: $0 MANAGER_APK BUILDER_APK ABI VERSION [--allow-unsigned]" >&2
   exit 2
 fi
 
 manager_apk="$1"
-abi="$2"
-version="$3"
+builder_apk="$2"
+abi="$3"
+version="$4"
+allow_unsigned=false
+if [[ ${5:-} == --allow-unsigned ]]; then
+  allow_unsigned=true
+elif [[ -n ${5:-} ]]; then
+  echo "unknown release verification option: $5" >&2
+  exit 2
+fi
 sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 build_tools_version="${ANDROID_BUILD_TOOLS_VERSION:-36.0.0}"
 bt="$sdk/build-tools/$build_tools_version"
 
 [[ -f "$manager_apk" ]] || { echo "manager APK is missing" >&2; exit 1; }
+[[ -f "$builder_apk" ]] || { echo "Builder APK is missing" >&2; exit 1; }
 case "$abi" in
   x86_64|arm64-v8a) ;;
   *) echo "release ABI must be x86_64 or arm64-v8a" >&2; exit 2 ;;
@@ -40,7 +49,8 @@ command -v unzip >/dev/null || { echo "unzip is required" >&2; exit 1; }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-terminal_apk="$work/archphene-terminal.apk"
+entries="$work/entries"
+unzip -Z1 "$manager_apk" > "$entries"
 
 manager_badging="$("$aapt2" dump badging "$manager_apk")"
 grep -F "package: name='org.archpheneos.manager'" <<<"$manager_badging" >/dev/null || {
@@ -57,48 +67,73 @@ manager_version_code="$(sed -n "s/^package: .* versionCode='\([0-9][0-9]*\)'.*/\
   echo "manager native ABI set does not equal $abi" >&2; exit 1;
 }
 manager_manifest="$("$aapt2" dump xmltree "$manager_apk" --file AndroidManifest.xml)"
+if grep -Fq 'application-debuggable' <<<"$manager_badging"; then
+  echo "manager APK is debuggable" >&2; exit 1
+fi
 grep -F 'android:pageSizeCompat' <<<"$manager_manifest" | grep -F '=32' >/dev/null || {
   echo "manager does not enable Android page-size compatibility mode" >&2; exit 1;
 }
 grep -F 'android:extractNativeLibs' <<<"$manager_manifest" | grep -F '=true' >/dev/null || {
   echo "manager does not enable native-library extraction" >&2; exit 1;
 }
-manager_catalog="assets/package-runtime/manager-native-${abi/arm64-v8a/aarch64}.tsv"
-unzip -Z1 "$manager_apk" | grep -Fx "$manager_catalog" >/dev/null || {
+architecture="$abi"
+[[ "$architecture" == arm64-v8a ]] && architecture=aarch64
+manager_catalog="assets/package-runtime-$architecture.tsv"
+grep -Fx "$manager_catalog" "$entries" >/dev/null || {
   echo "manager native soname catalog is missing" >&2; exit 1;
 }
 catalog_file="$work/manager-native.tsv"
 unzip -p "$manager_apk" "$manager_catalog" > "$catalog_file"
-declare -A catalog_logical=() catalog_packaged=()
+declare -A catalog_logical=() packaged_sizes=()
 catalog_count=0
 has_libc=false
 has_libalpm=false
-while IFS=$'\t' read -r logical packaged expected_hash expected_size extra; do
-  [[ -n "$logical" && "$logical" != \#* ]] || continue
-  [[ -z "$extra" && "$logical" =~ ^[A-Za-z0-9@._+-]{1,128}$ \
+has_loader=false
+has_pacman=false
+has_mesa=false
+while IFS=$'\t' read -r role logical packaged expected_size extra; do
+  [[ -n "$role" && "$role" != \#* ]] || continue
+  [[ -z "$extra" && "$role" =~ ^(tool|keyring|library|loader|ownertrust)$ \
+      && "$logical" =~ ^[A-Za-z0-9@._+-]{1,128}$ \
       && "$packaged" =~ ^lib[A-Za-z0-9_]+\.so$ \
-      && "$expected_hash" =~ ^[0-9a-f]{64}$ \
       && "$expected_size" =~ ^[1-9][0-9]*$ \
-      && -z "${catalog_logical[$logical]:-}" \
-      && -z "${catalog_packaged[$packaged]:-}" ]] || {
+      && -z "${catalog_logical[$logical]:-}" ]] || {
     echo "manager native soname catalog row is invalid" >&2; exit 1;
   }
   catalog_logical[$logical]=1
-  catalog_packaged[$packaged]=1
-  payload="$work/$packaged"
-  unzip -p "$manager_apk" "lib/$abi/$packaged" > "$payload"
-  [[ "$(wc -c < "$payload")" == "$expected_size" \
-      && "$(sha256sum "$payload" | cut -d ' ' -f 1)" == "$expected_hash" ]] || {
-    echo "manager native soname payload failed verification: $packaged" >&2; exit 1;
-  }
+  if [[ -n "${packaged_sizes[$packaged]:-}" ]]; then
+    [[ "${packaged_sizes[$packaged]}" == "$expected_size" ]] || {
+      echo "manager native alias sizes disagree: $packaged" >&2; exit 1;
+    }
+  else
+    packaged_sizes[$packaged]="$expected_size"
+    payload="$work/$packaged"
+    unzip -p "$manager_apk" "lib/$abi/$packaged" > "$payload"
+    [[ "$(wc -c < "$payload")" == "$expected_size" ]] || {
+      echo "manager native soname payload failed verification: $packaged" >&2; exit 1;
+    }
+  fi
   if [[ "$logical" == libc.so.6 ]]; then has_libc=true; fi
   if [[ "$logical" == libalpm.so.16 ]]; then has_libalpm=true; fi
+  if [[ "$logical" == @loader ]]; then has_loader=true; fi
+  if [[ "$logical" == @pacman ]]; then has_pacman=true; fi
+  if [[ "$logical" == libgallium-26.1.5.so ]]; then has_mesa=true; fi
   catalog_count=$((catalog_count + 1))
 done < "$catalog_file"
-[[ "$catalog_count" -gt 0 && "$has_libc" == true && "$has_libalpm" == true ]] || {
+[[ "$catalog_count" -le 256 && "$has_libc" == true && "$has_libalpm" == true \
+    && "$has_loader" == true && "$has_pacman" == true && "$has_mesa" == true ]] || {
   echo "manager native soname catalog lacks required entries" >&2; exit 1;
 }
-invalid_native="$(unzip -Z1 "$manager_apk" | grep "^lib/$abi/" \
+for required in \
+  libarchphene_android.so libarchphene_compositor.so \
+  libarchphene_dbus_daemon.so libarchphene_portal_service.so \
+  libarchphene_virgl_server.so libarchphene_pulseaudio.so \
+  libarchphene_pipewire_camera.so; do
+  grep -Fx "lib/$abi/$required" "$entries" >/dev/null || {
+    echo "manager APK lacks required native component: $required" >&2; exit 1;
+  }
+done
+invalid_native="$(grep "^lib/$abi/" "$entries" \
   | grep -Ev "^lib/$abi/lib[A-Za-z0-9_.+-]+\\.so$" || true)"
 [[ -z "$invalid_native" ]] || {
   echo "manager APK contains non-extractable native library names:" >&2
@@ -107,36 +142,60 @@ invalid_native="$(unzip -Z1 "$manager_apk" | grep "^lib/$abi/" \
 }
 "$zipalign" -c -P 16 -v 4 "$manager_apk" >/dev/null
 
-unzip -p "$manager_apk" assets/package-runtime/archphene-terminal.apk > "$terminal_apk"
-[[ -s "$terminal_apk" ]] || { echo "embedded Terminal APK is missing" >&2; exit 1; }
-terminal_badging="$("$aapt2" dump badging "$terminal_apk")"
-grep -F "package: name='org.archpheneos.terminal'" <<<"$terminal_badging" >/dev/null || {
-  echo "Terminal package name is invalid" >&2; exit 1;
+builder_badging="$("$aapt2" dump badging "$builder_apk")"
+grep -F "package: name='org.archphene.builder'" <<<"$builder_badging" >/dev/null || {
+  echo "Builder package name is invalid" >&2; exit 1;
 }
-grep -F "versionName='$version'" <<<"$terminal_badging" >/dev/null || {
-  echo "Terminal versionName does not equal $version" >&2; exit 1;
+grep -F "versionName='$version'" <<<"$builder_badging" >/dev/null || {
+  echo "Builder versionName does not equal $version" >&2; exit 1;
 }
-terminal_version_code="$(sed -n "s/^package: .* versionCode='\([0-9][0-9]*\)'.*/\1/p" <<<"$terminal_badging")"
-[[ "$terminal_version_code" == "$manager_version_code" ]] || {
-  echo "manager and Terminal versionCode values differ" >&2; exit 1;
+builder_version_code="$(sed -n "s/^package: .* versionCode='\([0-9][0-9]*\)'.*/\1/p" <<<"$builder_badging")"
+[[ "$builder_version_code" == "$manager_version_code" ]] || {
+  echo "manager and Builder versionCode values differ" >&2; exit 1;
 }
-[[ "$(grep '^native-code:' <<<"$terminal_badging")" == "native-code: '$abi'" ]] || {
-  echo "Terminal native ABI set does not equal $abi" >&2; exit 1;
+[[ "$(grep '^native-code:' <<<"$builder_badging")" == "native-code: '$abi'" ]] || {
+  echo "Builder native ABI set does not equal $abi" >&2; exit 1;
 }
-terminal_manifest="$("$aapt2" dump xmltree "$terminal_apk" --file AndroidManifest.xml)"
-grep -F 'android:pageSizeCompat' <<<"$terminal_manifest" | grep -F '=32' >/dev/null || {
-  echo "Terminal does not enable Android page-size compatibility mode" >&2; exit 1;
+if grep -Eq "^(application-debuggable|launchable-activity):" <<<"$builder_badging"; then
+  echo "Builder APK is debuggable or exposes a launcher Activity" >&2; exit 1
+fi
+if grep -Fq "uses-permission: name='android.permission.INTERNET'" <<<"$builder_badging"; then
+  echo "Builder APK requests network access" >&2; exit 1
+fi
+builder_manifest="$("$aapt2" dump xmltree "$builder_apk" --file AndroidManifest.xml)"
+grep -F 'android:pageSizeCompat' <<<"$builder_manifest" | grep -F '=32' >/dev/null || {
+  echo "Builder does not enable Android page-size compatibility mode" >&2; exit 1;
 }
-"$zipalign" -c -P 16 -v 4 "$terminal_apk" >/dev/null
+grep -F 'org.archphene.permission.BIND_BUILDER' <<<"$builder_manifest" >/dev/null || {
+  echo "Builder does not require the manager signature permission" >&2; exit 1;
+}
+"$zipalign" -c -P 16 -v 4 "$builder_apk" >/dev/null
 
-signer() {
-  "$apksigner" verify --print-certs "$1" 2>/dev/null \
-    | sed -n 's/^Signer #1 certificate SHA-256 digest: //p'
+launcher_apk="$work/launcher-template.apk"
+unzip -p "$manager_apk" assets/launcher/launcher-template.apk > "$launcher_apk"
+launcher_badging="$("$aapt2" dump badging "$launcher_apk")"
+grep -F "package: name='org.archphene.linux.p00000000000000000000000000000000'" \
+  <<<"$launcher_badging" >/dev/null || {
+  echo "generated app-shell template package is invalid" >&2; exit 1;
 }
-manager_signer="$(signer "$manager_apk")"
-terminal_signer="$(signer "$terminal_apk")"
-[[ "$manager_signer" =~ ^[0-9a-f]{64}$ && "$manager_signer" == "$terminal_signer" ]] || {
-  echo "manager and Terminal signing identities differ" >&2; exit 1;
-}
+if grep -Fq 'application-debuggable' <<<"$launcher_badging"; then
+  echo "generated app-shell template is debuggable" >&2; exit 1
+fi
+
+manager_signer=unsigned
+if [[ "$allow_unsigned" == false ]]; then
+  manager_signer="$(
+    "$apksigner" verify --print-certs "$manager_apk" 2>/dev/null \
+      | sed -n 's/^Signer #1 certificate SHA-256 digest: //p'
+  )"
+  expected_signer=fb89debcc1d5057ba81959928ad8bb73aa6bf7be932e145e890224fdbec2928f
+  builder_signer="$(
+    "$apksigner" verify --print-certs "$builder_apk" 2>/dev/null \
+      | sed -n 's/^Signer #1 certificate SHA-256 digest: //p'
+  )"
+  [[ "$manager_signer" == "$expected_signer" && "$builder_signer" == "$manager_signer" ]] || {
+    echo "manager and Builder release signing identities are invalid" >&2; exit 1;
+  }
+fi
 
 echo "Release APK contract passed: $abi $version signer $manager_signer"

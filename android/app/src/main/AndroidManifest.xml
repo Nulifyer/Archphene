@@ -43,6 +43,7 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@drawable/ic_archphene"
         android:label="@string/app_name"
+        android:pageSizeCompat="enabled"
         android:supportsRtl="true"
         android:theme="@style/Theme.Archphene">
 

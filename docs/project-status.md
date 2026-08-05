@@ -291,27 +291,27 @@ existing debug allocation, JNI, latency, memory, lifecycle, and soak gates.
 
 The production manager identity is now fixed as `org.archpheneos.manager`; the
 existing `org.archphene.app.debug` fixtures remain separate clean-development
-installs. The greenfield manager is not ready for tag publication. Its local unsigned
-release APK passes the optimization gate. The build now accepts bounded
-`archpheneVersionCode` and semantic `archpheneVersionName` Gradle properties
-and rejects invalid values before task execution. Exact-ABI release builds can
-therefore carry a prospective tag version without changing source. Both
-`arm64-v8a` and `x86_64` release builds produced only their requested native ABI
-with version `1.1.0-rc.1` and version code `1000001234`; over-limit codes and an
-incomplete semantic version were rejected during configuration. Release
-migration can call `build-archphene-release-apk.sh`, which serializes the
-shared Gradle output, verifies exact version and ABI badging, and publishes a
-stable unsigned artifact plus basename-scoped SHA-256 for signing. Two
-same-commit x86_64 rebuilds of version `1.1.0-rc.3` and code `1000001236` were
-byte-identical at
-`2967f73374276b04bcdae8b8b46a33402925296e6067fdd69ca117b2528c7be5`.
-The current tag workflow and
-`verify-release-apk.sh` still build and validate
-`prototypes/linux-app-manager-stub` as `org.archpheneos.manager`. Publishing a
-new tag now would therefore release the legacy manager rather than the tested
-greenfield application. Release migration must still invoke the staged builder
-for both ABIs and teach the verifier the new package contract. Existing release-signing
-secrets are present, and the draft-first workflow source contract passes; no tag
+installs. The greenfield release path now targets the manager and hidden Builder
+instead of the legacy prototype. It accepts bounded `archpheneVersionCode` and
+semantic `archpheneVersionName` Gradle properties and rejects invalid values
+before task execution. The serialized release builder emits exact-ABI manager
+and Builder APKs with matching versions and basename-scoped checksums.
+
+Version `1.1.0-rc.5`, code `1000001238`, rebuilt byte-identically for both ABIs.
+The manager digests were
+`353d70a588bc93eff13aa5ccfaecf382ebbe2dea282693cd08107cade57f521e`
+for x86_64 and
+`162bd44cd3d6a9017fa78382c3c30440b5ac59c553d0008cbe478bb53d5f4c30`
+for arm64-v8a. Builder digests were
+`551ae41d81d0851572376bbb2b996dca732b34cd1bbf5db39ac650522526c6aa`
+and
+`f2e6a738051c4630350562f8361c2e64b8f621d25c075d55094872b3f5bbf0df`,
+respectively. The verifier checks production identities, matching versions and
+signers, non-debuggable output, exact ABI, alignment, package-runtime content,
+generated app-shell metadata, and the Builder's hidden no-network boundary.
+Local unsigned structural verification passed; the workflow retains the
+production certificate gate for signed artifacts. Existing release-signing
+secrets are present, and the draft-first workflow source contract passes. No tag
 or remote release was created during this audit.
 
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung

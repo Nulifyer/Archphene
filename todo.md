@@ -290,7 +290,7 @@ and reproducible artifacts.
   a separate curated product rather than weakening the main architecture.
 - [ ] Complete the public-repository provenance, SBOM, licensing, secret,
   reproducibility, signing, update, rollback, and release-artifact audit.
-  - [ ] Migrate the tag workflow from `prototypes/linux-app-manager-stub` to
+  - [x] Migrate the tag workflow from `prototypes/linux-app-manager-stub` to
     `android/app`. Use the new-product `org.archpheneos.manager` identity, inject
     the tag version, emit exact-ABI assets, and update the verifier before
     creating a new tag.

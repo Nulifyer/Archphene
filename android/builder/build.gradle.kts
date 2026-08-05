@@ -7,12 +7,28 @@ dependencies {
 }
 
 val archpheneAbi = providers.gradleProperty("archpheneAbi").orNull
+val archpheneVersionCode = providers.gradleProperty("archpheneVersionCode").orNull
+val archpheneVersionName = providers.gradleProperty("archpheneVersionName").orNull
 val sourceValidation =
     providers.gradleProperty("archpheneSourceValidation")
         .map(String::toBooleanStrict)
         .orElse(false)
 require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
     "archpheneAbi must be x86_64 or arm64-v8a"
+}
+require(
+    archpheneVersionCode == null ||
+        (archpheneVersionCode.all(Char::isDigit) &&
+            archpheneVersionCode.toLong() in 1..2_100_000_000L),
+) {
+    "archpheneVersionCode must be an Android versionCode from 1 through 2100000000"
+}
+require(
+    archpheneVersionName == null ||
+        Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
+            .matches(archpheneVersionName),
+) {
+    "archpheneVersionName must use MAJOR.MINOR.PATCH syntax"
 }
 
 android {
@@ -24,8 +40,8 @@ android {
         applicationId = "org.archphene.builder"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = archpheneVersionCode?.toInt() ?: 1
+        versionName = archpheneVersionName ?: "0.1.0"
         if (archpheneAbi != null) {
             ndk {
                 abiFilters += archpheneAbi

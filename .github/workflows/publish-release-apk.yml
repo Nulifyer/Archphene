@@ -54,6 +54,8 @@ jobs:
             echo "VERSION_CODE=$((1000000000 + GITHUB_RUN_NUMBER))"
             echo "APK_X86_NAME=Archphene-x86_64-$version_name.apk"
             echo "APK_ARM64_NAME=Archphene-arm64-v8a-$version_name.apk"
+            echo "BUILDER_X86_NAME=Archphene-Builder-x86_64-$version_name.apk"
+            echo "BUILDER_ARM64_NAME=Archphene-Builder-arm64-v8a-$version_name.apk"
           } >> "$GITHUB_ENV"
 
       - name: Validate release contracts
@@ -95,7 +97,7 @@ jobs:
           bash scripts/build-ci-package-runtime.sh
           bash scripts/build-ci-package-runtime-arm64.sh
 
-      - name: Build shared Android compositor and Terminal PTY
+      - name: Build greenfield Rust JNI and compositor
         run: |
           docker build -f containers/android-native.Containerfile \
             -t archphene-android-native:release .
@@ -103,25 +105,28 @@ jobs:
             docker run --rm \
               -v "$PWD:/workspace" \
               -v archphene-cargo-registry:/opt/cargo/registry \
-              -w /workspace/native/archphene-compositor \
+              -w /workspace \
+              -e CARGO_TARGET_DIR=/workspace/tooling/build/release-rust \
+              -e RUSTUP_TOOLCHAIN=1.88.0 \
               archphene-android-native:release \
-              bash -lc "cargo build --target $target --release --locked"
+              bash -lc "cargo build --target $target --release --locked \
+                -p archphene-android -p archphene-builder -p archphene-compositor"
           done
-          docker run --rm \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            archphene-android-native:release \
-            bash -lc '
-              set -euo pipefail
-              ndk="$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
-              mkdir -p native/archphene-terminal/out/{x86_64,aarch64}
-              "$ndk/x86_64-linux-android29-clang" -shared -fPIC -O2 -Wall -Wextra -Werror \
-                -Wl,-z,relro,-z,now -o native/archphene-terminal/out/x86_64/libtermux.so \
-                native/archphene-terminal/terminal_pty.c
-              "$ndk/aarch64-linux-android29-clang" -shared -fPIC -O2 -Wall -Wextra -Werror \
-                -Wl,-z,relro,-z,now -o native/archphene-terminal/out/aarch64/libtermux.so \
-                native/archphene-terminal/terminal_pty.c
-            '
+          for entry in \
+            x86_64-linux-android:x86_64 \
+            aarch64-linux-android:arm64-v8a; do
+            target="${entry%%:*}"
+            abi="${entry##*:}"
+            install -Dm755 \
+              "tooling/build/release-rust/$target/release/libarchphene_android.so" \
+              "android/app/build/generated/jniLibs/$abi/libarchphene_android.so"
+            install -Dm755 \
+              "tooling/build/release-rust/$target/release/libarchphene_builder.so" \
+              "android/builder/build/generated/jniLibs/$abi/libarchphene_builder.so"
+            install -Dm755 \
+              "tooling/build/release-rust/$target/release/libarchphene_compositor.so" \
+              "android/app/build/generated/compositorJniLibs/$abi/libarchphene_compositor.so"
+          done
 
       - name: Build Android capability and desktop integration payloads
         run: |
@@ -204,28 +209,60 @@ jobs:
             }
           done
           key_path="$RUNNER_TEMP/archphene-release.keystore"
+          umask 077
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$key_path"
           echo "KEYSTORE_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Build signed ABI-specific APKs on Linux
         run: |
           for abi in x86_64 arm64-v8a; do
-            ARCHPHENE_ABI="$abi" bash scripts/build-linux-manager-apk.sh
             if [[ "$abi" == "x86_64" ]]; then
               name="$APK_X86_NAME"
+              builder_name="$BUILDER_X86_NAME"
             else
               name="$APK_ARM64_NAME"
+              builder_name="$BUILDER_ARM64_NAME"
             fi
+            bash scripts/build-archphene-release-apk.sh \
+              --abi "$abi" \
+              --version-code "$VERSION_CODE" \
+              --version-name "$VERSION_NAME" \
+              --prebuilt-native
+            unsigned="tooling/build/apk/Archphene-$abi-$VERSION_NAME-unsigned.apk"
+            builder_unsigned="tooling/build/apk/Archphene-Builder-$abi-$VERSION_NAME-unsigned.apk"
+            aligned="$RUNNER_TEMP/Archphene-$abi-aligned.apk"
+            builder_aligned="$RUNNER_TEMP/Archphene-Builder-$abi-aligned.apk"
+            asset="$RUNNER_TEMP/$name"
+            builder_asset="$RUNNER_TEMP/$builder_name"
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" \
+              -P 16 -f 4 "$unsigned" "$aligned"
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" \
+              -P 16 -f 4 "$builder_unsigned" "$builder_aligned"
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+              --ks "$KEYSTORE_PATH" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD \
+              --key-pass env:KEY_PASSWORD \
+              --out "$asset" \
+              "$aligned"
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+              --ks "$KEYSTORE_PATH" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD \
+              --key-pass env:KEY_PASSWORD \
+              --out "$builder_asset" \
+              "$builder_aligned"
             bash scripts/verify-release-apk.sh \
-              prototypes/linux-app-manager-stub/out-linux/archphene.apk \
+              "$asset" \
+              "$builder_asset" \
               "$abi" "$VERSION_NAME"
-            cp prototypes/linux-app-manager-stub/out-linux/archphene.apk \
-              "$RUNNER_TEMP/$name"
           done
 
       - name: Verify release artifacts
         run: |
-          for name in "$APK_X86_NAME" "$APK_ARM64_NAME"; do
+          for name in \
+            "$APK_X86_NAME" "$APK_ARM64_NAME" \
+            "$BUILDER_X86_NAME" "$BUILDER_ARM64_NAME"; do
             asset="$RUNNER_TEMP/$name"
             "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
               verify --verbose --print-certs "$asset"
@@ -234,15 +271,6 @@ jobs:
             sha256sum "$asset" | sed "s|  .*|  $name|" \
               > "$asset.sha256"
           done
-
-      - name: Create one-time v1.0.0 updater migration asset
-        if: env.VERSION_NAME == '1.0.1'
-        run: |
-          legacy_name="Archphene-$VERSION_NAME.apk"
-          cp "$RUNNER_TEMP/$APK_X86_NAME" "$RUNNER_TEMP/$legacy_name"
-          sha256sum "$RUNNER_TEMP/$legacy_name" | sed "s|  .*|  $legacy_name|" \
-            > "$RUNNER_TEMP/$legacy_name.sha256"
-          echo "LEGACY_X86_NAME=$legacy_name" >> "$GITHUB_ENV"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -260,12 +288,10 @@ jobs:
             "$RUNNER_TEMP/$APK_X86_NAME.sha256"
             "$RUNNER_TEMP/$APK_ARM64_NAME"
             "$RUNNER_TEMP/$APK_ARM64_NAME.sha256"
+            "$RUNNER_TEMP/$BUILDER_X86_NAME"
+            "$RUNNER_TEMP/$BUILDER_X86_NAME.sha256"
+            "$RUNNER_TEMP/$BUILDER_ARM64_NAME"
+            "$RUNNER_TEMP/$BUILDER_ARM64_NAME.sha256"
           )
-          if [[ -n "${LEGACY_X86_NAME:-}" ]]; then
-            assets+=(
-              "$RUNNER_TEMP/$LEGACY_X86_NAME"
-              "$RUNNER_TEMP/$LEGACY_X86_NAME.sha256"
-            )
-          fi
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           gh release edit "$RELEASE_TAG" --draft=false
