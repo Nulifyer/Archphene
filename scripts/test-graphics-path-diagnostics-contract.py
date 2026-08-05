@@ -161,6 +161,22 @@ require(
     "vtest_server_open_archphene_present_socket();",
 )
 require(
+    "native/android-gpu-helper/patches/0009-archphene-ahb-resource.patch",
+    "VCMD_ARCHPHENE_RESOURCE_CREATE_AHB 39",
+    "VCMD_ARCHPHENE_PRESENT_AHB 40",
+    "AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM",
+    "AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE",
+    "AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT",
+    "virgl_renderer_resource_import_eglimage",
+    "archphene_live_slots",
+    "archphene_present_outstanding",
+    "args.width * args.height > 33554432",
+    "glFinish();",
+    "vtest_server_send_archphene_resource",
+    "vtest_server_send_archphene_present",
+    "vtest_server_close_archphene_present_socket();",
+)
+require(
     "native/archphene-compositor/src/gpu_present_transport.rs",
     "MAX_UNIX_SOCKET_PATH_BYTES: usize = 103",
     "libc::SO_PEERCRED",

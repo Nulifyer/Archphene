@@ -1,0 +1,428 @@
+diff --git a/vtest/meson.build b/vtest/meson.build
+index c2bd278..600d1bb 100644
+--- a/vtest/meson.build
++++ b/vtest/meson.build
+@@ -41,6 +41,9 @@ vtest_depends = [
+    drm_uapi_dep,
+    mesa_dep,
+ ]
++if with_host_android
++   vtest_depends += [epoxy_dep, cc.find_library('android', required: true)]
++endif
+ 
+ if with_tracing == 'percetto'
+    vtest_depends += [percetto_dep]
+diff --git a/vtest/vtest.h b/vtest/vtest.h
+index b2708a2..e1e65b2 100644
+--- a/vtest/vtest.h
++++ b/vtest/vtest.h
+@@ -113,3 +113,13 @@ int vtest_drm_sync_query(uint32_t length_dw);
+ int vtest_drm_sync_transfer(uint32_t length_dw);
+ int vtest_resource_export_fd(uint32_t length_dw);
++int vtest_archphene_resource_create_ahb(uint32_t length_dw);
++int vtest_archphene_present_ahb(uint32_t length_dw);
++
++bool vtest_server_archphene_present_enabled(void);
++int vtest_server_send_archphene_resource(uint32_t resource_id, uint16_t slot,
++                                         uint32_t width, uint32_t height,
++                                         uint64_t estimated_bytes, void *buffer);
++int vtest_server_send_archphene_present(uint32_t resource_id,
++                                        uint64_t fence_sequence);
++int vtest_server_send_archphene_drop(uint32_t resource_id);
+ 
+diff --git a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
+index 1bd515c..0006a8a 100644
+--- a/vtest/vtest_protocol.h
++++ b/vtest/vtest_protocol.h
+@@ -94,6 +94,10 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
+ 
++/* Archphene private extension; valid only with the authenticated APHB channel. */
++#define VCMD_ARCHPHENE_RESOURCE_CREATE_AHB 39
++#define VCMD_ARCHPHENE_PRESENT_AHB 40
++
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+ #define VCMD_RES_CREATE_TARGET 1
+@@ -107,6 +111,12 @@
+ #define VCMD_RES_CREATE_NR_SAMPLES 9
+ /* resp res_id since protocol version 3 */
+ 
++#define VCMD_ARCHPHENE_RES_CREATE_AHB_SIZE VCMD_RES_CREATE_SIZE
++#define VCMD_ARCHPHENE_RES_CREATE_AHB_RESP_SIZE 1
++#define VCMD_ARCHPHENE_PRESENT_AHB_SIZE 1
++#define VCMD_ARCHPHENE_PRESENT_AHB_RES_HANDLE 0
++#define VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE 2
++
+ #define VCMD_RES_CREATE2_SIZE 11
+ #define VCMD_RES_CREATE2_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+ #define VCMD_RES_CREATE2_TARGET 1
+diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
+index ba4feb1..e2ef352 100644
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -34,6 +34,11 @@
+ #include <fcntl.h>
+ #include <limits.h>
+ #include <c11/threads.h>
++#ifdef __ANDROID__
++#include <android/hardware_buffer.h>
++#include <epoxy/egl.h>
++#include <epoxy/gl.h>
++#endif
+ 
+ #include "virgl_hw.h"
+ #include "virglrenderer.h"
+@@ -82,6 +87,13 @@ struct vtest_resource {
+    uint32_t res_id;
+ 
+    struct iovec iov;
++#ifdef __ANDROID__
++   AHardwareBuffer *archphene_buffer;
++   EGLImageKHR archphene_image;
++   uint8_t archphene_slot;
++   bool archphene_registered;
++   bool archphene_present_outstanding;
++#endif
+ };
+ 
+ struct vtest_sync {
+@@ -252,6 +264,11 @@ static struct vtest_renderer renderer = {
+    .next_sync_id = 1,
+ };
+ 
++#ifdef __ANDROID__
++static uint8_t archphene_live_slots;
++static uint64_t archphene_fence_sequence;
++#endif
++
+ static struct vtest_resource *vtest_new_resource(uint32_t client_res_id)
+ {
+    struct vtest_resource *res;
+@@ -271,6 +288,13 @@ static struct vtest_resource *vtest_new_resource(uint32_t client_res_id)
+    res->res_id = client_res_id ? client_res_id : res->server_res_id;
+    res->iov.iov_base = NULL;
+    res->iov.iov_len = 0;
++#ifdef __ANDROID__
++   res->archphene_buffer = NULL;
++   res->archphene_image = EGL_NO_IMAGE_KHR;
++   res->archphene_slot = UINT8_MAX;
++   res->archphene_registered = false;
++   res->archphene_present_outstanding = false;
++#endif
+ 
+    return res;
+ }
+@@ -282,6 +306,17 @@ static void vtest_unref_resource(struct vtest_resource *res)
+     */
+    virgl_renderer_resource_unref(res->res_id);
+ 
++#ifdef __ANDROID__
++   if (res->archphene_registered && !res->archphene_present_outstanding)
++      (void)vtest_server_send_archphene_drop(res->res_id);
++   if (res->archphene_image != EGL_NO_IMAGE_KHR)
++      eglDestroyImageKHR(eglGetCurrentDisplay(), res->archphene_image);
++   if (res->archphene_buffer)
++      AHardwareBuffer_release(res->archphene_buffer);
++   if (res->archphene_slot < 3)
++      archphene_live_slots &= (uint8_t)~(1u << res->archphene_slot);
++#endif
++
+    if (res->iov.iov_base)
+       munmap(res->iov.iov_base, res->iov.iov_len);
+ 
+@@ -1346,6 +1381,155 @@ int vtest_create_resource2(UNUSED uint32_t length_dw)
+    return vtest_create_resource_internal(ctx, VCMD_RESOURCE_CREATE2, &args, shm_size);
+ }
+ 
++int vtest_archphene_resource_create_ahb(uint32_t length_dw)
++{
++#ifdef __ANDROID__
++   static const EGLint image_attributes[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
++                                              EGL_NONE };
++   struct virgl_renderer_resource_create_args args;
++   AHardwareBuffer_Desc requested = { 0 };
++   AHardwareBuffer_Desc actual = { 0 };
++   struct vtest_context *ctx = vtest_get_current_context();
++   struct vtest_resource *res = NULL;
++   EGLClientBuffer client_buffer;
++   EGLDisplay display;
++   EGLImageKHR image = EGL_NO_IMAGE_KHR;
++   AHardwareBuffer *buffer = NULL;
++   uint32_t response[VTEST_HDR_SIZE + VCMD_ARCHPHENE_RES_CREATE_AHB_RESP_SIZE];
++   uint8_t slot;
++   int ret;
++
++   if (length_dw != VCMD_ARCHPHENE_RES_CREATE_AHB_SIZE ||
++       !vtest_server_archphene_present_enabled())
++      return -EINVAL;
++   memset(&args, 0, sizeof(args));
++   ret = vtest_create_resource_decode_args(ctx, &args);
++   if (ret)
++      return ret;
++   if (args.handle || args.target != PIPE_TEXTURE_2D ||
++       args.format != VIRGL_FORMAT_R8G8B8A8_UNORM ||
++       !(args.bind & VIRGL_BIND_RENDER_TARGET) ||
++       args.width == 0 || args.width > 8192 ||
++       args.height == 0 || args.height > 8192 ||
++       (uint64_t)args.width * args.height > 33554432 ||
++       args.depth != 1 || args.array_size != 1 || args.last_level != 0 ||
++       args.nr_samples != 0)
++      return -EINVAL;
++   for (slot = 0; slot < 3; slot++) {
++      if (!(archphene_live_slots & (1u << slot)))
++         break;
++   }
++   if (slot == 3)
++      return -ENOSPC;
++
++   requested.width = args.width;
++   requested.height = args.height;
++   requested.layers = 1;
++   requested.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
++   requested.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
++                     AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT;
++   if (!AHardwareBuffer_isSupported(&requested))
++      return -ENOTSUP;
++   ret = AHardwareBuffer_allocate(&requested, &buffer);
++   if (ret || !buffer)
++      return ret ? (ret < 0 ? ret : -ret) : -ENOMEM;
++
++   display = eglGetCurrentDisplay();
++   client_buffer = eglGetNativeClientBufferANDROID(buffer);
++   if (display == EGL_NO_DISPLAY || !client_buffer)
++      goto fail;
++   image = eglCreateImageKHR(display, EGL_NO_CONTEXT,
++                             EGL_NATIVE_BUFFER_ANDROID, client_buffer,
++                             image_attributes);
++   if (image == EGL_NO_IMAGE_KHR)
++      goto fail;
++
++   res = vtest_new_resource(0);
++   if (!res)
++      goto fail;
++   args.handle = res->res_id;
++   ret = virgl_renderer_resource_import_eglimage(&args, image);
++   if (ret)
++      goto fail;
++   virgl_renderer_ctx_attach_resource(ctx->ctx_id, res->res_id);
++   res->archphene_buffer = buffer;
++   res->archphene_image = image;
++   res->archphene_slot = slot;
++   archphene_live_slots |= (uint8_t)(1u << slot);
++   AHardwareBuffer_describe(buffer, &actual);
++   ret = vtest_server_send_archphene_resource(
++      res->res_id, slot, actual.width, actual.height,
++      (uint64_t)actual.stride * actual.height * 4, buffer);
++   if (ret)
++      goto fail_imported;
++   res->archphene_registered = true;
++
++   response[VTEST_CMD_LEN] = VCMD_ARCHPHENE_RES_CREATE_AHB_RESP_SIZE;
++   response[VTEST_CMD_ID] = VCMD_ARCHPHENE_RESOURCE_CREATE_AHB;
++   response[VTEST_CMD_DATA_START] = res->res_id;
++   ret = vtest_block_write(ctx->out_fd, response, sizeof(response));
++   if (ret < 0)
++      goto fail_imported;
++   util_hash_table_set(ctx->resource_table, intptr_to_pointer(res->res_id), res);
++   return 0;
++
++fail_imported:
++   vtest_unref_resource(res);
++   return ret;
++fail:
++   if (res)
++      list_add(&res->head, &renderer.free_resources);
++   if (image != EGL_NO_IMAGE_KHR)
++      eglDestroyImageKHR(display, image);
++   if (buffer)
++      AHardwareBuffer_release(buffer);
++   return -EINVAL;
++#else
++   (void)length_dw;
++   return -ENOTSUP;
++#endif
++}
++
++int vtest_archphene_present_ahb(uint32_t length_dw)
++{
++#ifdef __ANDROID__
++   struct vtest_context *ctx = vtest_get_current_context();
++   struct vtest_resource *res;
++   uint32_t request[VCMD_ARCHPHENE_PRESENT_AHB_SIZE];
++   uint32_t response[VTEST_HDR_SIZE + VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE];
++   uint64_t sequence;
++   int ret;
++
++   if (length_dw != VCMD_ARCHPHENE_PRESENT_AHB_SIZE)
++      return -EINVAL;
++   ret = ctx->input->read(ctx->input, request, sizeof(request));
++   if (ret != sizeof(request))
++      return -EIO;
++   res = util_hash_table_get(ctx->resource_table,
++                             intptr_to_pointer(request[VCMD_ARCHPHENE_PRESENT_AHB_RES_HANDLE]));
++   if (!res || !res->archphene_registered || res->archphene_present_outstanding)
++      return -EINVAL;
++
++   glFinish();
++   sequence = ++archphene_fence_sequence;
++   if (!sequence)
++      sequence = ++archphene_fence_sequence;
++   ret = vtest_server_send_archphene_present(res->res_id, sequence);
++   if (ret)
++      return ret;
++   res->archphene_present_outstanding = true;
++   response[VTEST_CMD_LEN] = VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE;
++   response[VTEST_CMD_ID] = VCMD_ARCHPHENE_PRESENT_AHB;
++   response[VTEST_CMD_DATA_START] = (uint32_t)sequence;
++   response[VTEST_CMD_DATA_START + 1] = (uint32_t)(sequence >> 32);
++   ret = vtest_block_write(ctx->out_fd, response, sizeof(response));
++   return ret < 0 ? ret : 0;
++#else
++   (void)length_dw;
++   return -ENOTSUP;
++#endif
++}
++
+ int vtest_resource_create_blob(UNUSED uint32_t length_dw)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
+index cb84267..b60576a 100644
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -41,6 +41,9 @@
+ #include <fcntl.h>
+ #include <getopt.h>
+ #include <string.h>
++#ifdef __ANDROID__
++#include <android/hardware_buffer.h>
++#endif
+ 
+ #include "util.h"
+ #include "util/list.h"
+@@ -249,6 +252,114 @@ static void archphene_put_u32(uint8_t *frame, size_t offset, uint32_t value)
+    frame[offset + 3] = (uint8_t)(value >> 24);
+ }
+ 
++static void archphene_put_u64(uint8_t *frame, size_t offset, uint64_t value)
++{
++   archphene_put_u32(frame, offset, (uint32_t)value);
++   archphene_put_u32(frame, offset + 4, (uint32_t)(value >> 32));
++}
++
++static int archphene_send_all(const void *data, size_t size)
++{
++   const uint8_t *bytes = data;
++   size_t written = 0;
++   int error;
++
++   while (written < size) {
++      ssize_t result = send(server.archphene_present_socket, bytes + written,
++                            size - written, MSG_NOSIGNAL);
++      if (result > 0) {
++         written += (size_t)result;
++         continue;
++      }
++      if (result < 0 && errno == EINTR)
++         continue;
++      error = result < 0 ? -errno : -EPIPE;
++      vtest_server_close_archphene_present_socket();
++      return error;
++   }
++   return 0;
++}
++
++static void archphene_init_frame(uint8_t frame[64], uint16_t opcode)
++{
++   memset(frame, 0, 64);
++   memcpy(frame, "APHB", 4);
++   archphene_put_u16(frame, 4, 1);
++   archphene_put_u16(frame, 6, opcode);
++   archphene_put_u32(frame, 8, server.archphene_session_id);
++   archphene_put_u32(frame, 12, server.archphene_helper_generation);
++   memcpy(frame + 16, server.archphene_present_token, 16);
++}
++
++bool vtest_server_archphene_present_enabled(void)
++{
++   return server.archphene_present_socket >= 0;
++}
++
++int vtest_server_send_archphene_resource(uint32_t resource_id, uint16_t slot,
++                                         uint32_t width, uint32_t height,
++                                         uint64_t estimated_bytes, void *buffer)
++{
++#ifdef __ANDROID__
++   uint8_t frame[64];
++   int result;
++
++   if (!resource_id || slot >= 3 || !width || !height || !estimated_bytes || !buffer)
++      return -EINVAL;
++   archphene_init_frame(frame, 2);
++   archphene_put_u32(frame, 32, resource_id);
++   archphene_put_u16(frame, 36, slot);
++   archphene_put_u32(frame, 40, width);
++   archphene_put_u32(frame, 44, height);
++   archphene_put_u64(frame, 48, estimated_bytes);
++   result = archphene_send_all(frame, sizeof(frame));
++   if (result)
++      return result;
++   result = AHardwareBuffer_sendHandleToUnixSocket(buffer,
++                                                    server.archphene_present_socket);
++   if (result) {
++      vtest_server_close_archphene_present_socket();
++      return result < 0 ? result : -result;
++   }
++   return 0;
++#else
++   (void)resource_id;
++   (void)slot;
++   (void)width;
++   (void)height;
++   (void)estimated_bytes;
++   (void)buffer;
++   return -ENOTSUP;
++#endif
++}
++
++int vtest_server_send_archphene_present(uint32_t resource_id,
++                                        uint64_t fence_sequence)
++{
++   uint8_t frame[64];
++   const uint8_t marker = 0x46;
++   int result;
++
++   if (!resource_id || !fence_sequence)
++      return -EINVAL;
++   archphene_init_frame(frame, 3);
++   archphene_put_u32(frame, 32, resource_id);
++   archphene_put_u64(frame, 48, fence_sequence);
++   result = archphene_send_all(frame, sizeof(frame));
++   return result ? result : archphene_send_all(&marker, sizeof(marker));
++}
++
++int vtest_server_send_archphene_drop(uint32_t resource_id)
++{
++   uint8_t frame[64];
++
++   if (!resource_id)
++      return -EINVAL;
++   archphene_init_frame(frame, 5);
++   archphene_put_u32(frame, 32, resource_id);
++   return archphene_send_all(frame, sizeof(frame));
++}
++
+ static void vtest_server_parse_args(int argc, char **argv)
+ {
+    int ret;
+@@ -908,6 +1012,8 @@ static const struct vtest_command {
+    HANDLER(DRM_SYNC_TRANSFER,           drm_sync_transfer,         true   ),
+ #endif /* ENABLE_DRM */
+    HANDLER(RESOURCE_EXPORT_FD,          resource_export_fd,        true   ),
++   HANDLER(ARCHPHENE_RESOURCE_CREATE_AHB, archphene_resource_create_ahb, true),
++   HANDLER(ARCHPHENE_PRESENT_AHB,         archphene_present_ahb,       true),
+ };
+ 
+ static int vtest_client_dispatch_commands(struct vtest_client *client)

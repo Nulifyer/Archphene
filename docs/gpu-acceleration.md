@@ -210,11 +210,12 @@ rejects a duplicate hello, decodes fixed Resource/Present/Release frames, and
 updates cloned bounded registries only when both the APHB and Wayland identity
 transition succeed. The socket round trip therefore uses the same scoped APHB
 Resource and 64-bit Present sequence that the Wayland commit claims. Android AHB
-handle and acquire-fence receipt are implemented; fence consumption,
-manager-to-helper release transfer, and helper/Mesa senders remain unimplemented.
+handle and acquire-state receipt are implemented. The helper Resource/Present
+sender is implemented behind private vtest commands; generic Mesa/Wayland
+production, fence consumption, and manager-to-helper release remain open.
 
 The pinned Android virglrenderer helper now has an optional fail-closed APHB
-bootstrap. Four arguments must appear together: a bounded Unix socket path,
+bootstrap and AHB resource path. Four arguments must appear together: a bounded Unix socket path,
 nonzero session ID, nonzero helper generation, and exactly 32 lowercase hex
 token characters with at least one nonzero byte. The helper connects and writes
 the exact 64-byte scoped Hello before publishing its vtest socket; partial,
@@ -224,7 +225,17 @@ remaining sender and release path is connected. Both Android ABIs build. An
 isolated same-UID
 Samsung probe received bytes `APHB`, version 1, opcode 1, session 77, generation
 9, the exact 16-byte token, and zero reserved trailing bytes; a partial-argument
-probe exited 1 before starting graphics.
+probe exited 1 before starting graphics. Two private vtest commands are admitted
+only after this channel exists. Resource creation accepts one bounded 2D
+`VIRGL_FORMAT_R8G8B8A8_UNORM` render target, allocates one of three Android
+RGBA AHB slots with sampling and render usage, imports its EGL image through
+`virgl_renderer_resource_import_eglimage`, and sends the exact scoped Resource
+frame and NDK handle before returning the resource ID. Present calls `glFinish`,
+sends the same resource ID with a monotonic 64-bit sequence and marker-only
+completed acquire state, then returns that sequence to the vtest client. A live
+same-UID Samsung protocol probe observed resource 1, stride 64, sequence 1, and
+marker `46`; both Android ABI builds pass. A resource permits only one Present
+until Release reception exists, so this path is not enabled in production.
 
 The compositor now has the matching dormant control endpoint. It binds only an
 absolute 103-byte-or-shorter path, replaces only a socket, authenticates the
@@ -249,8 +260,8 @@ before sending the marker. One explicit acquire state is retained per resource,
 and a would-block packet is retried before another APHB frame is read. Host tests
 cover both forms and reject a wrong marker; the Samsung round trip exercises the
 descriptor form on the same nonblocking receive path. Production
-does not bind this endpoint yet because fence consumption, release return, and
-the helper sender remain absent.
+does not bind this endpoint yet because generic Mesa/Wayland production, fence
+consumption, and release return remain absent.
 
 Direction and reuse are now explicit in APHB v1. Hello, Resource, Present, and
 DropResource travel helper-to-manager. Release travels manager-to-helper with

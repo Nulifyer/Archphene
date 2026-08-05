@@ -162,8 +162,11 @@ copying.
     descriptor, retry incomplete nonblocking packets before frame parsing, and
     retain one explicit acquire state per resource. Marker-only means the helper
     completed rendering conservatively before send.
-  - [ ] Connect the contracts to a generic Mesa virpipe winsys extension and the
-    helper's Resource/Present/Release sender.
+  - [x] Add fail-closed private vtest commands that allocate one of three RGBA
+    AHBs, import it as the exact virgl resource, send scoped Resource, and send
+    the matching 64-bit Present after conservative GPU completion.
+  - [ ] Connect a generic Mesa virpipe winsys/Wayland sender and the helper's
+    manager-to-helper Release receiver before allowing resource reuse.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
   buffer reuse. Bound dimensions, slots, estimated bytes, outstanding fences,
   pending releases, and device-loss recovery.

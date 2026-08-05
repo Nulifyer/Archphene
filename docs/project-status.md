@@ -4060,19 +4060,27 @@ Each frame is applied to cloned APHB and Wayland identity registries and becomes
 visible only when both transitions succeed. The generated-client socket test
 uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
 claiming the exact surface commit. Native AHB handle and acquire-fence receipt
-are implemented; fence consumption, release return, and helper/Mesa senders
-remain open.
+are implemented. The helper private Resource/Present sender is implemented;
+fence consumption, release return, and generic Mesa/Wayland production remain
+open.
 
-The Android vtest helper now implements only the scoped APHB bootstrap. Its
+The Android vtest helper now implements the scoped APHB bootstrap and a dormant
+AHB-backed resource path. Its
 private socket, session ID, helper generation, and 128-bit lowercase-hex token
 are strict all-or-none arguments. Valid configuration connects and writes Hello
 before the vtest socket becomes visible; malformed, partial, overlong, or failed
 connections terminate the helper. Dual-ABI release builds pass. A same-UID
 physical Samsung listener received the exact 64 bytes for session 77,
 generation 9, token `6a` repeated 16 times, and zero reserved bytes. A partial
-configuration exited 1 with the expected bounded-contract error. Production
-does not pass the arguments yet; helper Resource/Present production and fence
-return remain open.
+configuration exited 1 with the expected bounded-contract error. With the
+authenticated channel active, private vtest commands allocate at most three
+bounded RGBA AHBs, import each EGL image as the exact virgl render resource,
+send scoped Resource plus the NDK handle, conservatively complete GPU work, and
+send Present plus the same monotonic 64-bit sequence returned to the client.
+Both Android ABI builds pass. A same-UID physical Samsung command probe reported
+`resource=1 stride=64 sequence=1 marker=46`. A resource permits one Present
+until Release reception exists. Production does not pass the arguments or issue
+the commands; generic Mesa/Wayland production and release return remain open.
 
 The manager-side dormant control endpoint now admits Hello and Android Resource
 handles. It binds only a bounded absolute path and accepts
@@ -4088,8 +4096,8 @@ and idle DropResource commit handle and identity state transactionally. A live
 API 35 Samsung nonblocking socket round trip accepted a valid 64×32 AHB and
 atomically rejected a mismatched declaration. The host core test still returns
 `Unsupported` because AHardwareBuffer is Android-only. The production launcher
-therefore leaves the endpoint disabled until the helper sender and release path
-exist.
+therefore leaves the endpoint disabled until generic Mesa/Wayland production
+and the release path exist.
 
 APHB direction and reuse are no longer ambiguous. Helper-to-manager traffic is
 Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release

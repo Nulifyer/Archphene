@@ -74,15 +74,22 @@ client/server socket test now prove exact set/commit and clear/commit latching.
 The test no longer inserts identity resources directly: it authenticates Hello,
 Resource, and a 64-bit Present frame through the APHB registry, atomically
 coordinates both bounded registries, and then submits the matching Wayland
-claim. Native handle transfer and external senders remain the next boundary.
+claim. Generic Mesa/Wayland identity production remains the next external
+sender boundary.
 
-The Android vtest helper now has a dormant strict APHB Hello sender. It accepts
+The Android vtest helper now has a dormant strict APHB Hello and AHB resource sender. It accepts
 the present socket, session ID, helper generation, and 128-bit token only as one
 complete configuration and sends Hello before exposing vtest. Both ABI builds
 pass, and a same-UID Samsung listener received the exact 64-byte frame. Current
 manager launches intentionally omit the arguments until the complete sender and
-fence path exists; resource allocation, Present/fence production, and Release
-remain unimplemented in the helper.
+release path exists. Private vtest command 39 allocates one of three bounded
+RGBA AHBs, imports its EGL image as the exact virgl resource, and sends Resource
+plus its native handle. Command 40 conservatively completes rendering, sends
+Present with a marker-only acquire state, and returns the same 64-bit sequence
+to the client. Both ABIs build. A same-UID Samsung probe observed
+`resource=1 stride=64 sequence=1 marker=46`. One Present remains outstanding
+because the helper does not yet receive manager Release; generic Mesa/Wayland
+production and buffer reuse remain disabled.
 
 The compositor now has a dormant same-UID fixed-frame listener. It bounds path
 length and frames per dispatch, validates `SO_PEERCRED`, safely reassembles
