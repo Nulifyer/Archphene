@@ -4070,6 +4070,16 @@ configuration exited 1 with the expected bounded-contract error. Production
 does not pass the arguments yet; Resource/Present/Release, AHB handles, fences,
 and the manager receiver remain open.
 
+The manager-side dormant control endpoint is implemented through Hello
+admission, but not Resource handle receipt. It binds only a bounded absolute path, accepts
+only the current UID through `SO_PEERCRED`, reassembles fixed 64-byte frames,
+processes at most four per compositor dispatch, discards partial state across
+helper reconnect, and performs device/inode-checked socket cleanup. Unit tests
+cover fragmented delivery, reconnect, unsafe paths, and replacement-socket
+preservation. A core test accepts the exact scoped Hello and returns
+`Unsupported` for Resource because no AHB handle receiver exists yet. The
+production launcher therefore leaves the endpoint disabled.
+
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned
 callback context with a weak presentation reference and exact slot ID; its fence

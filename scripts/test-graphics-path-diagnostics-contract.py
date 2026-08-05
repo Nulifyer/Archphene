@@ -156,6 +156,23 @@ require(
     'memcpy(frame, "APHB", 4)',
     "vtest_server_open_archphene_present_socket();",
 )
+require(
+    "native/archphene-compositor/src/gpu_present_transport.rs",
+    "MAX_UNIX_SOCKET_PATH_BYTES: usize = 103",
+    "libc::SO_PEERCRED",
+    "peer_uid(&stream)? != self.expected_uid",
+    "GPU_PRESENT_FRAME_BYTES",
+    "disconnect_discards_partial_frame_before_replacement",
+    "metadata.dev() == self.identity.device",
+    "metadata.ino() == self.identity.inode",
+)
+require(
+    "native/archphene-compositor/src/lib.rs",
+    "enable_gpu_present_endpoint",
+    "MAX_FRAMES_PER_DISPATCH: usize = 4",
+    "GPU resource handles and fences are not connected",
+    "scoped_gpu_endpoint_accepts_only_connected_control_frames",
+)
 reject(
     "native/archphene-compositor/src/android_gpu_renderer.rs",
     "AHardwareBuffer_lock",

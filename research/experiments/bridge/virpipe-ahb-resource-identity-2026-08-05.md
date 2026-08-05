@@ -83,3 +83,10 @@ pass, and a same-UID Samsung listener received the exact 64-byte frame. Current
 manager launches intentionally omit the arguments until the receiver exists;
 resource allocation, AHB handle transfer, Present/fence production, and Release
 remain unimplemented.
+
+The compositor now has a dormant same-UID fixed-frame listener. It bounds path
+length and frames per dispatch, validates `SO_PEERCRED`, safely reassembles
+fragments, drops partial state on helper replacement, and preserves a socket
+that replaced its own inode. Scoped Hello passes end to end in a core test.
+Resource and Present deliberately return `Unsupported` until the receiver can
+consume the immediately following AHB native handle and production fence.

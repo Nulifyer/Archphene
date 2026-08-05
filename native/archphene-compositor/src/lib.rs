@@ -7,6 +7,7 @@ mod android_gpu_renderer;
 mod gpu_damage;
 #[cfg_attr(not(test), allow(dead_code))]
 mod gpu_present_protocol;
+mod gpu_present_transport;
 mod gpu_surface_identity;
 mod gpu_surface_protocol;
 
@@ -24,7 +25,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use gpu_present_protocol::{GpuPresentMessage, GpuPresentRegistry, GpuPresentScope};
+use gpu_present_protocol::{
+    GpuPresentMessage, GpuPresentRegistry, GpuPresentScope, decode_gpu_present,
+};
+use gpu_present_transport::{GpuPresentEndpoint, current_euid};
 use gpu_surface_identity::{
     GpuSurfaceIdentity, GpuSurfaceIdentityError, GpuSurfaceIdentityRegistry,
 };
@@ -472,6 +476,9 @@ pub struct CompositorCore {
     listener: Option<UnixListener>,
     socket_path: Option<PathBuf>,
     socket_identity: Option<SocketIdentity>,
+    gpu_present_endpoint: Option<GpuPresentEndpoint>,
+    gpu_present_scope: Option<GpuPresentScope>,
+    gpu_present_frame_count: u32,
     accepted_client_count: u32,
     active_client_count: Arc<AtomicUsize>,
     filesystem_client_count: Arc<AtomicUsize>,
@@ -12855,6 +12862,9 @@ impl CompositorCore {
             listener: None,
             socket_path: None,
             socket_identity: None,
+            gpu_present_endpoint: None,
+            gpu_present_scope: None,
+            gpu_present_frame_count: 0,
             accepted_client_count: 0,
             active_client_count: Arc::new(AtomicUsize::new(0)),
             filesystem_client_count: Arc::new(AtomicUsize::new(0)),
@@ -12884,6 +12894,25 @@ impl CompositorCore {
         self.display
             .handle()
             .create_global::<CompositorState, OrgArchpheneGpuPresentManagerV1, _>(1, ());
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn enable_gpu_present_endpoint(
+        &mut self,
+        path: &Path,
+        scope: GpuPresentScope,
+    ) -> std::io::Result<()> {
+        if self.gpu_present_endpoint.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "GPU present endpoint is already enabled",
+            ));
+        }
+        let endpoint = GpuPresentEndpoint::bind(path, current_euid())?;
+        self.enable_gpu_surface_identity(scope)?;
+        self.gpu_present_scope = Some(scope);
+        self.gpu_present_endpoint = Some(endpoint);
         Ok(())
     }
 
@@ -13087,6 +13116,7 @@ impl CompositorCore {
     }
 
     pub fn dispatch_once(&mut self) -> std::io::Result<usize> {
+        let gpu_frames = self.poll_gpu_present_endpoint()?;
         let accepted = self.accept_pending_clients()?;
         let dispatched = self.display.dispatch_clients(&mut self.state)?;
         if self.state.selection_focus_dirty {
@@ -13095,7 +13125,44 @@ impl CompositorCore {
             sync_focused_selection(&mut self.state, &handle);
         }
         self.display.flush_clients()?;
-        Ok(accepted.saturating_add(dispatched))
+        Ok(gpu_frames
+            .saturating_add(accepted)
+            .saturating_add(dispatched))
+    }
+
+    fn poll_gpu_present_endpoint(&mut self) -> std::io::Result<usize> {
+        const MAX_FRAMES_PER_DISPATCH: usize = 4;
+        let Some(scope) = self.gpu_present_scope else {
+            return Ok(0);
+        };
+        let mut count = 0_usize;
+        while count < MAX_FRAMES_PER_DISPATCH {
+            let frame = {
+                let Some(endpoint) = self.gpu_present_endpoint.as_mut() else {
+                    return Ok(count);
+                };
+                endpoint.poll_frame()?
+            };
+            let Some(frame) = frame else {
+                break;
+            };
+            match decode_gpu_present(scope, &frame)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))?
+            {
+                GpuPresentMessage::Hello | GpuPresentMessage::Release { .. } => {
+                    self.apply_gpu_present_frame(&frame)?;
+                }
+                GpuPresentMessage::Resource(_) | GpuPresentMessage::Present { .. } => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "GPU resource handles and fences are not connected",
+                    ));
+                }
+            }
+            self.gpu_present_frame_count = self.gpu_present_frame_count.saturating_add(1);
+            count += 1;
+        }
+        Ok(count)
     }
 
     pub fn compositor_bind_count(&self) -> u32 {
@@ -19950,6 +20017,60 @@ mod tests {
                 state.relative_motion = Some((dx, dy));
             }
         }
+    }
+
+    #[test]
+    fn scoped_gpu_endpoint_accepts_only_connected_control_frames() {
+        let path = std::env::temp_dir().join(format!(
+            "archphene-gpu-endpoint-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let scope = GpuPresentScope {
+            session_id: 55,
+            helper_generation: 2,
+            token: [0x4c; 16],
+        };
+        let mut core = CompositorCore::new().expect("Wayland display");
+        core.enable_gpu_present_endpoint(&path, scope)
+            .expect("enable scoped GPU endpoint");
+        let mut helper = UnixStream::connect(&path).expect("connect helper");
+        let hello = gpu_present_protocol::encode_gpu_present(scope, GpuPresentMessage::Hello)
+            .expect("encode hello");
+        helper.write_all(&hello[..19]).expect("first hello fragment");
+        assert_eq!(core.dispatch_once().expect("partial endpoint dispatch"), 0);
+        helper.write_all(&hello[19..]).expect("second hello fragment");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while core.gpu_present_frame_count == 0 {
+            core.dispatch_once().expect("complete endpoint dispatch");
+            assert!(Instant::now() < deadline, "timed out waiting for GPU Hello");
+            std::thread::yield_now();
+        }
+        assert_eq!(core.gpu_present_frame_count, 1);
+        let resource = gpu_present_protocol::encode_gpu_present(
+            scope,
+            GpuPresentMessage::Resource(gpu_present_protocol::PresentResource {
+                resource_id: 1,
+                slot: 0,
+                width: 64,
+                height: 64,
+                estimated_bytes: 64 * 64 * 4,
+            }),
+        )
+        .expect("encode unsupported resource");
+        helper.write_all(&resource).expect("send unsupported resource");
+        let error = loop {
+            match core.dispatch_once() {
+                Err(error) => break error,
+                Ok(_) => {
+                    assert!(Instant::now() < deadline, "timed out rejecting GPU resource");
+                    std::thread::yield_now();
+                }
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        drop(core);
+        assert!(!path.exists());
     }
 
     #[test]

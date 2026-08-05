@@ -222,6 +222,18 @@ Samsung probe received bytes `APHB`, version 1, opcode 1, session 77, generation
 9, the exact 16-byte token, and zero reserved trailing bytes; a partial-argument
 probe exited 1 before starting graphics.
 
+The compositor now has the matching dormant control endpoint. It binds only an
+absolute 103-byte-or-shorter path, replaces only a socket, authenticates the
+peer with `SO_PEERCRED` against the manager UID, reassembles one fixed 64-byte
+frame without allocation, and processes at most four frames per compositor
+dispatch. Disconnect discards a partial frame before accepting a replacement
+helper. Teardown unlinks only the exact device/inode it created. Three transport
+tests cover fragmented delivery, helper replacement, unsafe paths, and
+replacement-socket preservation; a core test accepts scoped Hello and rejects
+Resource as unsupported. Production does not bind this endpoint yet, and it
+deliberately rejects Resource/Present until native AHB handle and fence receipt
+are implemented.
+
 References:
 
 - [Android graphics architecture](https://source.android.com/docs/core/graphics/architecture)

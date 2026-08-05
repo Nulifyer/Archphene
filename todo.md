@@ -152,6 +152,9 @@ copying.
   - [x] Add strict optional helper arguments for the private present socket,
     session ID, helper generation, and 128-bit token. Connect and send the exact
     APHB Hello before publishing the vtest socket.
+  - [x] Add the dormant same-UID manager endpoint with fixed-frame reassembly,
+    bounded dispatch, reconnect-safe partial-frame discard, and inode-checked
+    cleanup. Reject Resource/Present until handle/fence receipt is connected.
   - [ ] Connect the contracts to a generic Mesa virpipe winsys extension, the
     helper's Resource/Present/Release sender, and the manager's AHB receiver.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
