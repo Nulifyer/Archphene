@@ -64,7 +64,7 @@ and the remaining release gate.
 The release also includes `Archphene-native-licenses-<version>.zip` and its
 checksum. Its embedded canonical manifest and checksum index currently cover
 the verified patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire, libepoxy, and
-virglrenderer source licenses. It does not represent the six audit records
+virglrenderer source licenses. It does not represent the four audit records
 that remain blocked. A separate `Archphene-glibc-source-<version>.zip` and checksum contain
 the exact pristine glibc revision, Archphene patch, and architecture build
 instructions required to reproduce the modified shared libraries.

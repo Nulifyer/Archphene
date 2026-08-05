@@ -63,8 +63,8 @@ locations, pins, declared licenses where reviewed, exact repository evidence,
 and concrete open blockers. `scripts/release-native-audit.py` rejects missing components,
 stale evidence, malformed blockers, and unreviewed additions.
 
-Nine records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
-libepoxy, virglrenderer, the x86_64 Qt bridge, and the Termux Pulse closure.
+Ten records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
+libepoxy, virglrenderer, both Qt bridges, and the Termux Pulse closure.
 Release CI checks each source archive SHA-256 or Git commit and publishes every
 discovered license, notice, and copyright file in
 `Archphene-native-licenses-<version>.zip`. The deterministic archive embeds the
@@ -80,9 +80,8 @@ Termux binary packages. It includes each exact historical package recipe and
 build-framework snapshot, every checksum-pinned upstream source archive,
 recipe-contained Android source, and indexed license files for all 14 packages.
 
-Five records remain blocked. The unresolved work includes floating Arch
-package transactions, incomplete GTK prebuilt provenance, the AArch64 Qt
-KF6Config input/rebuild. The tag workflow runs `--require-complete` before
+Four records remain blocked. The unresolved work is limited to the floating
+Arch package transactions and incomplete GTK prebuilt provenance. The tag workflow runs `--require-complete` before
 creating a GitHub draft, so an accidental tag cannot publish or remotely stage
 a release while any blocker remains. SPDX file
 licenses and package license conclusions remain `NOASSERTION` rather than making

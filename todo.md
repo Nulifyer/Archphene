@@ -312,6 +312,8 @@ and reproducible artifacts.
     and require byte-for-byte equality before the release audit gate.
   - [x] Rebuild the AArch64 Qt platform-theme and style plugins from historical
     source and require byte-for-byte equality before the release audit gate.
+  - [x] Rebuild the AArch64 KF6Config plugin byte-for-byte using its historical
+    headers and an ABI-only link stub; no KF6 implementation code is embedded.
   - [x] Bind both ABI copies of every Termux PulseAudio closure package to its
     exact historical package-recipe commit and verify all downloaded bytes.
   - [x] Publish deterministic corresponding source, build-framework snapshots,

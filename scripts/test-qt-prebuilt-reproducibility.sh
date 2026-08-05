@@ -68,4 +68,32 @@ for specification in "${arm_specifications[@]}"; do
   active=("${active[@]:0:${#active[@]}-1}")
 done
 
-echo "Qt prebuilt reproducibility passed: three x86_64 and two AArch64 historical outputs rebuilt byte-for-byte."
+kde_worktree="$base/arm-kde-config"
+git -C "$root" worktree add --quiet --detach "$kde_worktree" \
+  931ef9131f9e3f87b60430887b06d99449f80d9d
+active+=("$kde_worktree")
+"$container_cli" run --rm \
+  -v "$kde_worktree:/workspace" -w /workspace "$image" bash -lc '
+set -euo pipefail
+runtime=tooling/downloads/arch-curated-kcalc-aarch64/runtime-root
+mkdir -p "$runtime/usr/include/KF6" "$runtime/usr/lib"
+cp -a /usr/include/KF6/KConfig /usr/include/KF6/KConfigCore \
+  "$runtime/usr/include/KF6/"
+printf "%s\n" \
+  "void open_config(void) __asm__(\"_ZN13KSharedConfig10openConfigERK7QString6QFlagsIN7KConfig8OpenFlagEEN14QStandardPaths16StandardLocationE\");" \
+  "void open_config(void) {}" \
+  "void reparse(void) __asm__(\"_ZN7KConfig20reparseConfigurationEv\");" \
+  "void reparse(void) {}" > /tmp/kconfig-link-stub.c
+aarch64-linux-gnu-gcc -shared -Wl,-soname,libKF6ConfigCore.so.6 \
+  -o "$runtime/usr/lib/libKF6ConfigCore.so" /tmp/kconfig-link-stub.c
+bash scripts/build-qt-platform-theme-arm64.sh >/dev/null
+'
+kde_rebuilt="$kde_worktree/prebuilt/qt-bridge/arm64-v8a/libarchphene_kde_config.so"
+kde_expected=90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311
+[[ "$(sha256sum "$kde_rebuilt" | cut -d ' ' -f1)" == "$kde_expected" ]]
+cmp "$kde_rebuilt" \
+  "$root/prebuilt/qt-bridge/arm64-v8a/libarchphene_kde_config.so"
+git -C "$root" worktree remove --force "$kde_worktree"
+active=("${active[@]:0:${#active[@]}-1}")
+
+echo "Qt prebuilt reproducibility passed: all three x86_64 and AArch64 historical outputs rebuilt byte-for-byte."

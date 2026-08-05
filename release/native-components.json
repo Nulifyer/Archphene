@@ -132,17 +132,17 @@
     },
     {
       "artifactScopes": ["manager"],
-      "blockers": [{"category": "reproducibility", "detail": "The platform-theme and style plugins rebuild byte-for-byte from historical source; the retained KF6Config fallback still lacks its pinned historical KF6 link input and a clean rebuild."}],
+      "blockers": [],
       "declaredLicense": "MIT",
       "evidence": [
         {"contains": "kde_config_fallback_sha256=90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311", "path": "scripts/build-qt-platform-theme-arm64.sh"},
         {"contains": "\"sourceCommit\": \"931ef9131f9e3f87b60430887b06d99449f80d9d\"", "path": "prebuilt/qt-bridge/manifest-arm64-v8a.json"},
         {"contains": "Qt prebuilt provenance passed", "path": "scripts/test-qt-prebuilt-provenance.py"},
-        {"contains": "two AArch64 historical outputs rebuilt byte-for-byte", "path": "scripts/test-qt-prebuilt-reproducibility.sh"}
+        {"contains": "all three x86_64 and AArch64 historical outputs rebuilt byte-for-byte", "path": "scripts/test-qt-prebuilt-reproducibility.sh"}
       ],
       "id": "qt-bridge-aarch64",
       "kind": "mixed-source-prebuilt",
-      "reviewState": "blocked",
+      "reviewState": "verified",
       "sourcePin": {"type": "artifact-checksums", "value": "prebuilt/qt-bridge/SHA256SUMS"},
       "sourceUrl": "https://ca.us.mirror.archlinuxarm.org/aarch64/extra/qt6-base-6.11.1-1-aarch64.pkg.tar.xz",
       "version": "6.11.1"
@@ -205,5 +205,5 @@
     {"componentId": "pipewire", "path": "tooling/external/pipewire", "type": "git-tree"},
     {"componentId": "virglrenderer", "path": "tooling/downloads/virglrenderer-1.3.0.tar.gz", "type": "archive"}
   ],
-  "projectLicenseComponents": ["qt-bridge-x86_64"]
+  "projectLicenseComponents": ["qt-bridge-aarch64", "qt-bridge-x86_64"]
 }
