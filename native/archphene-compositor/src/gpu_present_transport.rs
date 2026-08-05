@@ -17,6 +17,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[cfg(target_os = "android")]
 use crate::android_graphics_ffi::ReceivedHardwareBuffer;
@@ -37,7 +38,9 @@ const PRESENT_RESOURCE_SLOTS: usize = 3;
 #[cfg(target_os = "android")]
 struct ReceivedResource {
     resource_id: u32,
-    _buffer: ReceivedHardwareBuffer,
+    width: u32,
+    height: u32,
+    buffer: ReceivedHardwareBuffer,
     acquire: Option<AcquireState>,
 }
 
@@ -57,6 +60,73 @@ struct PendingRelease {
     frame: [u8; GPU_PRESENT_FRAME_BYTES],
     frame_offset: usize,
     fence: Option<File>,
+}
+
+pub(crate) struct SurfaceRelease {
+    pub(crate) helper_generation: u32,
+    pub(crate) resource_id: u32,
+    pub(crate) fence_sequence: u64,
+    pub(crate) fence: Option<File>,
+}
+
+pub(crate) struct SurfaceReleaseQueue {
+    releases: Mutex<VecDeque<SurfaceRelease>>,
+}
+
+impl SurfaceReleaseQueue {
+    pub(crate) fn new() -> Self {
+        Self {
+            releases: Mutex::new(VecDeque::with_capacity(MAX_PENDING_RELEASES)),
+        }
+    }
+
+    pub(crate) fn push(&self, release: SurfaceRelease) -> io::Result<()> {
+        let mut releases = self
+            .releases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if releases.len() == MAX_PENDING_RELEASES {
+            releases.retain(|queued| queued.helper_generation == release.helper_generation);
+        }
+        if releases.len() == MAX_PENDING_RELEASES {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "GPU surface release queue is full",
+            ));
+        }
+        releases.push_back(release);
+        Ok(())
+    }
+
+    pub(crate) fn front_identity(&self) -> Option<(u32, u32, u64)> {
+        self.releases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .front()
+            .map(|release| {
+                (
+                    release.helper_generation,
+                    release.resource_id,
+                    release.fence_sequence,
+                )
+            })
+    }
+
+    pub(crate) fn pop(&self) -> Option<SurfaceRelease> {
+        self.releases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) struct AcquiredPresentResource {
+    pub(crate) resource_id: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) buffer: *mut std::ffi::c_void,
+    pub(crate) acquire_fence: Option<File>,
 }
 
 pub(crate) struct GpuPresentEndpoint {
@@ -181,6 +251,10 @@ impl GpuPresentEndpoint {
         Ok(())
     }
 
+    pub(crate) fn can_queue_release(&self) -> bool {
+        self.stream.is_some() && self.releases.len() < MAX_PENDING_RELEASES
+    }
+
     pub(crate) fn flush_releases(&mut self) -> io::Result<usize> {
         let result = self.flush_releases_inner();
         if result.is_err() {
@@ -273,6 +347,61 @@ impl GpuPresentEndpoint {
             io::Error::new(io::ErrorKind::NotConnected, "GPU helper is not connected")
         })?;
         receive_present_fence_from_fd(&mut self.resources, stream.as_raw_fd(), resource_id)
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn take_present_resource(
+        &mut self,
+        resource_id: u32,
+    ) -> io::Result<AcquiredPresentResource> {
+        let resource = self
+            .resources
+            .iter_mut()
+            .flatten()
+            .find(|resource| resource.resource_id == resource_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "GPU resource is unknown"))?;
+        let acquire = resource.acquire.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "GPU resource has no completed acquire state",
+            )
+        })?;
+        Ok(AcquiredPresentResource {
+            resource_id,
+            width: resource.width,
+            height: resource.height,
+            buffer: resource.buffer.as_raw(),
+            acquire_fence: match acquire {
+                AcquireState::Complete => None,
+                AcquireState::Fence { _descriptor } => Some(_descriptor),
+            },
+        })
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn return_present_resource(
+        &mut self,
+        resource: AcquiredPresentResource,
+    ) -> io::Result<()> {
+        let retained = self
+            .resources
+            .iter_mut()
+            .flatten()
+            .find(|retained| retained.resource_id == resource.resource_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "GPU resource is unknown"))?;
+        if retained.acquire.is_some() || retained.buffer.as_raw() != resource.buffer {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "GPU resource acquire state cannot be restored",
+            ));
+        }
+        retained.acquire = Some(match resource.acquire_fence {
+            Some(descriptor) => AcquireState::Fence {
+                _descriptor: descriptor,
+            },
+            None => AcquireState::Complete,
+        });
+        Ok(())
     }
 }
 
@@ -371,7 +500,9 @@ fn receive_resource_from_fd(
     }
     *slot = Some(ReceivedResource {
         resource_id: resource.resource_id,
-        _buffer: buffer,
+        width: resource.width,
+        height: resource.height,
+        buffer,
         acquire: None,
     });
     Ok(())
@@ -699,5 +830,39 @@ mod tests {
         assert_eq!(message.length, 1);
         assert_eq!(marker, [RELEASE_PACKET_MARKER]);
         assert!(message.descriptor.is_some());
+    }
+
+    #[test]
+    fn surface_release_callbacks_queue_exact_bounded_fifo_identities() {
+        let queue = SurfaceReleaseQueue::new();
+        for sequence in 1..=MAX_PENDING_RELEASES as u64 {
+            queue
+                .push(SurfaceRelease {
+                    helper_generation: 7,
+                    resource_id: sequence as u32,
+                    fence_sequence: sequence,
+                    fence: None,
+                })
+                .expect("bounded callback release");
+        }
+        assert_eq!(queue.front_identity(), Some((7, 1, 1)));
+        assert_eq!(
+            queue
+                .push(SurfaceRelease {
+                    helper_generation: 7,
+                    resource_id: 4,
+                    fence_sequence: 4,
+                    fence: None,
+                })
+                .expect_err("fourth callback release must be bounded")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        for sequence in 1..=MAX_PENDING_RELEASES as u64 {
+            let release = queue.pop().expect("queued callback release");
+            assert_eq!(release.resource_id, sequence as u32);
+            assert_eq!(release.fence_sequence, sequence);
+        }
+        assert!(queue.pop().is_none());
     }
 }

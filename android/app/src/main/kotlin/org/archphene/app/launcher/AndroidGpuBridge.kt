@@ -12,13 +12,17 @@ import java.util.concurrent.TimeUnit
 internal class AndroidGpuBridge(
     context: Context,
     private val sessionId: Int,
+    private val helperGeneration: Int,
+    private val compositor: NativeLauncherCompositor,
 ) : AutoCloseable {
     private val helper = File(context.applicationInfo.nativeLibraryDir, HELPER)
     private val runtimeDirectory =
         File(context.cacheDir, "gpu-$sessionId-${randomToken()}")
     private var process: Process? = null
     private var socket: File? = null
+    private var presentSocket: File? = null
     private var reaper: Thread? = null
+    private val presentToken = randomBytes(PRESENT_TOKEN_BYTES)
 
     @Synchronized
     fun start(): File? {
@@ -43,14 +47,33 @@ internal class AndroidGpuBridge(
             return null
         }
         val candidate = File(runtimeDirectory, SOCKET_NAME)
-        if (!fitsLauncherUnixSocketPath(candidate.absolutePath, UNIX_SOCKET_PATH_LIMIT)) {
+        val presentCandidate = File(runtimeDirectory, PRESENT_SOCKET_NAME)
+        if (
+            !fitsLauncherUnixSocketPath(candidate.absolutePath, UNIX_SOCKET_PATH_LIMIT) ||
+            !fitsLauncherUnixSocketPath(presentCandidate.absolutePath, UNIX_SOCKET_PATH_LIMIT)
+        ) {
             Log.w(TAG, "GPU socket path is too long; session=$sessionId uses llvmpipe")
-            cleanupFiles(candidate)
+            cleanupFiles(candidate, presentCandidate)
             return null
         }
-        if (candidate.exists() && !candidate.delete()) {
+        if (
+            (candidate.exists() && !candidate.delete()) ||
+            (presentCandidate.exists() && !presentCandidate.delete())
+        ) {
             Log.w(TAG, "Stale GPU socket could not be removed; session=$sessionId uses llvmpipe")
-            cleanupFiles(candidate)
+            cleanupFiles(candidate, presentCandidate)
+            return null
+        }
+        if (
+            !compositor.configureGpuPresentEndpoint(
+                presentCandidate.absolutePath,
+                sessionId,
+                helperGeneration,
+                presentToken,
+            )
+        ) {
+            Log.w(TAG, "GPU present endpoint is unavailable; session=$sessionId uses llvmpipe")
+            cleanupFiles(candidate, presentCandidate)
             return null
         }
         return runCatching {
@@ -62,11 +85,20 @@ internal class AndroidGpuBridge(
                     "--use-gles",
                     "--socket-path",
                     candidate.absolutePath,
+                    "--archphene-present-socket",
+                    presentCandidate.absolutePath,
+                    "--archphene-session-id",
+                    sessionId.toString(),
+                    "--archphene-helper-generation",
+                    helperGeneration.toString(),
+                    "--archphene-present-token",
+                    presentToken.toHex(),
                 ).redirectErrorStream(true)
                     .redirectOutput(ProcessBuilder.Redirect.to(File("/dev/null")))
                     .start()
             process = child
             socket = candidate
+            presentSocket = presentCandidate
             val deadline = SystemClock.uptimeMillis() + START_TIMEOUT_MILLIS
             while (
                 !candidate.exists() &&
@@ -95,15 +127,20 @@ internal class AndroidGpuBridge(
         val child = process
         if (child != null && !stopProcess(child, STOP_TIMEOUT_MILLIS)) {
             Log.w(TAG, "GPU helper did not stop; retaining cleanup session=$sessionId")
-            scheduleReap(child, socket)
+            scheduleReap(child, socket, presentSocket)
             return
         }
         process = null
-        cleanupFiles(socket)
+        cleanupFiles(socket, presentSocket)
         socket = null
+        presentSocket = null
     }
 
-    private fun scheduleReap(child: Process, candidate: File?) {
+    private fun scheduleReap(
+        child: Process,
+        candidate: File?,
+        presentCandidate: File?,
+    ) {
         if (reaper != null) return
         reaper =
             Thread({
@@ -119,8 +156,9 @@ internal class AndroidGpuBridge(
                 synchronized(this@AndroidGpuBridge) {
                     if (process === child) process = null
                     if (socket === candidate) {
-                        cleanupFiles(candidate)
+                        cleanupFiles(candidate, presentCandidate)
                         socket = null
+                        presentSocket = null
                     }
                     reaper = null
                 }
@@ -131,9 +169,11 @@ internal class AndroidGpuBridge(
             }
     }
 
-    private fun cleanupFiles(candidate: File?) {
-        if (candidate != null && candidate.exists() && !candidate.delete()) {
-            Log.w(TAG, "Could not remove GPU socket session=$sessionId")
+    private fun cleanupFiles(vararg candidates: File?) {
+        for (candidate in candidates) {
+            if (candidate != null && candidate.exists() && !candidate.delete()) {
+                Log.w(TAG, "Could not remove GPU socket session=$sessionId")
+            }
         }
         if (runtimeDirectory.exists() && !runtimeDirectory.delete()) {
             Log.w(TAG, "Could not remove GPU runtime directory session=$sessionId")
@@ -144,8 +184,10 @@ internal class AndroidGpuBridge(
         private const val TAG = "ArchpheneGpu"
         private const val HELPER = "libarchphene_virgl_server.so"
         private const val SOCKET_NAME = ".vg"
+        private const val PRESENT_SOCKET_NAME = ".ap"
         private const val RUNTIME_PREFIX = "gpu-"
         private const val TOKEN_LENGTH = 16
+        private const val PRESENT_TOKEN_BYTES = 16
         private const val MAX_STALE_DIRECTORIES = 64
         private const val UNIX_SOCKET_PATH_LIMIT = 104
         private const val START_TIMEOUT_MILLIS = 3_000L
@@ -216,17 +258,20 @@ internal class AndroidGpuBridge(
             ) {
                 return
             }
-            var socket: Path? = null
+            val sockets = ArrayList<Path>(2)
             Files.newDirectoryStream(path).use { entries ->
                 for (entry in entries) {
-                    if (socket != null || entry.fileName.toString() != SOCKET_NAME) {
+                    if (
+                        sockets.size == 2 ||
+                        entry.fileName.toString() !in setOf(SOCKET_NAME, PRESENT_SOCKET_NAME)
+                    ) {
                         Log.w(TAG, "Leaving GPU runtime directory with unexpected contents")
                         return
                     }
-                    socket = entry
+                    sockets.add(entry)
                 }
             }
-            socket?.let(Files::deleteIfExists)
+            sockets.forEach(Files::deleteIfExists)
             if (Files.deleteIfExists(path)) {
                 Log.i(TAG, "Removed stale GPU runtime directory")
             }
@@ -243,5 +288,17 @@ internal class AndroidGpuBridge(
                 }
             }.concatToString()
         }
+
+        private fun randomBytes(length: Int): ByteArray =
+            ByteArray(length).also { random.nextBytes(it) }
+
+        private fun ByteArray.toHex(): String =
+            CharArray(size * 2).also { output ->
+                forEachIndexed { index, byte ->
+                    val value = byte.toInt() and 0xff
+                    output[index * 2] = HEX[value ushr 4]
+                    output[index * 2 + 1] = HEX[value and 0x0f]
+                }
+            }.concatToString()
     }
 }

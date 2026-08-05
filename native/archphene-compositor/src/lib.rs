@@ -30,7 +30,7 @@ use gpu_present_protocol::{GPU_PRESENT_FRAME_BYTES, PresentResource};
 use gpu_present_protocol::{
     GpuPresentMessage, GpuPresentRegistry, GpuPresentScope, decode_gpu_present, encode_gpu_present,
 };
-use gpu_present_transport::{GpuPresentEndpoint, current_euid};
+use gpu_present_transport::{GpuPresentEndpoint, SurfaceReleaseQueue, current_euid};
 use gpu_surface_identity::{
     GpuSurfaceIdentity, GpuSurfaceIdentityError, GpuSurfaceIdentityRegistry,
 };
@@ -531,6 +531,7 @@ pub struct CompositorCore {
     socket_identity: Option<SocketIdentity>,
     gpu_present_endpoint: Option<GpuPresentEndpoint>,
     gpu_present_scope: Option<GpuPresentScope>,
+    gpu_surface_releases: Arc<SurfaceReleaseQueue>,
     #[cfg(target_os = "android")]
     gpu_present_pending_resource: Option<([u8; GPU_PRESENT_FRAME_BYTES], PresentResource)>,
     #[cfg(target_os = "android")]
@@ -2133,11 +2134,16 @@ fn copy_wayland_pixels_to_android(
 #[allow(unsafe_code)]
 mod android_graphics_ffi {
     use super::android_gpu_renderer::{Damage, GpuRenderer, SourceFormat};
-    use super::{PresentationCopyDamage, PresentationSlotContent};
+    use super::gpu_present_transport::{
+        AcquiredPresentResource, SurfaceRelease, SurfaceReleaseQueue,
+    };
+    use super::{GpuSurfaceIdentity, PresentationCopyDamage, PresentationSlotContent};
     use std::ffi::{c_char, c_void};
+    use std::fs::File;
     use std::io;
     use std::marker::PhantomData;
     use std::mem::zeroed;
+    use std::os::fd::{FromRawFd, IntoRawFd};
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -2342,6 +2348,10 @@ mod android_graphics_ffi {
     unsafe impl Send for ReceivedHardwareBuffer {}
 
     impl ReceivedHardwareBuffer {
+        pub(crate) fn as_raw(&self) -> *mut c_void {
+            self.0.as_ptr().cast()
+        }
+
         pub(crate) fn receive(socket_fd: libc::c_int) -> io::Result<Self> {
             let mut pointer = ptr::null_mut();
             // SAFETY: the descriptor is live and the output location is
@@ -2481,7 +2491,13 @@ mod android_graphics_ffi {
         destination_width: i32,
         destination_height: i32,
         current: Option<u64>,
+        external_current: Option<ExternalCurrent>,
         next_id: u64,
+    }
+
+    struct ExternalCurrent {
+        identity: GpuSurfaceIdentity,
+        releases: Arc<SurfaceReleaseQueue>,
     }
 
     struct HardwareBufferSlot {
@@ -2521,6 +2537,17 @@ mod android_graphics_ffi {
     struct BufferReleaseContext {
         slot_id: u64,
         presentation: Weak<PresentationState>,
+    }
+
+    struct ExternalReleaseContext {
+        identity: GpuSurfaceIdentity,
+        presentation: Weak<PresentationState>,
+        releases: Arc<SurfaceReleaseQueue>,
+    }
+
+    enum LegacyCompletionContext {
+        Slot(*mut c_void),
+        External(*mut c_void),
     }
 
     impl NativeWindow {
@@ -2563,6 +2590,7 @@ mod android_graphics_ffi {
                         destination_width: 0,
                         destination_height: 0,
                         current: None,
+                        external_current: None,
                         next_id: 1,
                     }),
                     diagnostics: GraphicsPresentationDiagnostics::default(),
@@ -2599,6 +2627,163 @@ mod android_graphics_ffi {
                     .load(Ordering::Relaxed),
                 _ => 0,
             }
+        }
+
+        pub(super) fn present_gpu_resource(
+            &mut self,
+            resource: AcquiredPresentResource,
+            identity: GpuSurfaceIdentity,
+            releases: Arc<SurfaceReleaseQueue>,
+        ) -> Result<(), AcquiredPresentResource> {
+            if resource.resource_id != identity.resource_id
+                || resource.width == 0
+                || resource.height == 0
+                || resource.width as usize > MAX_DIMENSION
+                || resource.height as usize > MAX_DIMENSION
+                || resource.buffer.is_null()
+            {
+                return Err(resource);
+            }
+            let Some(transaction) = NonNull::new(unsafe { android_surface_transaction_create() })
+            else {
+                return Err(resource);
+            };
+            let set_buffer_with_release = set_buffer_with_release();
+            let (completion_context, source, destination) = {
+                let mut buffers = self
+                    .presentation
+                    .buffers
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let previous_slot = buffers.current.take().and_then(|previous| {
+                    let slot = buffers.slots.iter_mut().find(|slot| slot.id == previous)?;
+                    slot.state = HardwareBufferState::PendingRelease;
+                    if set_buffer_with_release.is_some() {
+                        return None;
+                    }
+                    let mut callback_presentation = slot
+                        .release_context
+                        .presentation
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    debug_assert!(callback_presentation.is_none());
+                    *callback_presentation = Some(Arc::clone(&self.presentation));
+                    Some(LegacyCompletionContext::Slot(
+                        std::ptr::from_ref(&slot.release_context)
+                            .cast_mut()
+                            .cast::<c_void>(),
+                    ))
+                });
+                let previous_external = buffers.external_current.take();
+                let completion_context = previous_slot.or_else(|| {
+                    if set_buffer_with_release.is_some() {
+                        return None;
+                    }
+                    previous_external.map(|previous| {
+                        LegacyCompletionContext::External(
+                            Box::into_raw(Box::new(ExternalReleaseContext {
+                                identity: previous.identity,
+                                presentation: Arc::downgrade(&self.presentation),
+                                releases: previous.releases,
+                            }))
+                            .cast(),
+                        )
+                    })
+                });
+                buffers.external_current = Some(ExternalCurrent {
+                    identity,
+                    releases: Arc::clone(&releases),
+                });
+                (
+                    completion_context,
+                    AndroidRect {
+                        left: 0,
+                        top: 0,
+                        right: resource.width as i32,
+                        bottom: resource.height as i32,
+                    },
+                    AndroidRect {
+                        left: 0,
+                        top: 0,
+                        right: buffers.destination_width,
+                        bottom: buffers.destination_height,
+                    },
+                )
+            };
+            let acquire_fence = resource.acquire_fence.map_or(-1, IntoRawFd::into_raw_fd);
+            unsafe {
+                if let Some(set_buffer) = set_buffer_with_release {
+                    let release_context = Box::into_raw(Box::new(ExternalReleaseContext {
+                        identity,
+                        presentation: Arc::downgrade(&self.presentation),
+                        releases,
+                    }));
+                    set_buffer(
+                        transaction.as_ptr(),
+                        self.presentation.control.as_ptr(),
+                        resource.buffer.cast(),
+                        acquire_fence,
+                        release_context.cast(),
+                        surface_external_buffer_released,
+                    );
+                } else {
+                    android_surface_transaction_set_buffer(
+                        transaction.as_ptr(),
+                        self.presentation.control.as_ptr(),
+                        resource.buffer.cast(),
+                        acquire_fence,
+                    );
+                }
+                android_surface_transaction_set_geometry(
+                    transaction.as_ptr(),
+                    self.presentation.control.as_ptr(),
+                    &source,
+                    &destination,
+                    0,
+                );
+                android_surface_transaction_set_damage_region(
+                    transaction.as_ptr(),
+                    self.presentation.control.as_ptr(),
+                    &source,
+                    1,
+                );
+                android_surface_transaction_set_buffer_transparency(
+                    transaction.as_ptr(),
+                    self.presentation.control.as_ptr(),
+                    SURFACE_TRANSPARENCY_OPAQUE,
+                );
+                android_surface_transaction_set_visibility(
+                    transaction.as_ptr(),
+                    self.presentation.control.as_ptr(),
+                    SURFACE_VISIBILITY_SHOW,
+                );
+            }
+            if let Some(context) = completion_context {
+                unsafe {
+                    match context {
+                        LegacyCompletionContext::Slot(context) => {
+                            android_surface_transaction_set_on_complete(
+                                transaction.as_ptr(),
+                                context,
+                                surface_transaction_complete,
+                            );
+                        }
+                        LegacyCompletionContext::External(context) => {
+                            android_surface_transaction_set_on_complete(
+                                transaction.as_ptr(),
+                                context,
+                                surface_external_transaction_complete,
+                            );
+                        }
+                    }
+                }
+            }
+            unsafe {
+                android_surface_transaction_apply(transaction.as_ptr());
+                android_surface_transaction_delete(transaction.as_ptr());
+            }
+            increment_diagnostic(&self.presentation.diagnostics.ahb_submissions);
+            Ok(())
         }
 
         pub(super) fn set_rgba_geometry(
@@ -3010,7 +3195,7 @@ mod android_graphics_ffi {
                 unsafe { android_surface_transaction_delete(transaction.as_ptr()) };
                 return -6;
             }
-            let completion_context = buffers.current.and_then(|previous| {
+            let completion_context = buffers.current.take().and_then(|previous| {
                 let slot = buffers.slots.iter_mut().find(|slot| slot.id == previous)?;
                 slot.state = HardwareBufferState::PendingRelease;
                 if set_buffer_with_release.is_some() {
@@ -3023,11 +3208,27 @@ mod android_graphics_ffi {
                     .unwrap_or_else(|error| error.into_inner());
                 debug_assert!(callback_presentation.is_none());
                 *callback_presentation = Some(Arc::clone(presentation));
-                Some(
+                Some(LegacyCompletionContext::Slot(
                     std::ptr::from_ref(&slot.release_context)
                         .cast_mut()
                         .cast::<c_void>(),
-                )
+                ))
+            });
+            let previous_external = buffers.external_current.take();
+            let completion_context = completion_context.or_else(|| {
+                if set_buffer_with_release.is_some() {
+                    return None;
+                }
+                previous_external.map(|previous| {
+                    LegacyCompletionContext::External(
+                        Box::into_raw(Box::new(ExternalReleaseContext {
+                            identity: previous.identity,
+                            presentation: Arc::downgrade(presentation),
+                            releases: previous.releases,
+                        }))
+                        .cast(),
+                    )
+                })
             });
             let generation = buffers.slots[index].generation;
             for slot in &mut buffers.slots {
@@ -3113,11 +3314,22 @@ mod android_graphics_ffi {
         }
         if let Some(context) = completion_context {
             unsafe {
-                android_surface_transaction_set_on_complete(
-                    transaction.as_ptr(),
-                    context,
-                    surface_transaction_complete,
-                );
+                match context {
+                    LegacyCompletionContext::Slot(context) => {
+                        android_surface_transaction_set_on_complete(
+                            transaction.as_ptr(),
+                            context,
+                            surface_transaction_complete,
+                        );
+                    }
+                    LegacyCompletionContext::External(context) => {
+                        android_surface_transaction_set_on_complete(
+                            transaction.as_ptr(),
+                            context,
+                            surface_external_transaction_complete,
+                        );
+                    }
+                }
             }
         }
         unsafe {
@@ -3165,6 +3377,75 @@ mod android_graphics_ffi {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         -4
+    }
+
+    pub(super) unsafe fn probe_external_gpu_surface_release(
+        environment: *mut c_void,
+        surface: *mut c_void,
+    ) -> i32 {
+        let Some(mut window) = (unsafe { NativeWindow::from_surface(environment, surface) }) else {
+            return -1;
+        };
+        if window.set_rgba_geometry(64, 64, 64, 64).is_err() {
+            return -2;
+        }
+        let requested = HardwareBufferDescription {
+            width: 64,
+            height: 64,
+            layers: 1,
+            format: ANDROID_RGBA_8888 as u32,
+            usage: HARDWARE_BUFFER_GPU_SAMPLED_IMAGE | HARDWARE_BUFFER_GPU_COLOR_OUTPUT,
+            stride: 0,
+            reserved_zero: 0,
+            reserved_one: 0,
+        };
+        let mut buffers = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let mut pointer = ptr::null_mut();
+            if unsafe { android_hardware_buffer_allocate(&requested, &raw mut pointer) } != 0 {
+                return -3;
+            }
+            let Some(pointer) = NonNull::new(pointer) else {
+                return -3;
+            };
+            buffers.push(ReceivedHardwareBuffer(pointer));
+        }
+        let releases = Arc::new(SurfaceReleaseQueue::new());
+        for (index, buffer) in buffers.iter().enumerate() {
+            let resource_id = index as u32 + 1;
+            let identity = GpuSurfaceIdentity {
+                helper_generation: 7,
+                resource_id,
+                fence_sequence: resource_id as u64,
+            };
+            if window
+                .present_gpu_resource(
+                    AcquiredPresentResource {
+                        resource_id,
+                        width: 64,
+                        height: 64,
+                        buffer: buffer.as_raw(),
+                        acquire_fence: None,
+                    },
+                    identity,
+                    Arc::clone(&releases),
+                )
+                .is_err()
+            {
+                return -4;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if releases.front_identity() == Some((7, 1, 1)) {
+                let _ = releases.pop();
+                drop(window);
+                return 0;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        -5
     }
 
     fn set_buffer_with_release() -> Option<SetBufferWithRelease> {
@@ -3218,6 +3499,68 @@ mod android_graphics_ffi {
         } else {
             close_descriptor(fence);
         }
+    }
+
+    unsafe extern "C" fn surface_external_buffer_released(context: *mut c_void, fence: i32) {
+        if context.is_null() {
+            close_descriptor(fence);
+            return;
+        }
+        let context = unsafe { Box::from_raw(context.cast::<ExternalReleaseContext>()) };
+        queue_external_surface_release(*context, fence);
+    }
+
+    unsafe extern "C" fn surface_external_transaction_complete(
+        context: *mut c_void,
+        stats: *mut AndroidSurfaceTransactionStats,
+    ) {
+        if context.is_null() {
+            return;
+        }
+        let context = unsafe { Box::from_raw(context.cast::<ExternalReleaseContext>()) };
+        let fence = if stats.is_null() {
+            -1
+        } else if let Some(presentation) = context.presentation.upgrade() {
+            unsafe {
+                android_surface_transaction_previous_release_fence(
+                    stats,
+                    presentation.control.as_ptr(),
+                )
+            }
+        } else {
+            -1
+        };
+        queue_external_surface_release(*context, fence);
+    }
+
+    fn queue_external_surface_release(context: ExternalReleaseContext, fence: i32) {
+        if let Some(presentation) = context.presentation.upgrade() {
+            increment_diagnostic(&presentation.diagnostics.surfaceflinger_releases);
+            let mut buffers = presentation
+                .buffers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if buffers
+                .external_current
+                .as_ref()
+                .is_some_and(|current| current.identity == context.identity)
+            {
+                buffers.external_current = None;
+            }
+        }
+        let fence = if fence < 0 {
+            None
+        } else {
+            // SAFETY: Android transfers one owned release-fence descriptor to
+            // the callback, and File closes it on every queue/error path.
+            Some(unsafe { File::from_raw_fd(fence) })
+        };
+        let _ = context.releases.push(SurfaceRelease {
+            helper_generation: context.identity.helper_generation,
+            resource_id: context.identity.resource_id,
+            fence_sequence: context.identity.fence_sequence,
+            fence,
+        });
     }
 
     unsafe extern "C" fn surface_transaction_complete(
@@ -3406,6 +3749,7 @@ struct LauncherAttachedWindow {
     buffer_height: i32,
     density_dpi: i32,
     last_presented_commit: u32,
+    last_gpu_identity: Option<GpuSurfaceIdentity>,
 }
 
 #[cfg(target_os = "android")]
@@ -3477,7 +3821,10 @@ impl LauncherSurfaceCompositor {
         let density_dpi = launcher_density_dpi(width, height, density_dpi, geometry_percent);
         let logical_width = launcher_logical_extent(width, density_dpi);
         let logical_height = launcher_logical_extent(height, density_dpi);
-        if toplevel_id != 0 && self.core.window_frame_by_id(toplevel_id).is_none() {
+        if toplevel_id != 0
+            && self.core.window_frame_by_id(toplevel_id).is_none()
+            && self.core.window_gpu_identity(toplevel_id).is_none()
+        {
             return -7;
         }
         if window
@@ -3515,6 +3862,7 @@ impl LauncherSurfaceCompositor {
             buffer_height: logical_height,
             density_dpi,
             last_presented_commit: u32::MAX,
+            last_gpu_identity: None,
         });
         self.last_presentation_signature = None;
         self.last_reported_ime_serial = None;
@@ -3572,6 +3920,36 @@ impl LauncherSurfaceCompositor {
             if commit == attached.last_presented_commit {
                 continue;
             }
+            if let Some(identity) = self.core.window_gpu_identity(attached.toplevel_id) {
+                if attached.last_gpu_identity == Some(identity) {
+                    attached.last_presented_commit = commit;
+                    presented = true;
+                    continue;
+                }
+                if let Ok(resource) = self.core.take_gpu_present_resource(identity) {
+                    if resource.width as i32 == attached.buffer_width
+                        && resource.height as i32 == attached.buffer_height
+                    {
+                        match attached.window.present_gpu_resource(
+                            resource,
+                            identity,
+                            Arc::clone(&self.core.gpu_surface_releases),
+                        ) {
+                            Ok(()) => {
+                                attached.last_presented_commit = commit;
+                                attached.last_gpu_identity = Some(identity);
+                                presented = true;
+                                continue;
+                            }
+                            Err(resource) => {
+                                let _ = self.core.return_gpu_present_resource(resource);
+                            }
+                        }
+                    } else {
+                        let _ = self.core.return_gpu_present_resource(resource);
+                    }
+                }
+            }
             let frame = if attached.toplevel_id == 0 {
                 launcher_presentation_frame(&self.core.state)
             } else {
@@ -3596,6 +3974,7 @@ impl LauncherSurfaceCompositor {
             ) == 0
             {
                 attached.last_presented_commit = commit;
+                attached.last_gpu_identity = None;
                 presented = true;
             }
         }
@@ -10522,10 +10901,23 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let viewport_source_update = surface.pending_viewport_source.take();
                 let viewport_destination_update = surface.pending_viewport_destination.take();
                 let buffer_assignment = surface.pending_buffer.take();
-                if let Some(registry) = state.gpu_surface_identity.as_mut() {
-                    let _ = registry
-                        .commit_surface(resource.id().protocol_id(), buffer_assignment.is_some());
-                }
+                let (was_gpu_mapped, committed_gpu_identity) = state
+                    .gpu_surface_identity
+                    .as_mut()
+                    .map(|registry| {
+                        let was_mapped = registry
+                            .committed_surface(resource.id().protocol_id())
+                            .is_some();
+                        let committed = registry
+                            .commit_surface(
+                                resource.id().protocol_id(),
+                                buffer_assignment.is_some(),
+                            )
+                            .ok()
+                            .flatten();
+                        (was_mapped, committed)
+                    })
+                    .unwrap_or((false, None));
                 let mut callbacks = std::mem::take(&mut surface.pending_callbacks);
                 let role = surface.role;
                 let xdg_surface = surface.xdg_surface.clone();
@@ -10581,7 +10973,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 } else {
                     surface.committed_viewport_destination
                 };
-                let was_mapped = base_frame.is_some();
+                let was_mapped = base_frame.is_some() || was_gpu_mapped;
                 let next_scale = buffer_scale_update.unwrap_or(base_scale);
                 let next_transform = buffer_transform_update.unwrap_or(base_transform);
                 let next_viewport_source = viewport_source_update.unwrap_or(base_viewport_source);
@@ -10843,12 +11235,14 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
                 let latest_frame = surface.committed_frame.clone();
                 let is_xdg_toplevel = role == Some(SurfaceRole::XdgToplevel);
-                let previously_active_toplevel =
-                    if is_xdg_toplevel && !was_mapped && latest_frame.is_some() {
-                        state.active_toplevel.clone()
-                    } else {
-                        None
-                    };
+                let previously_active_toplevel = if is_xdg_toplevel
+                    && !was_mapped
+                    && (latest_frame.is_some() || committed_gpu_identity.is_some())
+                {
+                    state.active_toplevel.clone()
+                } else {
+                    None
+                };
                 let is_cursor = role == Some(SurfaceRole::Cursor);
                 let publishes_root_frame = surface_publishes_root_frame(
                     role,
@@ -10856,11 +11250,12 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     state.primary_toplevel.is_some(),
                 );
                 let has_frame = latest_frame.is_some();
+                let has_content = has_frame || committed_gpu_identity.is_some();
                 drop(surface);
                 apply_pointer_constraint_regions(state, resource);
 
                 state.surface_commit_count = state.surface_commit_count.saturating_add(1);
-                if has_frame {
+                if has_content {
                     enter_surface_outputs(state, resource);
                 }
                 let damage_origin = if publishes_root_frame {
@@ -10883,7 +11278,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     &mut data.inner.lock().unwrap_or_else(|error| error.into_inner()),
                     local_damage,
                 );
-                if publishes_root_frame && has_frame {
+                if publishes_root_frame && has_content {
                     if is_xdg_toplevel && state.primary_toplevel.is_none() {
                         state.primary_toplevel = xdg_toplevel.clone();
                     }
@@ -11008,7 +11403,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     cursor_changed(state);
                 }
                 if is_xdg_toplevel {
-                    if has_frame
+                    if has_content
                         && state.active_toplevel.as_ref().is_some_and(|active| {
                             xdg_toplevel
                                 .as_ref()
@@ -11026,7 +11421,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         }
                         state.pointer_focus_surface = Some(resource.clone());
                         set_keyboard_focus(state, Some(resource.clone()));
-                    } else if !has_frame
+                    } else if !has_content
                         && state
                             .pointer_focus_surface
                             .as_ref()
@@ -13038,6 +13433,7 @@ impl CompositorCore {
             socket_identity: None,
             gpu_present_endpoint: None,
             gpu_present_scope: None,
+            gpu_surface_releases: Arc::new(SurfaceReleaseQueue::new()),
             #[cfg(target_os = "android")]
             gpu_present_pending_resource: None,
             #[cfg(target_os = "android")]
@@ -13089,6 +13485,24 @@ impl CompositorCore {
         }
         let endpoint = GpuPresentEndpoint::bind(path, current_euid())?;
         self.enable_gpu_surface_identity(scope)?;
+        self.gpu_present_scope = Some(scope);
+        self.gpu_present_endpoint = Some(endpoint);
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    fn configure_gpu_present_endpoint(
+        &mut self,
+        path: &Path,
+        scope: GpuPresentScope,
+    ) -> std::io::Result<()> {
+        if self.gpu_present_endpoint.is_none() {
+            return self.enable_gpu_present_endpoint(path, scope);
+        }
+        let endpoint = GpuPresentEndpoint::bind(path, current_euid())?;
+        self.replace_gpu_surface_helper(scope)?;
+        self.gpu_present_pending_resource = None;
+        self.gpu_present_pending_fence = None;
         self.gpu_present_scope = Some(scope);
         self.gpu_present_endpoint = Some(endpoint);
         Ok(())
@@ -13359,6 +13773,48 @@ impl CompositorCore {
             .as_mut()
             .expect("endpoint checked by scope")
             .flush_releases()?;
+        while self
+            .gpu_present_endpoint
+            .as_ref()
+            .is_some_and(GpuPresentEndpoint::can_queue_release)
+        {
+            let Some((helper_generation, resource_id, fence_sequence)) =
+                self.gpu_surface_releases.front_identity()
+            else {
+                break;
+            };
+            if helper_generation != scope.helper_generation {
+                let _ = self.gpu_surface_releases.pop();
+                continue;
+            }
+            let frame = encode_gpu_present(
+                scope,
+                GpuPresentMessage::Release {
+                    resource_id,
+                    fence_sequence,
+                },
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))?;
+            let (present_registry, identity_registry, _) =
+                self.prepare_gpu_present_frame(&frame)?;
+            let release = self
+                .gpu_surface_releases
+                .pop()
+                .expect("front release remains queued");
+            self.gpu_present_endpoint
+                .as_mut()
+                .expect("endpoint checked above")
+                .queue_release(frame, release.fence)?;
+            self.state.gpu_present_registry = Some(present_registry);
+            self.state.gpu_surface_identity = Some(identity_registry);
+            count = count.saturating_add(1);
+        }
+        count = count.saturating_add(
+            self.gpu_present_endpoint
+                .as_mut()
+                .expect("endpoint checked above")
+                .flush_releases()?,
+        );
         #[cfg(target_os = "android")]
         if let Some((frame, resource)) = self.gpu_present_pending_resource.take() {
             let (present_registry, identity_registry, _) =
@@ -13828,6 +14284,46 @@ impl CompositorCore {
         compose_toplevel_frame(&self.state, toplevel)
     }
 
+    #[cfg(target_os = "android")]
+    fn window_gpu_identity(&self, id: u32) -> Option<GpuSurfaceIdentity> {
+        let surface = if id == 0 {
+            self.state.root_surface.clone()?
+        } else {
+            let toplevel = self
+                .state
+                .toplevels
+                .iter()
+                .find(|toplevel| toplevel.id().protocol_id() == id)?;
+            toplevel_surface(toplevel)?
+        };
+        self.state
+            .gpu_surface_identity
+            .as_ref()?
+            .committed_surface(surface.id().protocol_id())
+    }
+
+    #[cfg(target_os = "android")]
+    fn take_gpu_present_resource(
+        &mut self,
+        identity: GpuSurfaceIdentity,
+    ) -> io::Result<gpu_present_transport::AcquiredPresentResource> {
+        self.gpu_present_endpoint
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU endpoint is disabled"))?
+            .take_present_resource(identity.resource_id)
+    }
+
+    #[cfg(target_os = "android")]
+    fn return_gpu_present_resource(
+        &mut self,
+        resource: gpu_present_transport::AcquiredPresentResource,
+    ) -> io::Result<()> {
+        self.gpu_present_endpoint
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "GPU endpoint is disabled"))?
+            .return_present_resource(resource)
+    }
+
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     fn primary_window_id(&self) -> Option<u32> {
         self.state
@@ -13836,7 +14332,17 @@ impl CompositorCore {
             .filter(|toplevel| toplevel.is_alive())
             .and_then(|toplevel| {
                 toplevel_surface(toplevel)
-                    .filter(|surface| surface_frame(surface).is_some())
+                    .filter(|surface| {
+                        surface_frame(surface).is_some()
+                            || self
+                                .state
+                                .gpu_surface_identity
+                                .as_ref()
+                                .and_then(|registry| {
+                                    registry.committed_surface(surface.id().protocol_id())
+                                })
+                                .is_some()
+                    })
                     .map(|_| toplevel.id().protocol_id())
             })
     }
@@ -13854,9 +14360,16 @@ impl CompositorCore {
         let Some(surface) = toplevel_surface(&toplevel) else {
             return 0;
         };
-        let Some(frame) = surface_frame(&surface) else {
+        let frame = surface_frame(&surface);
+        let has_gpu_content = self
+            .state
+            .gpu_surface_identity
+            .as_ref()
+            .and_then(|registry| registry.committed_surface(surface.id().protocol_id()))
+            .is_some();
+        if frame.is_none() && !has_gpu_content {
             return 0;
-        };
+        }
         let changed = self
             .state
             .active_toplevel
@@ -13870,7 +14383,7 @@ impl CompositorCore {
             configure_toplevel_activation(&mut self.state, &toplevel, true);
         }
         self.state.root_surface = Some(surface.clone());
-        self.state.root_frame = Some(frame);
+        self.state.root_frame = frame;
         self.state.pointer_focus_surface = Some(surface.clone());
         self.state.pointer_inside = false;
         self.state.pointer_buttons = 0;
@@ -13895,8 +14408,17 @@ impl CompositorCore {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .is_some()
-                || toplevel_surface(toplevel)
-                    .is_none_or(|surface| surface_frame(&surface).is_none())
+                || toplevel_surface(toplevel).is_none_or(|surface| {
+                    surface_frame(&surface).is_none()
+                        && self
+                            .state
+                            .gpu_surface_identity
+                            .as_ref()
+                            .and_then(|registry| {
+                                registry.committed_surface(surface.id().protocol_id())
+                            })
+                            .is_none()
+                })
             {
                 continue;
             }
@@ -16601,6 +17123,16 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     unsafe { android_graphics_ffi::probe_release_aware_surface(environment, surface) }
 }
 
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeExternalGpuSurfaceReleaseProbe(
+    environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
+) -> i32 {
+    unsafe { android_graphics_ffi::probe_external_gpu_surface_release(environment, surface) }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCompositorBindCount(
     _environment: *mut std::ffi::c_void,
@@ -18530,6 +19062,47 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     handle: i64,
 ) -> bool {
     launcher_compositor(handle).is_some() && android_graphics_ffi::release_aware_buffers_available()
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeConfigureGpuPresentEndpoint(
+    environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    socket_path: jbyteArray,
+    session_id: i32,
+    helper_generation: i32,
+    token: jbyteArray,
+) -> i32 {
+    if session_id <= 0 || helper_generation <= 0 {
+        return -2;
+    }
+    let Some(socket_path) =
+        java_byte_array(environment, socket_path).and_then(|path| String::from_utf8(path).ok())
+    else {
+        return -2;
+    };
+    let Some(token) = java_byte_array(environment, token)
+        .and_then(|token| <[u8; 16]>::try_from(token).ok())
+        .filter(|token| token.iter().any(|byte| *byte != 0))
+    else {
+        return -2;
+    };
+    let Some(mut compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    compositor
+        .core
+        .configure_gpu_present_endpoint(
+            Path::new(&socket_path),
+            GpuPresentScope {
+                session_id: session_id as u32,
+                helper_generation: helper_generation as u32,
+                token,
+            },
+        )
+        .map_or(-3, |()| 0)
 }
 
 #[cfg(target_os = "android")]
@@ -20476,8 +21049,14 @@ mod tests {
         )
         .expect("present");
         core.apply_gpu_present_frame(&present).expect("apply present");
-        core.queue_gpu_present_release(7, 9, None)
-            .expect("queue release");
+        core.gpu_surface_releases
+            .push(gpu_present_transport::SurfaceRelease {
+                helper_generation: 3,
+                resource_id: 7,
+                fence_sequence: 9,
+                fence: None,
+            })
+            .expect("queue SurfaceFlinger callback release");
         core.dispatch_once().expect("flush release");
 
         let mut frame = [0; GPU_PRESENT_FRAME_BYTES];

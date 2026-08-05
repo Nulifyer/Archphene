@@ -95,20 +95,24 @@ probe completed sequences 1 and 2 around marker-only Release (`46,52,46`).
 The generic Mesa/Wayland sender is now implemented as a pinned Mesa 26.1.5
 patch. Eligible 8-bit RGBA/BGRA display targets use private commands 39 and 40,
 send the returned exact identity through `set_resource` before the same surface
-commit, then wait on command 41 before `eglSwapBuffers` returns. The path
+commit, then wait on command 41 before reusing that resource. Other ring
+resources can render later frames while SurfaceFlinger owns it. The path
 requires explicit activation, a valid helper generation, and the private
 Wayland global; otherwise Mesa retains `wl_shm`. Reproducible x86_64 and AArch64
-builds pass. Production
-and the manager's SurfaceFlinger-backed Release sender remain disabled because
-the custom Mesa install tree is not staged and received helper AHBs are not yet
-submitted to Android presentation.
+builds pass, and package-runtime staging now installs the custom tree. The
+manager can submit an exact received resource to `ASurfaceTransaction` and feed
+its release callback or legacy previous-release fence into the bounded Release
+queue. Production omits `ARCHPHENE_AHB_PRESENT` until non-direct scenes can
+import and compose AHBs without losing compositor semantics.
 
 The manager now has the transport half of Release sending. A three-entry queue
 admits only an exact registry-valid sequence, writes the full scoped frame before
 marker `52`, and optionally transfers one RAII-owned fence FD. Partial
 nonblocking writes resume in order, and disconnect drops all queued ownership.
-Host tests cover marker-only and fenced forms. Connecting actual SurfaceFlinger
-callback results remains open.
+Host tests cover marker-only and fenced forms. Android SurfaceFlinger callbacks
+now enqueue the exact scoped identity and optional fence through this transport.
+An isolated API 35 Samsung probe submitted two external AHBs and observed exact
+identity `{generation=7, resource=1, sequence=1}` through the legacy callback.
 
 The compositor now has a dormant same-UID fixed-frame listener. It bounds path
 length and frames per dispatch, validates `SO_PEERCRED`, safely reassembles

@@ -131,6 +131,27 @@ stage_architecture() {
   sources["libarchphene_kde_config.so"]="$qt_compat/libarchphene_kde_config.so"
   roles["libarchphene_kde_config.so"]=library
 
+  local mesa_runtime="$ARCHPHENE_ROOT/tooling/build/mesa-virpipe-sender/$architecture/usr/lib"
+  local mesa_library mesa_source
+  for mesa_library in \
+    libEGL.so libEGL.so.1 libEGL.so.1.0.0 \
+    libGLESv1_CM.so libGLESv1_CM.so.1 libGLESv1_CM.so.1.1.0 \
+    libGLESv2.so libGLESv2.so.2 libGLESv2.so.2.0.0 \
+    libgallium-26.1.5.so; do
+    case "$mesa_library" in
+      libEGL.so|libEGL.so.1) mesa_source=libEGL.so.1.0.0 ;;
+      libGLESv1_CM.so|libGLESv1_CM.so.1) mesa_source=libGLESv1_CM.so.1.1.0 ;;
+      libGLESv2.so|libGLESv2.so.2) mesa_source=libGLESv2.so.2.0.0 ;;
+      *) mesa_source="$mesa_library" ;;
+    esac
+    archphene_require_file "$mesa_runtime/$mesa_source"
+    sources["$mesa_library"]="$mesa_runtime/$mesa_source"
+    roles["$mesa_library"]=library
+  done
+  archphene_require_file "$mesa_runtime/libgallium-26.1.5.so"
+  sources["swrast_dri.so"]="$mesa_runtime/libgallium-26.1.5.so"
+  roles["swrast_dri.so"]=library
+
   declare -A packaged_hashes=()
   local identity packaged size actual_machine
   while IFS= read -r logical; do

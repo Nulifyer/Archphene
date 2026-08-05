@@ -4061,9 +4061,9 @@ visible only when both transitions succeed. The generated-client socket test
 uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
 claiming the exact surface commit. Native AHB handle and acquire-fence receipt
 are implemented. The helper private Resource/Present sender, blocking Release
-receiver, and generic Mesa/Wayland identity sender are implemented; runtime
-staging, Android submission of received helper AHBs, and manager SurfaceFlinger
-release transmission remain open.
+receiver, generic Mesa/Wayland identity sender, dual-ABI runtime staging,
+Android direct submission, and SurfaceFlinger-backed Release return are now
+implemented. Production activation remains withheld for composited scenes.
 
 The Android vtest helper now implements the scoped APHB bootstrap and a dormant
 AHB-backed resource path. Its
@@ -4088,17 +4088,23 @@ one marker-only Release (`46,52,46`). The pinned Mesa 26.1.5 patch now issues
 commands 39, 40, and 41 for eligible RGBA/BGRA display targets, sends the exact
 returned sequence through the private Wayland request before the matching
 surface commit, and falls back to `wl_shm` unless explicitly activated with the
-private global. Reproducible x86_64 and AArch64 builds pass. Production does not
-stage this Mesa tree or pass the helper arguments; Android submission of the
-received helper AHB and SurfaceFlinger-backed release return remain open.
+private global. Reproducible x86_64 and AArch64 builds pass. The package runtime
+now stages the pinned EGL/GLES/Gallium tree, and the launcher passes the scoped
+helper side-channel arguments after binding the same-UID manager endpoint.
+`ARCHPHENE_AHB_PRESENT` remains absent in production until imported composition
+preserves popups, cursors, transforms, and alpha.
 
 The dormant manager endpoint also has a bounded outbound Release transport. It
 admits at most three responses, transactionally commits registry release only
 after queue admission, resumes partial nonblocking 64-byte frame writes before
 marker `52`, and transfers zero or one RAII-owned release-fence FD. Disconnect
 closes queued descriptors. Host tests prove exact frame/marker ordering for both
-marker-only and fenced responses. SurfaceFlinger callbacks do not feed this
-queue yet, so production reuse remains disabled.
+marker-only and fenced responses. Direct Android buffer-release callbacks now
+feed exact helper generation, resource, sequence, and optional fence ownership
+into this queue; stale-generation callbacks are discarded after replacement.
+On the API 35 Samsung `SM-S908U`, an isolated probe submitted two external AHBs,
+observed the legacy previous-buffer release for exact identity `{7,1,1}`, and
+then passed the complete native compositor suite.
 
 The manager-side dormant control endpoint now admits Hello and Android Resource
 handles. It binds only a bounded absolute path and accepts
@@ -4114,8 +4120,8 @@ and idle DropResource commit handle and identity state transactionally. A live
 API 35 Samsung nonblocking socket round trip accepted a valid 64×32 AHB and
 atomically rejected a mismatched declaration. The host core test still returns
 `Unsupported` because AHardwareBuffer is Android-only. The production launcher
-therefore leaves the endpoint disabled until patched Mesa runtime staging,
-Android presentation of received helper AHBs, and the release path exist.
+now binds the endpoint before helper startup and can replace it only with a
+strictly newer helper generation. Mesa activation remains disabled.
 
 APHB direction and reuse are no longer ambiguous. Helper-to-manager traffic is
 Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release
@@ -4128,8 +4134,8 @@ that the helper completed rendering conservatively before send. Receipt is
 nonblocking, retains one explicit acquire state per resource, and retries
 would-block before parsing another frame. Host tests cover both forms and reject
 a wrong marker; the Samsung round trip includes the descriptor path. Fence
-consumption is implemented in the helper's blocking wait. Manager-side
-SurfaceFlinger release-fence transmission is still unimplemented.
+consumption is implemented in the helper's blocking wait. Manager-side direct
+submission now returns the SurfaceFlinger callback fence through scoped Release.
 
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned

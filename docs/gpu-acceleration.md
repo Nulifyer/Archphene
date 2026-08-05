@@ -249,11 +249,12 @@ loader sends the returned helper generation, resource ID, and exact 64-bit
 sequence through `set_resource` before the same `wl_surface.commit`. It activates
 only with `ARCHPHENE_AHB_PRESENT=1`, a valid
 `ARCHPHENE_GPU_HELPER_GENERATION`, and the private compositor global; otherwise
-Mesa retains `wl_shm`. After flushing that exact commit, the DRI loader performs
-command 41 before `eglSwapBuffers` returns, preventing rendering from reusing the
-resource early. Reproducible x86_64 and AArch64 builds pass. Production
-remains disabled until those install trees are staged and the manager presents
-the received helper AHB and returns its SurfaceFlinger release.
+Mesa retains `wl_shm`. Before reusing or destroying the same resource, the
+winsys performs command 41; other ring resources remain available for later
+frames. Reproducible x86_64 and AArch64 builds pass, and package-runtime
+staging now installs the pinned EGL/GLES/Gallium tree for both ABIs. Production
+still omits `ARCHPHENE_AHB_PRESENT` until non-direct scenes can import and
+compose received AHBs without losing popups, cursors, transforms, or alpha.
 
 The manager transport can now queue three Release responses without blocking
 the compositor. Registry release is prepared on cloned state and becomes
@@ -262,8 +263,11 @@ visible only after bounded queue admission. Each response writes the complete
 completed release, while `SCM_RIGHTS` carries one owned release-fence FD. Partial
 nonblocking frame writes resume before the marker, and queued FDs remain RAII
 owned until successful transfer or disconnect. Host socket tests cover both
-marker forms and exact ordering. SurfaceFlinger callback output is not connected
-to this queue yet.
+marker forms and exact ordering. The Android direct-submission callback now
+feeds exact generation/resource/sequence identities and optional owned release
+fences into this queue. Stale-generation callbacks are discarded after helper
+replacement. An isolated API 35 Samsung probe submitted two external AHBs and
+observed the exact first identity through the legacy previous-release callback.
 
 The compositor now has the matching dormant control endpoint. It binds only an
 absolute 103-byte-or-shorter path, replaces only a socket, authenticates the

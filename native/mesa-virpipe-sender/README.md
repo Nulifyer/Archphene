@@ -11,9 +11,9 @@ The patch adds three bounded operations:
 - It obtains the exact 64-bit Present sequence through command `40` and sends
   that identity through `org_archphene_gpu_surface_v1.set_resource` before the
   same surface commit.
-- After the exact Wayland commit is flushed, it waits for command `41` before
-  `eglSwapBuffers` returns or the resource is destroyed. The application cannot
-  begin rendering the next frame before the manager returns ownership.
+- It waits for command `41` before the same resource is reused or destroyed.
+  Other ring resources may render later frames while SurfaceFlinger owns the
+  submitted resource.
 
 The path activates only when `ARCHPHENE_AHB_PRESENT=1`,
 `ARCHPHENE_GPU_HELPER_GENERATION` is a valid nonzero 32-bit integer, and the
@@ -28,6 +28,7 @@ Build both native Linux architectures with:
 ```
 
 The build outputs an install tree under
-`tooling/build/mesa-virpipe-sender/<architecture>/`. Production launch remains
-disabled until Archphene stages this tree into each Linux runtime and submits
-the received helper AHB through the manager's Android presentation path.
+`tooling/build/mesa-virpipe-sender/<architecture>/`. The package-runtime staging
+step installs this tree for both ABIs. Production omits
+`ARCHPHENE_AHB_PRESENT` until non-direct scenes can import and compose received
+AHBs without losing popups, cursors, transforms, or alpha.

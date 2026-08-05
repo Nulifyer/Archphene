@@ -80,7 +80,9 @@ require(
 require(
     "prototypes/native-compositor-probe/src/org/archphene/compositorprobe/MainActivity.java",
     "nativeReleaseAwareSurfaceProbe",
+    "nativeExternalGpuSurfaceReleaseProbe",
     '"Surface release probe="',
+    '"External GPU Surface release probe=passed"',
     '"API36 per-buffer callback"',
     '"legacy fallback"',
 )
@@ -192,12 +194,6 @@ require(
     "missing Archphene GPU identity",
 )
 require(
-    "native/mesa-virpipe-sender/patches/0002-wait-release-after-commit.patch",
-    "driSWRastFinishPresent",
-    "archphene_finish_present",
-    "finish_present_data",
-)
-require(
     "native/android-gpu-helper/patches/0010-archphene-release-receive.patch",
     "VCMD_ARCHPHENE_WAIT_RELEASE_AHB 41",
     "vtest_server_receive_archphene_release",
@@ -237,12 +233,37 @@ require(
     "gpu_present_pending_resource",
     "gpu_present_pending_fence",
     "queue_gpu_present_release",
+    "surface_external_buffer_released",
+    "surface_external_transaction_complete",
+    "queue_external_surface_release",
+    "present_gpu_resource",
+    "take_gpu_present_resource",
     "scoped_gpu_release_commits_only_after_bounded_queue_admission",
     "AHardwareBuffer_recvHandleFromUnixSocket",
     "MAX_RECEIVED_DESCRIPTORS: usize = 4",
     "descriptor control message must contain exactly one descriptor",
     "GPU acquire fences require Android resources",
     "scoped_gpu_endpoint_accepts_only_connected_control_frames",
+)
+require(
+    "android/app/src/main/kotlin/org/archphene/app/launcher/AndroidGpuBridge.kt",
+    '"--archphene-present-socket"',
+    '"--archphene-session-id"',
+    '"--archphene-helper-generation"',
+    '"--archphene-present-token"',
+    "configureGpuPresentEndpoint",
+)
+require(
+    "scripts/stage-archphene-package-runtime.sh",
+    "mesa-virpipe-sender/$architecture/usr/lib",
+    "libEGL.so.1.0.0",
+    "libgallium-26.1.5.so",
+    'sources["swrast_dri.so"]',
+)
+reject(
+    "crates/archphene-process/src/lib.rs",
+    "ARCHPHENE_AHB_PRESENT",
+    "ARCHPHENE_GPU_HELPER_GENERATION",
 )
 reject(
     "native/archphene-compositor/src/android_gpu_renderer.rs",

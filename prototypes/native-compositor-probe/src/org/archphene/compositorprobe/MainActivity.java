@@ -72,6 +72,7 @@ public final class MainActivity extends Activity {
 
     private static native int nativeProtocolVersion();
     private static native int nativeReleaseAwareSurfaceProbe(Surface surface);
+    private static native int nativeExternalGpuSurfaceReleaseProbe(Surface surface);
     private static native boolean nativeCompoundConfinementProbe();
     private static native long nativeCreateCore();
     private static native int nativeAdoptClient(long handle, int fd);
@@ -436,6 +437,13 @@ public final class MainActivity extends Activity {
             }
             Log.i(TAG, "Surface release probe="
                     + (releaseResult == 0 ? "API36 per-buffer callback" : "legacy fallback"));
+            int externalReleaseResult = nativeExternalGpuSurfaceReleaseProbe(
+                    releaseSurfaceView.getHolder().getSurface());
+            if (externalReleaseResult != 0) {
+                throw new IllegalStateException(
+                        "external GPU Surface release " + externalReleaseResult);
+            }
+            Log.i(TAG, "External GPU Surface release probe=passed");
             if (nativeProtocolVersion() != 1) throw new IllegalStateException("protocol version");
             if (!nativeCompoundConfinementProbe()) {
                 throw new IllegalStateException("compound pointer confinement");

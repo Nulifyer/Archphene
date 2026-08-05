@@ -174,7 +174,7 @@ copying.
   - [x] Add a pinned generic Mesa virpipe winsys/Wayland sender that carries the
     exact command-40 sequence into the matching surface commit and waits on
     command 41 before reuse. Preserve `wl_shm` unless explicitly activated.
-  - [ ] Stage the patched Mesa runtime and connect the manager's received AHB
+  - [x] Stage the patched Mesa runtime and connect the manager's received AHB
     presentation and SurfaceFlinger-backed Release sender.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
   buffer reuse. Bound dimensions, slots, estimated bytes, outstanding fences,

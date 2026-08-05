@@ -862,7 +862,8 @@ impl CommandEnvironment {
             command
                 .env("EGL_PLATFORM", "wayland")
                 .env("GALLIUM_DRIVER", "virpipe")
-                .env("VTEST_SOCKET_NAME", socket_path);
+                .env("VTEST_SOCKET_NAME", socket_path)
+                .env("LIBGL_DRIVERS_PATH", &self.command_directory);
         } else if self.software_opengl {
             command
                 .env("EGL_PLATFORM", "wayland")
@@ -3685,6 +3686,10 @@ mod tests {
         assert_eq!(
             accelerated_value("VTEST_SOCKET_NAME"),
             Some(virgl_socket.as_os_str()),
+        );
+        assert_eq!(
+            accelerated_value("LIBGL_DRIVERS_PATH"),
+            Some(environment.command_directory.as_os_str()),
         );
         let software = environment
             .clone()

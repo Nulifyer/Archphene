@@ -75,6 +75,28 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun configureGpuPresentEndpoint(
+        socketPath: String,
+        sessionId: Int,
+        helperGeneration: Int,
+        token: ByteArray,
+    ): Boolean {
+        require(sessionId > 0)
+        require(helperGeneration > 0)
+        require(token.size == GPU_PRESENT_TOKEN_BYTES && token.any { it.toInt() != 0 })
+        val socketBytes = socketPath.toByteArray(StandardCharsets.UTF_8)
+        val result =
+            nativeConfigureGpuPresentEndpoint(
+                ownerHandle(),
+                socketBytes,
+                sessionId,
+                helperGeneration,
+                token,
+            )
+        PerformanceMetrics.recordCompositorJni(arrayCopyBytes = socketBytes.size + token.size)
+        return result == 0
+    }
+
     fun attachWindow(
         windowToken: Int,
         toplevelId: Int,
@@ -533,6 +555,14 @@ internal class NativeLauncherCompositor(
 
     private external fun nativeUsesReleaseAwareBuffers(handle: Long): Boolean
 
+    private external fun nativeConfigureGpuPresentEndpoint(
+        handle: Long,
+        socketPath: ByteArray,
+        sessionId: Int,
+        helperGeneration: Int,
+        token: ByteArray,
+    ): Int
+
     private external fun nativeDetachSurface(handle: Long)
 
     private external fun nativeAttachWindowSurface(
@@ -686,6 +716,7 @@ internal class NativeLauncherCompositor(
 
     companion object {
         private const val INPUT_RECORD_BYTES = 6 * Int.SIZE_BYTES
+        private const val GPU_PRESENT_TOKEN_BYTES = 16
         const val PRESENTATION_COMPONENTS = 42
         const val RESULT_CLOSED = -1
         const val FLAG_CLIENT_CONNECTED = 1

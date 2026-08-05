@@ -2874,7 +2874,13 @@ class LauncherSessionService : Service() {
             if (allowGpuBridge && session.authorization.usesGraphicsBridge) {
                 val bridge =
                     session.gpuBridge
-                        ?: AndroidGpuBridge(this, session.id).also {
+                        ?: AndroidGpuBridge(
+                            this,
+                            session.id,
+                            session.gpuRecoveryStage + 1,
+                            session.compositor
+                                ?: error("GPU bridge requires an active compositor"),
+                        ).also {
                             session.gpuBridge = it
                         }
                 bridge.start().also { socket ->
