@@ -175,6 +175,13 @@ contains no direct API 36 symbol dependency. The API 35 Samsung reports
 submitted slots during the current Mousepad Quick launch probe. A live API 36
 callback-path probe remains pending.
 
+The stock vtest contract does not propagate one host resource identity into the
+Wayland `wl_shm` commit produced by Mesa's current virpipe winsys. A helper-only
+“latest frame” heuristic would race commits and break multi-surface semantics,
+so it is not an acceptable direct-AHB implementation. The required generic
+Mesa/vtest-to-Wayland identity contract and bounded runtime delivery experiment
+are recorded in the [virpipe AHB resource identity audit](../research/experiments/bridge/virpipe-ahb-resource-identity-2026-08-05.md).
+
 References:
 
 - [Android graphics architecture](https://source.android.com/docs/core/graphics/architecture)

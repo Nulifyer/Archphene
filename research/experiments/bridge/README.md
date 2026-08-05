@@ -13,3 +13,4 @@ Dated Android permission, storage, transport, home, and document bridge evidence
 - [Split Storage Bridge Emulator Results](split-storage-bridge-emulator-results.md)
 - [Storage Access Framework bridge emulator results](storage-access-framework-bridge-emulator-results.md)
 - [Native compositor Android probe](native-compositor-android-probe-2026-07-13.md)
+- [Virpipe AHB resource identity audit](virpipe-ahb-resource-identity-2026-08-05.md)
