@@ -83,10 +83,18 @@ the child then removed the process. Force-stopping both tasks retained Mousepad
 PID 28062 only for the reconnect grace, logged both Binder deaths, and removed
 the process when the grace expired. The density override was restored to 420.
 
-Manager absence and wrapper removal remain open because exercising either on the
-current physical manager would terminate or uninstall retained user sessions;
-they require an isolated populated manager instance or explicit destructive-test
-authorization. This checkpoint makes no DeX or external-display claim.
+Manager absence and app-shell removal now pass on the Samsung after explicit
+authorization to reset test-owned state. The exact `Passwords and Keys` shell
+identified its manager as `org.archphene.app.debug`; after that manager was
+uninstalled, the shell cold-launched in 422 ms and displayed only “Open
+Archphene, then try this Linux app again.” It created no replacement manager or
+Linux session. Uninstalling the shell removed its package and process while the
+separate `org.archpheneos.manager` and Terminal packages remained installed.
+The stale isolated lifecycle manager was also removed. A current exact-AArch64
+debug manager was then installed as a clean UID with only a fresh private root;
+after declining optional Android-folder setup it reported “Archphene is ready,”
+zero installed packages, and no fatal log. This checkpoint makes no DeX or
+external-display claim.
 
 ## Android app-shell multi-task checkpoint
 

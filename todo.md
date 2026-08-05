@@ -109,7 +109,7 @@ its Linux environment.
 - [ ] Preserve exact intent and lifecycle behavior across multiple tasks.
   - [x] Preserve `ACTION_VIEW`, `ACTION_EDIT`, `ACTION_SEND`, notifications,
     root-task close, and wrapper force-stop behavior.
-  - [ ] Validate wrapper removal and manager absence without altering retained
+  - [x] Validate app-shell removal and manager absence without altering retained
     user sessions on the maintained physical target.
 - [x] Prototype manager-hosted **Quick launch** for trying a graphical package
   without another PackageInstaller confirmation. Keep **Add to Android** as the
