@@ -4,6 +4,10 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 container_cli="${CONTAINER_CLI:-podman}"
 image=localhost/archphene-qt-prebuilt-reproducibility:qt6.11.1
+container_user=()
+if [[ "$(basename "$container_cli")" == docker ]]; then
+  container_user=(--user "$(id -u):$(id -g)")
+fi
 mkdir -p "$root/tooling/build"
 base="$(mktemp -d "$root/tooling/build/qt-prebuilt-reproducibility.XXXXXX")"
 active=()
@@ -30,6 +34,7 @@ for specification in "${specifications[@]}"; do
   git -C "$root" worktree add --quiet --detach "$worktree" "$commit"
   active+=("$worktree")
   "$container_cli" run --rm \
+    "${container_user[@]}" \
     -v "$worktree:/workspace" -w /tmp "$image" bash -lc \
     "mkdir build && cd build && \
      qmake6 /workspace/native/archphene-qt-platform-theme/$project && \
@@ -55,6 +60,7 @@ for specification in "${arm_specifications[@]}"; do
   git -C "$root" worktree add --quiet --detach "$worktree" "$commit"
   active+=("$worktree")
   "$container_cli" run --rm \
+    "${container_user[@]}" \
     -v "$worktree:/workspace" -w /workspace "$image" \
     bash scripts/build-qt-platform-theme-arm64.sh >/dev/null
   rebuilt="$worktree/prebuilt/qt-bridge/arm64-v8a/$library"
@@ -73,6 +79,7 @@ git -C "$root" worktree add --quiet --detach "$kde_worktree" \
   931ef9131f9e3f87b60430887b06d99449f80d9d
 active+=("$kde_worktree")
 "$container_cli" run --rm \
+  "${container_user[@]}" \
   -v "$kde_worktree:/workspace" -w /workspace "$image" bash -lc '
 set -euo pipefail
 runtime=tooling/downloads/arch-curated-kcalc-aarch64/runtime-root
