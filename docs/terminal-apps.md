@@ -1,79 +1,107 @@
 # Terminal applications
 
-Archphene provides a first-party **Archphene Terminal** companion for command-line and TUI packages. It is a native Android terminal surface with a real PTY, not a VM and not a desktop terminal running through Wayland. Users install only the Archphene manager; the manager embeds the same-release-signed Terminal APK and installs or updates it through Android PackageInstaller when Terminal is first opened.
+Archphene includes a native Android Terminal surface in the manager. It runs a
+real PTY-backed shell in the same private Arch Linux environment used by
+graphical applications. It is not a VM, a Wayland desktop terminal, or a
+separate Android companion APK.
 
 ## Architecture
 
-- The manager and Terminal have separate Android package names and UIDs. Linux child processes cannot read or modify manager-private package state.
-- A signature-protected manager activity accepts `pacman` requests from the companion. The exported manager launcher ignores terminal request extras.
-- A read-only content provider exposes only runtime packs recorded as Terminal-managed and only to a companion signed with the manager release certificate.
-- Terminal copies each command, library, and data archive into its own sandbox, verifies the manager-declared size and SHA-256, rejects malformed catalogs and command collisions, and marks materialized runtime files read-only. The glibc loader is verified against the same catalog but executes from Terminal's APK-owned native library directory because modern Android forbids executing downloaded code from writable app data.
-- The Apache-2.0 Termux `terminal-emulator` and `terminal-view` modules provide VT/ANSI rendering, hardware-key input, Android IME input, selection, and resize handling.
-- Terminal text uses the explicitly bundled no-ligature `JetBrainsMonoNL Nerd Font Mono` regular face from Nerd Fonts `v3.4.0`. The build verifies its pinned SHA-256 and packages the OFL-1.1 license; Android's device-dependent generic `monospace` alias is not used.
-- Universal development builds carry both PTY libraries and APK-owned glibc loaders; release manager APKs embed a single-ABI Terminal companion matching x86_64 or arm64-v8a. Android selected arm64-v8a on the Samsung Galaxy S22 Ultra, launched a real PTY shell, accepted input, exposed its home through DocumentsUI, preserved the shell through rotation, and executed managed `btop 1.4.7`. The 16 KB x86_64 emulator returns a correlated compatibility error because upstream Arch x86_64 glibc is currently 4 KB-only.
-- A Bionic JNI PTY host starts the generated shell launcher. It uses `/system/bin/sh` until a verified Arch Bash runtime is installed, then selects managed Bash on the next session. Each shell owns a process group and requests a parent-death signal from Android's app process.
-- Each Arch command runs through the patched glibc loader with only its resolved library closure and package data root.
-- Home, `.config`, and `.cache` persist under the Terminal UID. GUI wrappers remain separate Android UIDs.
-- CLI packages do not create app-shell APKs. A package with a usable `.desktop` entry is handled as a GUI wrapper; CLI/TUI packages are exposed in Terminal; dependency-only packages create neither app shell nor command.
+- The manager owns the PTY, shell process group, terminal parser, scrollback,
+  selection, clipboard protocol, and teardown under its ordinary Android UID.
+- Terminal and graphical Linux applications share one Arch root, package
+  database, home, configuration, and Linux trust domain. They do not duplicate
+  package closures or user files.
+- Rust starts only bounded, contained executable paths, owns process groups and
+  descriptors, and publishes terminal damage through reusable direct buffers.
+  Kotlin renders the native Android surface and handles touch, hardware keys,
+  IME, clipboard, accessibility, configuration changes, and foreground-service
+  lifecycle.
+- Terminal remains unavailable until Bash or another supported shell is
+  installed through the verified package path. New sessions can then select it
+  from the bounded shell list.
+- CLI and TUI packages can expose reviewed commands in Terminal. They do not
+  create Android app-shell packages. A graphical desktop entry remains subject
+  to app-shell compatibility review and explicit **Add to Android** publication.
+- Terminal text uses the checksum-pinned no-ligature JetBrains Mono Nerd Font
+  face and packages its OFL-1.1 license. It does not depend on an OEM-specific
+  Android `monospace` alias.
 
-Installing btop does not implicitly install curl. Commands become available only when their source package is explicitly installed. Multiple commands from one source package are exposed together. Explicitly installed dependency-only packages contribute their verified libraries and toolkit data to managed commands without creating commands or Android app shells.
+The release manager APK contains the exact-ABI PTY/runtime components and font.
+There is no Terminal APK to install, sign, update, or grant access separately.
+The historical `v1.0.1` prototype used an isolated Terminal companion; that
+architecture is retained only as release history.
 
-Returning to Terminal after a package catalog change opens a new tab backed by an immutable runtime generation. Existing tabs keep the commands and dependency packs with which they started, so an install or removal cannot alter a running process underneath the user. Closing the final tab that references an old generation reclaims its private copied packs. A cold start retains only the current generation. On the x86_64 emulator and physical AArch64 Samsung, installing `vulkan-swrast` independently makes unmodified Arch `vulkaninfo` enumerate the llvmpipe CPU device; confirmed removal opens a new tab where Vulkan reports no drivers while the old tab continues to enumerate llvmpipe until it is closed. This validates loader and ICD composition, not accelerated Android GPU presentation.
+## Interaction and rendering
 
-Installing `bash` through Archphene publishes its verified runtime closure to Terminal and makes it the default user shell for subsequent sessions. The launcher scopes the patched glibc loader, library path, path bridge, and `C.UTF-8` locale root to managed commands; it clears those variables before invoking Android's Bionic utilities. Fish remains a possible future opt-in shell rather than a release dependency.
+The Terminal uses a compact two-line prompt on portrait displays. The active
+prompt places the current directory above a separate `$` input line and
+abbreviates intermediate directories while keeping the final directory
+readable. OSC 133 markers let completed commands retain only the submitted
+command and output. IME-only height changes preserve prompt state.
 
-Managed Bash uses a compact two-line prompt for portrait displays. The active prompt shows `archphene` and the current directory above a separate `$` input line; intermediate directories are abbreviated in the Fish style while the final directory remains readable, for example `~/Documents/source/ArchpheneOS` becomes `~/D/s/ArchpheneOS`. OSC 133 shell markers let the terminal remove that context after submission while retaining the `$ command` and its output. Height-only IME resizes preserve the markers. The default monospace size follows Android's 16sp scaled text size, and pinch zoom supports a bounded 10sp to 32sp range.
+Text follows Android's scaled 16sp baseline in Auto mode. Pinch zoom, the
+long-press menu, and hardware shortcuts select a bounded 10sp–32sp size;
+`Ctrl+0` restores Auto. The renderer preserves combining text, CJK width,
+regional-indicator flags, emoji modifiers, ZWJ families, indexed colors, direct
+RGB, style attributes, and wide-cell invariants across resize and scrollback.
 
-## Pacman compatibility
+Input supports Android IME preedit/commit, hardware modifiers and function keys,
+bracketed paste, touch selection with draggable endpoints, scrollback, mouse
+reporting, and accessibility navigation. Terminal protocol parsing and replies
+are bounded; malformed or overlong escape sequences fail closed.
 
-`pacman` in Terminal is an Archphene facade. It never mutates manager state directly.
+## Packages, files, and projects
 
-| Command | Behavior |
-| --- | --- |
-| `pacman -Q`, `-Qi`, `-Qs` | Query the locally managed Terminal package set. |
-| `pacman -Ss <name>` | Search official repositories in Archphene and return the compatible result count. |
-| `pacman -S <name>` | Resolve one exact compatible package, run the normal verified manager transaction, and stream its phase/result. |
-| `pacman -R <name>` | Request confirmation, remove one Terminal package, and return success or cancellation. |
-| `pacman -Syu` | Start an installed-package update check; pinned versions remain unchanged. |
-| `archphene-import [home-directory]` | Choose an Android document and copy it into visible Terminal home storage. The default destination is the home Downloads directory. |
-| `archphene-export <home-file>` | Choose an Android save location and copy a visible Terminal home file through a scoped URI grant. |
-| `archphene-project add <alias>` | Choose an Android folder once, persist its read/write grant, and create `$HOME/Projects/<alias>`. |
-| `archphene-project sync <alias>` | Synchronize the local POSIX mirror and its granted Android folder without another prompt. |
-| `archphene-project list`, `path <alias>` | List mappings and revoked-grant state, or print an active project's stable Terminal path. |
-| `archphene-project remove <alias>` | Release the persisted grant and remove the mapping while retaining local files. |
+Package mutations remain manager-owned durable jobs. Use the Packages page for
+official or reviewed AUR installation, update, repair, and removal. Newly
+installed verified commands become available to subsequent Terminal sessions
+through the same shared root; existing processes are not silently restarted.
 
-Imports use collision-safe names and publish only after a bounded copy completes. Exports require one visible regular file. Both operations reject dot-directories and paths outside Terminal home; neither requests broad storage access.
+The Files page and Android Storage Access Framework provide the supported
+external-file boundary:
 
-Android's Storage Access Framework exposes document URIs, not a mountable POSIX directory. Project mappings therefore use a bridge-managed local mirror. Explicit sync supports ordinary background Linux file access, nested directories, dotfiles, and process-restart persistence. It bounds each side to 10,000 entries and 2 GiB, rejects symlinks and path escapes, preserves simultaneous Android edits as content-hash-suffixed `.android-conflict-*` files, and defers deletions instead of risking silent data loss. External changes become visible after sync; this is not a live FUSE mount.
+- **Archphene Home** exposes ordinary visible home files through the
+  manager-owned `DocumentsProvider` while keeping dotfiles and runtime state
+  private.
+- Import and Export copy bounded regular files through explicit Android URI
+  grants.
+- Connected project folders use explicit persisted tree grants and a private
+  POSIX mirror under `$HOME/Projects`. Synchronization is explicit,
+  checksum-based, bounded, and conflict-preserving; it is not a FUSE mount.
+- Open and Share hand one validated regular file to Android through a scoped
+  read-only URI grant.
 
-Each shell request has a bounded unique identifier and atomically published request/response files, so tabbed sessions cannot overwrite each other. The manager correlates install jobs with that identifier and streams resolve, download, install, complete, cancellation, and error states through a provider protected by the release-signature permission and an explicit manager UID/package check. Correlation survives manager job recovery. One package failure does not stop independent jobs.
+These bridges do not grant Linux processes raw access to Android storage paths.
 
 ## Android capability boundary
 
-The Terminal companion uses an ordinary Android application UID. It does not receive root or platform-signature permissions.
+Terminal processes remain inside the manager's ordinary Android UID and SELinux
+sandbox. They receive no root, platform signature, mount, device-node, or broad
+storage privilege.
 
-- The path bridge filters `/proc` process enumeration to numeric entries whose status the Terminal UID can actually read, preserving the same-UID Archphene process tree without disclosing Android-wide PIDs. Reliable `/proc/self`, CPU-topology sysfs, safe character devices, and private shared memory remain available.
-- Android still denies ordinary apps global files such as `/proc/stat`. btop reaches its real Linux collector but cannot display unrestricted device-wide telemetry without a privileged broker, root/ADB delegation, or OS support. Archphene neither synthesizes misleading telemetry nor bypasses Android policy; any future public-API broker must label its restricted view.
-- Android permissions are requested only by explicit bridge actions. A Linux syscall cannot directly trigger an Android runtime permission prompt.
-- The Terminal UID exposes visible files in its Linux home as **Archphene Home** through an Android `DocumentsProvider`. Android Files, document pickers, and share targets can receive URI grants without broad storage permission.
-- Dotfiles such as `.config` and `.cache`, runtime packs, and manager state remain hidden and app-private. Linux commands can use visible home paths without a prompt; Android apps reach them only through Android's document grant model.
-- External Downloads and arbitrary project folders are not raw paths in the sandbox. Import/export and persisted tree grants require explicit Storage Access Framework bridge actions.
-- Up to eight tabbed sessions are owned by a `specialUse` foreground service with a visible stop action. Closing the Activity preserves PTYs; closing a tab kills only its process group; stopping the notification service or losing the Android app process removes all sessions.
-- Handled phone, tablet, docked-display, density, font-scale, and dark/light configuration changes relayout in place without replacing the PTY. The emulator matrix preserved one app PID and shell PID across 1080x2400, 2400x1080, 1280x1920, 1920x1280, and 1920x1080 viewports.
+- The path bridge exposes reliable self-process, CPU-topology, safe-device, and
+  private shared-memory paths while filtering Android-wide process visibility.
+- Android-denied global telemetry such as `/proc/stat` remains unavailable.
+  Archphene does not synthesize misleading host data or bypass Android policy.
+- Android permissions are requested only by explicit manager bridge actions. A
+  Linux syscall cannot directly trigger a runtime-permission prompt.
+- Home, Activity recreation, rotation, and supported configuration changes
+  retain the foreground shell. Stopping the Terminal session or manager
+  foreground service terminates and reaps its owned process group.
 
-## Remaining terminal work
+## Validated boundary
 
-1. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.
-2. Evaluate an opt-in automatic project-sync policy with explicit conflict and battery/network controls.
-3. Evaluate optional user-selectable shells after the Bash lifecycle and package compatibility matrix are stable.
-
-Kitty is not the default frontend because it is itself a GPU-accelerated Wayland application and would add compositor and GPU dependencies before displaying a shell or TUI.
+Current exact-ABI manager builds pass PTY startup, Bash selection, Unicode IME,
+hardware input, selection, clipboard and bracketed paste, scrollback, resize,
+font scaling, terminal protocol replies, Home/resume, graceful stop, process
+reaping, fatal-log checks, and full-device visual inspection on the API 36
+x86_64 emulator and Android 15 AArch64 Samsung. This evidence does not establish
+GrapheneOS, physical x86_64, DeX, or unrestricted Linux host telemetry support.
 
 ## References
 
-- [Termux application and terminal modules](https://github.com/termux/termux-app)
 - [Android native ABIs](https://developer.android.com/ndk/guides/abis)
 - [Android background execution limits](https://developer.android.com/topic/performance/power/power-details)
-- [Android shared documents and persisted directory access](https://developer.android.com/training/data-storage/shared/documents-files)
+- [Android shared documents](https://developer.android.com/training/data-storage/shared/documents-files)
 - [Arch Linux package database](https://archlinux.org/packages/)
-- [btop source](https://github.com/aristocratos/btop)

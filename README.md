@@ -113,14 +113,20 @@ Official Arch Linux packages are used for x86_64. AArch64 testing uses the separ
 
 ## Install Archphene
 
-Download the APK and checksum from [GitHub Releases](https://github.com/Nulifyer/Archphene/releases).
+Download the APKs and checksums from [GitHub Releases](https://github.com/Nulifyer/Archphene/releases).
 
 1. Download `Archphene-arm64-v8a-<version>.apk` for a normal ARM64 phone/tablet, or `Archphene-x86_64-<version>.apk` for an x86_64 Android system.
 2. Verify it against the matching `.apk.sha256` file.
 3. Allow your browser or file manager to install unknown applications when Android prompts.
 4. Install the APK through Android's normal package installer.
+5. To use reviewed AUR builds, also verify and install the matching
+   `Archphene-Builder-<abi>-<version>.apk`. It has no launcher Activity or
+   Android network permission.
 
-Release APKs are signed with a dedicated persistent Archphene release key and are built with `android:debuggable="false"`.
+Manager and Builder release APKs are non-debuggable and signed with the same
+dedicated persistent Archphene release key. The published `v1.0.1` assets are
+historical prototype artifacts; the manager-plus-Builder layout applies to the
+greenfield release path documented in [Publishing releases](docs/releases.md).
 
 The manager can generate and install the tested Qt/KCalc wrapper on x86_64 and AArch64 devices. Other packages remain subject to toolkit, ABI, page-size, bridge-capability, and wrapper-template compatibility checks; package search does not imply that every Arch package is currently runnable.
 
@@ -139,15 +145,25 @@ The command requires the pinned local SDK/NDK, Gradle cache, and existing
 network-disabled native container documented in
 [development](docs/development.md).
 
-### Historical release build
+### Greenfield release artifact build
 
-Release CI builds the Arch runtime, patched glibc, wrapper template, isolated Terminal companion, and signed manager APK on Linux. The same-release-signed companion is embedded in the manager and installed through Android confirmation on first use. The local Linux launcher runs those build phases inside Podman:
+Build versioned unsigned manager and hidden Builder APKs for one ABI:
 
-    ./scripts/build-manager-podman.sh
+```bash
+bash scripts/build-archphene-release-apk.sh \
+  --abi x86_64 --version-code 1000000001 --version-name 1.1.0-rc.1
+bash scripts/build-archphene-release-apk.sh \
+  --abi arm64-v8a --version-code 1000000001 --version-name 1.1.0-rc.1
+```
 
-Use `--skip-runtime` for manager-only rebuilds and `--release-build` for a locally production-signed APK.
+The script uses the committed Gradle wrapper and existing pinned native
+containers, stages the exact package runtime and generated app-shell template,
+and emits basename-scoped checksums under `tooling/build/apk/`. Production
+signing remains in the draft-first tag workflow; see
+[Publishing releases](docs/releases.md).
 
-Outputs: `prototypes/linux-app-manager-stub/out-linux/archphene.apk` and the embedded companion source artifact at `prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk`.
+Terminal is integrated into the manager. It is not built or installed as a
+separate companion APK.
 
 ### Linux emulator/device workflow
 
@@ -203,7 +219,10 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 
 | Path | Purpose |
 |---|---|
-| `prototypes/linux-app-manager-stub/` | Archphene Android manager |
+| `android/app/` | Greenfield Archphene manager application |
+| `android/builder/` | Hidden no-network AUR Builder companion |
+| `android/launcher-template/` | Generated app-shell template |
+| `prototypes/` | Historical Android proofs and published prototype sources |
 | `prototypes/kcalc-android-app/` | Qt/KDE wrapper and Wayland proof |
 | `prototypes/mousepad-android-app/` | GTK wrapper and document workflow proof |
 | `prototypes/shared-android-bridge/` | Shared Android Activity, input, clipboard, window, and JNI host |

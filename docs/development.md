@@ -314,29 +314,51 @@ screenshot.
 
 ## Build in Linux
 
-Use the Podman launcher:
+Build a current exact-ABI debug manager with the pinned local toolchain and
+existing network-disabled native containers:
 
 ```bash
-./scripts/build-manager-podman.sh
+./scripts/build-archphene-app.sh --abi x86_64
+./scripts/build-archphene-app.sh --abi arm64-v8a
 ```
 
-It uses Linux containers for signed Arch package tooling and the patched glibc
-build, then assembles and signs the APK in a Linux Android SDK container.
+The outputs are `tooling/build/apk/app-debug-x86_64.apk` and
+`tooling/build/apk/app-debug-arm64-v8a.apk`. Development builds use the ignored
+debug key and expose debug-only device hooks.
 
-For repeated manager-only changes, reuse the verified runtime artifact:
+Build the versioned unsigned artifacts consumed by the release workflow with:
 
 ```bash
-./scripts/build-manager-podman.sh --skip-runtime
+bash scripts/build-archphene-release-apk.sh \
+  --abi x86_64 --version-code 1000000001 --version-name 1.1.0-rc.1
+bash scripts/build-archphene-release-apk.sh \
+  --abi arm64-v8a --version-code 1000000001 --version-name 1.1.0-rc.1
 ```
 
-Build the same ABI-specific artifacts published by GitHub Releases with:
+Each invocation serializes the shared Gradle output, builds the production
+`org.archpheneos.manager` application and hidden `org.archphene.builder`
+companion, verifies their exact ABI and matching version, and writes the APKs
+and basename-scoped checksums under `tooling/build/apk/`. These local outputs
+remain unsigned. The tag workflow aligns and signs both APKs with the same
+production identity, verifies their content, and publishes only after all
+assets are attached to a draft release.
+
+The release workflow builds native outputs in pinned Docker containers before
+Gradle assembly and passes `--prebuilt-native`. Do not use that option unless
+all excluded native tasks have already produced the exact current-source
+outputs.
+
+Validate the local unsigned pair with:
 
 ```bash
-./scripts/build-manager-podman.sh --skip-runtime --artifact-abi x86_64
-./scripts/build-manager-podman.sh --skip-runtime --artifact-abi arm64-v8a
+bash scripts/verify-release-apk.sh \
+  tooling/build/apk/Archphene-x86_64-1.1.0-rc.1-unsigned.apk \
+  tooling/build/apk/Archphene-Builder-x86_64-1.1.0-rc.1-unsigned.apk \
+  x86_64 1.1.0-rc.1 --allow-unsigned
 ```
 
-Use the universal flavor only for local cross-device development. Release APKs are single-ABI so Android installs only the matching package runtime and wrapper templates.
+The CI invocation omits `--allow-unsigned` and requires the pinned production
+certificate. Release APKs are always single-ABI.
 
 The AArch64 bootstrap can be rebuilt independently on Linux with:
 
@@ -348,16 +370,12 @@ It uses a cacheable cross-toolchain image and a persistent package cache. Cache
 entries are signature-verified on every build before extraction. The ignored
 output is `tooling/build/ci-package-runtime-arm64/` with a complete `SHA256SUMS`
 catalog, pinned keyring/package-signer/glibc provenance, and the AArch64 glibc
-path broker. A normal build without `--skip-runtime` refreshes both x86_64 and
-AArch64 artifacts before APK assembly.
+path broker. Both exact-ABI package-runtime outputs must exist before release
+APK assembly; the CI workflow refreshes them before invoking Gradle.
 
-Local builds are signed with the development key and remain debuggable so the explicit `archphene_test_*` emulator hooks work. Those hooks are ignored unless Android marks the installed APK debuggable.
-
-Use `--release-build` only with the ignored production credentials created by
-`setup-github-release-signing.sh`. GitHub Actions invokes the underlying Linux
-scripts directly on Ubuntu. Release builds force both APKs non-debuggable. The outputs are
-`prototypes/linux-app-manager-stub/out-linux/archphene.apk` and the companion
-`prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk`; the latter is also embedded in the manager.
+Never pass production credentials to a development build. Create and maintain
+the release identity only through `setup-github-release-signing.sh` and the
+secret-handling workflow documented in [Publishing releases](releases.md).
 
 The greenfield launcher-template release intentionally omits AGP VCS metadata:
 its authenticated identity depends only on launcher inputs, not the parent
