@@ -364,13 +364,13 @@ the package runtime; the isolated package was then uninstalled.
 
 Both exact-ABI release pairs remained byte-identical across repeated
 `1.1.0-rc.7`, code `1000001240`, builds. Manager SHA-256 values are
-`ed975e5665be7d47ab3bc78047d0077659d77686fddc38bb5c705a8f9b4da6d9`
+`fefaa18d485b35bfeda1ec538fa5a066f954194c920e260953cd6e51b605b0a4`
 for x86_64 and
-`75c3ddb7579861ffd781ed44cc1b774f8df2ea23508042ac8302dbbee28c049a`
+`593fb373f0856283591f3d04bdd110ed1f0d13edb664239b0e5aecfdbba3bbec`
 for arm64-v8a; Builder values are
-`5eeadd32d7e810ef4aad23c9e3b886fb6de4e8dbc13f5cc1d843c8c5fdf81c9d`
+`58cd1484817c2ecbcd12f77f9ca037c75cbd90822b2d1c82a5be12583781e8e2`
 and
-`dd8567f1b786415ebc36e37c88d9c0e2eb7aa247fce02d96c8e3e4ab11ba2ac2`.
+`a99ceee3ff827f60a342e5eff6551e13ab455cdb14a6f801ce521d3b6cbdebc6`.
 
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
 SM-S908U. They prove cold launch, full-device insets and screenshots, touch
