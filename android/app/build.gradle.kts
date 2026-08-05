@@ -110,6 +110,7 @@ android {
             // glibc loader, so they require real filesystem paths rather than
             // mmap-only entries inside the APK.
             useLegacyPackaging = true
+            keepDebugSymbols += "**/libarchphene_pkg_*.so"
         }
     }
 

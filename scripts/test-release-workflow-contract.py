@@ -122,6 +122,7 @@ for value in (
     'archpheneVersionCode.toLong() <= 2_100_000_000L',
     'versionCode = archpheneVersionCode?.toInt() ?: 1',
     'versionName = archpheneVersionName ?: "0.1.0"',
+    'keepDebugSymbols += "**/libarchphene_pkg_*.so"',
 ):
     if value not in greenfield_build:
         raise SystemExit(f"greenfield release version contract missing: {value}")
