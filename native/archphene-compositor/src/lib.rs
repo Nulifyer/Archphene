@@ -2935,6 +2935,41 @@ mod android_graphics_ffi {
         set_buffer_with_release().is_some()
     }
 
+    pub(super) unsafe fn probe_release_aware_surface(
+        environment: *mut c_void,
+        surface: *mut c_void,
+    ) -> i32 {
+        if !release_aware_buffers_available() {
+            return 1;
+        }
+        let Some(mut window) = (unsafe { NativeWindow::from_surface(environment, surface) }) else {
+            return -1;
+        };
+        if window.set_rgba_geometry(64, 64, 64, 64).is_err() {
+            return -2;
+        }
+        for color in [0x22_u8, 0x66, 0xaa] {
+            let result = window.with_locked_rgba(PresentationCopyDamage::Full, |buffer, _| {
+                for pixel in buffer.pixels.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[color, color ^ 0x55, color ^ 0xaa, 0xff]);
+                }
+                0
+            });
+            if !matches!(result, Ok((0, 0))) {
+                return -3;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if window.graphics_diagnostic_component(4) > 0 {
+                return 0;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        -4
+    }
+
     fn set_buffer_with_release() -> Option<SetBufferWithRelease> {
         static FUNCTION: OnceLock<Option<SetBufferWithRelease>> = OnceLock::new();
         *FUNCTION.get_or_init(|| unsafe {
@@ -15909,6 +15944,16 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
         Ok(count) => i32::try_from(count).unwrap_or(i32::MAX),
         Err(_) => -2,
     }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeReleaseAwareSurfaceProbe(
+    environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
+) -> i32 {
+    unsafe { android_graphics_ffi::probe_release_aware_surface(environment, surface) }
 }
 
 #[unsafe(no_mangle)]

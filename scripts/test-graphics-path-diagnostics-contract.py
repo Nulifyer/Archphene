@@ -69,12 +69,20 @@ require(
     "android_surface_transaction_set_buffer(",
     "android_surface_transaction_set_on_complete(",
     "release_aware_buffers_available",
+    "probe_release_aware_surface",
 )
 require(
     "android/app/src/main/kotlin/org/archphene/app/launcher/LauncherSessionService.kt",
     '"Surface release mode="',
     '"API36 per-buffer callback"',
     '"legacy transaction completion"',
+)
+require(
+    "prototypes/native-compositor-probe/src/org/archphene/compositorprobe/MainActivity.java",
+    "nativeReleaseAwareSurfaceProbe",
+    '"Surface release probe="',
+    '"API36 per-buffer callback"',
+    '"legacy fallback"',
 )
 require(
     "native/archphene-compositor/src/jni_exports/steady_state_allocations.rs",

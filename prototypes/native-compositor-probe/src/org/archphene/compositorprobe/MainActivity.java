@@ -22,6 +22,9 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.PointerIcon;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
@@ -68,6 +71,7 @@ public final class MainActivity extends Activity {
     static { System.loadLibrary("archphene_compositor"); }
 
     private static native int nativeProtocolVersion();
+    private static native int nativeReleaseAwareSurfaceProbe(Surface surface);
     private static native boolean nativeCompoundConfinementProbe();
     private static native long nativeCreateCore();
     private static native int nativeAdoptClient(long handle, int fd);
@@ -363,6 +367,21 @@ public final class MainActivity extends Activity {
             return true;
         });
         content.addView(frameView, new LinearLayout.LayoutParams(320, 160));
+        CountDownLatch releaseSurfaceReady = new CountDownLatch(1);
+        SurfaceView releaseSurfaceView = new SurfaceView(this);
+        releaseSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                releaseSurfaceReady.countDown();
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {}
+        });
+        content.addView(releaseSurfaceView, new LinearLayout.LayoutParams(64, 64));
         TextView result = new TextView(this);
         result.setGravity(Gravity.CENTER);
         result.setTextSize(20);
@@ -376,7 +395,7 @@ public final class MainActivity extends Activity {
                     if (providerGrantOnly) runProviderGrantProbe(result);
                     else if (documentDragOnly) runDocumentDragProbe(result);
                     else if (dragOnly) runDragProbe(result);
-                    else runProbe(result, frameView);
+                    else runProbe(result, frameView, releaseSurfaceView, releaseSurfaceReady);
                 },
                 providerGrantOnly ? "provider-grant-probe"
                         : documentDragOnly ? "document-drag-probe"
@@ -394,12 +413,29 @@ public final class MainActivity extends Activity {
         if (byteOffset < 0 || byteOffset > encoded.length) return 0;
         return new String(encoded, 0, byteOffset, StandardCharsets.UTF_8).length();
     }
-    private void runProbe(TextView result, ArchpheneInputView frameView) {
+    private void runProbe(
+            TextView result,
+            ArchpheneInputView frameView,
+            SurfaceView releaseSurfaceView,
+            CountDownLatch releaseSurfaceReady) {
         String message;
         boolean passed = false;
         Bitmap renderedFrame = null;
         long core = 0;
         try {
+            if (!releaseSurfaceReady.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("release Surface timeout");
+            }
+            int releaseResult = nativeReleaseAwareSurfaceProbe(
+                    releaseSurfaceView.getHolder().getSurface());
+            if (android.os.Build.VERSION.SDK_INT >= 36 && releaseResult != 0) {
+                throw new IllegalStateException("API 36 release callback " + releaseResult);
+            }
+            if (android.os.Build.VERSION.SDK_INT < 36 && releaseResult != 1) {
+                throw new IllegalStateException("legacy release fallback " + releaseResult);
+            }
+            Log.i(TAG, "Surface release probe="
+                    + (releaseResult == 0 ? "API36 per-buffer callback" : "legacy fallback"));
             if (nativeProtocolVersion() != 1) throw new IllegalStateException("protocol version");
             if (!nativeCompoundConfinementProbe()) {
                 throw new IllegalStateException("compound pointer confinement");

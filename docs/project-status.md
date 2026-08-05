@@ -4043,8 +4043,11 @@ transaction-completion callback obtains the previous release fence exactly as
 before. Dual-ABI ELF inspection shows no direct API 36 symbol dependency. On the
 API 35 Samsung `SM-S908U`, an isolated Mousepad Quick launch reported
 `Surface release mode=legacy transaction completion`, rendered four GPU-composed
-AHB submissions, observed two SurfaceFlinger releases, and closed cleanly. No API
-36 target was attached, so live per-buffer callback verification remains open.
+AHB submissions, observed two SurfaceFlinger releases, and closed cleanly. A
+clean Android 16/API 36 x86_64 emulator submitted three AHBs through the same
+production path, reported `Surface release probe=API36 per-buffer callback`,
+observed the release callback and fence, and then passed the complete native
+compositor probe.
 
 Hardware key, repeat, and modifier delivery no longer clones focused
 `WlKeyboard` resources into a temporary vector. Focused resources stream in

@@ -172,8 +172,11 @@ reuse. Older systems continue to use the tested transaction-completion callback
 and `ASurfaceTransactionStats_getPreviousReleaseFenceFd`. The compositor ELF
 contains no direct API 36 symbol dependency. The API 35 Samsung reports
 `Surface release mode=legacy transaction completion` and releases two of four
-submitted slots during the current Mousepad Quick launch probe. A live API 36
-callback-path probe remains pending.
+submitted slots during the current Mousepad Quick launch probe. A clean Android
+16/API 36 x86_64 emulator reports `Surface release probe=API36 per-buffer
+callback`; the probe submits three AHBs through the production transaction path,
+observes a release callback and fence, and then passes the complete native
+compositor suite.
 
 The stock vtest contract does not propagate one host resource identity into the
 Wayland `wl_shm` commit produced by Mesa's current virpipe winsys. A helper-only
