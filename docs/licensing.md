@@ -58,22 +58,27 @@ license.
 The complete component-license and notice audit is not closed.
 [`release/native-components.json`](../release/native-components.json) is the
 canonical evidence-bound inventory for the 14 non-Rust third-party components
-or component sets currently entering the manager. It records source locations,
-pins, declared licenses where reviewed, exact repository evidence, and concrete
-open blockers. `scripts/release-native-audit.py` rejects missing components,
+or component sets currently entering the manager or Builder. It records source
+locations, pins, declared licenses where reviewed, exact repository evidence,
+and concrete open blockers. `scripts/release-native-audit.py` rejects missing components,
 stale evidence, malformed blockers, and unreviewed additions.
 
-Six records are verified: D-Bus, Mbed TLS, Mesa, PipeWire, libepoxy, and
-virglrenderer. Release CI checks each source archive SHA-256 or Git commit and
-publishes every discovered license, notice, and copyright file in
+Seven records are verified: patched glibc, D-Bus, Mbed TLS, Mesa, PipeWire,
+libepoxy, and virglrenderer. Release CI checks each source archive SHA-256 or
+Git commit and publishes every discovered license, notice, and copyright file in
 `Archphene-native-licenses-<version>.zip`. The deterministic archive embeds the
 canonical manifest and a per-file checksum index.
 
-Eight records remain blocked. The unresolved work includes floating Arch
-package transactions, incomplete GTK and Qt prebuilt provenance, PulseAudio
-closure source records, and patched glibc corresponding source. The tag workflow
-runs `--require-complete` before creating a GitHub draft, so an accidental tag
-cannot publish or remotely stage a release while any blocker remains. SPDX file
+The release also supplies `Archphene-glibc-source-<version>.zip`. It contains a
+deterministic archive of the exact pristine glibc Git tree, the applied
+Archphene patch, both architecture build scripts, the AArch64 container recipe,
+and an indexed checksum for every build-control file.
+
+Seven records remain blocked. The unresolved work includes floating Arch
+package transactions, incomplete GTK and Qt prebuilt provenance, and PulseAudio
+closure source records. The tag workflow runs `--require-complete` before
+creating a GitHub draft, so an accidental tag cannot publish or remotely stage
+a release while any blocker remains. SPDX file
 licenses and package license conclusions remain `NOASSERTION` rather than making
 unsupported conclusions.
 
@@ -86,4 +91,5 @@ python3 scripts/test-release-rust-licenses.py
 python3 scripts/test-release-sbom.py
 python3 scripts/test-release-native-audit.py
 python3 scripts/test-release-native-licenses.py
+python3 scripts/test-release-glibc-source.py
 ```

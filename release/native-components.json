@@ -44,15 +44,16 @@
     },
     {
       "artifactScopes": ["builder", "manager"],
-      "blockers": [{"category": "corresponding-source", "detail": "The release procedure does not yet publish a corresponding-source bundle containing the exact glibc revision, Archphene patch, and build instructions."}],
+      "blockers": [],
       "declaredLicense": "LGPL-2.1-or-later",
       "evidence": [
         {"contains": "glibc_commit=\"7cba77790f3279bec3ac20e9c7632b021cd53f95\"", "path": "scripts/build-ci-package-runtime.sh"},
-        {"contains": "0001-android-app-seccomp-compat.patch", "path": "scripts/build-ci-package-runtime.sh"}
+        {"contains": "0001-android-app-seccomp-compat.patch", "path": "scripts/build-ci-package-runtime.sh"},
+        {"contains": "org.archphene.glibc-corresponding-source.v1", "path": "scripts/release-glibc-source.py"}
       ],
       "id": "glibc",
       "kind": "modified-source-build",
-      "reviewState": "blocked",
+      "reviewState": "verified",
       "sourcePin": {"type": "git-commit", "value": "7cba77790f3279bec3ac20e9c7632b021cd53f95"},
       "sourceUrl": "https://sourceware.org/git/glibc.git",
       "version": "2.44+r5+g7cba77790f32"
@@ -181,6 +182,7 @@
   "format": "org.archphene.native-release-audit.v1",
   "licenseSources": [
     {"componentId": "dbus", "path": "tooling/downloads/dbus-1.16.2.tar.xz", "type": "archive"},
+    {"componentId": "glibc", "path": "tooling/external/glibc-release", "type": "git-tree"},
     {"componentId": "libepoxy", "path": "tooling/downloads/libepoxy-1.5.10.tar.gz", "type": "archive"},
     {"componentId": "mbedtls", "path": "tooling/downloads/mbedtls-3.6.6.tar.bz2", "type": "archive"},
     {"componentId": "mesa", "path": "tooling/downloads/mesa-26.1.5.tar.xz", "type": "archive"},

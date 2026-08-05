@@ -59,6 +59,7 @@ jobs:
             echo "BUILDER_X86_NAME=Archphene-Builder-x86_64-$version_name.apk"
             echo "BUILDER_ARM64_NAME=Archphene-Builder-arm64-v8a-$version_name.apk"
             echo "NATIVE_LICENSE_NAME=Archphene-native-licenses-$version_name.zip"
+            echo "GLIBC_SOURCE_NAME=Archphene-glibc-source-$version_name.zip"
           } >> "$GITHUB_ENV"
 
       - name: Validate release contracts
@@ -70,6 +71,7 @@ jobs:
           python3 scripts/test-release-license-contract.py
           python3 scripts/test-release-native-audit.py
           python3 scripts/test-release-native-licenses.py
+          python3 scripts/test-release-glibc-source.py
           python3 scripts/test-legacy-migration-contract.py
           python3 scripts/test-atspi-source-contract.py
 
@@ -262,6 +264,28 @@ jobs:
               bash scripts/build-android-gpu-helper.sh "$architecture"
           done
 
+      - name: Build glibc corresponding source
+        env:
+          GLIBC_COMMIT: 7cba77790f3279bec3ac20e9c7632b021cd53f95
+        run: |
+          glibc_source=tooling/external/glibc-release
+          mkdir -p "$glibc_source"
+          git -C "$glibc_source" init --quiet
+          git -C "$glibc_source" remote add origin \
+            https://sourceware.org/git/glibc.git
+          git -C "$glibc_source" fetch --quiet --depth 1 origin "$GLIBC_COMMIT"
+          git -C "$glibc_source" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$glibc_source" rev-parse HEAD)" = "$GLIBC_COMMIT"
+          glibc_bundle="$RUNNER_TEMP/$GLIBC_SOURCE_NAME"
+          python3 scripts/release-glibc-source.py generate \
+            --source "$glibc_source" --repository . --commit "$GLIBC_COMMIT" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" --output "$glibc_bundle"
+          python3 scripts/release-glibc-source.py verify \
+            --source "$glibc_source" --repository . --commit "$GLIBC_COMMIT" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" --output "$glibc_bundle"
+          sha256sum "$glibc_bundle" | \
+            sed "s|  .*|  $GLIBC_SOURCE_NAME|" > "$glibc_bundle.sha256"
+
       - name: Build verified native license bundle
         run: |
           native_licenses="$RUNNER_TEMP/$NATIVE_LICENSE_NAME"
@@ -403,6 +427,8 @@ jobs:
             ${{ runner.temp }}/Archphene-*.apk.rust-licenses.zip.sha256
             ${{ runner.temp }}/Archphene-native-licenses-*.zip
             ${{ runner.temp }}/Archphene-native-licenses-*.zip.sha256
+            ${{ runner.temp }}/Archphene-glibc-source-*.zip
+            ${{ runner.temp }}/Archphene-glibc-source-*.zip.sha256
           if-no-files-found: error
 
       - name: Attach APKs and publish release
@@ -411,6 +437,8 @@ jobs:
           assets+=(
             "$RUNNER_TEMP/$NATIVE_LICENSE_NAME"
             "$RUNNER_TEMP/$NATIVE_LICENSE_NAME.sha256"
+            "$RUNNER_TEMP/$GLIBC_SOURCE_NAME"
+            "$RUNNER_TEMP/$GLIBC_SOURCE_NAME.sha256"
           )
           for name in \
             "$APK_X86_NAME" "$APK_ARM64_NAME" \

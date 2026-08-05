@@ -304,6 +304,8 @@ and reproducible artifacts.
     and fail before any release write while an inventory blocker remains.
   - [x] Package and checksum-bind discovered source license and notice files for
     D-Bus, Mbed TLS, Mesa, PipeWire, libepoxy, and virglrenderer.
+  - [x] Publish the exact glibc source revision, Archphene patch, and x86_64 and
+    AArch64 build-control files as a deterministic corresponding-source bundle.
   - [ ] Resolve every recorded native/runtime notice, license-text,
     reproducibility, provenance, corresponding-source, and relinking blocker.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,
