@@ -32,9 +32,15 @@ prevents updates to existing installations. Never commit either file.
 1. Ensure the release commit is on `main`.
 2. Create and push a tag using `vMAJOR.MINOR.PATCH`, such as `v1.1.0`. Suffixes
    such as `v1.1.0-rc.1` are accepted.
-3. The **Publish Archphene APK** workflow creates or reuses a draft release,
+3. The workflow requires every record in `release/native-components.json` to
+   have no open release blocker before making a GitHub release write.
+4. The **Publish Archphene APK** workflow creates or reuses a draft release,
    builds and verifies all APKs, attaches every asset, and only then publishes
    the release.
+
+The native audit is currently incomplete, so the workflow intentionally stops
+before creating a draft. Do not bypass this gate. Resolve the evidence-bound
+licensing, provenance, reproducibility, and corresponding-source blockers first.
 
 The workflow attaches these APKs and a basename-scoped `.sha256` file for each:
 
@@ -90,6 +96,7 @@ python3 scripts/test-release-workflow-contract.py
 python3 scripts/test-release-rust-components.py
 python3 scripts/test-release-rust-licenses.py
 python3 scripts/test-release-sbom.py
+python3 scripts/test-release-native-audit.py
 ```
 
 Build and inspect unsigned local artifacts for both ABIs:

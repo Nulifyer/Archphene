@@ -67,8 +67,12 @@ jobs:
           python3 scripts/test-release-rust-licenses.py
           python3 scripts/test-release-sbom.py
           python3 scripts/test-release-license-contract.py
+          python3 scripts/test-release-native-audit.py
           python3 scripts/test-legacy-migration-contract.py
           python3 scripts/test-atspi-source-contract.py
+
+      - name: Require complete native release audit
+        run: python3 scripts/release-native-audit.py --require-complete
 
       - name: Ensure release is a draft
         run: |

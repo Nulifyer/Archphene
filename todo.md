@@ -300,8 +300,10 @@ and reproducible artifacts.
   - [x] Publish deterministic checksum-bound Rust license archives containing
     every discovered license, notice, and copyright file from the exact Cargo
     source packages represented in each APK SBOM.
-  - [ ] Finish the canonical native/runtime component inventory, required
-    notices and license texts, and corresponding-source or relinking audit.
+  - [x] Record the canonical evidence-bound native/runtime component inventory
+    and fail before any release write while an inventory blocker remains.
+  - [ ] Resolve every recorded native/runtime notice, license-text,
+    reproducibility, provenance, corresponding-source, and relinking blocker.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,
   status, changelog, support policy, and release notes from proven behavior.
 

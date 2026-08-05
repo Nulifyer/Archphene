@@ -35,6 +35,8 @@ required_workflow = (
     "python3 scripts/test-release-rust-components.py",
     "python3 scripts/test-release-rust-licenses.py",
     "python3 scripts/test-release-license-contract.py",
+    "python3 scripts/test-release-native-audit.py",
+    "python3 scripts/release-native-audit.py --require-complete",
     "python3 scripts/test-legacy-migration-contract.py",
     "python3 scripts/release-sbom.py generate",
     "python3 scripts/release-sbom.py verify",

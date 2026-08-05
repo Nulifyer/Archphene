@@ -55,17 +55,22 @@ license.
 
 ## Open release audit
 
-The complete component-license and notice audit is not closed. The signed
-manager APK also carries pinned native/runtime components such as patched glibc,
-pacman/libalpm, GnuPG, libarchive, Mesa, D-Bus, PulseAudio, PipeWire camera
-runtime, virglrenderer, and transitive Rust crates. Rust dependencies now have a
-canonical target-specific inventory, while the complete native/runtime
-inventory remains unfinished. The Cargo source packages now supply their
-license and notice files as a verified release asset. The remaining native
-runtime notices, license texts, and any corresponding-source or relinking
-obligations must be closed before the licensing release gate can be marked
-complete. SPDX file licenses and package license conclusions therefore remain
-`NOASSERTION` rather than making unsupported conclusions.
+The complete component-license and notice audit is not closed.
+[`release/native-components.json`](../release/native-components.json) is the
+canonical evidence-bound inventory for the 14 non-Rust third-party components
+or component sets currently entering the manager. It records source locations,
+pins, declared licenses where reviewed, exact repository evidence, and concrete
+open blockers. `scripts/release-native-audit.py` rejects missing components,
+stale evidence, malformed blockers, and unreviewed additions.
+
+All 14 records remain blocked. The unresolved work includes floating Arch
+package transactions, incomplete GTK and Qt prebuilt provenance, native license
+and notice packaging, PulseAudio closure source records, and patched glibc
+corresponding source. The tag workflow runs `--require-complete` before creating
+a GitHub draft, so an accidental tag cannot publish or remotely stage a release
+while any blocker remains. Rust source packages already supply their license and
+notice files as verified assets. SPDX file licenses and package license
+conclusions remain `NOASSERTION` rather than making unsupported conclusions.
 
 Run the current consistency gate with:
 
@@ -74,4 +79,5 @@ python3 scripts/test-release-license-contract.py
 python3 scripts/test-release-rust-components.py
 python3 scripts/test-release-rust-licenses.py
 python3 scripts/test-release-sbom.py
+python3 scripts/test-release-native-audit.py
 ```

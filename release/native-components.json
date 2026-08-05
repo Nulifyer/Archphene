@@ -1,0 +1,182 @@
+{
+  "components": [
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [
+        {"category": "reproducibility", "detail": "The transaction is resolved from the current Arch Linux ARM repository database rather than a checked-in package lock."},
+        {"category": "license", "detail": "The exact contributing package licenses and required notices are not collected."}
+      ],
+      "declaredLicense": "NOASSERTION",
+      "evidence": [{"contains": "pacman --config /tmp/pacman-arm.conf --root /tmp/arm/root", "path": "scripts/build-ci-package-runtime-arm64.sh"}],
+      "id": "arch-package-runtime-aarch64",
+      "kind": "package-set",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "floating-repository", "value": "aarch64/core+extra"},
+      "sourceUrl": "https://ca.us.mirror.archlinuxarm.org/aarch64/",
+      "version": "repository-current"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [
+        {"category": "reproducibility", "detail": "The runtime is selected by pacman -Syu from the current Arch repositories and the container base is not digest-pinned."},
+        {"category": "license", "detail": "The exact contributing package licenses and required notices are not collected."}
+      ],
+      "declaredLicense": "NOASSERTION",
+      "evidence": [{"contains": "pacman -Syu --noconfirm --needed", "path": "scripts/build-ci-package-runtime.sh"}],
+      "id": "arch-package-runtime-x86_64",
+      "kind": "package-set",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "floating-repository", "value": "archlinux:base-devel"},
+      "sourceUrl": "https://geo.mirror.pkgbuild.com/",
+      "version": "repository-current"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "license", "detail": "The release does not yet package the reviewed D-Bus license and notices."}],
+      "declaredLicense": "AFL-2.1 OR GPL-2.0-or-later",
+      "evidence": [{"contains": "DBUS_SHA256=\"0ba2a1a4b16afe7bceb2c07e9ce99a8c2c3508e5dec290dbb643384bd6beb7e2\"", "path": "scripts/build-android-dbus.sh"}],
+      "id": "dbus",
+      "kind": "source-build",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "sha256", "value": "0ba2a1a4b16afe7bceb2c07e9ce99a8c2c3508e5dec290dbb643384bd6beb7e2"},
+      "sourceUrl": "https://dbus.freedesktop.org/releases/dbus/dbus-1.16.2.tar.xz",
+      "version": "1.16.2"
+    },
+    {
+      "artifactScopes": ["builder", "manager"],
+      "blockers": [{"category": "corresponding-source", "detail": "The release procedure does not yet publish a corresponding-source bundle containing the exact glibc revision, Archphene patch, and build instructions."}],
+      "declaredLicense": "LGPL-2.1-or-later",
+      "evidence": [
+        {"contains": "glibc_commit=\"7cba77790f3279bec3ac20e9c7632b021cd53f95\"", "path": "scripts/build-ci-package-runtime.sh"},
+        {"contains": "0001-android-app-seccomp-compat.patch", "path": "scripts/build-ci-package-runtime.sh"}
+      ],
+      "id": "glibc",
+      "kind": "modified-source-build",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "git-commit", "value": "7cba77790f3279bec3ac20e9c7632b021cd53f95"},
+      "sourceUrl": "https://sourceware.org/git/glibc.git",
+      "version": "2.44+r5+g7cba77790f32"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "provenance", "detail": "The prebuilt manifest records AUR commits but not all source package checksums, toolchain inputs, licenses, or corresponding notices."}],
+      "declaredLicense": "NOASSERTION",
+      "evidence": [{"contains": "\"gdkPixbufAurCommit\": \"7764d81b04ac56cff9ee9d421862701c77d73e92\"", "path": "prebuilt/gtk3-compat/manifest.json"}],
+      "id": "gtk3-compat-aarch64",
+      "kind": "prebuilt",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "manifest", "value": "prebuilt/gtk3-compat/manifest.json"},
+      "sourceUrl": "https://aur.archlinux.org/gdk-pixbuf2-noglycin.git",
+      "version": "3.24"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "provenance", "detail": "The x86_64 prebuilt manifest identifies only an unpinned compatibility-package description and has no source revisions or license inventory."}],
+      "declaredLicense": "NOASSERTION",
+      "evidence": [{"contains": "\"source\": \"Archphene no-Glycin Arch compatibility packages\"", "path": "prebuilt/gtk3-compat/manifest.json"}],
+      "id": "gtk3-compat-x86_64",
+      "kind": "prebuilt",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "artifact-checksums", "value": "prebuilt/gtk3-compat/SHA256SUMS"},
+      "sourceUrl": "https://aur.archlinux.org/",
+      "version": "3.24"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "license", "detail": "The release does not yet package the reviewed libepoxy license and notice."}],
+      "declaredLicense": "MIT",
+      "evidence": [{"contains": "a7ced37f4102b745ac86d6a70a9da399cc139ff168ba6b8002b4d8d43c900c15", "path": "scripts/build-android-gpu-helper.sh"}],
+      "id": "libepoxy",
+      "kind": "static-source-build",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "sha256", "value": "a7ced37f4102b745ac86d6a70a9da399cc139ff168ba6b8002b4d8d43c900c15"},
+      "sourceUrl": "https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz",
+      "version": "1.5.10"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "license", "detail": "The release does not yet package the reviewed Mbed TLS license and notices."}],
+      "declaredLicense": "Apache-2.0 OR GPL-2.0-or-later",
+      "evidence": [{"contains": "MBEDTLS_SHA256=\"8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a\"", "path": "scripts/build-android-dbus.sh"}],
+      "id": "mbedtls",
+      "kind": "static-source-build",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "sha256", "value": "8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a"},
+      "sourceUrl": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2",
+      "version": "3.6.6"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "license", "detail": "The release does not yet package Mesa's reviewed license and dependency notices."}],
+      "declaredLicense": "MIT",
+      "evidence": [{"contains": "MESA_SHA256=\"79e421c7ce18cd9e790b8375920325779f10798630bf30e0b22f1a21c8617122\"", "path": "scripts/build-mesa-virpipe-sender.sh"}],
+      "id": "mesa",
+      "kind": "source-build",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "sha256", "value": "79e421c7ce18cd9e790b8375920325779f10798630bf30e0b22f1a21c8617122"},
+      "sourceUrl": "https://archive.mesa3d.org/mesa-26.1.5.tar.xz",
+      "version": "26.1.5"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "license", "detail": "The release does not yet package the reviewed PipeWire license and notices."}],
+      "declaredLicense": "MIT",
+      "evidence": [{"contains": "expected_commit=b741e0c74f5436f0c925f7741140db0efd32cf4e", "path": "scripts/build-pipewire-camera-runtime.sh"}],
+      "id": "pipewire",
+      "kind": "source-build",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "git-commit", "value": "b741e0c74f5436f0c925f7741140db0efd32cf4e"},
+      "sourceUrl": "https://gitlab.freedesktop.org/pipewire/pipewire.git",
+      "version": "1.6.8"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "provenance", "detail": "Two plugins are reproducible from a pinned Qt package, but the retained KF6Config fallback prebuilt lacks complete source provenance and license evidence."}],
+      "declaredLicense": "NOASSERTION",
+      "evidence": [{"contains": "kde_config_fallback_sha256=90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311", "path": "scripts/build-qt-platform-theme-arm64.sh"}],
+      "id": "qt-bridge-aarch64",
+      "kind": "mixed-source-prebuilt",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "artifact-checksums", "value": "prebuilt/qt-bridge/SHA256SUMS"},
+      "sourceUrl": "https://ca.us.mirror.archlinuxarm.org/aarch64/extra/qt6-base-6.11.1-1-aarch64.pkg.tar.xz",
+      "version": "6.11.1"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "reproducibility", "detail": "The x86_64 Qt build image and package set are tag-named but not digest/checksum pinned; the prebuilt manifest has no source provenance or license evidence."}],
+      "declaredLicense": "NOASSERTION",
+      "evidence": [{"contains": "image=localhost/archphene-qt-platform-theme:qt6.11.1", "path": "scripts/build-qt-platform-theme-podman.sh"}],
+      "id": "qt-bridge-x86_64",
+      "kind": "prebuilt",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "artifact-checksums", "value": "prebuilt/qt-bridge/SHA256SUMS"},
+      "sourceUrl": "https://archlinux.org/packages/extra/x86_64/qt6-base/",
+      "version": "6.11.1"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "corresponding-source", "detail": "Binary package checksums are pinned, but exact source archives, license metadata, notices, and source-delivery obligations are not recorded for the PulseAudio closure."}],
+      "declaredLicense": "NOASSERTION",
+      "evidence": [{"contains": "pulseaudio|aarch64|17.0-1|", "path": "native/archphene-audio/termux-pulse-packages.tsv"}],
+      "id": "termux-pulse-packages",
+      "kind": "binary-package-set",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "manifest", "value": "native/archphene-audio/termux-pulse-packages.tsv"},
+      "sourceUrl": "https://packages.termux.dev/apt/termux-main/",
+      "version": "manifest-locked"
+    },
+    {
+      "artifactScopes": ["manager"],
+      "blockers": [{"category": "license", "detail": "The release does not yet package the reviewed virglrenderer license and notices."}],
+      "declaredLicense": "MIT",
+      "evidence": [{"contains": "56170f8caa1bb642a2624b649e3bcca095ec2834814e5c308efc8a85a709e4ce", "path": "scripts/build-android-gpu-helper.sh"}],
+      "id": "virglrenderer",
+      "kind": "modified-source-build",
+      "reviewState": "blocked",
+      "sourcePin": {"type": "sha256", "value": "56170f8caa1bb642a2624b649e3bcca095ec2834814e5c308efc8a85a709e4ce"},
+      "sourceUrl": "https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/virglrenderer-1.3.0/virglrenderer-virglrenderer-1.3.0.tar.gz",
+      "version": "1.3.0"
+    }
+  ],
+  "format": "org.archphene.native-release-audit.v1"
+}
