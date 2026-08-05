@@ -64,6 +64,7 @@ jobs:
         run: |
           python3 scripts/test-release-workflow-contract.py
           python3 scripts/test-release-rust-components.py
+          python3 scripts/test-release-rust-licenses.py
           python3 scripts/test-release-sbom.py
           python3 scripts/test-release-license-contract.py
           python3 scripts/test-legacy-migration-contract.py
@@ -158,6 +159,29 @@ jobs:
               --metadata "$metadata" --lock Cargo.lock --target "$target" \
               --root archphene-builder \
               --output "$component_dir/builder-$target.json"
+            for role in manager builder; do
+              bundle="$component_dir/$role-$target-rust-licenses.zip"
+              docker run --rm --network=none \
+                -v "$PWD:/workspace" \
+                -v archphene-cargo-registry:/opt/cargo/registry \
+                -w /workspace \
+                archphene-android-native:release \
+                python3 scripts/release-rust-licenses.py generate \
+                  --components "$component_dir/$role-$target.json" \
+                  --cargo-registry /opt/cargo/registry \
+                  --source-date-epoch "$SOURCE_DATE_EPOCH" \
+                  --output "$bundle"
+              docker run --rm --network=none \
+                -v "$PWD:/workspace" \
+                -v archphene-cargo-registry:/opt/cargo/registry \
+                -w /workspace \
+                archphene-android-native:release \
+                python3 scripts/release-rust-licenses.py verify \
+                  --components "$component_dir/$role-$target.json" \
+                  --cargo-registry /opt/cargo/registry \
+                  --source-date-epoch "$SOURCE_DATE_EPOCH" \
+                  --output "$bundle"
+            done
             rm "$metadata"
           done
 
@@ -314,6 +338,13 @@ jobs:
               component_role=manager
             fi
             components="tooling/build/release-rust-components/$component_role-$rust_target.json"
+            license_source="tooling/build/release-rust-components/$component_role-$rust_target-rust-licenses.zip"
+            license_bundle="$asset.rust-licenses.zip"
+            install -m644 "$license_source" "$license_bundle"
+            cmp "$license_source" "$license_bundle"
+            sha256sum "$license_bundle" | \
+              sed "s|  .*|  $name.rust-licenses.zip|" \
+              > "$license_bundle.sha256"
             sbom="$asset.spdx.json"
             python3 scripts/release-sbom.py generate \
               --apk "$asset" \
@@ -323,6 +354,7 @@ jobs:
               --source-date-epoch "$SOURCE_DATE_EPOCH" \
               --rust-components "$components" \
               --rust-target "$rust_target" \
+              --rust-license-bundle "$license_bundle" \
               --output "$sbom"
             python3 scripts/release-sbom.py verify \
               --apk "$asset" \
@@ -331,7 +363,8 @@ jobs:
               --version "$VERSION_NAME" \
               --source-revision "$SOURCE_REVISION" \
               --rust-components "$components" \
-              --rust-target "$rust_target"
+              --rust-target "$rust_target" \
+              --rust-license-bundle "$license_bundle"
             sha256sum "$sbom" | sed "s|  .*|  $name.spdx.json|" \
               > "$sbom.sha256"
           done
@@ -345,6 +378,8 @@ jobs:
             ${{ runner.temp }}/Archphene-*.apk.sha256
             ${{ runner.temp }}/Archphene-*.apk.spdx.json
             ${{ runner.temp }}/Archphene-*.apk.spdx.json.sha256
+            ${{ runner.temp }}/Archphene-*.apk.rust-licenses.zip
+            ${{ runner.temp }}/Archphene-*.apk.rust-licenses.zip.sha256
           if-no-files-found: error
 
       - name: Attach APKs and publish release
@@ -358,6 +393,8 @@ jobs:
               "$RUNNER_TEMP/$name.sha256"
               "$RUNNER_TEMP/$name.spdx.json"
               "$RUNNER_TEMP/$name.spdx.json.sha256"
+              "$RUNNER_TEMP/$name.rust-licenses.zip"
+              "$RUNNER_TEMP/$name.rust-licenses.zip.sha256"
             )
           done
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber

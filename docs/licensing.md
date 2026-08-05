@@ -37,6 +37,15 @@ recorded as `STATIC_LINK`. `licenseConcluded` remains `NOASSERTION`: recording
 upstream metadata does not substitute for reviewing and packaging required
 license and notice texts.
 
+Each APK is accompanied by `<apk-name>.rust-licenses.zip` and its checksum. The
+deterministic bundle contains its exact component manifest plus every
+`LICENSE*`, `LICENCE*`, `COPYING*`, `UNLICENSE*`, `NOTICE*`, and `COPYRIGHT*`
+file found in each checksum-locked Cargo source package, including nested
+vendored notices. Its index binds every included file to a SHA-256, and the SPDX
+document records the bundle's filename and SHA-256. Generation fails when a
+component has no candidate license file. This closes Rust license-text
+collection, but it does not make an unsupported license conclusion.
+
 ## Separate package licenses
 
 Packages installed later through pacman or the reviewed AUR path are not
@@ -51,16 +60,18 @@ manager APK also carries pinned native/runtime components such as patched glibc,
 pacman/libalpm, GnuPG, libarchive, Mesa, D-Bus, PulseAudio, PipeWire camera
 runtime, virglrenderer, and transitive Rust crates. Rust dependencies now have a
 canonical target-specific inventory, while the complete native/runtime
-inventory remains unfinished. Required copyright notices, complete license
-texts—including applicable Rust package texts—and any corresponding-source or
-relinking obligations must be closed before the licensing release gate can be
-marked complete. SPDX file licenses and package license conclusions therefore
-remain `NOASSERTION` rather than making unsupported conclusions.
+inventory remains unfinished. The Cargo source packages now supply their
+license and notice files as a verified release asset. The remaining native
+runtime notices, license texts, and any corresponding-source or relinking
+obligations must be closed before the licensing release gate can be marked
+complete. SPDX file licenses and package license conclusions therefore remain
+`NOASSERTION` rather than making unsupported conclusions.
 
 Run the current consistency gate with:
 
 ```bash
 python3 scripts/test-release-license-contract.py
 python3 scripts/test-release-rust-components.py
+python3 scripts/test-release-rust-licenses.py
 python3 scripts/test-release-sbom.py
 ```

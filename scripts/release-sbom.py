@@ -14,6 +14,7 @@ MAX_FILES = 8192
 MAX_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_SBOM_BYTES = 32 * 1024 * 1024
 MAX_COMPONENT_BYTES = 4 * 1024 * 1024
+MAX_LICENSE_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_COMPONENTS = 512
 CHUNK_BYTES = 1024 * 1024
 
@@ -178,6 +179,17 @@ def read_rust_components(
     return validated, hashlib.sha256(raw).hexdigest()
 
 
+def bounded_digest(path: Path, maximum: int, label: str) -> str:
+    size = path.stat().st_size
+    if size <= 0 or size > maximum:
+        fail(f"{label} size is outside the bound")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def make_document(
     apk: Path,
     artifact_name: str,
@@ -186,6 +198,7 @@ def make_document(
     source_date_epoch: int,
     rust_components: Path,
     rust_target: str,
+    rust_license_bundle: Path,
 ) -> dict[str, object]:
     artifact_name = validate_text(artifact_name, "artifact name")
     version = validate_text(version, "version", 64)
@@ -193,6 +206,9 @@ def make_document(
         fail("source revision must be a full lowercase Git commit ID")
     apk_digest, files, verification_code = read_apk(apk)
     components, component_digest = read_rust_components(rust_components, rust_target)
+    license_bundle_digest = bounded_digest(
+        rust_license_bundle, MAX_LICENSE_BUNDLE_BYTES, "Rust license bundle"
+    )
     package_id = "SPDXRef-Package-APK"
     relationships = [
         {
@@ -261,11 +277,20 @@ def make_document(
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": f"{artifact_name} SBOM",
+        "comment": (
+            "Rust component license texts are provided in "
+            + artifact_name
+            + ".rust-licenses.zip (SHA256: "
+            + license_bundle_digest
+            + ")."
+        ),
         "documentNamespace": (
             "https://github.com/Nulifyer/Archphene/spdx/"
             + apk_digest
             + "-"
             + component_digest
+            + "-"
+            + license_bundle_digest
         ),
         "creationInfo": {
             "created": created_timestamp(source_date_epoch),
@@ -313,6 +338,7 @@ def generate(args: argparse.Namespace) -> None:
         args.source_date_epoch,
         args.rust_components,
         args.rust_target,
+        args.rust_license_bundle,
     )
     args.output.write_bytes(canonical_bytes(document))
 
@@ -346,6 +372,7 @@ def verify(args: argparse.Namespace) -> None:
         int(parsed.timestamp()),
         args.rust_components,
         args.rust_target,
+        args.rust_license_bundle,
     )
     if raw_sbom != canonical_bytes(expected):
         fail("SBOM does not match the APK or release metadata")
@@ -364,6 +391,7 @@ def parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--source-date-epoch", type=int, required=True)
     generate_parser.add_argument("--rust-components", type=Path, required=True)
     generate_parser.add_argument("--rust-target", required=True)
+    generate_parser.add_argument("--rust-license-bundle", type=Path, required=True)
     generate_parser.add_argument("--output", type=Path, required=True)
     generate_parser.set_defaults(handler=generate)
     verify_parser = subparsers.add_parser("verify")
@@ -374,6 +402,7 @@ def parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--source-revision", required=True)
     verify_parser.add_argument("--rust-components", type=Path, required=True)
     verify_parser.add_argument("--rust-target", required=True)
+    verify_parser.add_argument("--rust-license-bundle", type=Path, required=True)
     verify_parser.set_defaults(handler=verify)
     return result
 

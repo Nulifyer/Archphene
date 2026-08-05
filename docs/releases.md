@@ -44,13 +44,16 @@ The workflow attaches these APKs and a basename-scoped `.sha256` file for each:
 - `Archphene-Builder-arm64-v8a-<version>.apk`
 
 Each APK also has a deterministic `<apk-name>.spdx.json` SPDX 2.3 inventory and
-matching `.spdx.json.sha256`. The SBOM binds every signed APK entry and complete
-APK digest to the source commit and release version. It also records the exact
+matching `.spdx.json.sha256`. A deterministic
+`<apk-name>.rust-licenses.zip` and checksum provide the Cargo source packages'
+license and notice files. The SBOM binds every signed APK entry and complete APK
+digest to the source commit and release version. It records the exact
 target-filtered, checksum-locked Rust runtime closure with Cargo package URLs
-and declared license expressions. File licenses and package license conclusions
-remain `NOASSERTION`; metadata does not replace the separate license and notice
-audit. See [Licensing and release notices](licensing.md) for the notices already
-packaged and the remaining release gate.
+and declared license expressions, plus the Rust license bundle's SHA-256. File
+licenses and package license conclusions remain `NOASSERTION`; metadata does
+not replace the remaining native/runtime audit. See
+[Licensing and release notices](licensing.md) for the notices already packaged
+and the remaining release gate.
 
 Install the manager APK matching the device ABI. Install the matching Builder
 APK to enable reviewed AUR builds under the separate no-network Android UID.
@@ -85,6 +88,7 @@ Run the source contract before tagging:
 ```bash
 python3 scripts/test-release-workflow-contract.py
 python3 scripts/test-release-rust-components.py
+python3 scripts/test-release-rust-licenses.py
 python3 scripts/test-release-sbom.py
 ```
 

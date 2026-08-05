@@ -297,6 +297,9 @@ and reproducible artifacts.
   - [x] Derive target-filtered manager and Builder Rust runtime closures from
     locked Cargo metadata and include package URLs, source checksums, and
     declared licenses in each verified SPDX release SBOM.
+  - [x] Publish deterministic checksum-bound Rust license archives containing
+    every discovered license, notice, and copyright file from the exact Cargo
+    source packages represented in each APK SBOM.
   - [ ] Finish the canonical native/runtime component inventory, required
     notices and license texts, and corresponding-source or relinking audit.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,

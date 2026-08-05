@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import hashlib
 import json
 import subprocess
 import sys
@@ -28,6 +29,8 @@ with tempfile.TemporaryDirectory() as temporary:
     first = directory / "first.spdx.json"
     second = directory / "second.spdx.json"
     components = directory / "components.json"
+    license_bundle = directory / "licenses.zip"
+    license_bundle.write_bytes(b"deterministic Rust license bundle fixture")
     components.write_text(
         json.dumps(
             {
@@ -66,6 +69,8 @@ with tempfile.TemporaryDirectory() as temporary:
         str(components),
         "--rust-target",
         "x86_64-linux-android",
+        "--rust-license-bundle",
+        str(license_bundle),
     )
     run("generate", *common, "--output", str(first))
     run("generate", *common, "--output", str(second))
@@ -87,6 +92,8 @@ with tempfile.TemporaryDirectory() as temporary:
         str(components),
         "--rust-target",
         "x86_64-linux-android",
+        "--rust-license-bundle",
+        str(license_bundle),
     )
     document = json.loads(first.read_text(encoding="utf-8"))
     if (
@@ -96,6 +103,8 @@ with tempfile.TemporaryDirectory() as temporary:
         or len(document["packages"]) != 2
         or document["packages"][1]["licenseDeclared"] != "MIT OR Apache-2.0"
         or document["relationships"][-1]["relationshipType"] != "STATIC_LINK"
+        or hashlib.sha256(license_bundle.read_bytes()).hexdigest()
+        not in document["comment"]
     ):
         raise SystemExit("release SBOM lacks the required SPDX file inventory")
     component_bytes = components.read_bytes()
@@ -118,10 +127,35 @@ with tempfile.TemporaryDirectory() as temporary:
         str(components),
         "--rust-target",
         "x86_64-linux-android",
+        "--rust-license-bundle",
+        str(license_bundle),
         check=False,
     ).returncode == 0:
         raise SystemExit("release SBOM verification accepted changed Rust metadata")
     components.write_bytes(component_bytes)
+    license_bundle.write_bytes(b"changed license bundle")
+    if run(
+        "verify",
+        "--apk",
+        str(apk),
+        "--sbom",
+        str(first),
+        "--artifact-name",
+        "Archphene-x86_64-1.2.3.apk",
+        "--version",
+        "1.2.3",
+        "--source-revision",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--rust-components",
+        str(components),
+        "--rust-target",
+        "x86_64-linux-android",
+        "--rust-license-bundle",
+        str(license_bundle),
+        check=False,
+    ).returncode == 0:
+        raise SystemExit("release SBOM verification accepted a changed license bundle")
+    license_bundle.write_bytes(b"deterministic Rust license bundle fixture")
     document["files"][0]["checksums"][1]["checksumValue"] = "0" * 64
     first.write_text(json.dumps(document), encoding="utf-8")
     if run(
@@ -140,6 +174,8 @@ with tempfile.TemporaryDirectory() as temporary:
         str(components),
         "--rust-target",
         "x86_64-linux-android",
+        "--rust-license-bundle",
+        str(license_bundle),
         check=False,
     ).returncode == 0:
         raise SystemExit("release SBOM verification accepted a changed file digest")
@@ -162,6 +198,8 @@ with tempfile.TemporaryDirectory() as temporary:
         str(components),
         "--rust-target",
         "x86_64-linux-android",
+        "--rust-license-bundle",
+        str(license_bundle),
         "--output",
         str(directory / "unsafe.spdx.json"),
         check=False,
