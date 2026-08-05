@@ -302,6 +302,8 @@ and reproducible artifacts.
     source packages represented in each APK SBOM.
   - [x] Record the canonical evidence-bound native/runtime component inventory
     and fail before any release write while an inventory blocker remains.
+  - [x] Package and checksum-bind discovered source license and notice files for
+    D-Bus, Mbed TLS, Mesa, PipeWire, libepoxy, and virglrenderer.
   - [ ] Resolve every recorded native/runtime notice, license-text,
     reproducibility, provenance, corresponding-source, and relinking blocker.
 - [ ] Update README, architecture, security, roadmap, compatibility matrix,

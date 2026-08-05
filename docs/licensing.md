@@ -63,14 +63,19 @@ pins, declared licenses where reviewed, exact repository evidence, and concrete
 open blockers. `scripts/release-native-audit.py` rejects missing components,
 stale evidence, malformed blockers, and unreviewed additions.
 
-All 14 records remain blocked. The unresolved work includes floating Arch
-package transactions, incomplete GTK and Qt prebuilt provenance, native license
-and notice packaging, PulseAudio closure source records, and patched glibc
-corresponding source. The tag workflow runs `--require-complete` before creating
-a GitHub draft, so an accidental tag cannot publish or remotely stage a release
-while any blocker remains. Rust source packages already supply their license and
-notice files as verified assets. SPDX file licenses and package license
-conclusions remain `NOASSERTION` rather than making unsupported conclusions.
+Six records are verified: D-Bus, Mbed TLS, Mesa, PipeWire, libepoxy, and
+virglrenderer. Release CI checks each source archive SHA-256 or Git commit and
+publishes every discovered license, notice, and copyright file in
+`Archphene-native-licenses-<version>.zip`. The deterministic archive embeds the
+canonical manifest and a per-file checksum index.
+
+Eight records remain blocked. The unresolved work includes floating Arch
+package transactions, incomplete GTK and Qt prebuilt provenance, PulseAudio
+closure source records, and patched glibc corresponding source. The tag workflow
+runs `--require-complete` before creating a GitHub draft, so an accidental tag
+cannot publish or remotely stage a release while any blocker remains. SPDX file
+licenses and package license conclusions remain `NOASSERTION` rather than making
+unsupported conclusions.
 
 Run the current consistency gate with:
 
@@ -80,4 +85,5 @@ python3 scripts/test-release-rust-components.py
 python3 scripts/test-release-rust-licenses.py
 python3 scripts/test-release-sbom.py
 python3 scripts/test-release-native-audit.py
+python3 scripts/test-release-native-licenses.py
 ```

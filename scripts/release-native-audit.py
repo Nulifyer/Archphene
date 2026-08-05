@@ -35,7 +35,9 @@ def fail(message: str) -> None:
 
 def validate(path: Path) -> tuple[int, int]:
     document = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(document, dict) or set(document) != {"components", "format"}:
+    if not isinstance(document, dict) or set(document) != {
+        "components", "format", "licenseSources"
+    }:
         fail("native release audit document is invalid")
     if document["format"] != "org.archphene.native-release-audit.v1":
         fail("native release audit format is invalid")
@@ -82,6 +84,14 @@ def validate(path: Path) -> tuple[int, int]:
         source_pin = component["sourcePin"]
         if not isinstance(source_pin, dict) or set(source_pin) != {"type", "value"}:
             fail(f"native release source pin is invalid: {component_id}")
+        if source_pin["type"] not in {
+            "artifact-checksums", "floating-repository", "git-commit", "manifest", "sha256"
+        } or not isinstance(source_pin["value"], str):
+            fail(f"native release source pin type is invalid: {component_id}")
+        if source_pin["type"] == "sha256" and not re.fullmatch(r"[0-9a-f]{64}", source_pin["value"]):
+            fail(f"native release source checksum is invalid: {component_id}")
+        if source_pin["type"] == "git-commit" and not re.fullmatch(r"[0-9a-f]{40}", source_pin["value"]):
+            fail(f"native release source commit is invalid: {component_id}")
         if not isinstance(component["sourceUrl"], str) or not component["sourceUrl"].startswith("https://"):
             fail(f"native release source URL is invalid: {component_id}")
         evidence = component["evidence"]
@@ -101,6 +111,30 @@ def validate(path: Path) -> tuple[int, int]:
     missing = REQUIRED_COMPONENTS - set(ids)
     if missing:
         fail("native release audit lacks required components: " + ", ".join(sorted(missing)))
+    license_sources = document["licenseSources"]
+    if not isinstance(license_sources, list) or len(license_sources) > len(components):
+        fail("native release license sources are invalid")
+    source_ids: list[str] = []
+    by_id = {component["id"]: component for component in components}
+    for source in license_sources:
+        if not isinstance(source, dict) or set(source) != {"componentId", "path", "type"}:
+            fail("native release license source record is invalid")
+        component_id = source["componentId"]
+        if component_id not in by_id or source["type"] not in {"archive", "git-tree"}:
+            fail("native release license source identity is invalid")
+        source_path = Path(source["path"])
+        if source_path.is_absolute() or ".." in source_path.parts:
+            fail(f"native release license source path is unsafe: {component_id}")
+        component = by_id[component_id]
+        expected_pin = "sha256" if source["type"] == "archive" else "git-commit"
+        if component["sourcePin"]["type"] != expected_pin:
+            fail(f"native release license source pin is incompatible: {component_id}")
+        source_ids.append(component_id)
+    if source_ids != sorted(set(source_ids)):
+        fail("native release license sources are not uniquely sorted")
+    verified = {component["id"] for component in components if component["reviewState"] == "verified"}
+    if set(source_ids) != verified:
+        fail("verified native components do not match packaged license sources")
     return len(components), blocked
 
 

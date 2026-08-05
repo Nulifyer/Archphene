@@ -58,6 +58,7 @@ jobs:
             echo "APK_ARM64_NAME=Archphene-arm64-v8a-$version_name.apk"
             echo "BUILDER_X86_NAME=Archphene-Builder-x86_64-$version_name.apk"
             echo "BUILDER_ARM64_NAME=Archphene-Builder-arm64-v8a-$version_name.apk"
+            echo "NATIVE_LICENSE_NAME=Archphene-native-licenses-$version_name.zip"
           } >> "$GITHUB_ENV"
 
       - name: Validate release contracts
@@ -68,6 +69,7 @@ jobs:
           python3 scripts/test-release-sbom.py
           python3 scripts/test-release-license-contract.py
           python3 scripts/test-release-native-audit.py
+          python3 scripts/test-release-native-licenses.py
           python3 scripts/test-legacy-migration-contract.py
           python3 scripts/test-atspi-source-contract.py
 
@@ -260,7 +262,22 @@ jobs:
               bash scripts/build-android-gpu-helper.sh "$architecture"
           done
 
-
+      - name: Build verified native license bundle
+        run: |
+          native_licenses="$RUNNER_TEMP/$NATIVE_LICENSE_NAME"
+          python3 scripts/release-native-licenses.py generate \
+            --manifest release/native-components.json \
+            --root . \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --output "$native_licenses"
+          python3 scripts/release-native-licenses.py verify \
+            --manifest release/native-components.json \
+            --root . \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --output "$native_licenses"
+          sha256sum "$native_licenses" | \
+            sed "s|  .*|  $NATIVE_LICENSE_NAME|" \
+            > "$native_licenses.sha256"
       - name: Restore release signing key
         run: |
           for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
@@ -384,11 +401,17 @@ jobs:
             ${{ runner.temp }}/Archphene-*.apk.spdx.json.sha256
             ${{ runner.temp }}/Archphene-*.apk.rust-licenses.zip
             ${{ runner.temp }}/Archphene-*.apk.rust-licenses.zip.sha256
+            ${{ runner.temp }}/Archphene-native-licenses-*.zip
+            ${{ runner.temp }}/Archphene-native-licenses-*.zip.sha256
           if-no-files-found: error
 
       - name: Attach APKs and publish release
         run: |
           assets=()
+          assets+=(
+            "$RUNNER_TEMP/$NATIVE_LICENSE_NAME"
+            "$RUNNER_TEMP/$NATIVE_LICENSE_NAME.sha256"
+          )
           for name in \
             "$APK_X86_NAME" "$APK_ARM64_NAME" \
             "$BUILDER_X86_NAME" "$BUILDER_ARM64_NAME"; do
