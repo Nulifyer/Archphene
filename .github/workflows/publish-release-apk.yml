@@ -330,6 +330,14 @@ jobs:
 
       - name: Build verified native license bundle
         run: |
+          mesa_source=tooling/downloads/mesa-26.1.5.tar.xz
+          mkdir -p "$(dirname "$mesa_source")"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 4 \
+            --output "$mesa_source" \
+            https://archive.mesa3d.org/mesa-26.1.5.tar.xz
+          printf '%s  %s\n' \
+            79e421c7ce18cd9e790b8375920325779f10798630bf30e0b22f1a21c8617122 \
+            "$mesa_source" | sha256sum --check --quiet
           native_licenses="$RUNNER_TEMP/$NATIVE_LICENSE_NAME"
           python3 scripts/release-native-licenses.py generate \
             --manifest release/native-components.json \
