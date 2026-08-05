@@ -65,6 +65,7 @@ jobs:
           python3 scripts/test-release-workflow-contract.py
           python3 scripts/test-release-sbom.py
           python3 scripts/test-release-license-contract.py
+          python3 scripts/test-legacy-migration-contract.py
           python3 scripts/test-atspi-source-contract.py
 
       - name: Ensure release is a draft

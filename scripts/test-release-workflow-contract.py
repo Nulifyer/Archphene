@@ -33,6 +33,7 @@ required_workflow = (
     "--prebuilt-native",
     "python3 scripts/test-release-sbom.py",
     "python3 scripts/test-release-license-contract.py",
+    "python3 scripts/test-legacy-migration-contract.py",
     "python3 scripts/release-sbom.py generate",
     "python3 scripts/release-sbom.py verify",
     '--source-revision "$SOURCE_REVISION"',

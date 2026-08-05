@@ -51,6 +51,7 @@ import org.archphene.app.runtime.AvailablePackageSnapshot
 import org.archphene.app.runtime.InstalledPackageSnapshot
 import org.archphene.app.runtime.NativeRuntime
 import org.archphene.app.runtime.RuntimeSnapshot
+import java.io.File
 import java.util.Locale
 
 class MainActivity : Activity(), Choreographer.FrameCallback {
@@ -227,6 +228,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         activityGeneration++
+        if (LegacyPrototypeState.detectedMarker(File(applicationInfo.dataDir)) != null) {
+            Log.w(TAG, "Showing required clean-install migration boundary")
+            startActivity(Intent(this, LegacyMigrationActivity::class.java))
+            finish()
+            return
+        }
         val initialPreferences = ArchphenePreferences.snapshot()
         selectedManagerSection =
             (

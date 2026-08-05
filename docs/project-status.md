@@ -343,6 +343,35 @@ and
 The broader native/runtime/transitive component license and corresponding-source
 audit remains an explicit release blocker.
 
+The clean-install boundary is now enforced in code rather than only documented.
+Before preferences, Activity runtime startup, or Service bootstrap, the
+greenfield manager checks a fixed set of v1.0.1 prototype runtime and preference
+markers. A match starts no Linux service and shows only **Clean installation
+required**, an explicit data-loss warning, **Open app settings**, and **Close
+Archphene**. It never removes or migrates retained state. A dedicated JVM test
+covers empty/current roots, runtime and preference markers, and fail-closed
+invalid roots; a source contract preserves all three pre-start checks.
+
+On the physical Samsung, an isolated exact-AArch64 debug identity with a seeded
+`files/package-runtime` marker cold-launched the migration screen in 381 ms.
+The full-device frame and accessibility tree contained the complete warning and
+both actions, Android app settings opened from the visible button, no
+`ArchpheneRuntimeService` existed, and logs recorded blocked Application and
+Activity initialization without a fatal event. The marker remained while no
+greenfield root or preferences were created. Removing only the marker and cold
+restarting entered normal onboarding, started the runtime Service, and reached
+the package runtime; the isolated package was then uninstalled.
+
+Both exact-ABI release pairs remained byte-identical across repeated
+`1.1.0-rc.7`, code `1000001240`, builds. Manager SHA-256 values are
+`ed975e5665be7d47ab3bc78047d0077659d77686fddc38bb5c705a8f9b4da6d9`
+for x86_64 and
+`75c3ddb7579861ffd781ed44cc1b774f8df2ea23508042ac8302dbbee28c049a`
+for arm64-v8a; Builder values are
+`5eeadd32d7e810ef4aad23c9e3b886fb6de4e8dbc13f5cc1d843c8c5fdf81c9d`
+and
+`dd8567f1b786415ebc36e37c88d9c0e2eb7aa247fce02d96c8e3e4ab11ba2ac2`.
+
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
 SM-S908U. They prove cold launch, full-device insets and screenshots, touch
 batching, Activity recreation, HOME/resume continuity, Back shutdown, private

@@ -105,4 +105,7 @@ native components, and the generated app-shell template.
 
 The published `v1.0.1` assets and their one-time `v1.0.0` x86_64 updater alias
 remain historical, immutable prototype artifacts. The greenfield tag workflow
-does not rebuild, rename, or preserve that legacy distribution format.
+does not rebuild, rename, or preserve that legacy distribution format. A
+greenfield manager opened over retained prototype-private state fails closed
+before preferences or runtime bootstrap and directs the user to Android app
+settings for the required clean installation.

@@ -54,6 +54,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.HttpsURLConnection
 import org.archphene.app.ArchphenePreferences
+import org.archphene.app.LegacyPrototypeState
 import org.archphene.app.MainActivity
 import org.archphene.app.R
 import org.archphene.app.boundedUtf8Text
@@ -1979,6 +1980,11 @@ class ArchpheneRuntimeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        if (LegacyPrototypeState.detectedMarker(File(applicationInfo.dataDir)) != null) {
+            Log.e(TAG, "Refused to start greenfield runtime with retained prototype state")
+            stopSelf()
+            return
+        }
         createSessionNotificationChannel()
         connectivityManager = getSystemService(ConnectivityManager::class.java)
         try {

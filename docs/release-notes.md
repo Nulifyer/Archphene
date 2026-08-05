@@ -25,6 +25,12 @@ needed files, uninstall the prototype manager and Terminal, and then install the
 greenfield APKs. Generated app shells from the prototype must be removed and
 republished by the greenfield manager.
 
+An in-place Android update does not bypass this boundary. If any known
+prototype runtime or preference marker remains, the greenfield Application
+starts no preferences or Linux runtime and displays only a clean-install
+explanation with a link to Android app settings. It does not delete legacy
+state automatically.
+
 ## Added
 
 - One shared manager-owned Arch root, package database, home, process model, and

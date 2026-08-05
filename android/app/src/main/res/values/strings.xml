@@ -4,6 +4,10 @@
     <string name="runtime_starting">Starting the shared Arch runtime…</string>
     <string name="runtime_ready">Archphene is ready</string>
     <string name="runtime_unavailable">Shared Arch runtime unavailable</string>
+    <string name="legacy_migration_title">Clean installation required</string>
+    <string name="legacy_migration_message">This installation still contains private data from the published v1.0.1 prototype. The new Archphene product will not read, migrate, overwrite, or delete that state. To continue, uninstall Archphene in Android settings, then install the new manager and matching Builder APK. Uninstalling permanently erases the prototype’s private packages, Terminal data, and files. If you need that data, close Archphene and preserve it before uninstalling.</string>
+    <string name="open_app_settings">Open app settings</string>
+    <string name="close_archphene">Close Archphene</string>
     <string name="packages">Packages</string>
     <string name="package_results_heading">Package results and activity</string>
     <string name="installed_packages">Installed</string>
