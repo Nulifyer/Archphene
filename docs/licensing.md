@@ -76,8 +76,8 @@ Archphene patch, both architecture build scripts, the AArch64 container recipe,
 and an indexed checksum for every build-control file.
 
 Six records remain blocked. The unresolved work includes floating Arch
-package transactions, incomplete GTK prebuilt provenance, Qt historical binary
-reproduction on AArch64, and PulseAudio closure source records. The tag workflow
+package transactions, incomplete GTK prebuilt provenance, the AArch64 Qt
+KF6Config input/rebuild, and PulseAudio closure source records. The tag workflow
 runs `--require-complete` before creating a GitHub draft, so an accidental tag
 publish or remotely stage a release while any blocker remains. SPDX file
 licenses and package license conclusions remain `NOASSERTION` rather than making

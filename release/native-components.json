@@ -132,12 +132,13 @@
     },
     {
       "artifactScopes": ["manager"],
-      "blockers": [{"category": "reproducibility", "detail": "Every plugin is bound to its historical project source, but the retained KF6Config fallback lacks a pinned historical KF6 link input and none of the three outputs has a byte-for-byte clean rebuild gate."}],
+      "blockers": [{"category": "reproducibility", "detail": "The platform-theme and style plugins rebuild byte-for-byte from historical source; the retained KF6Config fallback still lacks its pinned historical KF6 link input and a clean rebuild."}],
       "declaredLicense": "MIT",
       "evidence": [
         {"contains": "kde_config_fallback_sha256=90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311", "path": "scripts/build-qt-platform-theme-arm64.sh"},
         {"contains": "\"sourceCommit\": \"931ef9131f9e3f87b60430887b06d99449f80d9d\"", "path": "prebuilt/qt-bridge/manifest-arm64-v8a.json"},
-        {"contains": "Qt prebuilt provenance passed", "path": "scripts/test-qt-prebuilt-provenance.py"}
+        {"contains": "Qt prebuilt provenance passed", "path": "scripts/test-qt-prebuilt-provenance.py"},
+        {"contains": "two AArch64 historical outputs rebuilt byte-for-byte", "path": "scripts/test-qt-prebuilt-reproducibility.sh"}
       ],
       "id": "qt-bridge-aarch64",
       "kind": "mixed-source-prebuilt",

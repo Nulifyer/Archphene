@@ -45,4 +45,27 @@ for specification in "${specifications[@]}"; do
   active=("${active[@]:0:${#active[@]}-1}")
 done
 
-echo "Qt x86_64 prebuilt reproducibility passed: three historical source commits rebuilt byte-for-byte."
+arm_specifications=(
+  'arm-platform:ed5dd11ca1f94c2651121e3d131bea7917991035:libarchphene_qt_platform_theme.so:d6acab7b19fa14c8efe930ecca7542adf380b4bb6fcfa0f3a4cc624bbc44d9ce'
+  'arm-style:88340f520f2961381e33bb3052a6e071a0ce755c:libarchphene_qt_style.so:2e17306d3de5e2cbcdac12f75252560a93ca14e3a4c41481fddba3cfd5246338'
+)
+for specification in "${arm_specifications[@]}"; do
+  IFS=: read -r name commit library expected <<<"$specification"
+  worktree="$base/$name"
+  git -C "$root" worktree add --quiet --detach "$worktree" "$commit"
+  active+=("$worktree")
+  "$container_cli" run --rm \
+    -v "$worktree:/workspace" -w /workspace "$image" \
+    bash scripts/build-qt-platform-theme-arm64.sh >/dev/null
+  rebuilt="$worktree/prebuilt/qt-bridge/arm64-v8a/$library"
+  actual="$(sha256sum "$rebuilt" | cut -d ' ' -f1)"
+  [[ "$actual" == "$expected" ]] || {
+    echo "Qt $name rebuild changed: expected $expected, got $actual" >&2
+    exit 1
+  }
+  cmp "$rebuilt" "$root/prebuilt/qt-bridge/arm64-v8a/$library"
+  git -C "$root" worktree remove --force "$worktree"
+  active=("${active[@]:0:${#active[@]}-1}")
+done
+
+echo "Qt prebuilt reproducibility passed: three x86_64 and two AArch64 historical outputs rebuilt byte-for-byte."
