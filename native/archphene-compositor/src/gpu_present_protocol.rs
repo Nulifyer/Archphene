@@ -64,7 +64,7 @@ pub(crate) enum GpuPresentMessage {
     Resource(PresentResource),
     Present {
         resource_id: u32,
-        fence_sequence: u32,
+        fence_sequence: u64,
     },
     Release {
         resource_id: u32,
@@ -117,7 +117,7 @@ pub(crate) fn encode_gpu_present(
             put_u16(&mut frame, 6, 3);
             put_u32(&mut frame, 32, resource_id);
             put_u16(&mut frame, 38, FLAG_FENCE);
-            put_u32(&mut frame, 52, fence_sequence);
+            put_u64(&mut frame, 48, fence_sequence);
         }
         GpuPresentMessage::Release { resource_id } if resource_id != 0 => {
             put_u16(&mut frame, 6, 4);
@@ -165,14 +165,14 @@ pub(crate) fn decode_gpu_present(
         }
         3 if resource_id != 0
             && get_u16(frame, 38) == FLAG_FENCE
-            && get_u32(frame, 52) != 0
+            && get_u64(frame, 48) != 0
             && frame[36..38].iter().all(|byte| *byte == 0)
-            && frame[40..52].iter().all(|byte| *byte == 0)
+            && frame[40..48].iter().all(|byte| *byte == 0)
             && frame[56..].iter().all(|byte| *byte == 0) =>
         {
             Ok(GpuPresentMessage::Present {
                 resource_id,
-                fence_sequence: get_u32(frame, 52),
+                fence_sequence: get_u64(frame, 48),
             })
         }
         4 if resource_id != 0 && frame[36..].iter().all(|byte| *byte == 0) => {
@@ -196,7 +196,7 @@ fn token_matches(candidate: &[u8], expected: &[u8; 16]) -> bool {
 pub(crate) struct GpuPresentRegistry {
     scope: GpuPresentScope,
     resources: [Option<PresentResource>; MAX_PRESENT_RESOURCES],
-    last_fence: [u32; MAX_PRESENT_RESOURCES],
+    last_fence: [u64; MAX_PRESENT_RESOURCES],
     total_bytes: u64,
 }
 
@@ -320,7 +320,7 @@ mod tests {
             GpuPresentMessage::Resource(resource(11, 0)),
             GpuPresentMessage::Present {
                 resource_id: 11,
-                fence_sequence: 9,
+                fence_sequence: 0x1_0000_0002,
             },
             GpuPresentMessage::Release { resource_id: 11 },
         ] {

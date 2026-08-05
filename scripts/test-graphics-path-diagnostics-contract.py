@@ -98,6 +98,8 @@ require(
     "helper_generation",
     "token: [u8; 16]",
     "MAX_PRESENT_TOTAL_BYTES",
+    "last_fence: [u64; MAX_PRESENT_RESOURCES]",
+    "fence_sequence: get_u64(frame, 48)",
     "DuplicateResource",
     "StaleFence",
     "rejects_cross_session_generation_token_and_trailing_fields",
