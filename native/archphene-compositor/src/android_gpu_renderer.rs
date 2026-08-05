@@ -65,7 +65,7 @@ const GL_TRIANGLE_STRIP: u32 = 0x0005;
 const GL_UNPACK_ALIGNMENT: u32 = 0x0cf5;
 const GL_NO_ERROR: u32 = 0;
 
-const MAX_TARGETS: usize = 15;
+const MAX_TARGETS: usize = crate::gpu_present_protocol::MAX_RETAINED_PRESENT_TARGETS;
 const MAX_PIXEL_BYTES: usize = 33_554_432 * 4;
 
 type EglGetNativeClientBufferAndroid = unsafe extern "C" fn(*mut c_void) -> EglClientBuffer;

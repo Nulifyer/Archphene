@@ -5,6 +5,8 @@
 mod android_gpu_renderer;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod gpu_damage;
+#[cfg_attr(not(test), allow(dead_code))]
+mod gpu_present_protocol;
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;

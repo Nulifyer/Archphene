@@ -4023,6 +4023,18 @@ GPU upload/composition, and zero CPU conversion/readback. The wider service and
 debug probe still allocated bounded ART objects, so the claim applies to the
 frame path rather than the entire Android process.
 
+The next virpipe stage now has a fixed manager-side AHB presentation protocol
+and bounded registry. Every 64-byte `APHB` v1 frame authenticates the exact
+session, helper generation, and 128-bit session token. At most three live resources may
+declare bounded RGBA dimensions and exact estimated bytes; resource IDs and
+slots are unique, fence sequences strictly increase, and release is required
+before reuse. Four focused tests reject cross-session/generation/token frames,
+reserved trailing fields, unsafe dimensions, duplicates, unknown resources, and
+stale fences. The active vtest helper does not yet consume this side channel or
+bind guest scanout resources to transferred AHB handles, so the corresponding
+release-plan item remains open and current virpipe frames still return through
+SHM.
+
 Hardware key, repeat, and modifier delivery no longer clones focused
 `WlKeyboard` resources into a temporary vector. Focused resources stream in
 retained order through a reusable live/same-client iterator; accepted events

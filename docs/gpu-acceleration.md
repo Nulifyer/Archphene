@@ -152,6 +152,18 @@ Android-host Vulkan transport is published yet, so accelerated Vulkan and
 Wayland Vulkan presentation remain incomplete. Production power/thermal
 measurements and broad physical-device testing are also incomplete.
 
+The manager-side protocol groundwork is implemented but not yet connected to
+the helper. It defines one fixed 64-byte `APHB` v1 side-channel frame carrying
+the exact session ID, helper generation, and 128-bit session token on every
+message. A three-resource registry bounds dimensions, pixels, estimated bytes,
+slot identity, duplicate resources, and strictly increasing fence sequences;
+release permits bounded slot reuse. Cross-session, stale-generation,
+wrong-token, malformed/trailing-field, oversized-resource, unknown-resource,
+duplicate-resource, and stale-fence cases fail closed in unit tests. Actual AHB
+handle transfer, vtest scanout-resource binding, and helper-to-compositor
+presentation remain open, so this contract alone does not remove virpipe SHM
+readback.
+
 References:
 
 - [Android graphics architecture](https://source.android.com/docs/core/graphics/architecture)

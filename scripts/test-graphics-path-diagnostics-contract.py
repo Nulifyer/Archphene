@@ -59,7 +59,7 @@ require(
     "glTexSubImage2D",
     "glDrawArrays",
     "glFinish",
-    "const MAX_TARGETS: usize = 15;",
+    "MAX_RETAINED_PRESENT_TARGETS",
     "pub(crate) fn remove_target",
 )
 require(
@@ -67,6 +67,18 @@ require(
     "fn warmed_gpu_damage_staging_does_not_allocate()",
     "for _ in 0..1_000",
     "assert_eq!(allocations, 0);",
+)
+require(
+    "native/archphene-compositor/src/gpu_present_protocol.rs",
+    'const MAGIC: &[u8; 4] = b"APHB";',
+    "pub(crate) const GPU_PRESENT_FRAME_BYTES: usize = 64;",
+    "MAX_PRESENT_RESOURCES: usize = 3",
+    "helper_generation",
+    "token: [u8; 16]",
+    "MAX_PRESENT_TOTAL_BYTES",
+    "DuplicateResource",
+    "StaleFence",
+    "rejects_cross_session_generation_token_and_trailing_fields",
 )
 reject(
     "native/archphene-compositor/src/android_gpu_renderer.rs",
