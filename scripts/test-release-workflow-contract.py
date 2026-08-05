@@ -9,9 +9,11 @@ CLIENT = (
     / "prototypes/linux-app-manager-stub/src/org/archpheneos/manager"
     / "GitHubReleaseClient.java"
 )
+GREENFIELD_BUILD = ROOT / "android/app/build.gradle.kts"
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
 client = CLIENT.read_text(encoding="utf-8")
+greenfield_build = GREENFIELD_BUILD.read_text(encoding="utf-8")
 
 required_workflow = (
     'push:\n    tags:\n      - "v*"',
@@ -72,6 +74,16 @@ required_client = (
 for value in required_client:
     if value not in client:
         raise SystemExit(f"self-update ABI test contract missing: {value}")
+
+for value in (
+    'providers.gradleProperty("archpheneVersionCode")',
+    'providers.gradleProperty("archpheneVersionName")',
+    'archpheneVersionCode.toLong() <= 2_100_000_000L',
+    'versionCode = archpheneVersionCode?.toInt() ?: 1',
+    'versionName = archpheneVersionName ?: "0.1.0"',
+):
+    if value not in greenfield_build:
+        raise SystemExit(f"greenfield release version contract missing: {value}")
 
 print(
     "Release workflow contract passed: draft-first publication, exact ABI assets, "
