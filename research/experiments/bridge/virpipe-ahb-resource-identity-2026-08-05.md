@@ -87,9 +87,13 @@ RGBA AHBs, imports its EGL image as the exact virgl resource, and sends Resource
 plus its native handle. Command 40 conservatively completes rendering, sends
 Present with a marker-only acquire state, and returns the same 64-bit sequence
 to the client. Both ABIs build. A same-UID Samsung probe observed
-`resource=1 stride=64 sequence=1 marker=46`. One Present remains outstanding
-because the helper does not yet receive manager Release; generic Mesa/Wayland
-production and buffer reuse remain disabled.
+`resource=1 stride=64 sequence=1 marker=46`. Private command 41 blocks for the
+exact scoped manager Release, accepts marker `52` with zero or one close-on-exec
+fence, waits a received fence, and permits reuse only after sequence equality.
+Malformed framing or descriptor cardinality closes the channel. The Samsung
+probe completed sequences 1 and 2 around marker-only Release (`46,52,46`).
+Generic Mesa/Wayland production and the manager's SurfaceFlinger-backed Release
+sender remain disabled.
 
 The compositor now has a dormant same-UID fixed-frame listener. It bounds path
 length and frames per dispatch, validates `SO_PEERCRED`, safely reassembles

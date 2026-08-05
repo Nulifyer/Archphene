@@ -234,8 +234,13 @@ frame and NDK handle before returning the resource ID. Present calls `glFinish`,
 sends the same resource ID with a monotonic 64-bit sequence and marker-only
 completed acquire state, then returns that sequence to the vtest client. A live
 same-UID Samsung protocol probe observed resource 1, stride 64, sequence 1, and
-marker `46`; both Android ABI builds pass. A resource permits only one Present
-until Release reception exists, so this path is not enabled in production.
+marker `46`; both Android ABI builds pass. Private command 41 then blocks for
+the exact scoped Release sequence, accepts marker `52` with zero or one
+close-on-exec release-fence FD, waits the FD when present, and only then permits
+reuse. Invalid scope, resource, sequence, marker, truncation, or descriptor
+cardinality closes the APHB channel. The Samsung probe completed sequences 1
+and 2 around one marker-only Release (`46,52,46`). The path remains disabled in
+production until Mesa/Wayland identity and SurfaceFlinger Release senders exist.
 
 The compositor now has the matching dormant control endpoint. It binds only an
 absolute 103-byte-or-shorter path, replaces only a socket, authenticates the
@@ -265,7 +270,7 @@ consumption, and release return remain absent.
 
 Direction and reuse are now explicit in APHB v1. Hello, Resource, Present, and
 DropResource travel helper-to-manager. Release travels manager-to-helper with
-the same 64-bit sequence and one release fence. A second Present or DropResource
+the same 64-bit sequence, marker `52`, and zero or one release fence. A second Present or DropResource
 fails while a fence is outstanding; stale or mismatched Release fails. This
 prevents destroying a resource as a substitute for returning SurfaceFlinger
 ownership. The dormant receiver rejects inbound Release and Present. It accepts

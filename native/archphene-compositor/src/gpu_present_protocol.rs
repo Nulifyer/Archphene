@@ -5,9 +5,10 @@
 //! session-private side channel while vtest retains renderer commands. Each
 //! Present frame is followed by one `0x46` marker byte carrying zero or one
 //! `SCM_RIGHTS` acquire-fence FD. No FD means the helper completed rendering
-//! before sending the marker. Every frame carries the authenticated session,
-//! helper generation, and random token so stale helpers and cross-session
-//! resources fail closed.
+//! before sending the marker. Release uses the same rule with marker `0x52` and
+//! a SurfaceFlinger release-fence FD. Every frame carries the authenticated
+//! session, helper generation, and random token so stale helpers and
+//! cross-session resources fail closed.
 
 pub(crate) const GPU_PRESENT_FRAME_BYTES: usize = 64;
 pub(crate) const MAX_PRESENT_RESOURCES: usize = 3;

@@ -4060,9 +4060,9 @@ Each frame is applied to cloned APHB and Wayland identity registries and becomes
 visible only when both transitions succeed. The generated-client socket test
 uses this coordinated path with a 64-bit fence sequence above `u32::MAX` before
 claiming the exact surface commit. Native AHB handle and acquire-fence receipt
-are implemented. The helper private Resource/Present sender is implemented;
-fence consumption, release return, and generic Mesa/Wayland production remain
-open.
+are implemented. The helper private Resource/Present sender and blocking Release
+receiver are implemented; manager SurfaceFlinger release transmission and
+generic Mesa/Wayland production remain open.
 
 The Android vtest helper now implements the scoped APHB bootstrap and a dormant
 AHB-backed resource path. Its
@@ -4078,9 +4078,14 @@ bounded RGBA AHBs, import each EGL image as the exact virgl render resource,
 send scoped Resource plus the NDK handle, conservatively complete GPU work, and
 send Present plus the same monotonic 64-bit sequence returned to the client.
 Both Android ABI builds pass. A same-UID physical Samsung command probe reported
-`resource=1 stride=64 sequence=1 marker=46`. A resource permits one Present
-until Release reception exists. Production does not pass the arguments or issue
-the commands; generic Mesa/Wayland production and release return remain open.
+`resource=1 stride=64 sequence=1 marker=46`. Private command 41 blocks for the
+exact scoped Release, accepts marker `52` with zero or one close-on-exec fence,
+waits a received fence, and permits reuse only after the matching sequence.
+Malformed scope, resource, sequence, marker, truncation, or descriptor count
+closes the channel. The Samsung probe completed Present sequences 1 and 2 around
+one marker-only Release (`46,52,46`). Production does not pass the arguments or
+issue the commands; generic Mesa/Wayland production and SurfaceFlinger-backed
+release return remain open.
 
 The manager-side dormant control endpoint now admits Hello and Android Resource
 handles. It binds only a bounded absolute path and accepts
@@ -4101,8 +4106,8 @@ and the release path exist.
 
 APHB direction and reuse are no longer ambiguous. Helper-to-manager traffic is
 Hello, Resource, Present, and idle-only DropResource. Manager-to-helper Release
-carries the exact Present sequence and will carry one SurfaceFlinger release
-fence. The registry rejects a second Present or drop while ownership is
+carries the exact Present sequence, marker `52`, and zero or one SurfaceFlinger
+release fence. The registry rejects a second Present or drop while ownership is
 outstanding, stale/mismatched release, and inbound Release on the manager
 endpoint. Present now requires one marker byte with zero or one `SCM_RIGHTS`
 acquire-fence descriptor. A descriptor is close-on-exec; marker-only records
@@ -4110,8 +4115,8 @@ that the helper completed rendering conservatively before send. Receipt is
 nonblocking, retains one explicit acquire state per resource, and retries
 would-block before parsing another frame. Host tests cover both forms and reject
 a wrong marker; the Samsung round trip includes the descriptor path. Fence
-consumption and manager-to-helper release-fence
-transfer are still unimplemented.
+consumption is implemented in the helper's blocking wait. Manager-side
+SurfaceFlinger release-fence transmission is still unimplemented.
 
 API 36 per-buffer release handling is implemented behind runtime symbol
 resolution. `ASurfaceTransaction_setBufferWithRelease` receives one heap-owned

@@ -165,8 +165,11 @@ copying.
   - [x] Add fail-closed private vtest commands that allocate one of three RGBA
     AHBs, import it as the exact virgl resource, send scoped Resource, and send
     the matching 64-bit Present after conservative GPU completion.
-  - [ ] Connect a generic Mesa virpipe winsys/Wayland sender and the helper's
-    manager-to-helper Release receiver before allowing resource reuse.
+  - [x] Receive the exact scoped manager Release through a blocking private
+    vtest wait, consume its optional release fence, and permit reuse only after
+    the matching 64-bit sequence completes.
+  - [ ] Connect a generic Mesa virpipe winsys/Wayland sender and the manager's
+    SurfaceFlinger-backed Release sender.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
   buffer reuse. Bound dimensions, slots, estimated bytes, outstanding fences,
   pending releases, and device-loss recovery.

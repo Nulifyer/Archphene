@@ -177,6 +177,18 @@ require(
     "vtest_server_close_archphene_present_socket();",
 )
 require(
+    "native/android-gpu-helper/patches/0010-archphene-release-receive.patch",
+    "VCMD_ARCHPHENE_WAIT_RELEASE_AHB 41",
+    "vtest_server_receive_archphene_release",
+    "archphene_last_present_sequence",
+    "MSG_CMSG_CLOEXEC",
+    "CMSG_SPACE(sizeof(int) * 4)",
+    "marker != 0x52",
+    "sync_wait(fence_fd, -1)",
+    "sequence != res->archphene_last_present_sequence",
+    "res->archphene_present_outstanding = false",
+)
+require(
     "native/archphene-compositor/src/gpu_present_transport.rs",
     "MAX_UNIX_SOCKET_PATH_BYTES: usize = 103",
     "libc::SO_PEERCRED",

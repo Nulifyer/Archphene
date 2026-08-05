@@ -1,0 +1,232 @@
+diff --git a/vtest/vtest.h b/vtest/vtest.h
+index 258c563..c20f7a5 100644
+--- a/vtest/vtest.h
++++ b/vtest/vtest.h
+@@ -114,6 +114,7 @@ int vtest_drm_sync_transfer(uint32_t length_dw);
+ int vtest_resource_export_fd(uint32_t length_dw);
+ int vtest_archphene_resource_create_ahb(uint32_t length_dw);
+ int vtest_archphene_present_ahb(uint32_t length_dw);
++int vtest_archphene_wait_release_ahb(uint32_t length_dw);
+ 
+ bool vtest_server_archphene_present_enabled(void);
+ int vtest_server_send_archphene_resource(uint32_t resource_id, uint16_t slot,
+@@ -122,6 +123,9 @@ int vtest_server_send_archphene_resource(uint32_t resource_id, uint16_t slot,
+ int vtest_server_send_archphene_present(uint32_t resource_id,
+                                         uint64_t fence_sequence);
+ int vtest_server_send_archphene_drop(uint32_t resource_id);
++int vtest_server_receive_archphene_release(uint32_t resource_id,
++                                           uint64_t fence_sequence,
++                                           int *fence_fd);
+ 
+ void vtest_set_max_length(uint32_t length);
+ 
+diff --git a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
+index 0006a8a..ea2c16e 100644
+--- a/vtest/vtest_protocol.h
++++ b/vtest/vtest_protocol.h
+@@ -97,6 +97,7 @@
+ /* Archphene private extension; valid only with the authenticated APHB channel. */
+ #define VCMD_ARCHPHENE_RESOURCE_CREATE_AHB 39
+ #define VCMD_ARCHPHENE_PRESENT_AHB 40
++#define VCMD_ARCHPHENE_WAIT_RELEASE_AHB 41
+ 
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+@@ -116,6 +117,10 @@
+ #define VCMD_ARCHPHENE_PRESENT_AHB_SIZE 1
+ #define VCMD_ARCHPHENE_PRESENT_AHB_RES_HANDLE 0
+ #define VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE 2
++#define VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SIZE 3
++#define VCMD_ARCHPHENE_WAIT_RELEASE_AHB_RES_HANDLE 0
++#define VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SEQUENCE_LO 1
++#define VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SEQUENCE_HI 2
+ 
+ #define VCMD_RES_CREATE2_SIZE 11
+ #define VCMD_RES_CREATE2_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
+index e03777b..439851f 100644
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -93,6 +93,7 @@ struct vtest_resource {
+    uint8_t archphene_slot;
+    bool archphene_registered;
+    bool archphene_present_outstanding;
++   uint64_t archphene_last_present_sequence;
+ #endif
+ };
+ 
+@@ -294,6 +295,7 @@ static struct vtest_resource *vtest_new_resource(uint32_t client_res_id)
+    res->archphene_slot = UINT8_MAX;
+    res->archphene_registered = false;
+    res->archphene_present_outstanding = false;
++   res->archphene_last_present_sequence = 0;
+ #endif
+ 
+    return res;
+@@ -1518,6 +1520,7 @@ int vtest_archphene_present_ahb(uint32_t length_dw)
+    if (ret)
+       return ret;
+    res->archphene_present_outstanding = true;
++   res->archphene_last_present_sequence = sequence;
+    response[VTEST_CMD_LEN] = VCMD_ARCHPHENE_PRESENT_AHB_RESP_SIZE;
+    response[VTEST_CMD_ID] = VCMD_ARCHPHENE_PRESENT_AHB;
+    response[VTEST_CMD_DATA_START] = (uint32_t)sequence;
+@@ -1530,6 +1533,54 @@ int vtest_archphene_present_ahb(uint32_t length_dw)
+ #endif
+ }
+ 
++int vtest_archphene_wait_release_ahb(uint32_t length_dw)
++{
++#ifdef __ANDROID__
++   struct vtest_context *ctx = vtest_get_current_context();
++   struct vtest_resource *res;
++   uint32_t request[VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SIZE];
++   uint32_t response[VTEST_HDR_SIZE] = {
++      [VTEST_CMD_LEN] = 0,
++      [VTEST_CMD_ID] = VCMD_ARCHPHENE_WAIT_RELEASE_AHB,
++   };
++   uint64_t sequence;
++   int fence_fd = -1;
++   int ret;
++
++   if (length_dw != VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SIZE)
++      return -EINVAL;
++   ret = ctx->input->read(ctx->input, request, sizeof(request));
++   if (ret != sizeof(request))
++      return -EIO;
++   sequence = (uint64_t)request[VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SEQUENCE_LO] |
++              ((uint64_t)request[VCMD_ARCHPHENE_WAIT_RELEASE_AHB_SEQUENCE_HI] << 32);
++   res = util_hash_table_get(
++      ctx->resource_table,
++      intptr_to_pointer(request[VCMD_ARCHPHENE_WAIT_RELEASE_AHB_RES_HANDLE]));
++   if (!res || !res->archphene_registered || !res->archphene_present_outstanding ||
++       !sequence || sequence != res->archphene_last_present_sequence)
++      return -EINVAL;
++
++   ret = vtest_server_receive_archphene_release(res->res_id, sequence, &fence_fd);
++   if (ret)
++      return ret;
++   if (fence_fd >= 0) {
++      ret = sync_wait(fence_fd, -1);
++      close(fence_fd);
++      if (ret)
++         return -errno;
++   }
++   res->archphene_present_outstanding = false;
++   response[VTEST_CMD_LEN] = 0;
++   response[VTEST_CMD_ID] = VCMD_ARCHPHENE_WAIT_RELEASE_AHB;
++   ret = vtest_block_write(ctx->out_fd, response, sizeof(response));
++   return ret < 0 ? ret : 0;
++#else
++   (void)length_dw;
++   return -ENOTSUP;
++#endif
++}
++
+ int vtest_resource_create_blob(UNUSED uint32_t length_dw)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
+index 5483114..cfd00d8 100644
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -360,6 +360,91 @@ int vtest_server_send_archphene_drop(uint32_t resource_id)
+    return archphene_send_all(frame, sizeof(frame));
+ }
+ 
++static int archphene_receive_all(void *data, size_t size)
++{
++   uint8_t *bytes = data;
++   size_t received = 0;
++   int error;
++
++   while (received < size) {
++      ssize_t result = recv(server.archphene_present_socket, bytes + received,
++                            size - received, 0);
++      if (result > 0) {
++         received += (size_t)result;
++         continue;
++      }
++      if (result < 0 && errno == EINTR)
++         continue;
++      error = result < 0 ? -errno : -EPIPE;
++      vtest_server_close_archphene_present_socket();
++      return error;
++   }
++   return 0;
++}
++
++int vtest_server_receive_archphene_release(uint32_t resource_id,
++                                           uint64_t fence_sequence,
++                                           int *fence_fd)
++{
++   uint8_t frame[64];
++   uint8_t marker = 0;
++   uint8_t control[CMSG_SPACE(sizeof(int) * 4)] = { 0 };
++   struct iovec iov = { .iov_base = &marker, .iov_len = 1 };
++   struct msghdr message = { 0 };
++   struct cmsghdr *header;
++   uint8_t expected[64];
++   int descriptor = -1;
++   size_t descriptor_count = 0;
++   int result;
++
++   if (!fence_fd || !resource_id || !fence_sequence)
++      return -EINVAL;
++   *fence_fd = -1;
++   result = archphene_receive_all(frame, sizeof(frame));
++   if (result)
++      return result;
++   archphene_init_frame(expected, 4);
++   archphene_put_u32(expected, 32, resource_id);
++   archphene_put_u64(expected, 48, fence_sequence);
++   if (memcmp(frame, expected, sizeof(frame)))
++      goto invalid;
++
++   message.msg_iov = &iov;
++   message.msg_iovlen = 1;
++   message.msg_control = control;
++   message.msg_controllen = sizeof(control);
++   do {
++      result = recvmsg(server.archphene_present_socket, &message, MSG_CMSG_CLOEXEC);
++   } while (result < 0 && errno == EINTR);
++   header = CMSG_FIRSTHDR(&message);
++   if (header) {
++      if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS ||
++          header->cmsg_len < CMSG_LEN(0) || header->cmsg_len > message.msg_controllen ||
++          (header->cmsg_len - CMSG_LEN(0)) % sizeof(int))
++         goto invalid;
++      descriptor_count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
++      for (size_t i = 0; i < descriptor_count; i++) {
++         int received;
++         memcpy(&received, (uint8_t *)CMSG_DATA(header) + i * sizeof(int), sizeof(received));
++         if (i == 0)
++            descriptor = received;
++         else if (received >= 0)
++            close(received);
++      }
++   }
++   if (result != 1 || marker != 0x52 || (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) ||
++       (header && (descriptor_count != 1 || descriptor < 0)))
++      goto invalid;
++   *fence_fd = descriptor;
++   return 0;
++
++invalid:
++   if (descriptor >= 0)
++      close(descriptor);
++   vtest_server_close_archphene_present_socket();
++   return -EPROTO;
++}
++
+ static void vtest_server_parse_args(int argc, char **argv)
+ {
+    int ret;
+@@ -1021,6 +1106,7 @@ static const struct vtest_command {
+    HANDLER(RESOURCE_EXPORT_FD,          resource_export_fd,        true   ),
+    HANDLER(ARCHPHENE_RESOURCE_CREATE_AHB, archphene_resource_create_ahb, true),
+    HANDLER(ARCHPHENE_PRESENT_AHB,         archphene_present_ahb,       true),
++   HANDLER(ARCHPHENE_WAIT_RELEASE_AHB,    archphene_wait_release_ahb,  true),
+ };
+ 
+ static int vtest_client_dispatch_commands(struct vtest_client *client)
