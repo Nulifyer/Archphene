@@ -158,7 +158,14 @@ jobs:
               -e CARGO_TARGET_DIR=/workspace/tooling/build/release-rust \
               -e RUSTUP_TOOLCHAIN=1.88.0 \
               archphene-android-native:release \
-              bash -lc "cargo build --target $target --release --locked \
+              bash -lc "ndk_bin=\$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin; \
+                export CC_x86_64_linux_android=\$ndk_bin/x86_64-linux-android29-clang; \
+                export CXX_x86_64_linux_android=\$ndk_bin/x86_64-linux-android29-clang++; \
+                export AR_x86_64_linux_android=\$ndk_bin/llvm-ar; \
+                export CC_aarch64_linux_android=\$ndk_bin/aarch64-linux-android29-clang; \
+                export CXX_aarch64_linux_android=\$ndk_bin/aarch64-linux-android29-clang++; \
+                export AR_aarch64_linux_android=\$ndk_bin/llvm-ar; \
+                cargo build --target $target --release --locked \
                 -p archphene-android -p archphene-builder -p archphene-compositor"
           done
           for entry in \
