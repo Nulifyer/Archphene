@@ -12914,6 +12914,43 @@ impl CompositorCore {
         1
     }
 
+    pub fn activate_next_window(&mut self) -> u32 {
+        let mut ids = [0_u32; MAX_TOPLEVELS];
+        let mut count = 0_usize;
+        for toplevel in &self.state.toplevels {
+            let Some(data) = toplevel.data::<XdgToplevelData>() else {
+                continue;
+            };
+            if data
+                .parent
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+                || toplevel_surface(toplevel)
+                    .is_none_or(|surface| surface_frame(&surface).is_none())
+            {
+                continue;
+            }
+            if count == ids.len() {
+                break;
+            }
+            ids[count] = toplevel.id().protocol_id();
+            count += 1;
+        }
+        if count <= 1 {
+            return 0;
+        }
+        let active_id = self
+            .state
+            .active_toplevel
+            .as_ref()
+            .map(|active| active.id().protocol_id());
+        let next = active_id
+            .and_then(|active| ids[..count].iter().position(|id| *id == active))
+            .map_or(0, |index| (index + 1) % count);
+        self.activate_window(ids[next])
+    }
+
     pub fn configure_window(&mut self, id: u32, width: i32, height: i32) -> u32 {
         if self.activate_window(id) == 0 {
             return 0;
@@ -17581,6 +17618,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return -1;
     };
     compositor.activate_window(window_token)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeActivateNextWindow(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(mut compositor) = launcher_compositor(handle) else {
+        return -1;
+    };
+    i32::try_from(compositor.core.activate_next_window()).unwrap_or(i32::MAX)
 }
 
 #[cfg(target_os = "android")]

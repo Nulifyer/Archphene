@@ -22,23 +22,33 @@ their stable component and `archphene-window://` data.
 
 On the Samsung SM-S908U, unmodified Mousepad opened `Untitled 2` from
 `Ctrl+Shift+N`. At the normal 420 density override, the callback reported one
-independent toplevel while Android retained one compact task. A temporary 240
-density override changed the live capability policy to a 720 dp adaptive window;
-the same package then held task 5714 for `LauncherActivity` and task 5715 for
-the internal `LauncherWindowActivity`. Both shared wrapper PID 29186, manager
-PID 28708, and Linux Mousepad PID 29025. Home, task switching, child close, and
-root resume retained Linux PID 29025. Killing the background app-shell process
-and reopening the primary task recreated both authenticated sessions against
-root session 1, reused tasks 5714 and 5715, and retained Linux PID 29025. Closing
-the child removed only its task and toplevel; closing the final primary task
-removed Mousepad while the cached Android app-shell process could remain. The
-device density override was restored to 420.
+independent toplevel while Android retained one compact task. The compact task
+now reserves a 56 dp Android control row only when independent windows exist;
+its bounded `Switch window (2)` action and `Ctrl+Tab` shortcut cycle native
+Wayland activation without creating another Android task.
+
+A temporary 240 density override changed the live capability policy to a 720 dp
+adaptive window; the same package then held task 5714 for `LauncherActivity` and
+task 5715 for the internal `LauncherWindowActivity`. Both shared wrapper PID
+29186, manager PID 28708, and Linux Mousepad PID 29025. Home, task switching,
+child close, and root resume retained Linux PID 29025. Killing the background
+app-shell process and reopening the primary task recreated both authenticated
+sessions against root session 1, reused tasks 5714 and 5715, and retained Linux
+PID 29025. Closing the child removed only its task and toplevel; closing the
+final primary task removed Mousepad while the cached Android app-shell process
+could remain.
+
+The current policy also passed a live 420→240→420 transition. Mousepad PID 22126
+remained unchanged as root task 5733 gained child task 5734, then the child
+released only its Android attachment and root task 5733 resumed with the compact
+switcher. Policy inputs are the current inset-adjusted window metrics, display,
+pointer, hardware keyboard, and observed independent-window capability; no OEM
+or model check is present. The device density override was restored to 420.
 
 This is physical evidence for generic compact/adaptive task ownership, not a
 DeX or external-display claim. Physical DeX, the x86_64 emulator parity matrix,
-root-task close while another independent task remains, the compact in-app
-window switcher, and the complete single-window application regression remain
-open release gates.
+root-task close while another independent task remains, and the complete
+single-window application regression remain open release gates.
 
 The final source state passes all locked Rust workspace tests, workspace Clippy
 with warnings denied, app/app-shell/Builder JVM tests and debug lint, every

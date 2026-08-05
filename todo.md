@@ -94,7 +94,7 @@ its Linux environment.
   session to a bounded set of window tokens and Surfaces. The manager must keep
   Linux process ownership while each Activity owns only its Android window and
   foreground capabilities.
-- [ ] Implement the compact policy: one task hosts the primary toplevel and
+- [x] Implement the compact policy: one task hosts the primary toplevel and
   composes popups, transients, and ordinary secondary windows. Provide a bounded
   in-app window switcher only when an application has independent windows.
 - [x] Implement the desktop policy: primary and independent document/toplevel
@@ -103,7 +103,7 @@ its Linux environment.
 - [x] Replace `singleTask` only after multi-window session ownership is ready.
   Use a multi-instance-compatible Activity mode, bounded Recents, document
   intents, and explicit New Window behavior. Do not create one APK per window.
-- [ ] Drive compact/adaptive/desktop policy from the current window metrics,
+- [x] Drive compact/adaptive/desktop policy from the current window metrics,
   caption and system insets, display, pointer, keyboard, and application
   capability. Do not branch on Samsung, DeX, Pixel, or model names.
 - [ ] Preserve exact `ACTION_VIEW`, `ACTION_EDIT`, `ACTION_SEND`, notification,

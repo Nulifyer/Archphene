@@ -658,6 +658,14 @@ class LauncherSessionService : Service() {
                     transactAccessibilityAction(data, reply)
                     true
                 }
+                TRANSACTION_ACTIVATE_NEXT_WINDOW -> {
+                    transactActivateNextWindow(data, reply)
+                    true
+                }
+                TRANSACTION_RELEASE_WINDOW_TASK -> {
+                    transactReleaseWindowTask(data, reply)
+                    true
+                }
                 else -> super.onTransact(code, data, reply, flags)
             }
         }
@@ -1161,6 +1169,91 @@ class LauncherSessionService : Service() {
             reply.writeNoException()
             reply.writeInt(result)
         }
+
+        private fun transactActivateNextWindow(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            val result =
+                transactSessionOnly(data, "window switch") { callingUid, sessionId ->
+                    activateNextWindow(callingUid, sessionId)
+                }
+            reply.writeNoException()
+            reply.writeInt(result)
+        }
+
+        private fun transactReleaseWindowTask(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            val result =
+                transactSessionOnly(data, "window task release") { callingUid, sessionId ->
+                    releaseWindowTask(callingUid, sessionId)
+                }
+            reply.writeNoException()
+            reply.writeInt(result)
+        }
+
+        private fun transactSessionOnly(
+            data: Parcel,
+            operation: String,
+            action: (Int, Int) -> Int,
+        ): Int =
+            runCatching {
+                data.enforceInterface(INTERFACE)
+                val version = data.readInt()
+                val sessionId = data.readInt()
+                if (
+                    !supportedProtocolVersion(version) ||
+                    sessionId <= 0 ||
+                    data.dataAvail() != 0
+                ) {
+                    return@runCatching RESULT_INVALID
+                }
+                action(Binder.getCallingUid(), sessionId)
+            }.getOrElse { error ->
+                Log.w(TAG, "Rejected malformed launcher $operation", error)
+                RESULT_INVALID
+            }
+    }
+
+    @Synchronized
+    private fun activateNextWindow(
+        callingUid: Int,
+        sessionId: Int,
+    ): Int {
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        if (session.toplevelId != 0 || session.surface == null) return RESULT_INVALID
+        val root = rootSession(session) ?: return RESULT_NOT_READY
+        return if (
+            surfaceHandler.post {
+                synchronized(this) {
+                    if (!session.clientActive || session.surface == null) return@post
+                }
+                val compositor = root.compositor ?: return@post
+                val activated = compositor.activateNextWindow()
+                if (activated) {
+                    compositor.dispatchAndPresent(SystemClock.uptimeMillis().toInt())
+                }
+                Log.i(TAG, "Compact Linux window switch root=${root.id} activated=$activated")
+            }
+        ) {
+            RESULT_OK
+        } else {
+            RESULT_NOT_READY
+        }
+    }
+
+    @Synchronized
+    private fun releaseWindowTask(
+        callingUid: Int,
+        sessionId: Int,
+    ): Int {
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        if (session.toplevelId <= 0) return RESULT_INVALID
+        removeSession(sessionId, closeWindow = false)
+        Log.i(TAG, "Released Android task session=$sessionId without closing its Linux window")
+        return RESULT_OK
     }
 
     private data class OpenResult(
@@ -3144,11 +3237,12 @@ class LauncherSessionService : Service() {
             val id = compositor.windowComponent(index, WINDOW_COMPONENT_ID)
             val parent = compositor.windowComponent(index, WINDOW_COMPONENT_PARENT)
             val mapped = compositor.windowComponent(index, WINDOW_COMPONENT_MAPPED)
+            val active = compositor.windowComponent(index, WINDOW_COMPONENT_ACTIVE)
             val primary = compositor.windowComponent(index, WINDOW_COMPONENT_PRIMARY)
             if (index < MAX_PUBLISHED_WINDOWS) {
                 if (diagnostics.isNotEmpty()) diagnostics.append(';')
                 diagnostics.append(id).append(',').append(parent).append(',')
-                    .append(mapped).append(',').append(primary)
+                    .append(mapped).append(',').append(active).append(',').append(primary)
             }
             if (id <= 0 || parent != 0 || mapped != 1 || primary == 1) continue
             if (count >= ids.size) break
@@ -4933,6 +5027,10 @@ class LauncherSessionService : Service() {
         private const val TRANSACTION_DOCUMENT_RESULT = IBinder.FIRST_CALL_TRANSACTION + 7
         private const val TRANSACTION_ACCESSIBILITY_ACTION =
             IBinder.FIRST_CALL_TRANSACTION + 8
+        private const val TRANSACTION_ACTIVATE_NEXT_WINDOW =
+            IBinder.FIRST_CALL_TRANSACTION + 9
+        private const val TRANSACTION_RELEASE_WINDOW_TASK =
+            IBinder.FIRST_CALL_TRANSACTION + 10
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
@@ -5026,6 +5124,7 @@ class LauncherSessionService : Service() {
         private const val WINDOW_COMPONENT_ID = 0
         private const val WINDOW_COMPONENT_PARENT = 1
         private const val WINDOW_COMPONENT_MAPPED = 2
+        private const val WINDOW_COMPONENT_ACTIVE = 3
         private const val WINDOW_COMPONENT_PRIMARY = 4
         private const val MAX_PRINT_TITLE_UTF16 = 256
         private const val MAX_PRINT_TITLE_BYTES = 512

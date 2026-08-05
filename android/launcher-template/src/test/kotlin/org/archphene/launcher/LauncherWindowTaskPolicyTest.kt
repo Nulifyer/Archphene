@@ -31,9 +31,33 @@ class LauncherWindowTaskPolicyTest {
         assertFalse(policy(smallestWidthDp = 411, precisePointer = false, width = 1920, height = 1080))
     }
 
+    @Test
+    fun acceptsHardwareKeyboardAndRequiresApplicationCapability() {
+        assertTrue(
+            policy(
+                smallestWidthDp = 411,
+                precisePointer = false,
+                hardwareKeyboard = true,
+                width = 1920,
+                height = 1080,
+            ),
+        )
+        assertFalse(
+            policy(
+                smallestWidthDp = 600,
+                precisePointer = true,
+                applicationSupportsIndependentWindows = false,
+                width = 1920,
+                height = 1080,
+            ),
+        )
+    }
+
     private fun policy(
         smallestWidthDp: Int,
         precisePointer: Boolean,
+        hardwareKeyboard: Boolean = false,
+        applicationSupportsIndependentWindows: Boolean = true,
         width: Int,
         height: Int,
         displayId: Int = 0,
@@ -43,6 +67,8 @@ class LauncherWindowTaskPolicyTest {
             displayId = displayId,
             defaultDisplayId = 0,
             precisePointer = precisePointer,
+            hardwareKeyboard = hardwareKeyboard,
+            applicationSupportsIndependentWindows = applicationSupportsIndependentWindows,
             widthPixels = width,
             heightPixels = height,
             density = 2f,

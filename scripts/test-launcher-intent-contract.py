@@ -35,6 +35,14 @@ require(
     "Intent.FLAG_ACTIVITY_NEW_DOCUMENT",
     "LauncherWindowActivity::class.java",
     "activityManager.appTasks",
+    "TRANSACTION_ACTIVATE_NEXT_WINDOW",
+    "TRANSACTION_RELEASE_WINDOW_TASK",
+    "launcher_switch_window",
+    "KeyEvent.KEYCODE_TAB",
+    "event.isCtrlPressed",
+    "COMPACT_SWITCHER_HEIGHT_DP",
+    "getInsetsIgnoringVisibility",
+    "applicationSupportsIndependentWindows",
 )
 require(
     ROOT
@@ -46,6 +54,8 @@ require(
     "session.launchDocumentPath",
     "private const val MAX_PUBLISHED_WINDOWS = 8",
     "private const val SESSION_RECONNECT_GRACE_MILLIS = 15_000L",
+    "TRANSACTION_ACTIVATE_NEXT_WINDOW",
+    "TRANSACTION_RELEASE_WINDOW_TASK",
 )
 require(
     ROOT

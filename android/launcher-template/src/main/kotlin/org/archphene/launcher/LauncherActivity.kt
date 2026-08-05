@@ -64,6 +64,7 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -184,6 +185,7 @@ open class LauncherActivity :
     private lateinit var directoryProgress: ProgressBar
     private lateinit var surfaceView: LauncherSurfaceView
     private lateinit var content: FrameLayout
+    private lateinit var windowSwitcher: Button
     private val handler = Handler(Looper.getMainLooper())
     private val documentThread = HandlerThread("ArchpheneDocument").apply { start() }
     private val documentHandler = Handler(documentThread.looper)
@@ -191,6 +193,7 @@ open class LauncherActivity :
     private var sessionId = 0
     private var requestedToplevelId = 0
     private var latestIndependentToplevelIds = IntArray(0)
+    private var preserveToplevelOnClose = false
     private var attempts = 0
     private var binding = false
     @Volatile private var activityResumed = false
@@ -1134,6 +1137,20 @@ open class LauncherActivity :
                 isIndeterminate = true
                 visibility = View.GONE
             }
+        windowSwitcher =
+            Button(this).apply {
+                isAllCaps = false
+                visibility = View.GONE
+                setOnClickListener {
+                    Log.i(
+                        TAG,
+                        "Compact Linux window switch requested session=$sessionId " +
+                            "manager=${remote != null}",
+                    )
+                    activateNextLinuxWindow()
+                    surfaceView.requestFocus()
+                }
+            }
         content =
             FrameLayout(this).apply {
                 addView(
@@ -1155,6 +1172,17 @@ open class LauncherActivity :
                     FrameLayout.LayoutParams(dp(48), dp(48)).apply {
                         gravity = Gravity.CENTER
                         bottomMargin = dp(112)
+                    },
+                )
+                addView(
+                    windowSwitcher,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        dp(48),
+                    ).apply {
+                        gravity = Gravity.TOP or Gravity.END
+                        topMargin = dp(8)
+                        marginEnd = dp(8)
                     },
                 )
                 setOnApplyWindowInsetsListener { view, insets ->
@@ -1466,7 +1494,11 @@ open class LauncherActivity :
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
-            ),
+            ).apply {
+                if (windowSwitcher.visibility == View.VISIBLE) {
+                    topMargin = dp(COMPACT_SWITCHER_HEIGHT_DP)
+                }
+            },
         )
         surfaceView.requestFocus()
         Log.i(TAG, "Recreated launcher Surface after manager disconnect")
@@ -2319,6 +2351,16 @@ open class LauncherActivity :
                     "source=0x${event.source.toString(16)} flags=0x${event.flags.toString(16)} " +
                     "time=${event.eventTime}",
             )
+        }
+        if (
+            event.keyCode == KeyEvent.KEYCODE_TAB &&
+            event.isCtrlPressed &&
+            windowSwitcher.visibility == View.VISIBLE
+        ) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                activateNextLinuxWindow()
+            }
+            return true
         }
         if (
             sessionId <= 0 ||
@@ -3632,7 +3674,13 @@ open class LauncherActivity :
             data.writeInterfaceToken(INTERFACE)
             data.writeInt(PROTOCOL_VERSION)
             data.writeInt(activeSession)
-            if (service.transact(TRANSACTION_CLOSE, data, reply, 0)) {
+            val transaction =
+                if (preserveToplevelOnClose) {
+                    TRANSACTION_RELEASE_WINDOW_TASK
+                } else {
+                    TRANSACTION_CLOSE
+                }
+            if (service.transact(transaction, data, reply, 0)) {
                 reply.readException()
                 reply.readInt()
             }
@@ -4937,6 +4985,17 @@ open class LauncherActivity :
         }
         latestIndependentToplevelIds = ids.copyOf()
         val taskPolicyEnabled = desktopWindowTasksEnabled()
+        val switcherVisible = !taskPolicyEnabled && ids.isNotEmpty()
+        windowSwitcher.visibility = if (switcherVisible) View.VISIBLE else View.GONE
+        val surfaceLayout = surfaceView.layoutParams as? FrameLayout.LayoutParams
+        val switcherInset = if (switcherVisible) dp(COMPACT_SWITCHER_HEIGHT_DP) else 0
+        if (surfaceLayout != null && surfaceLayout.topMargin != switcherInset) {
+            surfaceLayout.topMargin = switcherInset
+            surfaceView.layoutParams = surfaceLayout
+        }
+        if (windowSwitcher.visibility == View.VISIBLE) {
+            windowSwitcher.text = getString(R.string.launcher_switch_window, ids.size + 1)
+        }
         Log.i(
             TAG,
             "Independent Linux windows=${ids.size} Android tasks=$taskPolicyEnabled " +
@@ -4986,8 +5045,34 @@ open class LauncherActivity :
     }
 
     private fun reconcileWindowTaskPolicy() {
-        if (requestedToplevelId == 0 && latestIndependentToplevelIds.isNotEmpty()) {
+        if (requestedToplevelId > 0 && !desktopWindowTasksEnabled()) {
+            preserveToplevelOnClose = true
+            finishAndRemoveTask()
+        } else if (requestedToplevelId == 0 && latestIndependentToplevelIds.isNotEmpty()) {
             reconcileIndependentWindows(latestIndependentToplevelIds)
+        }
+    }
+
+    private fun activateNextLinuxWindow() {
+        val service = remote ?: return
+        val activeSession = sessionId.takeIf { id -> id > 0 } ?: return
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(activeSession)
+            if (service.transact(TRANSACTION_ACTIVATE_NEXT_WINDOW, data, reply, 0)) {
+                reply.readException()
+                if (reply.readInt() != RESULT_OK) {
+                    Log.w(TAG, "Manager rejected compact Linux window switch")
+                }
+            }
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not switch compact Linux window", error)
+        } finally {
+            reply.recycle()
+            data.recycle()
         }
     }
 
@@ -5003,8 +5088,15 @@ open class LauncherActivity :
         val density = resources.displayMetrics.density.coerceAtLeast(1f)
         val (widthPixels, heightPixels) =
             if (Build.VERSION.SDK_INT >= 30) {
-                val bounds = windowManager.currentWindowMetrics.bounds
-                bounds.width() to bounds.height()
+                val metrics = windowManager.currentWindowMetrics
+                val insets =
+                    metrics.windowInsets.getInsetsIgnoringVisibility(
+                        WindowInsets.Type.systemBars() or
+                            WindowInsets.Type.displayCutout() or
+                            WindowInsets.Type.captionBar(),
+                    )
+                (metrics.bounds.width() - insets.left - insets.right).coerceAtLeast(1) to
+                    (metrics.bounds.height() - insets.top - insets.bottom).coerceAtLeast(1)
             } else {
                 resources.displayMetrics.widthPixels to resources.displayMetrics.heightPixels
             }
@@ -5012,11 +5104,15 @@ open class LauncherActivity :
             InputDevice.getDeviceIds().any { id ->
                 ((InputDevice.getDevice(id)?.sources ?: 0) and InputDevice.SOURCE_MOUSE) != 0
             }
+        val hardwareKeyboard = configuration.keyboard == Configuration.KEYBOARD_QWERTY
         return LauncherWindowTaskPolicy.useIndependentTasks(
             smallestWidthDp = configuration.smallestScreenWidthDp,
             displayId = displayId ?: android.view.Display.DEFAULT_DISPLAY,
             defaultDisplayId = android.view.Display.DEFAULT_DISPLAY,
             precisePointer = precisePointer,
+            hardwareKeyboard = hardwareKeyboard,
+            applicationSupportsIndependentWindows =
+                requestedToplevelId > 0 || latestIndependentToplevelIds.isNotEmpty(),
             widthPixels = widthPixels,
             heightPixels = heightPixels,
             density = density,
@@ -5171,6 +5267,10 @@ open class LauncherActivity :
         private const val TRANSACTION_DOCUMENT_RESULT = IBinder.FIRST_CALL_TRANSACTION + 7
         private const val TRANSACTION_ACCESSIBILITY_ACTION =
             IBinder.FIRST_CALL_TRANSACTION + 8
+        private const val TRANSACTION_ACTIVATE_NEXT_WINDOW =
+            IBinder.FIRST_CALL_TRANSACTION + 9
+        private const val TRANSACTION_RELEASE_WINDOW_TASK =
+            IBinder.FIRST_CALL_TRANSACTION + 10
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
@@ -5246,6 +5346,7 @@ open class LauncherActivity :
         private const val MAX_PENDING_PRINTS = 4
         private const val MAX_PENDING_ACTION_CALLBACKS = 32
         private const val MAX_STALE_PRINT_FILES = 32
+        private const val COMPACT_SWITCHER_HEIGHT_DP = 56
         private const val MAX_PRINT_PAGES = 10_000
         private const val MAX_PRINT_PAGE_DIMENSION = 100_000
         private const val PRINT_COPY_BUFFER_BYTES = 64 * 1024

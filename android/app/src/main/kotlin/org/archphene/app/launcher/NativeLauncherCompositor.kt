@@ -113,6 +113,14 @@ internal class NativeLauncherCompositor(
         return result == 0
     }
 
+    fun activateNextWindow(): Boolean {
+        val current = ownerHandle()
+        if (current == 0L) return false
+        return nativeActivateNextWindow(current).also {
+            PerformanceMetrics.recordCompositorJni()
+        } > 0
+    }
+
     fun requestClose(): Int {
         val current = ownerHandle()
         return if (current == 0L) {
@@ -538,6 +546,8 @@ internal class NativeLauncherCompositor(
         handle: Long,
         windowToken: Int,
     ): Int
+
+    private external fun nativeActivateNextWindow(handle: Long): Int
 
     private external fun nativeRequestClose(handle: Long): Int
 

@@ -275,12 +275,19 @@ Android task attachments. One root session owns the private Wayland socket,
 Linux process group, brokers, and compositor. Up to eight authenticated Android
 window sessions each own one bounded token and `Surface`; the compositor caps
 the retained aggregate at 33,554,432 pixels. The primary task uses the compact
-composited output. On an adaptive window, an external display, or a sufficiently
-large pointer-driven window, independent unparented toplevels receive internal
-document Activities. Parent-owned popups and transient surfaces remain composed
-with their toplevel. Recents are bounded to eight window tasks, and stable
-component-plus-data document intents reuse an existing task after Activity
-process death.
+composited output. When an observed independent toplevel exists, compact mode
+reserves a 56 dp Android control row for a bounded window switcher; its action or
+`Ctrl+Tab` cycles native activation while all toplevels remain in one task. On an
+adaptive window, an external display, or a sufficiently large pointer- or
+keyboard-driven window, independent unparented toplevels receive internal
+document Activities. The policy uses current caption, system-bar, and cutout
+insets, current window metrics, display identity, input capabilities, and
+observed application window capability without an OEM or model branch. A live
+transition back to compact mode releases each child Activity attachment without
+closing its Linux toplevel. Parent-owned popups and transient surfaces remain
+composed with their toplevel. Recents are bounded to eight window tasks, and
+stable component-plus-data document intents reuse an existing task after
+Activity process death.
 
 The identities and lifetimes are:
 
@@ -338,8 +345,9 @@ on the physical Samsung without a retained stretched buffer.
 
 The physical Samsung gate uses current generated app shells and unmodified
 package-installed clients. Mousepad proves compact and adaptive multi-task
-ownership, process-death restoration, input, IME, accessibility, and lifecycle;
-the maintained package matrix covers the other broker and rendering contracts.
+ownership, compact window switching, live compact/adaptive policy transitions,
+process-death restoration, input, IME, accessibility, and lifecycle; the
+maintained package matrix covers the other broker and rendering contracts.
 Physical external-display and repeated x86_64 multi-task coverage remain open.
 
 ### Wayland and graphics bridge
