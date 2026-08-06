@@ -8,6 +8,27 @@ record their state at the time of validation. The authoritative forward plan is
 [`todo.md`](../todo.md); supported application claims are maintained in the
 [compatibility matrix](compatibility-matrix.md).
 
+## v1.1.0-rc.5 release checkpoint
+
+GitHub Actions run `31056119328` completed the production release workflow and
+published [`v1.1.0-rc.5`](https://github.com/Nulifyer/Archphene/releases/tag/v1.1.0-rc.5)
+as a prerelease. The release contains signed manager and hidden Builder APKs for
+`arm64-v8a` and `x86_64`, checksum files, SPDX 2.3 inventories, Rust license
+archives, the native license archive, and corresponding-source archives for
+glibc and the Termux PulseAudio closure. All 30 assets report uploaded state.
+
+The downloaded AArch64 manager and Builder APKs match their published SHA-256
+files and verify with APK Signature Scheme v3 under release certificate
+`fb89debcc1d5057ba81959928ad8bb73aa6bf7be932e145e890224fdbec2928f`.
+The hidden Builder installed on Samsung `RFCT90AEEFA` (`SM-S908U`) as version
+`1.1.0-rc.5`, exposes no launcher activity, and declares no network permission.
+The manager could not replace the retained development-signed production-ID
+installation because Android correctly returned `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+The existing 1.6 GiB manager state was archived and checksum-verified before the
+attempt, and reinstalling its original APK retained that state. Testing the
+release-signed manager on this device therefore remains bounded by Android's
+signer continuity rule rather than deleting retained user state.
+
 ## Generated app-shell visibility checkpoint
 
 The generated app-shell template and manager now share the narrow

@@ -2,7 +2,7 @@
 
 Notable user-facing changes will be recorded here.
 
-## Unreleased
+## 1.1.0-rc.5 - 2026-08-06
 
 ### Added
 
