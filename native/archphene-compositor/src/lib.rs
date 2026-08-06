@@ -3929,6 +3929,11 @@ impl LauncherSurfaceCompositor {
                 if let Ok(resource) = self.core.take_gpu_present_resource(identity) {
                     if resource.width as i32 == attached.buffer_width
                         && resource.height as i32 == attached.buffer_height
+                        && self.core.window_allows_direct_gpu_present(
+                            attached.toplevel_id,
+                            resource.width,
+                            resource.height,
+                        )
                     {
                         match attached.window.present_gpu_resource(
                             resource,
@@ -4563,6 +4568,31 @@ fn direct_surface_frame(surface: &SurfaceState) -> Option<Arc<CommittedFrame>> {
     } else {
         Some(Arc::clone(frame))
     }
+}
+
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+fn direct_gpu_surface_is_opaque_full_output(
+    surface: &SurfaceState,
+    width: u32,
+    height: u32,
+) -> bool {
+    if surface.committed_buffer_transform != BufferTransform::Normal
+        || surface.committed_viewport_source.is_some()
+        || !surface.children_below.is_empty()
+        || !surface.children_above.is_empty()
+    {
+        return false;
+    }
+    let Some(region) = surface.committed_opaque_region.as_ref() else {
+        return false;
+    };
+    let [RegionOperation::Add(rectangle)] = region.operations.as_slice() else {
+        return false;
+    };
+    rectangle.x <= 0
+        && rectangle.y <= 0
+        && rectangle.right() >= i64::from(width)
+        && rectangle.bottom() >= i64::from(height)
 }
 
 fn frame_matches_output(frame: &CommittedFrame, width: u32, height: u32) -> bool {
@@ -14300,6 +14330,62 @@ impl CompositorCore {
             .gpu_surface_identity
             .as_ref()?
             .committed_surface(surface.id().protocol_id())
+    }
+
+    #[cfg(target_os = "android")]
+    fn window_allows_direct_gpu_present(&self, id: u32, width: u32, height: u32) -> bool {
+        let (Ok(output_width), Ok(output_height)) = (i32::try_from(width), i32::try_from(height))
+        else {
+            return false;
+        };
+        if id != 0
+            || output_width == 0
+            || output_height == 0
+            || self.state.cursor_frame.is_some()
+            || self.state.popups.iter().any(|popup| {
+                popup.is_alive()
+                    && popup
+                        .data::<XdgPopupData>()
+                        .is_some_and(|data| !data.dismissed.load(Ordering::Acquire))
+            })
+            || !self.state.tile_toplevels
+            || self.state.output_width != output_width
+            || self.state.output_height != output_height
+        {
+            return false;
+        }
+        let Some(root_surface) = self.state.root_surface.as_ref() else {
+            return false;
+        };
+        let Some(layout) = toplevel_layout(&self.state) else {
+            return false;
+        };
+        if layout.overlay_primary
+            || layout.root_x != 0
+            || layout.root_y != 0
+            || layout.root_width != output_width
+            || layout.root_height != output_height
+        {
+            return false;
+        }
+        let geometry = window_geometry_for_surface(root_surface).unwrap_or(WindowGeometry {
+            x: 0,
+            y: 0,
+            width: output_width,
+            height: output_height,
+        });
+        if geometry.x != 0
+            || geometry.y != 0
+            || geometry.width != output_width
+            || geometry.height != output_height
+        {
+            return false;
+        }
+        let Some(data) = root_surface.data::<SurfaceData>() else {
+            return false;
+        };
+        let surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+        direct_gpu_surface_is_opaque_full_output(&surface, width, height)
     }
 
     #[cfg(target_os = "android")]
@@ -27070,6 +27156,32 @@ mod tests {
             )],
         });
         assert!(direct_surface_frame(&surface).is_none());
+    }
+
+    #[test]
+    fn direct_gpu_surface_requires_exact_opaque_full_output_state() {
+        let mut surface = SurfaceState::default();
+        assert!(!direct_gpu_surface_is_opaque_full_output(&surface, 2, 2));
+
+        surface.committed_opaque_region = Some(RegionState {
+            operations: vec![RegionOperation::Add(
+                RegionRectangle::new(0, 0, 2, 2).expect("opaque output"),
+            )],
+        });
+        assert!(direct_gpu_surface_is_opaque_full_output(&surface, 2, 2));
+        assert!(!direct_gpu_surface_is_opaque_full_output(&surface, 3, 2));
+
+        surface
+            .committed_opaque_region
+            .as_mut()
+            .expect("opaque region")
+            .operations
+            .push(RegionOperation::Subtract(
+                RegionRectangle::new(0, 0, 1, 1).expect("transparent corner"),
+            ));
+        assert!(!direct_gpu_surface_is_opaque_full_output(&surface, 2, 2));
+        surface.committed_buffer_transform = BufferTransform::Rotate90;
+        assert!(!direct_gpu_surface_is_opaque_full_output(&surface, 2, 2));
     }
 
     #[test]

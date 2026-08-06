@@ -179,6 +179,10 @@ copying.
 - [ ] Import virgl-produced AHBs as EGL images and return release fences before
   buffer reuse. Bound dimensions, slots, estimated bytes, outstanding fences,
   pending releases, and device-loss recovery.
+  - [x] Keep dormant direct SurfaceControl submission fail-closed unless the
+    committed resource is the root, exact full-output, single-region opaque
+    surface with no popup, custom cursor, child, transform, viewport crop, or
+    overlay layout. Return every rejected resource to the bounded registry.
 - [ ] Add a direct-submit fast path for a sole opaque full-output surface with no
   popup, cursor, transform, alpha, or compositor work. All other cases remain
   GPU-composited.

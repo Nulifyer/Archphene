@@ -8,6 +8,22 @@ record their state at the time of validation. The authoritative forward plan is
 [`todo.md`](../todo.md); supported application claims are maintained in the
 [compatibility matrix](compatibility-matrix.md).
 
+## Direct AHB submission guard checkpoint
+
+The dormant virgl AHB path no longer submits every matching resource directly
+to SurfaceControl. Direct submission now accepts only the root surface at the
+exact output size with a single opaque region covering the complete output. It
+rejects secondary windows, popups, custom cursors, overlay layouts, child
+surfaces, buffer transforms, viewport crops, and non-full window geometry, then
+returns the acquired resource to the bounded registry. This is a prerequisite
+for a future direct-submit fast path; `ARCHPHENE_AHB_PRESENT` remains disabled
+until the non-direct EGL composition path handles all rejected states.
+
+All 129 compositor tests and warning-denied compositor Clippy pass. Both Android
+ABIs build with Rust 1.88, the graphics diagnostics contract passes, and the
+rebuilt AArch64 native compositor probe completes its full MotionEvent and
+Wayland lifecycle gate on Samsung `RFCT90AEEFA`.
+
 ## v1.1.0-rc.5 release checkpoint
 
 GitHub Actions run `31056119328` completed the production release workflow and
